@@ -1,0 +1,73 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: labourlink_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: labourlink
+      POSTGRES_USER: labourlink
+      POSTGRES_PASSWORD: labourlink_secret
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d
+    ports:
+      - '5432:5432'
+    networks:
+      - labourlink_network
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U labourlink']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: labourlink_api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+      PORT: 4000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: labourlink
+      DB_USER: labourlink
+      DB_PASSWORD: labourlink_secret
+    ports:
+      - '4000:4000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - labourlink_network
+    volumes:
+      - ./server:/app
+      - /app/node_modules
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: labourlink_web
+    restart: unless-stopped
+    environment:
+      VITE_API_URL: http://localhost:4000
+    ports:
+      - '3000:3000'
+    depends_on:
+      - api
+    networks:
+      - labourlink_network
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+
+volumes:
+  postgres_data:
+
+networks:
+  labourlink_network:
+    driver: bridge
