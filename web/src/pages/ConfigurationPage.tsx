@@ -1,4 +1,4 @@
-﻿export function ConfigurationPage() {
+export function ConfigurationPage() {
   return (
     <div>
       <h1 className="text-2xl font-semibold text-gray-900">Configuration</h1>

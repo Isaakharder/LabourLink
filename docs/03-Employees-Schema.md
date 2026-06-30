@@ -1,4 +1,4 @@
-﻿# Chapter 3 — Employee Schema Design
+# Chapter 3 — Employee Schema Design
 
 **Status:** Implemented in migration 002
 **Migration:** `database/migrations/002_employee_domain.sql`

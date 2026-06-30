@@ -1,4 +1,4 @@
-﻿export function InputPage() {
+export function InputPage() {
   return (
     <div>
       <h1 className="text-2xl font-semibold text-gray-900">Input</h1>

@@ -1,4 +1,4 @@
-﻿export function TeamsPage() {
+export function TeamsPage() {
   return (
     <div>
       <h1 className="text-2xl font-semibold text-gray-900">Teams</h1>

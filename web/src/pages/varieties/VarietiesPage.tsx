@@ -1,4 +1,4 @@
-﻿export function VarietiesPage() {
+export function VarietiesPage() {
   return (
     <div>
       <h1 className="text-2xl font-semibold text-gray-900">Varieties</h1>

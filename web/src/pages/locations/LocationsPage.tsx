@@ -1,4 +1,4 @@
-﻿export function LocationsPage() {
+export function LocationsPage() {
   return (
     <div>
       <h1 className="text-2xl font-semibold text-gray-900">Locations</h1>

@@ -1,4 +1,4 @@
-﻿export function CarriersPage() {
+export function CarriersPage() {
   return (
     <div>
       <h1 className="text-2xl font-semibold text-gray-900">Carriers</h1>
