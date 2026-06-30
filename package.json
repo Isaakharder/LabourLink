@@ -1,0 +1,14 @@
+{
+  "name": "labourlink",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "db":         "docker compose up -d postgres",
+    "dev":        "concurrently --names API,WEB --prefix-colors cyan,yellow \"npm run dev --prefix server\" \"npm run dev --prefix web\"",
+    "start-dev":  "npm run db && npm run dev",
+    "start-prod": "docker compose up --build -d"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
