@@ -194,3 +194,38 @@ never modified after creation, append-only.
   *at the time of the event*, not at query time — preserving historical accuracy
 - The distinction maps directly to the sidebar: Basic Data = master data,
   Input = event data, Reports = derived views over both
+
+---
+
+## DEV-001 — No UTF-8 BOM in Generated Files
+
+**Date:** 2026-06-29
+**Status:** Accepted
+
+### Context
+
+During initial project setup, several files were written using PowerShell 5.1's
+`Set-Content -Encoding utf8`. That encoding silently prepends a UTF-8 BOM
+(`0xEF 0xBB 0xBF`) to every file. When Vite's JSON parser (via cosmiconfig)
+reads `package.json`, the leading BOM character causes an immediate parse
+failure and the dev server will not start.
+
+### Decision
+
+All files in this repository must be UTF-8 **without** BOM.
+
+- The `Write` tool (Claude Code built-in) does not add a BOM — prefer it.
+- When PowerShell must write a file, use:
+  ```powershell
+  [System.IO.File]::WriteAllText($path, $content, [System.Text.UTF8Encoding]::new($false))
+  ```
+  `$false` suppresses the BOM. `Set-Content -Encoding utf8` must not be used.
+- `.gitattributes` enforces `eol=lf` across all text files to prevent
+  a second class of Windows line-ending issues.
+
+### Consequences
+
+- Any tooling that generates or patches files on Windows must be checked
+  for BOM output before it is introduced into the workflow.
+- The `[System.Text.UTF8Encoding]::new($false)` pattern is the standard
+  for any PowerShell file writes in this project.
