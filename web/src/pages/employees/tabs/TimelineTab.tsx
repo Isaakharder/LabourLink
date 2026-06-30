@@ -1,17 +1,17 @@
-import type { MockEmployee, TimelineEvent } from '../mock-data';
+import type { Employee, TimelineEvent } from '../../../api/employees';
 import { formatDate } from '../helpers';
 
 interface Props {
-  employee: MockEmployee;
+  employee: Employee;
 }
 
 const EVENT_CONFIG: Record<TimelineEvent['type'], { dot: string; label: string }> = {
-  employment: { dot: 'bg-blue-500', label: 'Employment' },
-  contract: { dot: 'bg-purple-500', label: 'Contract' },
-  security: { dot: 'bg-amber-500', label: 'Security' },
-  device: { dot: 'bg-teal-500', label: 'Device' },
-  archive: { dot: 'bg-gray-400', label: 'Archive' },
-  note: { dot: 'bg-gray-300', label: 'Note' },
+  employment: { dot: 'bg-blue-500',   label: 'Employment' },
+  contract:   { dot: 'bg-purple-500', label: 'Contract'   },
+  security:   { dot: 'bg-amber-500',  label: 'Security'   },
+  device:     { dot: 'bg-teal-500',   label: 'Device'     },
+  archive:    { dot: 'bg-gray-400',   label: 'Archive'    },
+  note:       { dot: 'bg-gray-300',   label: 'Note'       },
 };
 
 export function TimelineTab({ employee }: Props) {
@@ -28,6 +28,10 @@ export function TimelineTab({ employee }: Props) {
       {sorted.length === 0 ? (
         <div className="bg-white rounded-lg border border-gray-200 p-8 text-center">
           <p className="text-sm text-gray-400">No timeline events</p>
+          <p className="text-xs text-gray-300 mt-1">
+            {/* TEMPORARY: Timeline data will be populated once the activity system is built */}
+            Timeline history will be available in a future chapter.
+          </p>
         </div>
       ) : (
         <div className="relative">

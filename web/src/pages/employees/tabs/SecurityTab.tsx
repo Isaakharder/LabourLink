@@ -1,23 +1,23 @@
 import type { ReactNode } from 'react';
 import { Shield, Key, Clock } from 'lucide-react';
-import type { MockEmployee } from '../mock-data';
+import type { Employee } from '../../../api/employees';
 import { formatDateTime } from '../helpers';
 
 interface Props {
-  employee: MockEmployee;
+  employee: Employee;
 }
 
 export function SecurityTab({ employee }: Props) {
+  const role = employee.securityRole ?? 'General';
+
   return (
     <div className="px-8 py-6">
       <SectionBlock title="Access Level">
         <div className="flex items-start gap-3">
           <Shield size={16} className="text-gray-400 mt-0.5 flex-shrink-0" />
           <div>
-            <div className="text-sm font-medium text-gray-800">{employee.securityRole}</div>
-            <div className="text-xs text-gray-400 mt-0.5">
-              {roleDescription(employee.securityRole)}
-            </div>
+            <div className="text-sm font-medium text-gray-800">{role}</div>
+            <div className="text-xs text-gray-400 mt-0.5">{roleDescription(role)}</div>
           </div>
         </div>
       </SectionBlock>
@@ -60,11 +60,11 @@ function SectionBlock({ title, children }: { title: string; children: ReactNode 
 }
 
 const ROLE_DESCRIPTIONS: Record<string, string> = {
-  Admin: 'Full system access including configuration and user management',
-  Manager: 'Can manage all data including contracts and locations',
-  Supervisor: 'Can manage employees and registrations within their site',
-  'Crew Leader': 'Can view team registrations and close shifts for others',
-  General: 'Mobile clock-in/clock-out access only',
+  Admin:        'Full system access including configuration and user management',
+  Manager:      'Can manage all data including contracts and locations',
+  Supervisor:   'Can manage employees and registrations within their site',
+  'Crew Leader':'Can view team registrations and close shifts for others',
+  General:      'Mobile clock-in/clock-out access only',
 };
 
 function roleDescription(role: string): string {

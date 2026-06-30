@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Users } from 'lucide-react';
-import type { MockEmployee, TabId } from './mock-data';
+import type { Employee, TabId } from '../../api/employees';
 import { EmployeeSummaryCard } from './EmployeeSummaryCard';
 import { NewEmployeeForm } from './NewEmployeeForm';
 import { GeneralTab } from './tabs/GeneralTab';
@@ -12,22 +12,23 @@ import { NotesTab } from './tabs/NotesTab';
 import { TimelineTab } from './tabs/TimelineTab';
 
 const TABS: { id: TabId; label: string }[] = [
-  { id: 'general', label: 'General' },
+  { id: 'general',    label: 'General' },
   { id: 'employment', label: 'Employment' },
-  { id: 'career', label: 'Career' },
-  { id: 'security', label: 'Security' },
-  { id: 'devices', label: 'Devices' },
-  { id: 'notes', label: 'Notes' },
-  { id: 'timeline', label: 'Timeline' },
+  { id: 'career',     label: 'Career' },
+  { id: 'security',   label: 'Security' },
+  { id: 'devices',    label: 'Devices' },
+  { id: 'notes',      label: 'Notes' },
+  { id: 'timeline',   label: 'Timeline' },
 ];
 
 interface Props {
-  employee: MockEmployee | null;
+  employee: Employee | null;
   isNew: boolean;
   onCancelNew: () => void;
+  onCreated: (id: number) => void;
 }
 
-export function EmployeeDetail({ employee, isNew, onCancelNew }: Props) {
+export function EmployeeDetail({ employee, isNew, onCancelNew, onCreated }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>('general');
 
   useEffect(() => {
@@ -35,7 +36,7 @@ export function EmployeeDetail({ employee, isNew, onCancelNew }: Props) {
   }, [employee?.id]);
 
   if (isNew) {
-    return <NewEmployeeForm onCancel={onCancelNew} />;
+    return <NewEmployeeForm onCancel={onCancelNew} onCreated={onCreated} />;
   }
 
   if (!employee) {
@@ -72,13 +73,13 @@ export function EmployeeDetail({ employee, isNew, onCancelNew }: Props) {
       </div>
 
       <div className="flex-1 overflow-y-auto bg-gray-50">
-        {activeTab === 'general' && <GeneralTab employee={employee} />}
+        {activeTab === 'general'    && <GeneralTab    employee={employee} />}
         {activeTab === 'employment' && <EmploymentTab employee={employee} />}
-        {activeTab === 'career' && <CareerTab employee={employee} />}
-        {activeTab === 'security' && <SecurityTab employee={employee} />}
-        {activeTab === 'devices' && <DevicesTab employee={employee} />}
-        {activeTab === 'notes' && <NotesTab employee={employee} />}
-        {activeTab === 'timeline' && <TimelineTab employee={employee} />}
+        {activeTab === 'career'     && <CareerTab     employee={employee} />}
+        {activeTab === 'security'   && <SecurityTab   employee={employee} />}
+        {activeTab === 'devices'    && <DevicesTab    employee={employee} />}
+        {activeTab === 'notes'      && <NotesTab      employee={employee} />}
+        {activeTab === 'timeline'   && <TimelineTab   employee={employee} />}
       </div>
     </div>
   );

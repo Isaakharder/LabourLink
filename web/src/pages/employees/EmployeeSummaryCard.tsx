@@ -1,14 +1,14 @@
-import type { MockEmployee, EmployeeStatus } from './mock-data';
+import type { Employee, EmployeeStatus } from '../../api/employees';
 import { getAvatarColor } from './helpers';
 
 const STATUS_BADGE: Record<EmployeeStatus, { cls: string; label: string }> = {
-  active: { cls: 'bg-emerald-100 text-emerald-700', label: 'Active' },
-  inactive: { cls: 'bg-yellow-100 text-yellow-800', label: 'Inactive' },
-  archived: { cls: 'bg-gray-100 text-gray-500', label: 'Archived' },
+  active:   { cls: 'bg-emerald-100 text-emerald-700', label: 'Active' },
+  inactive: { cls: 'bg-yellow-100 text-yellow-800',   label: 'Inactive' },
+  archived: { cls: 'bg-gray-100 text-gray-500',       label: 'Archived' },
 };
 
 interface Props {
-  employee: MockEmployee;
+  employee: Employee;
 }
 
 export function EmployeeSummaryCard({ employee }: Props) {
@@ -40,8 +40,8 @@ export function EmployeeSummaryCard({ employee }: Props) {
 
           <div className="mt-3 flex flex-wrap gap-x-8 gap-y-1">
             <SummaryField label="Contract" value={employee.contract} />
-            <SummaryField label="Role" value={employee.jobRole} />
-            <SummaryField label="Site" value={employee.site} />
+            <SummaryField label="Role"     value={employee.jobRole} />
+            <SummaryField label="Site"     value={employee.site} />
           </div>
         </div>
 
@@ -53,11 +53,11 @@ export function EmployeeSummaryCard({ employee }: Props) {
   );
 }
 
-function SummaryField({ label, value }: { label: string; value: string }) {
+function SummaryField({ label, value }: { label: string; value: string | null }) {
   return (
     <div>
       <div className="text-xs text-gray-400">{label}</div>
-      <div className="text-sm font-medium text-gray-700">{value}</div>
+      <div className="text-sm font-medium text-gray-700">{value ?? '—'}</div>
     </div>
   );
 }

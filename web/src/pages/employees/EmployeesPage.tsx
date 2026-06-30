@@ -1,14 +1,36 @@
-import { useState } from 'react';
-import { MOCK_EMPLOYEES } from './mock-data';
+import { useState, useEffect } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData } from '@tanstack/react-query';
+import { employeeApi } from '../../api/employees';
 import { EmployeeList } from './EmployeeList';
 import { EmployeeDetail } from './EmployeeDetail';
 
 export function EmployeesPage() {
-  const [selectedId, setSelectedId] = useState<number | null>(MOCK_EMPLOYEES[0]?.id ?? null);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
   const [isNew, setIsNew] = useState(false);
+  const queryClient = useQueryClient();
 
-  const selected =
-    selectedId != null ? (MOCK_EMPLOYEES.find(e => e.id === selectedId) ?? null) : null;
+  const { data: employees = [], isLoading: isListLoading } = useQuery({
+    queryKey: ['employees'],
+    queryFn: employeeApi.list,
+  });
+
+  // Select the first employee once the list loads (only if nothing is selected)
+  useEffect(() => {
+    if (employees.length > 0 && selectedId === null && !isNew) {
+      setSelectedId(employees[0].id);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employees.length]);
+
+  const activeId = isNew ? null : selectedId;
+
+  const { data: selectedEmployee } = useQuery({
+    queryKey: ['employee', activeId],
+    queryFn: () => employeeApi.detail(activeId!),
+    enabled: activeId != null,
+    placeholderData: keepPreviousData,
+  });
 
   function handleSelect(id: number) {
     setSelectedId(id);
@@ -22,20 +44,32 @@ export function EmployeesPage() {
 
   function handleCancelNew() {
     setIsNew(false);
-    if (MOCK_EMPLOYEES.length > 0) {
-      setSelectedId(MOCK_EMPLOYEES[0].id);
+    if (employees.length > 0) {
+      setSelectedId(employees[0].id);
     }
+  }
+
+  function handleCreated(id: number) {
+    void queryClient.invalidateQueries({ queryKey: ['employees'] });
+    setIsNew(false);
+    setSelectedId(id);
   }
 
   return (
     <div className="-m-8 h-full flex overflow-hidden">
       <EmployeeList
-        employees={MOCK_EMPLOYEES}
+        employees={employees}
+        isLoading={isListLoading}
         selectedId={selectedId}
         onSelect={handleSelect}
         onNew={handleNew}
       />
-      <EmployeeDetail employee={selected} isNew={isNew} onCancelNew={handleCancelNew} />
+      <EmployeeDetail
+        employee={selectedEmployee ?? null}
+        isNew={isNew}
+        onCancelNew={handleCancelNew}
+        onCreated={handleCreated}
+      />
     </div>
   );
 }

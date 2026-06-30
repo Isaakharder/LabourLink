@@ -1,7 +1,7 @@
-import type { MockEmployee } from '../mock-data';
+import type { Employee } from '../../../api/employees';
 
 interface Props {
-  employee: MockEmployee;
+  employee: Employee;
 }
 
 export function NotesTab({ employee }: Props) {

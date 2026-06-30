@@ -1,8 +1,8 @@
-import type { MockEmployee } from '../mock-data';
+import type { Employee } from '../../../api/employees';
 import { formatDate } from '../helpers';
 
 interface Props {
-  employee: MockEmployee;
+  employee: Employee;
 }
 
 export function CareerTab({ employee }: Props) {
@@ -29,7 +29,9 @@ export function CareerTab({ employee }: Props) {
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1">
-                      <span className="text-sm font-semibold text-gray-800">{record.jobRole}</span>
+                      <span className="text-sm font-semibold text-gray-800">
+                        {record.jobRole ?? '—'}
+                      </span>
                       {isCurrent && (
                         <span className="text-xs bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-medium">
                           Current
@@ -37,7 +39,7 @@ export function CareerTab({ employee }: Props) {
                       )}
                     </div>
                     <div className="text-xs text-gray-500">
-                      {record.site} &middot; {record.contract}
+                      {record.site ?? '—'} &middot; {record.contract ?? '—'}
                       {record.team && ` · ${record.team}`}
                     </div>
                     {record.supervisor && (

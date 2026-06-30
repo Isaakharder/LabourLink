@@ -1,22 +1,23 @@
 import { useState } from 'react';
 import { Search, UserPlus } from 'lucide-react';
-import type { MockEmployee, EmployeeStatus } from './mock-data';
+import type { EmployeeListItem, EmployeeStatus } from '../../api/employees';
 import { getAvatarColor } from './helpers';
 
 const STATUS_DOT: Record<EmployeeStatus, string> = {
-  active: 'bg-emerald-500',
+  active:   'bg-emerald-500',
   inactive: 'bg-yellow-400',
   archived: 'bg-gray-300',
 };
 
 interface Props {
-  employees: MockEmployee[];
+  employees: EmployeeListItem[];
+  isLoading: boolean;
   selectedId: number | null;
   onSelect: (id: number) => void;
   onNew: () => void;
 }
 
-export function EmployeeList({ employees, selectedId, onSelect, onNew }: Props) {
+export function EmployeeList({ employees, isLoading, selectedId, onSelect, onNew }: Props) {
   const [search, setSearch] = useState('');
 
   const filtered = employees.filter(e => {
@@ -59,7 +60,9 @@ export function EmployeeList({ employees, selectedId, onSelect, onNew }: Props) 
       </div>
 
       <ul className="flex-1 overflow-y-auto">
-        {filtered.length === 0 ? (
+        {isLoading ? (
+          <li className="px-4 py-8 text-center text-sm text-gray-400">Loading…</li>
+        ) : filtered.length === 0 ? (
           <li className="px-4 py-8 text-center text-sm text-gray-400">No employees found</li>
         ) : (
           filtered.map(emp => {
