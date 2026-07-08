@@ -51,3 +51,10 @@ The system is designed in layers:
 5. **Android app** — mobile registration at the work location
 
 Each layer builds on a stable foundation. Features are never rushed.
+
+## Planned Future Features
+
+- **Greenhouse View** — live map showing crop-work progress by row, derived
+  from the event log. Row colors (gray/blue/green/yellow/red) reflect real-time
+  state without manual input. Depends on Locations, Work Events, and Mobile
+  Scanning. Spec: `docs/FUTURE-greenhouse-view.md`

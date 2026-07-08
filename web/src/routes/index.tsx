@@ -8,11 +8,14 @@ import { CropsPage } from '@/pages/crops/CropsPage';
 import { VarietiesPage } from '@/pages/varieties/VarietiesPage';
 import { LocationGroupsPage } from '@/pages/location-groups/LocationGroupsPage';
 import { LocationsPage } from '@/pages/locations/LocationsPage';
+import { SitesPage } from '@/pages/sites/SitesPage';
 import { CarriersPage } from '@/pages/carriers/CarriersPage';
 import { TeamsPage } from '@/pages/teams/TeamsPage';
 import { InputPage } from '@/pages/InputPage';
 import { ReportsPage } from '@/pages/ReportsPage';
 import { ConfigurationPage } from '@/pages/ConfigurationPage';
+import { ViewGreenhousePage } from '@/pages/greenhouse/ViewGreenhousePage';
+import { GreenhouseMapBuilderPage } from '@/pages/greenhouse/GreenhouseMapBuilderPage';
 
 export const router = createBrowserRouter([
   {
@@ -27,11 +30,14 @@ export const router = createBrowserRouter([
       { path: 'varieties', element: <VarietiesPage /> },
       { path: 'location-groups', element: <LocationGroupsPage /> },
       { path: 'locations', element: <LocationsPage /> },
+      { path: 'sites', element: <SitesPage /> },
       { path: 'carriers', element: <CarriersPage /> },
       { path: 'teams', element: <TeamsPage /> },
       { path: 'input', element: <InputPage /> },
       { path: 'reports', element: <ReportsPage /> },
       { path: 'configuration', element: <ConfigurationPage /> },
+      { path: 'greenhouse', element: <ViewGreenhousePage /> },
+      { path: 'greenhouse/builder/:mapId', element: <GreenhouseMapBuilderPage /> },
     ],
   },
 ]);

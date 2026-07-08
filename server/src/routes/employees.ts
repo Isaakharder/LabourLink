@@ -202,7 +202,6 @@ employeesRouter.get('/:id', async (req: Request, res: Response) => {
         assignedSince: new Date(r.assignedSince).toISOString(),
         assignedUntil: r.assignedUntil ? new Date(r.assignedUntil).toISOString() : null,
       })),
-      // TODO: Timeline will be populated when the activity system is built (Chapter 7+)
       timeline: [],
     });
   } catch (err) {
@@ -314,5 +313,94 @@ employeesRouter.patch('/:id', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('PATCH /api/employees/:id', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Change Contract ───────────────────────────────────────────────────────────
+// Ends the current employment record and opens a new one with the selected contract.
+// History is preserved — old record is never deleted or overwritten.
+
+employeesRouter.post('/:id/change-contract', async (req: Request, res: Response) => {
+  const employeeId = parseInt(req.params.id, 10);
+  if (isNaN(employeeId)) { res.status(400).json({ error: 'Invalid employee id' }); return; }
+
+  const { contractTemplateId, effectiveDate, notes = 'Contract Change' } = req.body as {
+    contractTemplateId?: number;
+    effectiveDate?: string;
+    notes?: string;
+  };
+
+  if (!contractTemplateId || !effectiveDate) {
+    res.status(400).json({ error: 'contractTemplateId and effectiveDate are required' });
+    return;
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Load current employment record (lock it)
+    const { rows: currentRows } = await client.query<{
+      id: number; site_id: number; job_role_id: number | null;
+      team_id: number | null; supervisor_id: number | null; started_on: string;
+    }>(
+      `SELECT id, site_id, job_role_id, team_id, supervisor_id, started_on
+       FROM employment_records
+       WHERE employee_id = $1 AND ended_on IS NULL
+       FOR UPDATE`,
+      [employeeId],
+    );
+
+    const current = currentRows[0] ?? null;
+
+    if (current) {
+      // Validate: effectiveDate must be after current record's started_on
+      const { rows: checkRows } = await client.query<{ valid: boolean }>(
+        `SELECT ($1::date > $2::date) AS valid`,
+        [effectiveDate, current.started_on],
+      );
+      if (!checkRows[0].valid) {
+        await client.query('ROLLBACK');
+        res.status(400).json({
+          error: `Effective date must be after the current record's start date (${current.started_on})`,
+        });
+        return;
+      }
+
+      // End the current record: ended_on = effectiveDate - 1 day
+      await client.query(
+        `UPDATE employment_records
+         SET ended_on = $1::date - INTERVAL '1 day'
+         WHERE id = $2`,
+        [effectiveDate, current.id],
+      );
+    }
+
+    // Insert new employment record with new contract, same other fields
+    const { rows: newRows } = await client.query<{ id: number }>(
+      `INSERT INTO employment_records
+         (employee_id, site_id, job_role_id, contract_template_id, team_id, supervisor_id, started_on, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [
+        employeeId,
+        current?.site_id ?? null,
+        current?.job_role_id ?? null,
+        contractTemplateId,
+        current?.team_id ?? null,
+        current?.supervisor_id ?? null,
+        effectiveDate,
+        notes || 'Contract Change',
+      ],
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json({ id: newRows[0].id, effectiveDate });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('POST /api/employees/:id/change-contract', err);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
   }
 });

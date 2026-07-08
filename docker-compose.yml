@@ -43,6 +43,7 @@ services:
       - labourlink_network
     volumes:
       - ./server:/app
+      - ./shared:/shared
       - /app/node_modules
 
   web:
@@ -61,6 +62,7 @@ services:
       - labourlink_network
     volumes:
       - ./web:/app
+      - ./shared:/shared
       - /app/node_modules
 
 volumes:

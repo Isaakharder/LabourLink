@@ -45,9 +45,6 @@ export function EmployeeSummaryCard({ employee }: Props) {
           </div>
         </div>
 
-        <button className="flex-shrink-0 text-sm text-gray-500 hover:text-gray-700 border border-gray-200 rounded-md px-3 py-1.5 hover:bg-gray-50 transition-colors">
-          Edit
-        </button>
       </div>
     </div>
   );

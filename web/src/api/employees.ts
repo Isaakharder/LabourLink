@@ -97,6 +97,12 @@ export interface CreateEmployeeInput {
   securityRoleId?: number;
 }
 
+export interface ChangeContractInput {
+  contractTemplateId: number;
+  effectiveDate: string;
+  notes?: string;
+}
+
 const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -133,6 +139,12 @@ export const employeeApi = {
   ) =>
     apiFetch<{ id: number }>(`/api/employees/${id}`, {
       method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+
+  changeContract: (id: number, data: ChangeContractInput) =>
+    apiFetch<{ id: number; effectiveDate: string }>(`/api/employees/${id}/change-contract`, {
+      method: 'POST',
       body: JSON.stringify(data),
     }),
 };

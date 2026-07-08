@@ -17,6 +17,8 @@ import {
   ChevronDown,
   ChevronRight,
   Sprout as Logo,
+  Layers,
+  Building2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -48,12 +50,14 @@ const navigation: NavItem[] = [
       { label: 'Activities', path: '/activities', icon: Activity },
       { label: 'Crops', path: '/crops', icon: Leaf },
       { label: 'Varieties', path: '/varieties', icon: Sprout },
+      { label: 'Sites', path: '/sites', icon: Building2 },
       { label: 'Location Groups', path: '/location-groups', icon: MapPin },
       { label: 'Locations', path: '/locations', icon: Map },
       { label: 'Carriers', path: '/carriers', icon: Truck },
       { label: 'Teams', path: '/teams', icon: UsersRound },
     ],
   },
+  { label: 'Greenhouse', path: '/greenhouse', icon: Layers },
   { label: 'Input', path: '/input', icon: PenLine },
   { label: 'Reports', path: '/reports', icon: BarChart3 },
   { label: 'Configuration', path: '/configuration', icon: Settings },
@@ -64,13 +68,13 @@ export function Sidebar() {
 
   const basicDataPaths = [
     '/employees', '/contracts', '/activities', '/crops', '/varieties',
-    '/location-groups', '/locations', '/carriers', '/teams',
+    '/sites', '/location-groups', '/locations', '/carriers', '/teams',
   ];
   const basicDataActive = basicDataPaths.some((p) =>
     location.pathname.startsWith(p)
   );
 
-  const [basicDataOpen, setBasicDataOpen] = useState(basicDataActive || true);
+  const [basicDataOpen, setBasicDataOpen] = useState(basicDataActive);
 
   return (
     <aside className="flex h-screen w-60 flex-shrink-0 flex-col bg-[hsl(var(--sidebar))] border-r border-[hsl(var(--sidebar-border))]">
