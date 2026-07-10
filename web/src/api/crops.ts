@@ -1,19 +1,4 @@
-const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
-
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-    ...init,
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    let msg = body;
-    try { msg = (JSON.parse(body) as { error: string }).error; } catch { /* keep raw */ }
-    throw new Error(msg);
-  }
-  if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
-}
+import { apiFetch } from '@/lib/apiClient';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 

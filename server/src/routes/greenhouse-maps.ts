@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { db as pool } from '../db';
 import {
   blockRowRect,
@@ -13,8 +13,63 @@ import {
   type Rect,
 } from '../../../shared/greenhouse-geometry';
 import { detectMissingSlots } from '../lib/missing-rows';
+import { requirePermission } from '../middleware/auth';
+import {
+  greenhouseMapBelongsToCompany,
+  compartmentBelongsToMap,
+  blockBelongsToCompartment,
+  walkwayBelongsToCompartment,
+  rowBelongsToCompartment,
+  siteBelongsToCompany,
+} from '../lib/companyScope';
 
 export const greenhouseMapsRouter = Router();
+
+// Ownership checks run once per param, regardless of how many routes nest under it.
+greenhouseMapsRouter.param('mapId', async (req: Request, res: Response, next: NextFunction, mapIdParam: string) => {
+  const mapId = Number(mapIdParam);
+  if (!(await greenhouseMapBelongsToCompany(mapId, req.user!.companyId))) {
+    res.status(404).json({ error: 'Map not found' });
+    return;
+  }
+  next();
+});
+
+greenhouseMapsRouter.param('compartmentId', async (req: Request, res: Response, next: NextFunction, compartmentIdParam: string) => {
+  const compartmentId = Number(compartmentIdParam);
+  if (!(await compartmentBelongsToMap(compartmentId, Number(req.params.mapId)))) {
+    res.status(404).json({ error: 'Compartment not found' });
+    return;
+  }
+  next();
+});
+
+greenhouseMapsRouter.param('blockId', async (req: Request, res: Response, next: NextFunction, blockIdParam: string) => {
+  const blockId = Number(blockIdParam);
+  if (!(await blockBelongsToCompartment(blockId, Number(req.params.compartmentId)))) {
+    res.status(404).json({ error: 'Block not found' });
+    return;
+  }
+  next();
+});
+
+greenhouseMapsRouter.param('walkwayId', async (req: Request, res: Response, next: NextFunction, walkwayIdParam: string) => {
+  const walkwayId = Number(walkwayIdParam);
+  if (!(await walkwayBelongsToCompartment(walkwayId, Number(req.params.compartmentId)))) {
+    res.status(404).json({ error: 'Walkway not found' });
+    return;
+  }
+  next();
+});
+
+greenhouseMapsRouter.param('rowId', async (req: Request, res: Response, next: NextFunction, rowIdParam: string) => {
+  const rowId = Number(rowIdParam);
+  if (!(await rowBelongsToCompartment(rowId, Number(req.params.compartmentId)))) {
+    res.status(404).json({ error: 'Row not found' });
+    return;
+  }
+  next();
+});
 
 const FT2_TO_M2 = 0.09290304;
 
@@ -89,7 +144,7 @@ async function checkOverlap(
 }
 
 // ── List maps ──────────────────────────────────────────────────────────────────
-greenhouseMapsRouter.get('/', async (req: Request, res: Response) => {
+greenhouseMapsRouter.get('/', requirePermission('greenhouse:view'), async (req: Request, res: Response) => {
   const siteId = req.query.siteId ? Number(req.query.siteId) : null;
   try {
     const { rows } = await pool.query(`
@@ -101,10 +156,10 @@ greenhouseMapsRouter.get('/', async (req: Request, res: Response) => {
       JOIN sites s ON s.id = gm.site_id
       LEFT JOIN greenhouse_compartments gc ON gc.map_id = gm.id
       LEFT JOIN greenhouse_rows gr ON gr.compartment_id = gc.id
-      WHERE ($1::int IS NULL OR gm.site_id = $1)
+      WHERE s.company_id = $2 AND ($1::int IS NULL OR gm.site_id = $1)
       GROUP BY gm.id, s.name
       ORDER BY s.name, gm.name
-    `, [siteId]);
+    `, [siteId, req.user!.companyId]);
     res.json(rows);
   } catch (err) {
     console.error(err);
@@ -113,8 +168,11 @@ greenhouseMapsRouter.get('/', async (req: Request, res: Response) => {
 });
 
 // ── Get map detail ─────────────────────────────────────────────────────────────
-greenhouseMapsRouter.get('/:id(\\d+)', async (req: Request, res: Response) => {
+greenhouseMapsRouter.get('/:id(\\d+)', requirePermission('greenhouse:view'), async (req: Request, res: Response) => {
   const { id } = req.params;
+  if (!(await greenhouseMapBelongsToCompany(Number(id), req.user!.companyId))) {
+    return res.status(404).json({ error: 'Map not found' });
+  }
   try {
     const mapRes = await pool.query(`
       SELECT gm.id, gm.site_id AS "siteId", s.name AS "siteName", gm.name,
@@ -232,9 +290,12 @@ greenhouseMapsRouter.get('/:id(\\d+)', async (req: Request, res: Response) => {
 });
 
 // ── Create map ─────────────────────────────────────────────────────────────────
-greenhouseMapsRouter.post('/', async (req: Request, res: Response) => {
+greenhouseMapsRouter.post('/', requirePermission('greenhouse:edit'), async (req: Request, res: Response) => {
   const { siteId, name } = req.body as { siteId: number; name: string };
   if (!siteId || !name?.trim()) return res.status(400).json({ error: 'siteId and name are required' });
+  if (!(await siteBelongsToCompany(siteId, req.user!.companyId))) {
+    return res.status(400).json({ error: 'Invalid siteId' });
+  }
   try {
     const { rows } = await pool.query(`
       INSERT INTO greenhouse_maps (site_id, name) VALUES ($1, $2)
@@ -248,8 +309,11 @@ greenhouseMapsRouter.post('/', async (req: Request, res: Response) => {
 });
 
 // ── Update map (name and/or canvas extents) ────────────────────────────────────
-greenhouseMapsRouter.patch('/:id(\\d+)', async (req: Request, res: Response) => {
+greenhouseMapsRouter.patch('/:id(\\d+)', requirePermission('greenhouse:edit'), async (req: Request, res: Response) => {
   const { id } = req.params;
+  if (!(await greenhouseMapBelongsToCompany(Number(id), req.user!.companyId))) {
+    return res.status(404).json({ error: 'Map not found' });
+  }
   const body = req.body as {
     name?: string;
     northExtentFt?: number;
@@ -285,8 +349,11 @@ greenhouseMapsRouter.patch('/:id(\\d+)', async (req: Request, res: Response) => 
 });
 
 // ── Delete map ─────────────────────────────────────────────────────────────────
-greenhouseMapsRouter.delete('/:id(\\d+)', async (req: Request, res: Response) => {
+greenhouseMapsRouter.delete('/:id(\\d+)', requirePermission('greenhouse:edit'), async (req: Request, res: Response) => {
   const { id } = req.params;
+  if (!(await greenhouseMapBelongsToCompany(Number(id), req.user!.companyId))) {
+    return res.status(404).json({ error: 'Map not found' });
+  }
   try {
     await pool.query('DELETE FROM greenhouse_maps WHERE id = $1', [id]);
     res.status(204).send();
@@ -297,7 +364,7 @@ greenhouseMapsRouter.delete('/:id(\\d+)', async (req: Request, res: Response) =>
 });
 
 // ── Add compartment ────────────────────────────────────────────────────────────
-greenhouseMapsRouter.post('/:mapId(\\d+)/compartments', async (req: Request, res: Response) => {
+greenhouseMapsRouter.post('/:mapId(\\d+)/compartments', requirePermission('greenhouse:edit'), async (req: Request, res: Response) => {
   const mapId = Number(req.params.mapId);
   const { name, eastWestFt, northSouthFt } = req.body as { name: string; eastWestFt: number; northSouthFt: number };
   if (!name?.trim() || !eastWestFt || !northSouthFt) return res.status(400).json({ error: 'name, eastWestFt, and northSouthFt are required' });
@@ -323,8 +390,11 @@ greenhouseMapsRouter.post('/:mapId(\\d+)/compartments', async (req: Request, res
 });
 
 // ── Update compartment ─────────────────────────────────────────────────────────
-greenhouseMapsRouter.patch('/:mapId(\\d+)/compartments/:id(\\d+)', async (req: Request, res: Response) => {
+greenhouseMapsRouter.patch('/:mapId(\\d+)/compartments/:id(\\d+)', requirePermission('greenhouse:edit'), async (req: Request, res: Response) => {
   const { id } = req.params;
+  if (!(await compartmentBelongsToMap(Number(id), Number(req.params.mapId)))) {
+    return res.status(404).json({ error: 'Compartment not found' });
+  }
   const { name, eastWestFt, northSouthFt, xFt, yFt } = req.body as {
     name?: string; eastWestFt?: number; northSouthFt?: number; xFt?: number; yFt?: number;
   };
@@ -403,8 +473,11 @@ greenhouseMapsRouter.patch('/:mapId(\\d+)/compartments/:id(\\d+)', async (req: R
 });
 
 // ── Delete compartment ─────────────────────────────────────────────────────────
-greenhouseMapsRouter.delete('/:mapId(\\d+)/compartments/:id(\\d+)', async (req: Request, res: Response) => {
+greenhouseMapsRouter.delete('/:mapId(\\d+)/compartments/:id(\\d+)', requirePermission('greenhouse:edit'), async (req: Request, res: Response) => {
   const { id } = req.params;
+  if (!(await compartmentBelongsToMap(Number(id), Number(req.params.mapId)))) {
+    return res.status(404).json({ error: 'Compartment not found' });
+  }
   try {
     await pool.query('DELETE FROM greenhouse_compartments WHERE id = $1', [id]);
     res.status(204).send();
@@ -417,6 +490,7 @@ greenhouseMapsRouter.delete('/:mapId(\\d+)/compartments/:id(\\d+)', async (req: 
 // ── Create row block ───────────────────────────────────────────────────────────
 greenhouseMapsRouter.post(
   '/:mapId(\\d+)/compartments/:compartmentId(\\d+)/blocks',
+  requirePermission('greenhouse:edit'),
   async (req: Request, res: Response) => {
     const compartmentId = Number(req.params.compartmentId);
     const {
@@ -623,6 +697,7 @@ greenhouseMapsRouter.post(
 // ── Delete row block ───────────────────────────────────────────────────────────
 greenhouseMapsRouter.delete(
   '/:mapId(\\d+)/compartments/:compartmentId(\\d+)/blocks/:blockId(\\d+)',
+  requirePermission('greenhouse:edit'),
   async (req: Request, res: Response) => {
     const { blockId } = req.params;
     try {
@@ -638,6 +713,7 @@ greenhouseMapsRouter.delete(
 // ── Create walkway ─────────────────────────────────────────────────────────────
 greenhouseMapsRouter.post(
   '/:mapId(\\d+)/compartments/:compartmentId(\\d+)/walkways',
+  requirePermission('greenhouse:edit'),
   async (req: Request, res: Response) => {
     const compartmentId = Number(req.params.compartmentId);
     const { orientation, widthFt, offsetFromSide = 'centered', offsetFt = 0, label } =
@@ -683,6 +759,7 @@ greenhouseMapsRouter.post(
 // ── Delete walkway ─────────────────────────────────────────────────────────────
 greenhouseMapsRouter.delete(
   '/:mapId(\\d+)/compartments/:compartmentId(\\d+)/walkways/:walkwayId(\\d+)',
+  requirePermission('greenhouse:edit'),
   async (req: Request, res: Response) => {
     const { walkwayId } = req.params;
     try {
@@ -698,6 +775,7 @@ greenhouseMapsRouter.delete(
 // ── Quick layout: rows on both sides of a center walkway ───────────────────────
 greenhouseMapsRouter.post(
   '/:mapId(\\d+)/compartments/:compartmentId(\\d+)/layout/both-sides',
+  requirePermission('greenhouse:edit'),
   async (req: Request, res: Response) => {
     const compartmentId = Number(req.params.compartmentId);
     const {
@@ -835,6 +913,7 @@ greenhouseMapsRouter.post(
 // ── List missing physical row slots in a block ────────────────────────────────
 greenhouseMapsRouter.get(
   '/:mapId(\\d+)/compartments/:compartmentId(\\d+)/blocks/:blockId(\\d+)/missing-rows',
+  requirePermission('greenhouse:view'),
   async (req: Request, res: Response) => {
     const { blockId, compartmentId } = req.params;
     try {
@@ -871,6 +950,7 @@ greenhouseMapsRouter.get(
 // Never renumbers or shifts any other row.
 greenhouseMapsRouter.post(
   '/:mapId(\\d+)/compartments/:compartmentId(\\d+)/blocks/:blockId(\\d+)/rows',
+  requirePermission('greenhouse:edit'),
   async (req: Request, res: Response) => {
     const mapId        = Number(req.params.mapId);
     const compartmentId = Number(req.params.compartmentId);
@@ -1005,6 +1085,7 @@ greenhouseMapsRouter.post(
 // ── Delete single row ──────────────────────────────────────────────────────────
 greenhouseMapsRouter.delete(
   '/:mapId(\\d+)/compartments/:compartmentId(\\d+)/rows/:rowId(\\d+)',
+  requirePermission('greenhouse:edit'),
   async (req: Request, res: Response) => {
     const { rowId } = req.params;
     try {
@@ -1022,6 +1103,7 @@ greenhouseMapsRouter.delete(
 // Rows with no history are hard-deleted (row + location removed).
 greenhouseMapsRouter.delete(
   '/:mapId(\\d+)/rows',
+  requirePermission('greenhouse:edit'),
   async (req: Request, res: Response) => {
     const mapId = Number(req.params.mapId);
     const { rowIds } = req.body as { rowIds?: unknown };
@@ -1112,6 +1194,7 @@ greenhouseMapsRouter.delete(
 // ── Legacy: batch add rows (creates a block internally) ────────────────────────
 greenhouseMapsRouter.post(
   '/:mapId(\\d+)/compartments/:compartmentId(\\d+)/rows/batch',
+  requirePermission('greenhouse:edit'),
   async (req: Request, res: Response) => {
     const compartmentId = Number(req.params.compartmentId);
     const { startRow, endRow, filter = 'all', side, widthFt, lengthFt } = req.body as {

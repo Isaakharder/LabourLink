@@ -1,10 +1,12 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db';
+import { requirePermission } from '../middleware/auth';
+import { employeeBelongsToCompany, siteBelongsToCompany, contractTemplateBelongsToCompany } from '../lib/companyScope';
 
 export const employeesRouter = Router();
 
 // ── List ──────────────────────────────────────────────────────────────────────
-employeesRouter.get('/', async (_req: Request, res: Response) => {
+employeesRouter.get('/', requirePermission('employees:view'), async (req: Request, res: Response) => {
   try {
     const result = await db.query(`
       SELECT
@@ -26,8 +28,13 @@ employeesRouter.get('/', async (_req: Request, res: Response) => {
       LEFT JOIN contract_templates ct ON ct.id = er.contract_template_id
       LEFT JOIN job_roles          jr ON jr.id  = er.job_role_id
       LEFT JOIN sites               s  ON s.id   = er.site_id
+      WHERE EXISTS (
+        SELECT 1 FROM employment_records er2
+        JOIN sites s2 ON s2.id = er2.site_id
+        WHERE er2.employee_id = e.id AND s2.company_id = $1
+      )
       ORDER BY e.last_name, e.first_name
-    `);
+    `, [req.user!.companyId]);
     res.json(result.rows);
   } catch (err) {
     console.error('GET /api/employees', err);
@@ -36,13 +43,13 @@ employeesRouter.get('/', async (_req: Request, res: Response) => {
 });
 
 // ── Form options  (must come before /:id so it isn't caught as an id param) ──
-employeesRouter.get('/form-options', async (_req: Request, res: Response) => {
+employeesRouter.get('/form-options', requirePermission('employees:view'), async (req: Request, res: Response) => {
   try {
     const [sites, securityRoles, jobRoles, contracts] = await Promise.all([
-      db.query(`SELECT id, name FROM sites           WHERE archived_at IS NULL ORDER BY name`),
+      db.query(`SELECT id, name FROM sites WHERE archived_at IS NULL AND company_id = $1 ORDER BY name`, [req.user!.companyId]),
       db.query(`SELECT id, name FROM security_roles  WHERE archived_at IS NULL ORDER BY sort_order`),
       db.query(`SELECT id, name FROM job_roles        WHERE archived_at IS NULL ORDER BY sort_order`),
-      db.query(`SELECT id, name FROM contract_templates WHERE archived_at IS NULL ORDER BY name`),
+      db.query(`SELECT id, name FROM contract_templates WHERE archived_at IS NULL AND company_id = $1 ORDER BY name`, [req.user!.companyId]),
     ]);
     res.json({
       sites:             sites.rows,
@@ -57,9 +64,13 @@ employeesRouter.get('/form-options', async (_req: Request, res: Response) => {
 });
 
 // ── Detail ────────────────────────────────────────────────────────────────────
-employeesRouter.get('/:id', async (req: Request, res: Response) => {
+employeesRouter.get('/:id', requirePermission('employees:view'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  if (!(await employeeBelongsToCompany(id, req.user!.companyId))) {
+    res.status(404).json({ error: 'Employee not found' });
+    return;
+  }
 
   try {
     const [baseResult, careerResult, devicesResult] = await Promise.all([
@@ -211,7 +222,7 @@ employeesRouter.get('/:id', async (req: Request, res: Response) => {
 });
 
 // ── Create ────────────────────────────────────────────────────────────────────
-employeesRouter.post('/', async (req: Request, res: Response) => {
+employeesRouter.post('/', requirePermission('employees:edit'), async (req: Request, res: Response) => {
   const { firstName, lastName, dateOfBirth, phone, email,
           siteId, startedOn, jobRoleId, contractTemplateId, securityRoleId } = req.body as {
     firstName: string; lastName: string; dateOfBirth?: string; phone?: string; email?: string;
@@ -221,6 +232,14 @@ employeesRouter.post('/', async (req: Request, res: Response) => {
 
   if (!firstName || !lastName || !siteId || !startedOn) {
     res.status(400).json({ error: 'firstName, lastName, siteId, and startedOn are required' });
+    return;
+  }
+  if (!(await siteBelongsToCompany(siteId, req.user!.companyId))) {
+    res.status(400).json({ error: 'Invalid siteId' });
+    return;
+  }
+  if (contractTemplateId && !(await contractTemplateBelongsToCompany(contractTemplateId, req.user!.companyId))) {
+    res.status(400).json({ error: 'Invalid contractTemplateId' });
     return;
   }
 
@@ -274,9 +293,13 @@ employeesRouter.post('/', async (req: Request, res: Response) => {
 });
 
 // ── Update ────────────────────────────────────────────────────────────────────
-employeesRouter.patch('/:id', async (req: Request, res: Response) => {
+employeesRouter.patch('/:id', requirePermission('employees:edit'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  if (!(await employeeBelongsToCompany(id, req.user!.companyId))) {
+    res.status(404).json({ error: 'Employee not found' });
+    return;
+  }
 
   const dbCols: Record<string, string> = {
     firstName:   'first_name',
@@ -320,9 +343,13 @@ employeesRouter.patch('/:id', async (req: Request, res: Response) => {
 // Ends the current employment record and opens a new one with the selected contract.
 // History is preserved — old record is never deleted or overwritten.
 
-employeesRouter.post('/:id/change-contract', async (req: Request, res: Response) => {
+employeesRouter.post('/:id/change-contract', requirePermission('employees:edit'), async (req: Request, res: Response) => {
   const employeeId = parseInt(req.params.id, 10);
   if (isNaN(employeeId)) { res.status(400).json({ error: 'Invalid employee id' }); return; }
+  if (!(await employeeBelongsToCompany(employeeId, req.user!.companyId))) {
+    res.status(404).json({ error: 'Employee not found' });
+    return;
+  }
 
   const { contractTemplateId, effectiveDate, notes = 'Contract Change' } = req.body as {
     contractTemplateId?: number;
@@ -332,6 +359,10 @@ employeesRouter.post('/:id/change-contract', async (req: Request, res: Response)
 
   if (!contractTemplateId || !effectiveDate) {
     res.status(400).json({ error: 'contractTemplateId and effectiveDate are required' });
+    return;
+  }
+  if (!(await contractTemplateBelongsToCompany(contractTemplateId, req.user!.companyId))) {
+    res.status(400).json({ error: 'Invalid contractTemplateId' });
     return;
   }
 

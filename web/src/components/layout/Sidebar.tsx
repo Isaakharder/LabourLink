@@ -19,8 +19,11 @@ import {
   Sprout as Logo,
   Layers,
   Building2,
+  ShieldCheck,
+  LogOut,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useAuth } from '@/lib/AuthContext';
 
 interface NavLeaf {
   label: string;
@@ -65,6 +68,7 @@ const navigation: NavItem[] = [
 
 export function Sidebar() {
   const location = useLocation();
+  const { user, hasPermission, logout } = useAuth();
 
   const basicDataPaths = [
     '/employees', '/contracts', '/activities', '/crops', '/varieties',
@@ -157,10 +161,42 @@ export function Sidebar() {
             </div>
           );
         })}
+
+        {hasPermission('users:manage') && (
+          <NavLink
+            to="/admin/users"
+            className={({ isActive }) =>
+              cn(
+                'flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors',
+                isActive
+                  ? 'bg-[hsl(var(--sidebar-active))] text-white font-medium'
+                  : 'text-[hsl(var(--sidebar-foreground))] hover:bg-white/5 hover:text-white'
+              )
+            }
+          >
+            <ShieldCheck size={16} className="flex-shrink-0" />
+            Users
+          </NavLink>
+        )}
       </nav>
 
       {/* Footer */}
-      <div className="px-4 py-3 border-t border-[hsl(var(--sidebar-border))]">
+      <div className="px-4 py-3 border-t border-[hsl(var(--sidebar-border))] space-y-2">
+        {user && (
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <p className="truncate text-xs font-medium text-white">{user.email}</p>
+              <p className="text-xs text-[hsl(var(--sidebar-muted))]">{user.role}</p>
+            </div>
+            <button
+              onClick={() => void logout()}
+              title="Sign out"
+              className="flex-shrink-0 rounded-md p-1.5 text-[hsl(var(--sidebar-muted))] hover:bg-white/5 hover:text-white transition-colors"
+            >
+              <LogOut size={14} />
+            </button>
+          </div>
+        )}
         <p className="text-xs text-[hsl(var(--sidebar-muted))]">
           Local-first · v0.1.0
         </p>

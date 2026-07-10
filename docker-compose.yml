@@ -34,6 +34,8 @@ services:
       DB_NAME: labourlink
       DB_USER: labourlink
       DB_PASSWORD: labourlink_secret
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in a root .env file — see .env.example}
+      WEB_ORIGIN: http://localhost:3000
     ports:
       - '4000:4000'
     depends_on:
@@ -44,6 +46,7 @@ services:
     volumes:
       - ./server:/app
       - ./shared:/shared
+      - ./database:/database:ro
       - /app/node_modules
 
   web:

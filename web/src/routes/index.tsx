@@ -16,6 +16,7 @@ import { ReportsPage } from '@/pages/ReportsPage';
 import { ConfigurationPage } from '@/pages/ConfigurationPage';
 import { ViewGreenhousePage } from '@/pages/greenhouse/ViewGreenhousePage';
 import { GreenhouseMapBuilderPage } from '@/pages/greenhouse/GreenhouseMapBuilderPage';
+import { AdminUsersPage } from '@/pages/admin/AdminUsersPage';
 
 export const router = createBrowserRouter([
   {
@@ -38,6 +39,7 @@ export const router = createBrowserRouter([
       { path: 'configuration', element: <ConfigurationPage /> },
       { path: 'greenhouse', element: <ViewGreenhousePage /> },
       { path: 'greenhouse/builder/:mapId', element: <GreenhouseMapBuilderPage /> },
+      { path: 'admin/users', element: <AdminUsersPage /> },
     ],
   },
 ]);

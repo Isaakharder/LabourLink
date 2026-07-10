@@ -15,9 +15,10 @@ interface Props {
   selectedId: number | null;
   onSelect: (id: number) => void;
   onNew: () => void;
+  canCreate?: boolean;
 }
 
-export function EmployeeList({ employees, isLoading, selectedId, onSelect, onNew }: Props) {
+export function EmployeeList({ employees, isLoading, selectedId, onSelect, onNew, canCreate = true }: Props) {
   const [search, setSearch] = useState('');
 
   const filtered = employees.filter(e => {
@@ -36,13 +37,15 @@ export function EmployeeList({ employees, isLoading, selectedId, onSelect, onNew
           <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
             Employees
           </h2>
-          <button
-            onClick={onNew}
-            className="flex items-center gap-1.5 text-xs font-medium text-emerald-700 hover:text-emerald-800 transition-colors"
-          >
-            <UserPlus size={13} />
-            New
-          </button>
+          {canCreate && (
+            <button
+              onClick={onNew}
+              className="flex items-center gap-1.5 text-xs font-medium text-emerald-700 hover:text-emerald-800 transition-colors"
+            >
+              <UserPlus size={13} />
+              New
+            </button>
+          )}
         </div>
         <div className="relative">
           <Search

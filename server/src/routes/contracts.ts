@@ -1,11 +1,13 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db';
+import { requirePermission } from '../middleware/auth';
+import { contractTemplateBelongsToCompany } from '../lib/companyScope';
 
 export const contractsRouter = Router();
 
 // ── List ──────────────────────────────────────────────────────────────────────
 
-contractsRouter.get('/', async (_req: Request, res: Response) => {
+contractsRouter.get('/', requirePermission('contracts:view'), async (req: Request, res: Response) => {
   try {
     const { rows } = await db.query(`
       SELECT
@@ -17,9 +19,10 @@ contractsRouter.get('/', async (_req: Request, res: Response) => {
       FROM contract_templates ct
       LEFT JOIN contract_profiles cp
         ON cp.contract_template_id = ct.id AND cp.archived_at IS NULL
+      WHERE ct.company_id = $1
       GROUP BY ct.id
       ORDER BY ct.archived_at NULLS FIRST, ct.name
-    `);
+    `, [req.user!.companyId]);
     res.json(rows);
   } catch (err) {
     console.error('GET /api/contracts', err);
@@ -29,7 +32,7 @@ contractsRouter.get('/', async (_req: Request, res: Response) => {
 
 // ── Detail (with profiles) ────────────────────────────────────────────────────
 
-contractsRouter.get('/:id', async (req: Request, res: Response) => {
+contractsRouter.get('/:id', requirePermission('contracts:view'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
 
@@ -38,8 +41,8 @@ contractsRouter.get('/:id', async (req: Request, res: Response) => {
       db.query(`
         SELECT id, name, archived_at AS "archivedAt",
                created_at AS "createdAt", updated_at AS "updatedAt"
-        FROM contract_templates WHERE id = $1
-      `, [id]),
+        FROM contract_templates WHERE id = $1 AND company_id = $2
+      `, [id, req.user!.companyId]),
 
       db.query(`
         SELECT
@@ -77,7 +80,7 @@ contractsRouter.get('/:id', async (req: Request, res: Response) => {
 
 // ── Create ────────────────────────────────────────────────────────────────────
 
-contractsRouter.post('/', async (req: Request, res: Response) => {
+contractsRouter.post('/', requirePermission('contracts:edit'), async (req: Request, res: Response) => {
   const { name } = req.body as { name?: string };
   if (!name?.trim()) {
     res.status(400).json({ error: 'name is required' });
@@ -85,8 +88,8 @@ contractsRouter.post('/', async (req: Request, res: Response) => {
   }
   try {
     const { rows } = await db.query<{ id: number; name: string }>(
-      `INSERT INTO contract_templates (name) VALUES ($1) RETURNING id, name`,
-      [name.trim()],
+      `INSERT INTO contract_templates (name, company_id) VALUES ($1, $2) RETURNING id, name`,
+      [name.trim(), req.user!.companyId],
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -97,7 +100,7 @@ contractsRouter.post('/', async (req: Request, res: Response) => {
 
 // ── Update ────────────────────────────────────────────────────────────────────
 
-contractsRouter.patch('/:id', async (req: Request, res: Response) => {
+contractsRouter.patch('/:id', requirePermission('contracts:edit'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
 
@@ -118,9 +121,10 @@ contractsRouter.patch('/:id', async (req: Request, res: Response) => {
   }
 
   try {
-    params.push(id);
+    params.push(id, req.user!.companyId);
     const { rows } = await db.query(
-      `UPDATE contract_templates SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING id`,
+      `UPDATE contract_templates SET ${sets.join(', ')}
+       WHERE id = $${params.length - 1} AND company_id = $${params.length} RETURNING id`,
       params,
     );
     if (!rows[0]) { res.status(404).json({ error: 'Contract not found' }); return; }
@@ -133,9 +137,13 @@ contractsRouter.patch('/:id', async (req: Request, res: Response) => {
 
 // ── Create Profile ────────────────────────────────────────────────────────────
 
-contractsRouter.post('/:id/profiles', async (req: Request, res: Response) => {
+contractsRouter.post('/:id/profiles', requirePermission('contracts:edit'), async (req: Request, res: Response) => {
   const contractId = parseInt(req.params.id, 10);
   if (isNaN(contractId)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  if (!(await contractTemplateBelongsToCompany(contractId, req.user!.companyId))) {
+    res.status(404).json({ error: 'Contract not found' });
+    return;
+  }
 
   const {
     effectiveFrom,
@@ -184,11 +192,15 @@ contractsRouter.post('/:id/profiles', async (req: Request, res: Response) => {
 
 // ── Clone Profile ─────────────────────────────────────────────────────────────
 
-contractsRouter.post('/:id/profiles/:profileId/clone', async (req: Request, res: Response) => {
+contractsRouter.post('/:id/profiles/:profileId/clone', requirePermission('contracts:edit'), async (req: Request, res: Response) => {
   const contractId  = parseInt(req.params.id, 10);
   const profileId   = parseInt(req.params.profileId, 10);
   if (isNaN(contractId) || isNaN(profileId)) {
     res.status(400).json({ error: 'Invalid id' });
+    return;
+  }
+  if (!(await contractTemplateBelongsToCompany(contractId, req.user!.companyId))) {
+    res.status(404).json({ error: 'Contract not found' });
     return;
   }
 
@@ -227,11 +239,15 @@ contractsRouter.post('/:id/profiles/:profileId/clone', async (req: Request, res:
 
 // ── Update Profile ────────────────────────────────────────────────────────────
 
-contractsRouter.patch('/:id/profiles/:profileId', async (req: Request, res: Response) => {
+contractsRouter.patch('/:id/profiles/:profileId', requirePermission('contracts:edit'), async (req: Request, res: Response) => {
   const contractId = parseInt(req.params.id, 10);
   const profileId  = parseInt(req.params.profileId, 10);
   if (isNaN(contractId) || isNaN(profileId)) {
     res.status(400).json({ error: 'Invalid id' }); return;
+  }
+  if (!(await contractTemplateBelongsToCompany(contractId, req.user!.companyId))) {
+    res.status(404).json({ error: 'Contract not found' });
+    return;
   }
 
   const allowed: Record<string, string> = {

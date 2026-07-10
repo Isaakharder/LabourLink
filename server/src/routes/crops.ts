@@ -1,10 +1,12 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db';
+import { requirePermission } from '../middleware/auth';
+import { cropBelongsToCompany, filterRowIdsByCompany } from '../lib/companyScope';
 
 export const cropsRouter = Router();
 
 // ── List ──────────────────────────────────────────────────────────────────────
-cropsRouter.get('/', async (_req: Request, res: Response) => {
+cropsRouter.get('/', requirePermission('crops:view'), async (req: Request, res: Response) => {
   try {
     const { rows } = await db.query(`
       SELECT
@@ -18,9 +20,10 @@ cropsRouter.get('/', async (_req: Request, res: Response) => {
         COUNT(v.id)::int       AS "varietyCount"
       FROM crops c
       LEFT JOIN varieties v ON v.crop_id = c.id AND v.archived_at IS NULL
+      WHERE c.company_id = $1
       GROUP BY c.id
       ORDER BY c.planting_date DESC NULLS LAST, c.name
-    `);
+    `, [req.user!.companyId]);
     res.json(rows);
   } catch (err) {
     console.error('GET /api/crops', err);
@@ -29,7 +32,7 @@ cropsRouter.get('/', async (_req: Request, res: Response) => {
 });
 
 // ── Create ────────────────────────────────────────────────────────────────────
-cropsRouter.post('/', async (req: Request, res: Response) => {
+cropsRouter.post('/', requirePermission('crops:edit'), async (req: Request, res: Response) => {
   const { name, plantingDate, pullingDate } = req.body as {
     name: string;
     plantingDate: string;
@@ -51,15 +54,15 @@ cropsRouter.post('/', async (req: Request, res: Response) => {
 
   try {
     const { rows } = await db.query<{ id: number }>(
-      `INSERT INTO crops (name, planting_date, pulling_date)
-       VALUES ($1, $2, $3)
+      `INSERT INTO crops (name, planting_date, pulling_date, company_id)
+       VALUES ($1, $2, $3, $4)
        RETURNING id, name,
          planting_date::text AS "plantingDate",
          pulling_date::text  AS "pullingDate",
          archived_at         AS "archivedAt",
          created_at          AS "createdAt",
          updated_at          AS "updatedAt"`,
-      [name.trim(), plantingDate, pullingDate || null],
+      [name.trim(), plantingDate, pullingDate || null, req.user!.companyId],
     );
     res.status(201).json({ ...rows[0], varietyCount: 0 });
   } catch (err) {
@@ -69,7 +72,7 @@ cropsRouter.post('/', async (req: Request, res: Response) => {
 });
 
 // ── Detail ────────────────────────────────────────────────────────────────────
-cropsRouter.get('/:id', async (req: Request, res: Response) => {
+cropsRouter.get('/:id', requirePermission('crops:view'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
 
@@ -86,9 +89,9 @@ cropsRouter.get('/:id', async (req: Request, res: Response) => {
         COUNT(v.id)::int       AS "varietyCount"
       FROM crops c
       LEFT JOIN varieties v ON v.crop_id = c.id AND v.archived_at IS NULL
-      WHERE c.id = $1
+      WHERE c.id = $1 AND c.company_id = $2
       GROUP BY c.id
-    `, [id]);
+    `, [id, req.user!.companyId]);
     if (rows.length === 0) { res.status(404).json({ error: 'Crop not found' }); return; }
     res.json(rows[0]);
   } catch (err) {
@@ -98,9 +101,13 @@ cropsRouter.get('/:id', async (req: Request, res: Response) => {
 });
 
 // ── Crop locations: list ──────────────────────────────────────────────────────
-cropsRouter.get('/:id/locations', async (req: Request, res: Response) => {
+cropsRouter.get('/:id/locations', requirePermission('crops:view'), async (req: Request, res: Response) => {
   const cropId = parseInt(req.params.id, 10);
   if (isNaN(cropId)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  if (!(await cropBelongsToCompany(cropId, req.user!.companyId))) {
+    res.status(404).json({ error: 'Crop not found' });
+    return;
+  }
 
   try {
     const { rows } = await db.query(`
@@ -139,13 +146,21 @@ cropsRouter.get('/:id/locations', async (req: Request, res: Response) => {
 });
 
 // ── Crop locations: replace (PUT) ─────────────────────────────────────────────
-cropsRouter.put('/:id/locations', async (req: Request, res: Response) => {
+cropsRouter.put('/:id/locations', requirePermission('crops:edit'), async (req: Request, res: Response) => {
   const cropId = parseInt(req.params.id, 10);
   if (isNaN(cropId)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  if (!(await cropBelongsToCompany(cropId, req.user!.companyId))) {
+    res.status(404).json({ error: 'Crop not found' });
+    return;
+  }
 
   const { rowIds } = req.body as { rowIds?: number[] };
   if (!Array.isArray(rowIds)) {
     res.status(400).json({ error: 'rowIds must be an array' }); return;
+  }
+  const validRowIds = await filterRowIdsByCompany(rowIds, req.user!.companyId);
+  if (validRowIds.length !== rowIds.length) {
+    res.status(400).json({ error: 'One or more rowIds are invalid' }); return;
   }
 
   const client = await db.connect();
@@ -172,9 +187,13 @@ cropsRouter.put('/:id/locations', async (req: Request, res: Response) => {
 });
 
 // ── Plant density: list ───────────────────────────────────────────────────────
-cropsRouter.get('/:id/plant-density', async (req: Request, res: Response) => {
+cropsRouter.get('/:id/plant-density', requirePermission('crops:view'), async (req: Request, res: Response) => {
   const cropId = parseInt(req.params.id, 10);
   if (isNaN(cropId)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  if (!(await cropBelongsToCompany(cropId, req.user!.companyId))) {
+    res.status(404).json({ error: 'Crop not found' });
+    return;
+  }
 
   try {
     const { rows } = await db.query(`
@@ -209,9 +228,13 @@ cropsRouter.get('/:id/plant-density', async (req: Request, res: Response) => {
 });
 
 // ── Plant density: create ─────────────────────────────────────────────────────
-cropsRouter.post('/:id/plant-density', async (req: Request, res: Response) => {
+cropsRouter.post('/:id/plant-density', requirePermission('crops:edit'), async (req: Request, res: Response) => {
   const cropId = parseInt(req.params.id, 10);
   if (isNaN(cropId)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  if (!(await cropBelongsToCompany(cropId, req.user!.companyId))) {
+    res.status(404).json({ error: 'Crop not found' });
+    return;
+  }
 
   const { name = 'Plants', plantCount, areaM2: providedAreaM2, notes, rowIds } = req.body as {
     name?: string;
@@ -228,6 +251,12 @@ cropsRouter.post('/:id/plant-density', async (req: Request, res: Response) => {
   const hasRowIds = Array.isArray(rowIds) && rowIds.length > 0;
   if (!hasRowIds && (!providedAreaM2 || providedAreaM2 <= 0)) {
     res.status(400).json({ error: 'areaM2 must be a positive number when no rowIds are provided' }); return;
+  }
+  if (hasRowIds) {
+    const validRowIds = await filterRowIdsByCompany(rowIds as number[], req.user!.companyId);
+    if (validRowIds.length !== (rowIds as number[]).length) {
+      res.status(400).json({ error: 'One or more rowIds are invalid' }); return;
+    }
   }
 
   const client = await db.connect();
@@ -282,11 +311,15 @@ cropsRouter.post('/:id/plant-density', async (req: Request, res: Response) => {
 });
 
 // ── Plant density: delete ─────────────────────────────────────────────────────
-cropsRouter.delete('/:id/plant-density/:densityId', async (req: Request, res: Response) => {
+cropsRouter.delete('/:id/plant-density/:densityId', requirePermission('crops:edit'), async (req: Request, res: Response) => {
   const cropId    = parseInt(req.params.id, 10);
   const densityId = parseInt(req.params.densityId, 10);
   if (isNaN(cropId) || isNaN(densityId)) {
     res.status(400).json({ error: 'Invalid id' }); return;
+  }
+  if (!(await cropBelongsToCompany(cropId, req.user!.companyId))) {
+    res.status(404).json({ error: 'Crop not found' });
+    return;
   }
 
   try {
@@ -303,9 +336,13 @@ cropsRouter.delete('/:id/plant-density/:densityId', async (req: Request, res: Re
 });
 
 // ── Update ────────────────────────────────────────────────────────────────────
-cropsRouter.patch('/:id', async (req: Request, res: Response) => {
+cropsRouter.patch('/:id', requirePermission('crops:edit'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  if (!(await cropBelongsToCompany(id, req.user!.companyId))) {
+    res.status(404).json({ error: 'Crop not found' });
+    return;
+  }
 
   const DB_COLS: Record<string, string> = {
     name:         'name',

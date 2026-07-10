@@ -1,5 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db';
+import { requirePermission } from '../middleware/auth';
+import { siteBelongsToCompany, locationBelongsToCompany } from '../lib/companyScope';
 
 export const locationsRouter = Router();
 
@@ -17,7 +19,7 @@ function buildPatch(body: Record<string, unknown>, fieldMap: Record<string, stri
 
 // ── Sites ─────────────────────────────────────────────────────────────────────
 
-locationsRouter.get('/sites', async (_req: Request, res: Response) => {
+locationsRouter.get('/sites', requirePermission('locations:view'), async (req: Request, res: Response) => {
   try {
     const { rows } = await db.query(`
       SELECT
@@ -32,9 +34,10 @@ locationsRouter.get('/sites', async (_req: Request, res: Response) => {
       JOIN companies c ON c.id = s.company_id
       LEFT JOIN locations l          ON l.site_id  = s.id
       LEFT JOIN greenhouse_maps gm   ON gm.site_id = s.id
+      WHERE s.company_id = $1
       GROUP BY s.id, c.name
       ORDER BY s.archived_at NULLS FIRST, s.name
-    `);
+    `, [req.user!.companyId]);
     res.json(rows);
   } catch (err) {
     console.error('GET /api/locations/sites', err);
@@ -42,16 +45,14 @@ locationsRouter.get('/sites', async (_req: Request, res: Response) => {
   }
 });
 
-locationsRouter.post('/sites', async (req: Request, res: Response) => {
+locationsRouter.post('/sites', requirePermission('locations:edit'), async (req: Request, res: Response) => {
   const { name, code, address, timezone = 'Europe/Amsterdam' } = req.body as {
     name?: string; code?: string; address?: string; timezone?: string;
   };
   if (!name?.trim()) { res.status(400).json({ error: 'name is required' }); return; }
   if (!code?.trim()) { res.status(400).json({ error: 'code is required' }); return; }
   try {
-    const coRes = await db.query('SELECT id, name FROM companies LIMIT 1');
-    if (!coRes.rows.length) { res.status(500).json({ error: 'No company configured' }); return; }
-    const { id: company_id, name: companyName } = coRes.rows[0];
+    const { rows: coRows } = await db.query('SELECT name FROM companies WHERE id = $1', [req.user!.companyId]);
     const { rows } = await db.query(`
       INSERT INTO sites (company_id, name, code, address, timezone)
       VALUES ($1, $2, $3, $4, $5)
@@ -59,8 +60,8 @@ locationsRouter.post('/sites', async (req: Request, res: Response) => {
                 archived_at AS "archivedAt",
                 created_at  AS "createdAt",
                 updated_at  AS "updatedAt"
-    `, [company_id, name.trim(), code.trim().toUpperCase(), address?.trim() || null, timezone]);
-    res.status(201).json({ ...rows[0], companyName, locationCount: 0, mapCount: 0 });
+    `, [req.user!.companyId, name.trim(), code.trim().toUpperCase(), address?.trim() || null, timezone]);
+    res.status(201).json({ ...rows[0], companyName: coRows[0]?.name ?? null, locationCount: 0, mapCount: 0 });
   } catch (err: unknown) {
     if ((err as { code?: string }).code === '23505') {
       res.status(409).json({ error: 'A site with that code already exists' }); return;
@@ -70,7 +71,7 @@ locationsRouter.post('/sites', async (req: Request, res: Response) => {
   }
 });
 
-locationsRouter.get('/sites/:id', async (req: Request, res: Response) => {
+locationsRouter.get('/sites/:id', requirePermission('locations:view'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
   try {
@@ -82,8 +83,8 @@ locationsRouter.get('/sites/:id', async (req: Request, res: Response) => {
               c.name        AS "companyName"
        FROM sites s
        JOIN companies c ON c.id = s.company_id
-       WHERE s.id = $1`,
-      [id],
+       WHERE s.id = $1 AND s.company_id = $2`,
+      [id, req.user!.companyId],
     );
     if (!rows[0]) { res.status(404).json({ error: 'Not found' }); return; }
     res.json(rows[0]);
@@ -93,7 +94,7 @@ locationsRouter.get('/sites/:id', async (req: Request, res: Response) => {
   }
 });
 
-locationsRouter.patch('/sites/:id', async (req: Request, res: Response) => {
+locationsRouter.patch('/sites/:id', requirePermission('locations:edit'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
   const { sets, vals } = buildPatch(req.body as Record<string, unknown>, {
@@ -102,8 +103,8 @@ locationsRouter.patch('/sites/:id', async (req: Request, res: Response) => {
   if (!sets.length) { res.status(400).json({ error: 'No fields to update' }); return; }
   try {
     const { rowCount } = await db.query(
-      `UPDATE sites SET ${sets.join(', ')} WHERE id = $${vals.length + 1}`,
-      [...vals, id],
+      `UPDATE sites SET ${sets.join(', ')} WHERE id = $${vals.length + 1} AND company_id = $${vals.length + 2}`,
+      [...vals, id, req.user!.companyId],
     );
     if (rowCount === 0) { res.status(404).json({ error: 'Not found' }); return; }
     res.json({ ok: true });
@@ -113,9 +114,12 @@ locationsRouter.patch('/sites/:id', async (req: Request, res: Response) => {
   }
 });
 
-locationsRouter.delete('/sites/:id', async (req: Request, res: Response) => {
+locationsRouter.delete('/sites/:id', requirePermission('locations:edit'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  if (!(await siteBelongsToCompany(id, req.user!.companyId))) {
+    res.status(404).json({ error: 'Not found' }); return;
+  }
   try {
     const usageRes = await db.query(`
       SELECT
@@ -142,13 +146,13 @@ locationsRouter.delete('/sites/:id', async (req: Request, res: Response) => {
 
 // ── Locations ─────────────────────────────────────────────────────────────────
 
-locationsRouter.get('/', async (req: Request, res: Response) => {
+locationsRouter.get('/', requirePermission('locations:view'), async (req: Request, res: Response) => {
   const siteId = req.query.siteId ? parseInt(String(req.query.siteId), 10) : null;
   const includeArchived = req.query.includeArchived === 'true';
 
   try {
-    const params: unknown[] = [];
-    const conditions: string[] = [];
+    const params: unknown[] = [req.user!.companyId];
+    const conditions: string[] = ['s.company_id = $1'];
     if (siteId !== null) {
       params.push(siteId);
       conditions.push(`l.site_id = $${params.length}`);
@@ -156,7 +160,7 @@ locationsRouter.get('/', async (req: Request, res: Response) => {
     if (!includeArchived) {
       conditions.push('l.archived_at IS NULL');
     }
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const where = `WHERE ${conditions.join(' AND ')}`;
 
     const { rows } = await db.query(
       `SELECT
@@ -184,7 +188,7 @@ locationsRouter.get('/', async (req: Request, res: Response) => {
   }
 });
 
-locationsRouter.get('/:id(\\d+)', async (req: Request, res: Response) => {
+locationsRouter.get('/:id(\\d+)', requirePermission('locations:view'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   try {
     const { rows } = await db.query(
@@ -207,8 +211,8 @@ locationsRouter.get('/:id(\\d+)', async (req: Request, res: Response) => {
          l.updated_at        AS "updatedAt"
        FROM locations l
        JOIN sites s ON s.id = l.site_id
-       WHERE l.id = $1`,
-      [id],
+       WHERE l.id = $1 AND s.company_id = $2`,
+      [id, req.user!.companyId],
     );
     if (!rows[0]) { res.status(404).json({ error: 'Not found' }); return; }
     res.json(rows[0]);
@@ -218,11 +222,14 @@ locationsRouter.get('/:id(\\d+)', async (req: Request, res: Response) => {
   }
 });
 
-locationsRouter.post('/', async (req: Request, res: Response) => {
+locationsRouter.post('/', requirePermission('locations:edit'), async (req: Request, res: Response) => {
   const { siteId, code, name, abbreviatedName, netAreaM2, mapXM, mapYM,
           mapLengthM, mapWidthM, sortOrder } = req.body as Record<string, unknown>;
   if (!siteId || !code || !name) {
     res.status(400).json({ error: 'siteId, code, and name are required' }); return;
+  }
+  if (!(await siteBelongsToCompany(siteId as number, req.user!.companyId))) {
+    res.status(400).json({ error: 'Invalid siteId' }); return;
   }
   try {
     const { rows } = await db.query(
@@ -246,8 +253,11 @@ locationsRouter.post('/', async (req: Request, res: Response) => {
   }
 });
 
-locationsRouter.patch('/:id(\\d+)', async (req: Request, res: Response) => {
+locationsRouter.patch('/:id(\\d+)', requirePermission('locations:edit'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
+  if (!(await locationBelongsToCompany(id, req.user!.companyId))) {
+    res.status(404).json({ error: 'Not found' }); return;
+  }
   const { sets, vals } = buildPatch(req.body as Record<string, unknown>, {
     code:            'code',
     name:            'name',
@@ -279,8 +289,11 @@ locationsRouter.patch('/:id(\\d+)', async (req: Request, res: Response) => {
 });
 
 // Which groups does this location belong to?
-locationsRouter.get('/:id(\\d+)/groups', async (req: Request, res: Response) => {
+locationsRouter.get('/:id(\\d+)/groups', requirePermission('locations:view'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
+  if (!(await locationBelongsToCompany(id, req.user!.companyId))) {
+    res.status(404).json({ error: 'Not found' }); return;
+  }
   try {
     const { rows } = await db.query(
       `SELECT lg.id, lg.code, lg.name, lg.sort_order AS "sortOrder",
@@ -300,10 +313,13 @@ locationsRouter.get('/:id(\\d+)/groups', async (req: Request, res: Response) => 
 
 // ── Location Scan Codes ───────────────────────────────────────────────────────
 
-locationsRouter.get('/scan-codes', async (req: Request, res: Response) => {
+locationsRouter.get('/scan-codes', requirePermission('locations:view'), async (req: Request, res: Response) => {
   const locationId = parseInt(String(req.query.locationId ?? ''), 10);
   if (isNaN(locationId)) {
     res.status(400).json({ error: 'locationId query param required' }); return;
+  }
+  if (!(await locationBelongsToCompany(locationId, req.user!.companyId))) {
+    res.status(404).json({ error: 'Not found' }); return;
   }
   try {
     const { rows } = await db.query(
@@ -323,10 +339,13 @@ locationsRouter.get('/scan-codes', async (req: Request, res: Response) => {
   }
 });
 
-locationsRouter.post('/scan-codes', async (req: Request, res: Response) => {
+locationsRouter.post('/scan-codes', requirePermission('locations:edit'), async (req: Request, res: Response) => {
   const { locationId, scanCode, scanType, label, isPrimary } = req.body as Record<string, unknown>;
   if (!locationId || !scanCode || !scanType) {
     res.status(400).json({ error: 'locationId, scanCode, and scanType are required' }); return;
+  }
+  if (!(await locationBelongsToCompany(locationId as number, req.user!.companyId))) {
+    res.status(400).json({ error: 'Invalid locationId' }); return;
   }
   const validTypes = ['qr', 'rfid', 'barcode', 'manual'];
   if (!validTypes.includes(String(scanType))) {
@@ -349,22 +368,27 @@ locationsRouter.post('/scan-codes', async (req: Request, res: Response) => {
   }
 });
 
-locationsRouter.patch('/scan-codes/:id', async (req: Request, res: Response) => {
+locationsRouter.patch('/scan-codes/:id', requirePermission('locations:edit'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
   const body = req.body as Record<string, unknown>;
 
-  if (body.isPrimary === true) {
-    try {
-      const { rows: sc } = await db.query(
-        `SELECT location_id FROM location_scan_codes WHERE id = $1`, [id],
-      );
-      if (!sc[0]) { res.status(404).json({ error: 'Not found' }); return; }
+  try {
+    const { rows: scRows } = await db.query(
+      `SELECT sc.location_id FROM location_scan_codes sc
+       JOIN locations l ON l.id = sc.location_id
+       JOIN sites s ON s.id = l.site_id
+       WHERE sc.id = $1 AND s.company_id = $2`,
+      [id, req.user!.companyId],
+    );
+    if (!scRows[0]) { res.status(404).json({ error: 'Not found' }); return; }
+
+    if (body.isPrimary === true) {
       await db.query('BEGIN');
       await db.query(
         `UPDATE location_scan_codes SET is_primary = FALSE
          WHERE location_id = $1 AND is_primary = TRUE AND archived_at IS NULL AND id != $2`,
-        [sc[0].location_id, id],
+        [scRows[0].location_id, id],
       );
       const { sets, vals } = buildPatch(body, {
         scanCode: 'scan_code', scanType: 'scan_type', label: 'label',
@@ -376,24 +400,14 @@ locationsRouter.patch('/scan-codes/:id', async (req: Request, res: Response) => 
       );
       await db.query('COMMIT');
       res.json({ ok: true });
-    } catch (err: unknown) {
-      await db.query('ROLLBACK').catch(() => {});
-      const pg = err as { code?: string };
-      if (pg.code === '23505') {
-        res.status(409).json({ error: 'Scan code already in use' }); return;
-      }
-      console.error('PATCH /api/locations/scan-codes/:id', err);
-      res.status(500).json({ error: 'Internal server error' });
+      return;
     }
-    return;
-  }
 
-  const { sets, vals } = buildPatch(body, {
-    scanCode: 'scan_code', scanType: 'scan_type', label: 'label',
-    isPrimary: 'is_primary', archivedAt: 'archived_at',
-  });
-  if (!sets.length) { res.status(400).json({ error: 'No fields to update' }); return; }
-  try {
+    const { sets, vals } = buildPatch(body, {
+      scanCode: 'scan_code', scanType: 'scan_type', label: 'label',
+      isPrimary: 'is_primary', archivedAt: 'archived_at',
+    });
+    if (!sets.length) { res.status(400).json({ error: 'No fields to update' }); return; }
     const { rowCount } = await db.query(
       `UPDATE location_scan_codes SET ${sets.join(', ')} WHERE id = $${vals.length + 1}`,
       [...vals, id],
@@ -401,6 +415,7 @@ locationsRouter.patch('/scan-codes/:id', async (req: Request, res: Response) => 
     if (rowCount === 0) { res.status(404).json({ error: 'Not found' }); return; }
     res.json({ ok: true });
   } catch (err: unknown) {
+    await db.query('ROLLBACK').catch(() => undefined);
     const pg = err as { code?: string };
     if (pg.code === '23505') {
       res.status(409).json({ error: 'Scan code already in use or primary conflict' }); return;

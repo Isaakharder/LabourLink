@@ -1,5 +1,7 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { db } from '../db';
+import { requirePermission } from '../middleware/auth';
+import { siteBelongsToCompany, locationGroupBelongsToCompany, locationBelongsToCompany } from '../lib/companyScope';
 
 export const locationGroupsRouter = Router();
 
@@ -15,15 +17,26 @@ function buildPatch(body: Record<string, unknown>, fieldMap: Record<string, stri
   return { sets, vals };
 }
 
+// Every :id in this router refers to a location_group id — verify ownership once.
+locationGroupsRouter.param('id', async (req: Request, res: Response, next: NextFunction, idParam: string) => {
+  const id = parseInt(idParam, 10);
+  if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  if (!(await locationGroupBelongsToCompany(id, req.user!.companyId))) {
+    res.status(404).json({ error: 'Not found' });
+    return;
+  }
+  next();
+});
+
 // ── Location Groups ───────────────────────────────────────────────────────────
 
-locationGroupsRouter.get('/', async (req: Request, res: Response) => {
+locationGroupsRouter.get('/', requirePermission('locations:view'), async (req: Request, res: Response) => {
   const siteId = req.query.siteId ? parseInt(String(req.query.siteId), 10) : null;
   const includeArchived = req.query.includeArchived === 'true';
 
   try {
-    const params: unknown[] = [];
-    const conditions: string[] = [];
+    const params: unknown[] = [req.user!.companyId];
+    const conditions: string[] = ['s.company_id = $1'];
     if (siteId !== null) {
       params.push(siteId);
       conditions.push(`lg.site_id = $${params.length}`);
@@ -31,7 +44,7 @@ locationGroupsRouter.get('/', async (req: Request, res: Response) => {
     if (!includeArchived) {
       conditions.push('lg.archived_at IS NULL');
     }
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const where = `WHERE ${conditions.join(' AND ')}`;
 
     const { rows } = await db.query(
       `SELECT
@@ -61,9 +74,8 @@ locationGroupsRouter.get('/', async (req: Request, res: Response) => {
   }
 });
 
-locationGroupsRouter.get('/:id', async (req: Request, res: Response) => {
+locationGroupsRouter.get('/:id', requirePermission('locations:view'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
-  if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
   try {
     const { rows } = await db.query(
       `SELECT
@@ -91,10 +103,13 @@ locationGroupsRouter.get('/:id', async (req: Request, res: Response) => {
   }
 });
 
-locationGroupsRouter.post('/', async (req: Request, res: Response) => {
+locationGroupsRouter.post('/', requirePermission('locations:edit'), async (req: Request, res: Response) => {
   const { siteId, code, name, netAreaM2, sortOrder } = req.body as Record<string, unknown>;
   if (!siteId || !code || !name) {
     res.status(400).json({ error: 'siteId, code, and name are required' }); return;
+  }
+  if (!(await siteBelongsToCompany(siteId as number, req.user!.companyId))) {
+    res.status(400).json({ error: 'Invalid siteId' }); return;
   }
   try {
     const { rows } = await db.query(
@@ -113,9 +128,8 @@ locationGroupsRouter.post('/', async (req: Request, res: Response) => {
   }
 });
 
-locationGroupsRouter.patch('/:id', async (req: Request, res: Response) => {
+locationGroupsRouter.patch('/:id', requirePermission('locations:edit'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
-  if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
   const { sets, vals } = buildPatch(req.body as Record<string, unknown>, {
     code:       'code',
     name:       'name',
@@ -143,9 +157,8 @@ locationGroupsRouter.patch('/:id', async (req: Request, res: Response) => {
 
 // ── Group membership ──────────────────────────────────────────────────────────
 
-locationGroupsRouter.get('/:id/locations', async (req: Request, res: Response) => {
+locationGroupsRouter.get('/:id/locations', requirePermission('locations:view'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
-  if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
   try {
     const { rows } = await db.query(
       `SELECT
@@ -168,12 +181,14 @@ locationGroupsRouter.get('/:id/locations', async (req: Request, res: Response) =
   }
 });
 
-locationGroupsRouter.post('/:id/locations', async (req: Request, res: Response) => {
+locationGroupsRouter.post('/:id/locations', requirePermission('locations:edit'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
-  if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
   const { locationId } = req.body as Record<string, unknown>;
   if (!locationId) {
     res.status(400).json({ error: 'locationId is required' }); return;
+  }
+  if (!(await locationBelongsToCompany(locationId as number, req.user!.companyId))) {
+    res.status(400).json({ error: 'Invalid locationId' }); return;
   }
   try {
     await db.query(
@@ -189,10 +204,10 @@ locationGroupsRouter.post('/:id/locations', async (req: Request, res: Response) 
   }
 });
 
-locationGroupsRouter.delete('/:id/locations/:locationId', async (req: Request, res: Response) => {
+locationGroupsRouter.delete('/:id/locations/:locationId', requirePermission('locations:edit'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   const locationId = parseInt(req.params.locationId, 10);
-  if (isNaN(id) || isNaN(locationId)) {
+  if (isNaN(locationId)) {
     res.status(400).json({ error: 'Invalid id' }); return;
   }
   try {

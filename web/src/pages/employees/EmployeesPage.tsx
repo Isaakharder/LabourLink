@@ -4,11 +4,13 @@ import { keepPreviousData } from '@tanstack/react-query';
 import { employeeApi } from '../../api/employees';
 import { EmployeeList } from './EmployeeList';
 import { EmployeeDetail } from './EmployeeDetail';
+import { useAuth } from '@/lib/AuthContext';
 
 export function EmployeesPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [isNew, setIsNew] = useState(false);
   const queryClient = useQueryClient();
+  const { hasPermission } = useAuth();
 
   const { data: employees = [], isLoading: isListLoading } = useQuery({
     queryKey: ['employees'],
@@ -63,6 +65,7 @@ export function EmployeesPage() {
         selectedId={selectedId}
         onSelect={handleSelect}
         onNew={handleNew}
+        canCreate={hasPermission('employees:edit')}
       />
       <EmployeeDetail
         employee={selectedEmployee ?? null}
