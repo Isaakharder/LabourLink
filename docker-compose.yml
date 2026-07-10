@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: labourlink
       POSTGRES_PASSWORD: labourlink_secret
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data_dev:/var/lib/postgresql/data
       - ./database/migrations:/docker-entrypoint-initdb.d
     ports:
       - '5432:5432'
@@ -22,8 +22,9 @@ services:
 
   api:
     build:
-      context: ./server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: server/Dockerfile
+      target: dev
     container_name: labourlink_api
     restart: unless-stopped
     environment:
@@ -51,8 +52,9 @@ services:
 
   web:
     build:
-      context: ./web
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: web/Dockerfile
+      target: dev
     container_name: labourlink_web
     restart: unless-stopped
     environment:
@@ -69,7 +71,8 @@ services:
       - /app/node_modules
 
 volumes:
-  postgres_data:
+  postgres_data_dev:
+    name: labourlink_postgres_data_dev
 
 networks:
   labourlink_network:

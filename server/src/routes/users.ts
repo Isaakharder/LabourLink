@@ -106,6 +106,17 @@ usersRouter.patch('/:id(\\d+)', requirePermission('users:manage'), async (req: R
       vals,
     );
     if (rowCount === 0) { res.status(404).json({ error: 'Not found' }); return; }
+
+    if (isActive === false) {
+      // requireAuth/mobileAuth already re-check is_active live on every
+      // request, so a deactivated account is blocked on its very next
+      // call regardless — this proactively clears any lingering
+      // browser/mobile session rows immediately instead of waiting for
+      // that to happen or for natural expiry.
+      await db.query('UPDATE sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL', [id]);
+      await db.query('UPDATE mobile_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL', [id]);
+    }
+
     res.json({ ok: true });
   } catch (err) {
     console.error('PATCH /api/users/:id', err);
@@ -130,9 +141,14 @@ usersRouter.post('/:id(\\d+)/reset-password', requirePermission('users:manage'),
     );
     if (rowCount === 0) { res.status(404).json({ error: 'Not found' }); return; }
 
-    // Resetting a password invalidates any existing sessions for that user.
+    // Resetting a password invalidates any existing sessions for that user
+    // — both browser cookie sessions and mobile bearer sessions.
     await db.query(
       'UPDATE sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL',
+      [id],
+    );
+    await db.query(
+      'UPDATE mobile_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL',
       [id],
     );
     res.json({ ok: true });
@@ -175,6 +191,71 @@ usersRouter.post('/:id(\\d+)/sessions/revoke-all', requirePermission('users:mana
     res.json({ ok: true });
   } catch (err) {
     console.error('POST /api/users/:id/sessions/revoke-all', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Mobile sessions (separate from browser sessions above) ──────────────────
+
+usersRouter.get('/:id(\\d+)/mobile-sessions', requirePermission('users:manage'), async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  try {
+    const { rows: userRows } = await db.query('SELECT 1 FROM users WHERE id = $1 AND company_id = $2', [id, req.user!.companyId]);
+    if (!userRows.length) { res.status(404).json({ error: 'Not found' }); return; }
+
+    const { rows } = await db.query(
+      `SELECT id, device_id AS "deviceId", device_name AS "deviceName", app_version AS "appVersion",
+              created_at AS "createdAt", last_used_at AS "lastUsedAt", expires_at AS "expiresAt"
+       FROM mobile_sessions
+       WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > NOW()
+       ORDER BY last_used_at DESC`,
+      [id],
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('GET /api/users/:id/mobile-sessions', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Revokes exactly one device's mobile session, without touching any other
+// mobile session or any browser session for the same user — this is how
+// an admin handles "employee lost their phone" without logging everyone
+// else, or that employee's own web login, out.
+usersRouter.post(
+  '/:id(\\d+)/mobile-sessions/:sessionId(\\d+)/revoke',
+  requirePermission('users:manage'),
+  async (req: Request, res: Response) => {
+    const id = parseInt(req.params.id, 10);
+    const sessionId = parseInt(req.params.sessionId, 10);
+    try {
+      const { rows: userRows } = await db.query('SELECT 1 FROM users WHERE id = $1 AND company_id = $2', [id, req.user!.companyId]);
+      if (!userRows.length) { res.status(404).json({ error: 'Not found' }); return; }
+
+      const { rowCount } = await db.query(
+        `UPDATE mobile_sessions SET revoked_at = NOW()
+         WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`,
+        [sessionId, id],
+      );
+      if (rowCount === 0) { res.status(404).json({ error: 'Not found' }); return; }
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('POST /api/users/:id/mobile-sessions/:sessionId/revoke', err);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  },
+);
+
+usersRouter.post('/:id(\\d+)/mobile-sessions/revoke-all', requirePermission('users:manage'), async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  try {
+    const { rows: userRows } = await db.query('SELECT 1 FROM users WHERE id = $1 AND company_id = $2', [id, req.user!.companyId]);
+    if (!userRows.length) { res.status(404).json({ error: 'Not found' }); return; }
+
+    await db.query('UPDATE mobile_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL', [id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /api/users/:id/mobile-sessions/revoke-all', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

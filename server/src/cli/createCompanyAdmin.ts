@@ -8,7 +8,8 @@
  * creation against a live system) — it's a CLI command run by whoever has
  * shell access to the API container:
  *
- *   docker compose exec api npm run create-admin
+ *   Dev:  docker compose exec api npm run create-admin
+ *   Prod: docker compose -f docker-compose.prod.yml exec api npm run create-admin:prod
  */
 import readline from 'readline';
 import { db } from '../db';

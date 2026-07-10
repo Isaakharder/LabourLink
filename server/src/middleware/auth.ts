@@ -15,13 +15,25 @@ declare global {
   namespace Express {
     interface Request {
       user?: AuthenticatedUser;
+      // Set only when authenticated via a mobile bearer token (see
+      // middleware/mobileAuth.ts) — the mobile_sessions.id backing the
+      // presented token, used by POST /auth/mobile-logout to revoke
+      // exactly that session and no other.
+      mobileSessionId?: number;
     }
   }
 }
 
-// Resolves req.user from the session-stored userId/companyId. Never trusts
-// company_id/user_id/role values supplied by the request body or query.
+// Resolves req.user either from a mobile bearer token already verified by
+// mobileAuth (mounted earlier in the middleware chain), or from the
+// session-stored userId/companyId. Never trusts company_id/user_id/role
+// values supplied by the request body or query.
 export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+  if (req.user) {
+    next();
+    return;
+  }
+
   const userId = req.session.userId;
   const companyId = req.session.companyId;
   if (!userId || !companyId) {

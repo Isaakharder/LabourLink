@@ -75,19 +75,54 @@ Press `Ctrl+C` to stop the API and web. PostgreSQL stays running.
 
 ---
 
-## Production
+## Production (local-network deployment)
 
-Everything runs in Docker:
+Full walkthrough, host machine setup, security notes, and Android
+integration details: **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** and
+**[docs/ANDROID_AND_TIMETRACKING.md](docs/ANDROID_AND_TIMETRACKING.md)**.
 
-```bash
+Production uses a **separate** Compose file (`docker-compose.prod.yml`) with
+compiled builds, no Vite/nodemon, and nginx serving the frontend + proxying
+`/api` — it does not touch the dev stack or its data.
+
+```powershell
+# First time only
+copy .env.production.example .env.production
+notepad .env.production   # set SESSION_SECRET and POSTGRES_PASSWORD
+
+# Start local-network production mode
 npm run start-prod
 ```
 
-Builds and starts PostgreSQL, API, and web. No local Node.js required.
+### Exact PowerShell commands
+
+| Task | Command |
+|---|---|
+| Start dev mode | `npm run start-dev` |
+| Start local-network production mode | `npm run start-prod` |
+| Stop production without deleting data | `npm run stop-prod` (never add `-v`) |
+| Check container status | `docker compose -f docker-compose.prod.yml ps` |
+| View logs | `npm run logs-prod` |
+| Find the host's LAN IP | `ipconfig` (look for `IPv4 Address`) |
+| Test from another device | `Invoke-WebRequest http://<HOST_IP>:8080/health` |
+| Update from GitHub | `.\scripts\update-app.ps1` |
+| Run migrations manually | `docker compose -f docker-compose.prod.yml exec api npm run migrate:prod` |
+| Back up PostgreSQL | `.\scripts\backup-db.ps1` |
+| List backups | `.\scripts\list-backups.ps1` |
+| Restore PostgreSQL | `.\scripts\restore-db.ps1 -BackupFile <path>` |
+| Reboot recovery check | `docker compose -f docker-compose.prod.yml ps` (after Docker Desktop starts) |
+| Create the first administrator | `docker compose -f docker-compose.prod.yml exec api npm run create-admin:prod` (or use the in-app setup screen on first visit) |
+| Change the session secret | Edit `SESSION_SECRET` in `.env.production`, then `npm run start-prod` again (this invalidates all existing sessions — everyone is logged out) |
+| Roll back a failed update | `.\scripts\rollback.ps1 -CommitOrTag <sha>` |
+
+Firewall/local-network troubleshooting: see the
+[Troubleshooting section of docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#troubleshooting).
 
 ---
 
 ## Service URLs
+
+### Development
 
 | Service      | URL                          |
 |--------------|------------------------------|
@@ -95,6 +130,19 @@ Builds and starts PostgreSQL, API, and web. No local Node.js required.
 | API          | http://localhost:4000        |
 | API health   | http://localhost:4000/health |
 | PostgreSQL   | localhost:5432               |
+
+### Production (local network)
+
+| Service      | URL                                    |
+|--------------|-----------------------------------------|
+| Web + API    | http://\<HOST_IP\>:8080 (single port)   |
+| API health   | http://\<HOST_IP\>:8080/health          |
+| PostgreSQL   | not exposed — internal to Docker only   |
+
+In production, nginx is the only published port. It serves the built
+frontend and proxies `/api/*` and `/health` to the API container internally
+— neither the browser nor a future Android app ever talks to the API or
+Postgres containers directly.
 
 ---
 
@@ -154,24 +202,33 @@ docker exec -it labourlink_postgres psql -U labourlink -d labourlink
 
 ```
 LabourLink/
-├── server/                   Express API (TypeScript)
+├── server/                    Express API (TypeScript)
 │   ├── src/
-│   ├── nodemon.json          watches src/ for .ts changes, runs ts-node
-│   ├── .env                  local dev DB connection (gitignored)
-│   └── .env.example          template — copy to .env on first setup
-├── web/                      React frontend (Vite + TypeScript)
+│   ├── Dockerfile             multi-stage: dev (nodemon) / prod (compiled)
+│   ├── nodemon.json           watches src/ for .ts changes, runs ts-node
+│   ├── .env                   local dev DB connection (gitignored)
+│   └── .env.example           template — copy to .env on first setup
+├── web/                       React frontend (Vite + TypeScript)
 │   ├── src/
-│   ├── .env                  local dev API URL (gitignored)
-│   └── .env.example          template — copy to .env on first setup
+│   ├── Dockerfile             multi-stage: dev (Vite) / prod (nginx)
+│   ├── nginx.conf             production static serving + /api reverse proxy
+│   ├── .env                   local dev API URL (gitignored)
+│   └── .env.example           template — copy to .env on first setup
 ├── database/
-│   └── migrations/           SQL migrations, run automatically on fresh DB
-├── docs/                     Architecture decisions and module schemas
-├── docker-compose.yml        defines postgres, api, web services
-└── package.json              root scripts (db, dev, start-dev, start-prod)
+│   └── migrations/            SQL migrations, run automatically on fresh DB
+├── scripts/                   PowerShell ops scripts (backup, restore, update, rollback)
+├── docs/                      Architecture decisions, deployment guide, Android/time-tracking notes
+├── docker-compose.yml         dev stack: postgres, api, web (hot reload)
+├── docker-compose.prod.yml    production stack: postgres, api, web (compiled + nginx)
+├── .env.production.example    template — copy to .env.production for production
+└── package.json                root scripts (db, dev, start-dev, start-prod, stop-prod, logs-prod)
 ```
 
 ---
 
 ## Documentation
 
-Architecture decisions and module schema designs live in [docs/](docs/).
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — production Docker structure, host machine setup, security, backups
+- [docs/ANDROID_AND_TIMETRACKING.md](docs/ANDROID_AND_TIMETRACKING.md) — Android API prep and time-tracking readiness audit
+- [docs/ARCHITECTURE_DECISIONS.md](docs/ARCHITECTURE_DECISIONS.md) — ADRs
+- Module schema designs live in the rest of [docs/](docs/)
