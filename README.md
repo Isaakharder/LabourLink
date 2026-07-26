@@ -27,8 +27,14 @@ web/      React app (desktop layout + mobile PWA shell, same codebase)
 ### 1. Create the Supabase project
 
 1. Go to https://supabase.com/dashboard and create a new project.
-2. Once it's provisioned, go to **Project Settings → Database → Connection string → URI**.
-   Copy that value — you'll need it for `DATABASE_URL`.
+2. Once it's provisioned, go to **Project Settings → Database → Connect** and copy the
+   **Session pooler** connection string (not "Transaction pooler" — that mode doesn't
+   support the long-lived, persistent connections `pg.Pool` keeps open, which is what
+   our always-on Express server uses). That string is your `DATABASE_URL`.
+3. The project's `anon`/`publishable` key and REST URL (shown on the same page) are **not
+   used** by this app — the backend talks to Postgres directly via `pg`, not the Supabase
+   client SDK or its REST/PostgREST layer. Nothing Supabase-specific ever reaches the
+   frontend, so there's no key to expose there.
 
 ### 2. Configure and run the server
 
@@ -62,22 +68,35 @@ see the mobile shell — the app picks a layout based on viewport width.
 ## Deploying to Railway (no Docker)
 
 Railway builds Node projects directly with Nixpacks, so no Dockerfile is needed.
+`server/railway.json` and `web/railway.json` pin each service's build command, start
+command, and health-check path so the dashboard settings are just a root directory and
+environment variables.
 
-1. Create a new Railway project, then add **two services** from the same GitHub repo:
-   - **api** service → set its root directory to `server/`
-   - **web** service → set its root directory to `web/`
-2. On the **api** service, set environment variables: `DATABASE_URL` (Supabase URI),
-   `JWT_SECRET`, `CORS_ORIGIN` (the web service's public URL), `PORT` is set by Railway automatically.
-3. On the **web** service, set `VITE_API_URL` to the api service's public URL, and set the
-   build command to `npm run build` with start command `npm run preview -- --host 0.0.0.0 --port $PORT`
-   (or serve `dist/` with a tiny static server — fine to revisit once Phase 1 is stable).
-4. Run `npm run migrate` and `npm run create-admin` once against the production
-   `DATABASE_URL` (locally, pointed at prod, is simplest) before first login.
+1. Create a new Railway project from the `Isaakharder/LabourLink` GitHub repo, then add
+   **two services** (Railway will ask which directory each uses — a monorepo needs one
+   service per app):
+   - service named **api** → root directory `server/`
+   - service named **web** → root directory `web/`
+2. **api** service environment variables:
+   - `DATABASE_URL` — the Supabase Session pooler string from step 1 above
+   - `JWT_SECRET` — a long random value (`openssl rand -hex 32`)
+   - `CORS_ORIGIN` — `https://${{web.RAILWAY_PUBLIC_DOMAIN}}` (Railway's cross-service
+     variable reference — resolves to the web service's live URL automatically)
+   - `NODE_ENV` — `production`
+   - `PORT` — set automatically by Railway, no action needed
+3. **web** service environment variables:
+   - `VITE_API_URL` — `https://${{api.RAILWAY_PUBLIC_DOMAIN}}` (Vite inlines this at
+     build time, so it must be set before the build runs, not just at runtime)
+   - `PORT` — set automatically by Railway, no action needed
+4. Generate a public domain for both services (Settings → Networking → Generate Domain).
+5. Run `npm run migrate` and `npm run create-admin` once against the production
+   `DATABASE_URL` (running them locally, pointed at prod via a temporary `server/.env`,
+   is simplest) before the first login.
 
 ## Milestones
 
-- [x] **Phase 1** — Railway project, Supabase project, database schema, authentication,
-      desktop layout, mobile layout
+- [ ] **Phase 1** — Railway project, Supabase project, database schema, authentication,
+      desktop layout, mobile layout (scaffolded; not yet verified live — see Known gaps)
 - [ ] **Phase 2** — Employees page: create / edit / delete / activate-deactivate
 - [ ] **Phase 3** — Device pairing: pair, approve, name, assign employee
 - [ ] **Phase 4** — Setup page: device management, reassignment, disable, unpair

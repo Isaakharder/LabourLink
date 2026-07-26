@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { CookieOptions, Router } from "express";
 import { pool } from "../db";
 import { verifyPin } from "../lib/pin";
 import { requireAuth, signSession, SESSION_COOKIE } from "../middleware/auth";
@@ -6,6 +6,18 @@ import { requireAuth, signSession, SESSION_COOKIE } from "../middleware/auth";
 const router = Router();
 
 const isProduction = process.env.NODE_ENV === "production";
+
+// Web and API are deployed as separate Railway services on separate
+// subdomains, making every request cross-site. sameSite: "lax" only rides
+// along on top-level navigations, not on credentialed fetch() calls across
+// origins — it would silently drop the session cookie on every request. In
+// production we need "none" (which itself requires secure: true). Locally,
+// where both run on localhost, "lax" is fine and avoids needing HTTPS in dev.
+const sessionCookieOptions: CookieOptions = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? "none" : "lax",
+};
 
 router.post("/login", async (req, res) => {
   const { email, pin } = req.body as { email?: string; pin?: string };
@@ -44,9 +56,7 @@ router.post("/login", async (req, res) => {
 
   const token = signSession(session);
   res.cookie(SESSION_COOKIE, token, {
-    httpOnly: true,
-    secure: isProduction,
-    sameSite: "lax",
+    ...sessionCookieOptions,
     maxAge: 12 * 60 * 60 * 1000,
   });
 
@@ -54,7 +64,7 @@ router.post("/login", async (req, res) => {
 });
 
 router.post("/logout", (_req, res) => {
-  res.clearCookie(SESSION_COOKIE);
+  res.clearCookie(SESSION_COOKIE, sessionCookieOptions);
   res.status(204).send();
 });
 
