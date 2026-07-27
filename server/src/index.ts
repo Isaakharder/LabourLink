@@ -7,7 +7,7 @@ import dashboardRoutes from "./routes/dashboard";
 import healthRoutes from "./routes/health";
 
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = Number(process.env.PORT) || 4000;
 const CORS_ORIGIN = (process.env.CORS_ORIGIN || "http://localhost:5173").split(
   ","
 );
@@ -20,6 +20,6 @@ app.use("/api/health", healthRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`LabourLink API listening on port ${PORT}`);
 });

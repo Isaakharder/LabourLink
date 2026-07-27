@@ -1,15 +1,13 @@
 import { Router } from "express";
-import { pool } from "../db";
 
 const router = Router();
 
-router.get("/", async (_req, res) => {
-  try {
-    await pool.query("select 1");
-    res.json({ status: "ok", db: "connected" });
-  } catch (err) {
-    res.status(503).json({ status: "error", db: "unreachable" });
-  }
+// Liveness check only — must return immediately with no dependency on
+// Supabase or anything else, so Railway's healthcheck can't be taken down
+// by a slow/unreachable database. Deploy-time DB verification happens via
+// `npm run migrate` and the login/dashboard smoke test, not this route.
+router.get("/", (_req, res) => {
+  res.status(200).json({ status: "ok" });
 });
 
 export default router;
