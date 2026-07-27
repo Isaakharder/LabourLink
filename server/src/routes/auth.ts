@@ -21,37 +21,72 @@ const sessionCookieOptions: CookieOptions = {
 };
 
 router.post("/login", asyncHandler(async (req, res) => {
+  console.log("[login] 1. Login request received");
+
   const { email, pin } = req.body as { email?: string; pin?: string };
 
   if (!email || !pin) {
     return res.status(400).json({ error: "Email and PIN are required" });
   }
 
-  let rows;
+  // Acquiring a client and running the query are separated into two awaits
+  // (rather than the usual pool.query shorthand) specifically so a failure
+  // here is diagnosable as "couldn't get a connection" vs "query itself
+  // failed" instead of one opaque catch block covering both.
+  console.log("[login] 2. Attempting database connection");
+  let client;
   try {
-    ({ rows } = await pool.query(
-      `select e.id, e.first_name, e.last_name, e.settings_pin_hash, e.is_active,
-              sr.name as security_role, tr.name as team_role
-       from employees e
-       join security_roles sr on sr.id = e.security_role_id
-       join team_roles tr on tr.id = e.team_role_id
-       where lower(e.email) = lower($1)`,
-      [email]
-    ));
+    client = await pool.connect();
   } catch (err) {
     console.error(
-      "Login database query failed:",
+      "[login] FAILED at step 2 (acquire connection):",
       err instanceof Error ? err.message : err
     );
     return res.status(503).json({ error: "Service temporarily unavailable" });
   }
+  console.log("[login] 3. Database connection successful");
+
+  let rows;
+  try {
+    try {
+      ({ rows } = await client.query(
+        `select e.id, e.first_name, e.last_name, e.settings_pin_hash, e.is_active,
+                sr.name as security_role, tr.name as team_role
+         from employees e
+         join security_roles sr on sr.id = e.security_role_id
+         join team_roles tr on tr.id = e.team_role_id
+         where lower(e.email) = lower($1)`,
+        [email]
+      ));
+    } catch (err) {
+      console.error(
+        "[login] FAILED at step 4 (user lookup query):",
+        err instanceof Error ? err.message : err
+      );
+      return res.status(503).json({ error: "Service temporarily unavailable" });
+    }
+  } finally {
+    client.release();
+  }
+  console.log("[login] 4. User lookup completed");
 
   const employee = rows[0];
+  console.log(`[login] 5. User found: ${employee ? "yes" : "no"}`);
   if (!employee || !employee.is_active) {
     return res.status(401).json({ error: "Invalid email or PIN" });
   }
 
-  const valid = await verifyPin(pin, employee.settings_pin_hash);
+  let valid: boolean;
+  try {
+    valid = await verifyPin(pin, employee.settings_pin_hash);
+  } catch (err) {
+    console.error(
+      "[login] FAILED at step 6 (bcrypt verification):",
+      err instanceof Error ? err.message : err
+    );
+    return res.status(503).json({ error: "Service temporarily unavailable" });
+  }
+  console.log(`[login] 6. Password verification passed: ${valid ? "yes" : "no"}`);
   if (!valid) {
     return res.status(401).json({ error: "Invalid email or PIN" });
   }
@@ -69,8 +104,10 @@ router.post("/login", asyncHandler(async (req, res) => {
     ...sessionCookieOptions,
     maxAge: 12 * 60 * 60 * 1000,
   });
+  console.log("[login] 7. Session created");
 
   res.json({ employee: session });
+  console.log("[login] 8. Response sent");
 }));
 
 router.post("/logout", (_req, res) => {
