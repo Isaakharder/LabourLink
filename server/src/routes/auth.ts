@@ -1,5 +1,6 @@
 import { CookieOptions, Router } from "express";
 import { pool } from "../db";
+import { asyncHandler } from "../lib/asyncHandler";
 import { verifyPin } from "../lib/pin";
 import { requireAuth, signSession, SESSION_COOKIE } from "../middleware/auth";
 
@@ -19,22 +20,31 @@ const sessionCookieOptions: CookieOptions = {
   sameSite: isProduction ? "none" : "lax",
 };
 
-router.post("/login", async (req, res) => {
+router.post("/login", asyncHandler(async (req, res) => {
   const { email, pin } = req.body as { email?: string; pin?: string };
 
   if (!email || !pin) {
     return res.status(400).json({ error: "Email and PIN are required" });
   }
 
-  const { rows } = await pool.query(
-    `select e.id, e.first_name, e.last_name, e.settings_pin_hash, e.is_active,
-            sr.name as security_role, tr.name as team_role
-     from employees e
-     join security_roles sr on sr.id = e.security_role_id
-     join team_roles tr on tr.id = e.team_role_id
-     where lower(e.email) = lower($1)`,
-    [email]
-  );
+  let rows;
+  try {
+    ({ rows } = await pool.query(
+      `select e.id, e.first_name, e.last_name, e.settings_pin_hash, e.is_active,
+              sr.name as security_role, tr.name as team_role
+       from employees e
+       join security_roles sr on sr.id = e.security_role_id
+       join team_roles tr on tr.id = e.team_role_id
+       where lower(e.email) = lower($1)`,
+      [email]
+    ));
+  } catch (err) {
+    console.error(
+      "Login database query failed:",
+      err instanceof Error ? err.message : err
+    );
+    return res.status(503).json({ error: "Service temporarily unavailable" });
+  }
 
   const employee = rows[0];
   if (!employee || !employee.is_active) {
@@ -61,7 +71,7 @@ router.post("/login", async (req, res) => {
   });
 
   res.json({ employee: session });
-});
+}));
 
 router.post("/logout", (_req, res) => {
   res.clearCookie(SESSION_COOKIE, sessionCookieOptions);
