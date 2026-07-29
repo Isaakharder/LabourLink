@@ -23,11 +23,15 @@ const sessionCookieOptions: CookieOptions = {
 router.post("/login", asyncHandler(async (req, res) => {
   console.log("[login] 1. Login request received");
 
-  const { email, pin } = req.body as { email?: string; pin?: string };
+  const { email: rawEmail, pin } = req.body as { email?: string; pin?: string };
 
-  if (!email || !pin) {
+  if (!rawEmail || !pin) {
     return res.status(400).json({ error: "Email and PIN are required" });
   }
+
+  // Must match the normalization createAdmin.ts applies at insert time —
+  // otherwise case/whitespace variants of the same email can diverge.
+  const email = rawEmail.trim().toLowerCase();
 
   // Acquiring a client and running the query are separated into two awaits
   // (rather than the usual pool.query shorthand) specifically so a failure
@@ -55,7 +59,7 @@ router.post("/login", asyncHandler(async (req, res) => {
          from employees e
          join security_roles sr on sr.id = e.security_role_id
          join team_roles tr on tr.id = e.team_role_id
-         where lower(e.email) = lower($1)`,
+         where lower(trim(e.email)) = $1`,
         [email]
       ));
     } catch (err) {

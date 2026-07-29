@@ -9,9 +9,9 @@ import { pool } from "../db";
 import { hashPin } from "../lib/pin";
 
 async function run() {
-  const [firstName, lastName, email, pin] = process.argv.slice(2);
+  const [firstName, lastName, rawEmail, pin] = process.argv.slice(2);
 
-  if (!firstName || !lastName || !email || !pin) {
+  if (!firstName || !lastName || !rawEmail || !pin) {
     console.error(
       'Usage: npm run create-admin -- "First" "Last" email@example.com <pin>'
     );
@@ -22,6 +22,11 @@ async function run() {
     console.error("PIN must be 4-8 digits.");
     process.exit(1);
   }
+
+  // Must match the normalization login uses to look employees up by email
+  // (see requireAuth's query in routes/auth.ts) — otherwise two accounts
+  // that differ only in email casing/whitespace can both exist and collide.
+  const email = rawEmail.trim().toLowerCase();
 
   const pinHash = await hashPin(pin);
 
