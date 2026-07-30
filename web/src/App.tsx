@@ -1,10 +1,14 @@
 import { Navigate, Route, Routes } from "react-router-dom";
-import { DesktopLayout } from "./components/desktop/DesktopLayout";
+import { AppLayout } from "./components/layout/AppLayout";
 import { MobileLayout } from "./components/mobile/MobileLayout";
 import { AuthProvider, useAuth } from "./context/AuthContext";
+import { DevicePairingProvider, useDevicePairing } from "./context/DevicePairingContext";
+import { DashboardPage } from "./pages/desktop/DashboardPage";
+import { DevicesPage } from "./pages/desktop/DevicesPage";
 import { EmployeesPage } from "./pages/desktop/EmployeesPage";
 import { InputsPage } from "./pages/desktop/InputsPage";
 import { LoginPage } from "./pages/desktop/LoginPage";
+import { SettingsPage } from "./pages/desktop/SettingsPage";
 import { SetupPage } from "./pages/desktop/SetupPage";
 import { HomeScreen } from "./pages/mobile/HomeScreen";
 import { PairingScreen } from "./pages/mobile/PairingScreen";
@@ -20,26 +24,24 @@ function DesktopApp() {
 
   return (
     <Routes>
-      <Route element={<DesktopLayout />}>
+      <Route element={<AppLayout />}>
         <Route index element={<Navigate to="/inputs" replace />} />
+        <Route path="dashboard" element={<DashboardPage />} />
         <Route path="inputs" element={<InputsPage />} />
         <Route path="employees" element={<EmployeesPage />} />
+        <Route path="devices" element={<DevicesPage />} />
         <Route path="setup" element={<SetupPage />} />
+        <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/inputs" replace />} />
       </Route>
     </Routes>
   );
 }
 
-// Not paired yet == no device_identifier saved locally. Real pairing status
-// checks against the server land in Phase 3; for now this only decides which
-// shell screen to show.
-function isPaired(): boolean {
-  return Boolean(localStorage.getItem("labourlink_device_identifier"));
-}
-
 function MobileApp() {
-  if (!isPaired()) {
+  const { paired } = useDevicePairing();
+
+  if (!paired) {
     return <PairingScreen />;
   }
 
@@ -61,7 +63,11 @@ export default function App() {
   const isMobile = useIsMobile();
 
   if (isMobile) {
-    return <MobileApp />;
+    return (
+      <DevicePairingProvider>
+        <MobileApp />
+      </DevicePairingProvider>
+    );
   }
 
   return (

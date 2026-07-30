@@ -4,8 +4,12 @@ import cors from "cors";
 import express, { NextFunction, Request, Response } from "express";
 import authRoutes from "./routes/auth";
 import dashboardRoutes from "./routes/dashboard";
+import devicesRoutes from "./routes/devices";
 import diagnosticsRoutes from "./routes/diagnostics";
+import employeesRoutes from "./routes/employees";
 import healthRoutes from "./routes/health";
+import mobileTimeRoutes from "./routes/mobileTime";
+import pairingRoutes from "./routes/pairing";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -21,6 +25,10 @@ app.use("/api/health", healthRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/diagnostics", diagnosticsRoutes);
+app.use("/api/employees", employeesRoutes);
+app.use("/api/pairing", pairingRoutes);
+app.use("/api/devices", devicesRoutes);
+app.use("/api/mobile", mobileTimeRoutes);
 
 // Safety net: any error forwarded via next(err) (see asyncHandler) lands
 // here instead of crashing the process. Logged server-side; the client only

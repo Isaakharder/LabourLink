@@ -1,22 +1,49 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { api } from "../../lib/api";
+import { flushQueue, getPendingCount } from "../../lib/offlineQueue";
 
-// There is no work data to sync yet (activities/work sessions are out of
-// scope until later). This simulates the status transition so the screen and
-// nav are real; the actual sync call gets wired in once there's data to move.
 export function SyncScreen() {
-  const [status, setStatus] = useState<"idle" | "syncing" | "synced">("idle");
+  const [online, setOnline] = useState(navigator.onLine);
+  const [pending, setPending] = useState(getPendingCount());
+  const [syncing, setSyncing] = useState(false);
 
-  function handleSync() {
-    setStatus("syncing");
-    setTimeout(() => setStatus("synced"), 800);
-  }
+  const sync = useCallback(async () => {
+    setSyncing(true);
+    await flushQueue((path, body) => api(path, { method: "POST", body: JSON.stringify(body) })).catch(
+      () => {}
+    );
+    setPending(getPendingCount());
+    setSyncing(false);
+  }, []);
+
+  useEffect(() => {
+    function goOnline() {
+      setOnline(true);
+      sync();
+    }
+    function goOffline() {
+      setOnline(false);
+    }
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, [sync]);
 
   return (
     <div className="mobile-sync">
       <h1>Sync</h1>
-      <p className="sync-status-text">{status}</p>
-      <button onClick={handleSync} disabled={status === "syncing"}>
-        Sync now
+      <div className="sync-status">
+        <span className={`connection-dot ${online ? "online" : "offline"}`} />
+        {online ? "Online" : "Offline"}
+      </div>
+      <p className="sync-status-text">
+        {pending > 0 ? `${pending} action(s) pending sync` : "All actions synced"}
+      </p>
+      <button onClick={sync} disabled={syncing || pending === 0}>
+        {syncing ? "Syncing..." : "Sync now"}
       </button>
     </div>
   );

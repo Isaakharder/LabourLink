@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { PageHeader } from "../../components/layout/PageHeader";
 import { api } from "../../lib/api";
 
 interface DashboardStats {
@@ -19,25 +20,31 @@ export function InputsPage() {
       .catch(() => setError("Could not load dashboard stats"));
   }, []);
 
-  if (error) return <p className="error-text">{error}</p>;
-  if (!stats) return <p>Loading...</p>;
-
-  const tiles: Array<[string, number]> = [
-    ["Total Employees", stats.totalEmployees],
-    ["Total Devices", stats.totalDevices],
-    ["Assigned Devices", stats.assignedDevices],
-    ["Unassigned Devices", stats.unassignedDevices],
-    ["Devices Waiting For Setup", stats.devicesWaitingForSetup],
-  ];
+  const tiles: Array<[string, number]> | null = stats
+    ? [
+        ["Total Employees", stats.totalEmployees],
+        ["Total Devices", stats.totalDevices],
+        ["Assigned Devices", stats.assignedDevices],
+        ["Unassigned Devices", stats.unassignedDevices],
+        ["Devices Waiting For Setup", stats.devicesWaitingForSetup],
+      ]
+    : null;
 
   return (
-    <div className="stat-grid">
-      {tiles.map(([label, value]) => (
-        <div className="stat-tile" key={label}>
-          <span className="stat-value">{value}</span>
-          <span className="stat-label">{label}</span>
+    <>
+      <PageHeader title="Inputs" />
+      {error && <p className="error-text">{error}</p>}
+      {!error && !tiles && <p>Loading...</p>}
+      {tiles && (
+        <div className="stat-grid">
+          {tiles.map(([label, value]) => (
+            <div className="stat-tile" key={label}>
+              <span className="stat-value">{value}</span>
+              <span className="stat-label">{label}</span>
+            </div>
+          ))}
         </div>
-      ))}
-    </div>
+      )}
+    </>
   );
 }
