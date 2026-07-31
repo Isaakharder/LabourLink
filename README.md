@@ -49,9 +49,15 @@ npm run create-admin -- "Jane" "Doe" jane@example.com 123456
 npm run dev             # http://localhost:4000
 ```
 
-`create-admin` is a one-time bootstrap — it exists only because the Employees
-CRUD page (Phase 2) doesn't exist yet, so there'd otherwise be no way to log in.
-Once Phase 2 ships, create employees through the UI instead.
+`create-admin` is a one-time bootstrap for the *first* administrator — the
+Employees page (see "Employee management" below) never sets a PIN, so it
+can't grant desktop login on its own. Employees created through the UI can
+still be assigned mobile devices immediately; `create-admin` (or direct DB
+access) is the only way today to give someone a PIN and desktop access.
+
+Employee profile photos also need `SUPABASE_URL` and
+`SUPABASE_SERVICE_ROLE_KEY` set in `server/.env` — see "Employee management"
+below.
 
 ### 3. Configure and run the web app
 
@@ -79,6 +85,60 @@ web) in one go.
 - **Mobile:** http://localhost:5173/mobile — or shrink the window below
   ~768px / use dev tools device emulation on the desktop URL; the app picks a
   layout based on viewport width, not the URL prefix
+
+## Employee management
+
+The desktop Employees page (`/employees`, Administrator/Manager to view,
+Administrator to add/edit) manages the `employees` table directly — there's
+no separate "users" system.
+
+**Required fields:** first name, last name, start date, nationality
+(Canadian or Mexican — constrained at the DB level via a `CHECK` constraint).
+**Optional:** profile photo, email, phone number, date of birth, gender
+(Male / Female / Prefer not to say), job group, employee number, preferred
+language (English / Spanish), notes. Email and employee number are unique
+when supplied (email case/whitespace-insensitively, matching login's
+normalization) but neither is required — field employees who never get
+desktop access don't need either. Phone numbers are normalized to
+`+<countrycode><digits>`, using the nationality field to pick `+1` vs `+52`
+for a bare 10-digit number. New employees default to the `Employee` security
+role and `Team Member` team role unless the admin picks something else, and
+default to Active.
+
+**Mobile-only vs. desktop-login employees:** `settings_pin_hash` is
+nullable. The Employees page never sets a PIN — every employee it creates
+can be assigned a mobile device (device-identifier auth, see "Testing from a
+real phone" below) but cannot log into the desktop app until a PIN exists.
+The only way to set one today is `npm run create-admin` (bootstraps an
+Administrator with a PIN) or direct DB access; there's no in-app "grant
+desktop access" action yet. Deactivating an employee (`isActive: false`)
+immediately ends any active device assignment they have (device stays
+paired, free for reassignment) and is blocked from mobile auth on their very
+next request regardless — nothing is deleted, so their historical time
+entries and the (now-ended) assignment record both remain queryable.
+
+**Profile photos** go through Supabase Storage, never through Postgres or
+the browser directly:
+- Bucket `employee-profile-photos` (override with `SUPABASE_STORAGE_BUCKET`
+  in `server/.env`), created automatically on first upload if it doesn't
+  exist — private, 5MB limit, JPEG/PNG/WebP only (enforced both by the
+  bucket config and server-side by `multer`+`sharp` before upload).
+- Every upload is re-encoded server-side to a centered-crop 512×512 WebP
+  regardless of the source image's shape or format, at a unique path
+  (`employees/{employeeId}/{uuid}.webp`) — `employees.profile_photo_path`
+  stores only that path, never a URL or the image itself.
+- The API only ever returns short-lived signed URLs (`getSignedPhotoUrl`
+  in `server/src/lib/storage.ts`, 1 hour by default) — nothing in the bucket
+  is publicly reachable.
+- Replacing a photo uploads the new one, updates the DB row, *then* deletes
+  the old storage object — never the other way around, so a mid-request
+  failure can't leave the employee with no photo at all.
+- `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (`server/.env`) are
+  required for any of this to work — the service-role key is server-only,
+  read via `process.env` in `server/src/lib/storage.ts`, and is never sent
+  to or reachable from the browser bundle (nothing in `web/` imports that
+  module, and Vite only ever inlines `VITE_`-prefixed variables into the
+  client build regardless).
 
 ## Testing from a real phone on the same Wi-Fi
 
@@ -155,9 +215,9 @@ environment variables.
 
 - [x] **Phase 1** — Railway project, Supabase project, database schema, authentication,
       desktop sidebar layout, mobile shell (PWA installable — icons, manifest, service worker)
-- [ ] **Phase 2** — Employees page: create / edit / delete / activate-deactivate
-      (still a placeholder; employees today are only created via `create-admin`
-      or the DB directly)
+- [x] **Phase 2** — Employees page: create / edit / activate-deactivate, profile
+      photos (Supabase Storage). "Delete" is deliberately not offered — see
+      Employee management above; soft deactivation only
 - [x] **Phase 3** — Device pairing: pair, approve, name, assign employee
 - [x] **Phase 4** — Setup page: pending-request list, device list, deactivate.
       Reassigning an already-paired device (re-approving a new pairing request

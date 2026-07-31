@@ -560,3 +560,400 @@ input {
   border-radius: 6px;
   font-size: 0.8rem;
 }
+
+/* ---------- Avatars ---------- */
+
+.avatar {
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.avatar-small {
+  width: 36px;
+  height: 36px;
+}
+
+.avatar-small .avatar-initials {
+  font-size: 0.8rem;
+}
+
+.avatar-large {
+  width: 96px;
+  height: 96px;
+}
+
+.avatar-large .avatar-initials {
+  font-size: 1.75rem;
+}
+
+.avatar-initials {
+  font-weight: 600;
+  color: var(--color-muted);
+}
+
+/* ---------- Employees toolbar ---------- */
+
+.employees-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.employees-search {
+  flex: 1 1 220px;
+  min-width: 180px;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+
+.employees-toolbar select {
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  background: var(--color-surface);
+}
+
+.employees-count {
+  color: var(--color-muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.employees-add-button {
+  margin-left: auto;
+  padding: 0.55rem 1rem;
+  border: none;
+  border-radius: 6px;
+  background: var(--color-primary);
+  color: white;
+  font-size: 0.9rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* ---------- Employees table ---------- */
+
+.employees-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.employees-table th,
+.employees-table td {
+  text-align: left;
+  padding: 0.6rem 0.85rem;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.employees-table th {
+  color: var(--color-muted);
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.employees-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.status-pill {
+  display: inline-block;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.status-active {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.status-inactive {
+  background: #f1f5f9;
+  color: var(--color-muted);
+}
+
+.employee-row-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.employee-row-actions button {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+/* Card fallback — hidden until the table becomes impractical (see media
+   query below). Same data, rendered twice, so each layout can be genuinely
+   readable rather than a CSS-contorted table. */
+.employee-cards {
+  display: none;
+}
+
+/* ---------- Employees: create/edit modal ---------- */
+
+.employee-form-section {
+  margin-bottom: 1.5rem;
+}
+
+.employee-form-section h3 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-muted);
+  margin: 0 0 0.85rem;
+}
+
+.employee-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+}
+
+.employee-form-grid label,
+.employee-form-section > label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+}
+
+.employee-form-grid input,
+.employee-form-grid select,
+.employee-form-section input[type="text"],
+.employee-form-section textarea {
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  font-family: inherit;
+  color: var(--color-text);
+}
+
+.employee-form-checkbox {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.5rem !important;
+  padding-top: 1.4rem;
+}
+
+.field-error {
+  color: var(--color-danger);
+  font-size: 0.75rem;
+}
+
+.form-warning {
+  color: #92400e;
+  background: #fef3c7;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8rem;
+  margin-top: 0.75rem;
+}
+
+.employee-form-photo {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.employee-form-photo-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.employee-form-photo-controls button {
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-size: 0.82rem;
+}
+
+.employee-form-photo-cancel {
+  color: var(--color-danger);
+}
+
+.employee-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.employee-form-actions button {
+  padding: 0.55rem 1.1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-size: 0.9rem;
+}
+
+.employee-form-save {
+  background: var(--color-primary) !important;
+  border-color: var(--color-primary) !important;
+  color: white;
+  font-weight: 600;
+}
+
+.employee-form-save:disabled,
+.employee-form-actions button:disabled {
+  opacity: 0.6;
+}
+
+/* ---------- Generic modal ---------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 18, 25, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 3rem 1rem;
+  overflow-y: auto;
+  z-index: 100;
+}
+
+.modal-panel {
+  background: var(--color-surface);
+  border-radius: var(--radius);
+  width: 100%;
+  max-width: 480px;
+  max-height: calc(100vh - 6rem);
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-panel-wide {
+  max-width: 720px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.25rem 1.5rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 1.4rem;
+  line-height: 1;
+  color: var(--color-muted);
+  cursor: pointer;
+  padding: 0.2rem 0.4rem;
+}
+
+.modal-body {
+  padding: 1.5rem;
+  overflow-y: auto;
+}
+
+/* ---------- Responsive: employees table -> cards, form -> one column ---------- */
+
+@media (max-width: 900px) {
+  .employees-table {
+    display: none;
+  }
+
+  .employee-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .employee-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 1rem;
+  }
+
+  .employee-card-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.85rem;
+  }
+
+  .employee-card-name {
+    font-weight: 600;
+    margin-bottom: 0.3rem;
+  }
+
+  .employee-card-fields {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.6rem 1rem;
+    margin: 0 0 0.85rem;
+  }
+
+  .employee-card-fields dt {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    color: var(--color-muted);
+    letter-spacing: 0.02em;
+  }
+
+  .employee-card-fields dd {
+    margin: 0;
+    font-size: 0.85rem;
+  }
+
+  .employee-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .modal-overlay {
+    padding: 0;
+  }
+
+  .modal-panel,
+  .modal-panel-wide {
+    max-width: 100%;
+    max-height: 100vh;
+    border-radius: 0;
+  }
+}

@@ -1,0 +1,418 @@
+import { FormEvent, useRef, useState } from "react";
+import { Modal } from "../ui/Modal";
+import { Avatar } from "./Avatar";
+import { api, ApiError } from "../../lib/api";
+import { Employee, GENDERS, LANGUAGES, NATIONALITIES } from "../../lib/employeeTypes";
+
+interface EmployeeFormModalProps {
+  employee: Employee | null; // null = create mode
+  onClose: () => void;
+  onSaved: () => void;
+}
+
+interface FormState {
+  firstName: string;
+  lastName: string;
+  dateOfBirth: string;
+  gender: string;
+  nationality: string;
+  preferredLanguage: string;
+  employeeNumber: string;
+  startDate: string;
+  jobGroup: string;
+  isActive: boolean;
+  securityRoleId: string;
+  teamRoleId: string;
+  email: string;
+  phoneNumber: string;
+  notes: string;
+}
+
+const SECURITY_ROLES = [
+  { id: 1, name: "Employee" },
+  { id: 2, name: "Crew Leader" },
+  { id: 3, name: "Supervisor" },
+  { id: 4, name: "Manager" },
+  { id: 5, name: "Administrator" },
+];
+const TEAM_ROLES = [
+  { id: 1, name: "Team Member" },
+  { id: 2, name: "Team Leader" },
+  { id: 3, name: "Assistant Team Leader" },
+];
+
+const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
+const ACCEPTED_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
+
+function toFormState(employee: Employee | null): FormState {
+  return {
+    firstName: employee?.firstName ?? "",
+    lastName: employee?.lastName ?? "",
+    dateOfBirth: employee?.dateOfBirth ?? "",
+    gender: employee?.gender ?? "",
+    nationality: employee?.nationality ?? "",
+    preferredLanguage: employee?.preferredLanguage ?? "",
+    employeeNumber: employee?.employeeNumber ?? "",
+    startDate: employee?.startDate ?? "",
+    jobGroup: employee?.jobGroup ?? "",
+    isActive: employee?.isActive ?? true,
+    securityRoleId: String(employee?.securityRoleId ?? 1),
+    teamRoleId: String(employee?.teamRoleId ?? 1),
+    email: employee?.email ?? "",
+    phoneNumber: employee?.phoneNumber ?? "",
+    notes: employee?.notes ?? "",
+  };
+}
+
+export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormModalProps) {
+  const isEdit = Boolean(employee);
+  const [form, setForm] = useState<FormState>(() => toFormState(employee));
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const [removePhoto, setRemovePhoto] = useState(false);
+  const [photoPickError, setPhotoPickError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  function set<K extends keyof FormState>(key: K, value: FormState[K]) {
+    setForm((f) => ({ ...f, [key]: value }));
+  }
+
+  function handlePhotoPick(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file later
+    if (!file) return;
+
+    if (!ACCEPTED_PHOTO_TYPES.includes(file.type)) {
+      setPhotoPickError("Only JPEG, PNG, or WebP images are allowed");
+      return;
+    }
+    if (file.size > MAX_PHOTO_BYTES) {
+      setPhotoPickError("Photo must be 5 MB or smaller");
+      return;
+    }
+
+    setPhotoPickError(null);
+    setRemovePhoto(false);
+    setPhotoFile(file);
+    setPhotoPreview(URL.createObjectURL(file));
+  }
+
+  function handleClearStagedPhoto() {
+    setPhotoFile(null);
+    setPhotoPreview(null);
+  }
+
+  function handleRemoveExistingPhoto() {
+    setPhotoFile(null);
+    setPhotoPreview(null);
+    setRemovePhoto(true);
+  }
+
+  function validate(): boolean {
+    const next: Record<string, string> = {};
+    if (!form.firstName.trim()) next.firstName = "First name is required";
+    if (!form.lastName.trim()) next.lastName = "Last name is required";
+    if (!form.startDate) next.startDate = "Start date is required";
+    if (!NATIONALITIES.includes(form.nationality as (typeof NATIONALITIES)[number])) {
+      next.nationality = "Nationality is required";
+    }
+    if (form.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) {
+      next.email = "Email address is not valid";
+    }
+    setErrors(next);
+    return Object.keys(next).length === 0;
+  }
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (submitting) return; // guard against a double-submit racing past the disabled button
+    setSubmitError(null);
+    if (!validate()) return;
+
+    const isDeactivating = isEdit && employee!.isActive && !form.isActive;
+    if (isDeactivating && employee!.device) {
+      const proceed = window.confirm(
+        `${employee!.firstName} ${employee!.lastName} has an assigned device (${
+          employee!.device.name ?? "unnamed"
+        }). Deactivating will end that assignment — the device itself stays paired and can be reassigned. Deactivate anyway?`
+      );
+      if (!proceed) return;
+    }
+
+    setSubmitting(true);
+    try {
+      const payload = {
+        firstName: form.firstName.trim(),
+        lastName: form.lastName.trim(),
+        dateOfBirth: form.dateOfBirth || null,
+        gender: form.gender || null,
+        nationality: form.nationality,
+        preferredLanguage: form.preferredLanguage || null,
+        employeeNumber: form.employeeNumber.trim() || null,
+        startDate: form.startDate,
+        jobGroup: form.jobGroup.trim() || null,
+        isActive: form.isActive,
+        securityRoleId: Number(form.securityRoleId),
+        teamRoleId: Number(form.teamRoleId),
+        email: form.email.trim() || null,
+        phoneNumber: form.phoneNumber.trim() || null,
+        notes: form.notes.trim() || null,
+      };
+
+      let employeeId: string;
+      if (isEdit) {
+        const res = await api<{ employee: Employee }>(`/api/employees/${employee!.id}`, {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        });
+        employeeId = res.employee.id;
+      } else {
+        const res = await api<{ employee: Employee }>("/api/employees", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        employeeId = res.employee.id;
+      }
+
+      if (photoFile) {
+        const formData = new FormData();
+        formData.append("photo", photoFile);
+        try {
+          await api(`/api/employees/${employeeId}/photo`, { method: "POST", body: formData });
+        } catch {
+          setSubmitError("Employee saved, but the photo failed to upload. You can try again below.");
+          setSubmitting(false);
+          return;
+        }
+      } else if (removePhoto && isEdit) {
+        await api(`/api/employees/${employeeId}/photo`, { method: "DELETE" }).catch(() => {});
+      }
+
+      onSaved();
+    } catch (err) {
+      if (err instanceof ApiError && err.errors) {
+        setErrors(err.errors);
+      } else if (err instanceof ApiError) {
+        setSubmitError(err.message);
+      } else {
+        setSubmitError("Something went wrong saving this employee");
+      }
+      setSubmitting(false);
+    }
+  }
+
+  const previewUrl = photoPreview ?? (removePhoto ? null : employee?.photoUrl ?? null);
+  const deviceWarning =
+    isEdit && employee?.device && form.isActive === false
+      ? `${employee.firstName} has an assigned device (${employee.device.name ?? "unnamed"}). Saving will end that assignment; the device itself stays paired for reassignment.`
+      : null;
+
+  return (
+    <Modal title={isEdit ? "Edit Employee" : "Add Employee"} onClose={onClose} wide>
+      <form onSubmit={handleSubmit} className="employee-form" noValidate>
+        {submitError && <p className="error-text">{submitError}</p>}
+
+        <section className="employee-form-section">
+          <h3>Personal</h3>
+          <div className="employee-form-photo">
+            <Avatar photoUrl={previewUrl} firstName={form.firstName || "?"} lastName={form.lastName} size="large" />
+            <div className="employee-form-photo-controls">
+              <button type="button" onClick={() => fileInputRef.current?.click()}>
+                {previewUrl ? "Replace photo" : "Upload photo"}
+              </button>
+              {photoFile && (
+                <button type="button" className="employee-form-photo-cancel" onClick={handleClearStagedPhoto}>
+                  Cancel
+                </button>
+              )}
+              {!photoFile && previewUrl && (
+                <button type="button" className="employee-form-photo-cancel" onClick={handleRemoveExistingPhoto}>
+                  Remove photo
+                </button>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={handlePhotoPick}
+                hidden
+              />
+            </div>
+            {photoPickError && <p className="error-text">{photoPickError}</p>}
+          </div>
+
+          <div className="employee-form-grid">
+            <label>
+              First name *
+              <input
+                type="text"
+                value={form.firstName}
+                onChange={(e) => set("firstName", e.target.value)}
+                required
+              />
+              {errors.firstName && <span className="field-error">{errors.firstName}</span>}
+            </label>
+            <label>
+              Last name *
+              <input
+                type="text"
+                value={form.lastName}
+                onChange={(e) => set("lastName", e.target.value)}
+                required
+              />
+              {errors.lastName && <span className="field-error">{errors.lastName}</span>}
+            </label>
+            <label>
+              Date of birth
+              <input
+                type="date"
+                value={form.dateOfBirth}
+                onChange={(e) => set("dateOfBirth", e.target.value)}
+              />
+            </label>
+            <label>
+              Gender
+              <select value={form.gender} onChange={(e) => set("gender", e.target.value)}>
+                <option value="">—</option>
+                {GENDERS.map((g) => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Nationality *
+              <select
+                value={form.nationality}
+                onChange={(e) => set("nationality", e.target.value)}
+                required
+              >
+                <option value="">Select...</option>
+                {NATIONALITIES.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+              {errors.nationality && <span className="field-error">{errors.nationality}</span>}
+            </label>
+            <label>
+              Preferred language
+              <select
+                value={form.preferredLanguage}
+                onChange={(e) => set("preferredLanguage", e.target.value)}
+              >
+                <option value="">—</option>
+                {LANGUAGES.map((l) => (
+                  <option key={l} value={l}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section className="employee-form-section">
+          <h3>Employment</h3>
+          <div className="employee-form-grid">
+            <label>
+              Employee number
+              <input
+                type="text"
+                value={form.employeeNumber}
+                onChange={(e) => set("employeeNumber", e.target.value)}
+              />
+              {errors.employeeNumber && <span className="field-error">{errors.employeeNumber}</span>}
+            </label>
+            <label>
+              Start date *
+              <input
+                type="date"
+                value={form.startDate}
+                onChange={(e) => set("startDate", e.target.value)}
+                required
+              />
+              {errors.startDate && <span className="field-error">{errors.startDate}</span>}
+            </label>
+            <label>
+              Job group
+              <input type="text" value={form.jobGroup} onChange={(e) => set("jobGroup", e.target.value)} />
+            </label>
+            <label>
+              Security role
+              <select value={form.securityRoleId} onChange={(e) => set("securityRoleId", e.target.value)}>
+                {SECURITY_ROLES.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Team role
+              <select value={form.teamRoleId} onChange={(e) => set("teamRoleId", e.target.value)}>
+                {TEAM_ROLES.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="employee-form-checkbox">
+              <input
+                type="checkbox"
+                checked={form.isActive}
+                onChange={(e) => set("isActive", e.target.checked)}
+              />
+              Active
+            </label>
+          </div>
+          {deviceWarning && <p className="form-warning">{deviceWarning}</p>}
+        </section>
+
+        <section className="employee-form-section">
+          <h3>Contact</h3>
+          <div className="employee-form-grid">
+            <label>
+              Email
+              <input type="email" value={form.email} onChange={(e) => set("email", e.target.value)} />
+              {errors.email && <span className="field-error">{errors.email}</span>}
+            </label>
+            <label>
+              Phone number
+              <input
+                type="tel"
+                placeholder="e.g. (555) 123-4567"
+                value={form.phoneNumber}
+                onChange={(e) => set("phoneNumber", e.target.value)}
+              />
+            </label>
+          </div>
+        </section>
+
+        <section className="employee-form-section">
+          <h3>Additional</h3>
+          <label>
+            Notes
+            <textarea rows={3} value={form.notes} onChange={(e) => set("notes", e.target.value)} />
+          </label>
+        </section>
+
+        <div className="employee-form-actions">
+          <button type="button" onClick={onClose} disabled={submitting}>
+            Cancel
+          </button>
+          <button type="submit" className="employee-form-save" disabled={submitting}>
+            {submitting ? "Saving..." : "Save"}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}

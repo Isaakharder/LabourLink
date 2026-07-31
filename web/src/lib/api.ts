@@ -15,19 +15,27 @@ const API_URL = resolveApiUrl();
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  // Field-level validation errors, e.g. { email: "..." } — present when the
+  // server responded with { errors: {...} } instead of a single { error }.
+  errors?: Record<string, string>;
+  constructor(status: number, message: string, errors?: Record<string, string>) {
     super(message);
     this.status = status;
+    this.errors = errors;
   }
 }
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const deviceId = localStorage.getItem(DEVICE_ID_KEY);
+  // FormData bodies must NOT get an explicit Content-Type — the browser sets
+  // one itself (including the multipart boundary), which fetch can't do if
+  // we've already set the header ourselves.
+  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
     credentials: "include",
     headers: {
-      "Content-Type": "application/json",
+      ...(isFormData ? {} : { "Content-Type": "application/json" }),
       ...(deviceId ? { "X-Device-Id": deviceId } : {}),
       ...options.headers,
     },
@@ -35,7 +43,12 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new ApiError(res.status, body.error || "Request failed");
+    const firstFieldError = body.errors && Object.values(body.errors)[0];
+    throw new ApiError(
+      res.status,
+      body.error || (typeof firstFieldError === "string" ? firstFieldError : "Request failed"),
+      body.errors
+    );
   }
 
   if (res.status === 204) {

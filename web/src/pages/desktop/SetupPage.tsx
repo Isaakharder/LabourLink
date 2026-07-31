@@ -23,8 +23,8 @@ interface Device {
 
 interface Employee {
   id: string;
-  first_name: string;
-  last_name: string;
+  firstName: string;
+  lastName: string;
 }
 
 const POLL_INTERVAL_MS = 5000;
@@ -42,7 +42,7 @@ export function SetupPage() {
     Promise.all([
       api<{ requests: PairingRequest[] }>("/api/devices/pairing-requests"),
       api<{ devices: Device[] }>("/api/devices"),
-      api<{ employees: Employee[] }>("/api/employees"),
+      api<{ employees: Employee[] }>("/api/employees?status=active"),
     ])
       .then(([r, d, e]) => {
         setRequests(r.requests);
@@ -137,7 +137,7 @@ export function SetupPage() {
                     </option>
                     {employees.map((emp) => (
                       <option key={emp.id} value={emp.id}>
-                        {emp.first_name} {emp.last_name}
+                        {emp.firstName} {emp.lastName}
                       </option>
                     ))}
                   </select>

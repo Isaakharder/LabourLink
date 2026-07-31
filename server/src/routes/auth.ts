@@ -76,7 +76,10 @@ router.post("/login", asyncHandler(async (req, res) => {
 
   const employee = rows[0];
   console.log(`[login] 5. User found: ${employee ? "yes" : "no"}`);
-  if (!employee || !employee.is_active) {
+  // settings_pin_hash is nullable — employees created via the Employees page
+  // have no PIN yet (desktop login isn't part of that form) and simply can't
+  // log in until one is set some other way.
+  if (!employee || !employee.is_active || !employee.settings_pin_hash) {
     return res.status(401).json({ error: "Invalid email or PIN" });
   }
 
