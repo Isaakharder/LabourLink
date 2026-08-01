@@ -29,7 +29,7 @@ export interface Employee {
   teamRoleId: number;
   teamRole: string;
   device: EmployeeDevice | null;
-  activityGroup: EmployeeActivityGroup | null;
+  activityGroups: EmployeeActivityGroup[];
   createdAt: string;
   updatedAt: string;
 }

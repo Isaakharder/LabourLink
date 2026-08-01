@@ -49,10 +49,7 @@ export function AssignEmployeesModal({ group, onClose, onChanged }: AssignEmploy
     setBusy(true);
     setError(null);
     try {
-      await api(`/api/employees/${employeeId}/activity-group`, {
-        method: "PATCH",
-        body: JSON.stringify({ activityGroupId: null }),
-      });
+      await api(`/api/activity-groups/${group.id}/employees/${employeeId}`, { method: "DELETE" });
       load();
       onChanged();
     } catch (err) {
@@ -122,8 +119,8 @@ export function AssignEmployeesModal({ group, onClose, onChanged }: AssignEmploy
               <label key={e.id} className="activity-checklist-item">
                 <input type="checkbox" checked={selected.has(e.id)} onChange={() => toggleSelected(e.id)} />
                 {e.firstName} {e.lastName}
-                {e.activityGroup && (
-                  <span className="field-error"> (currently: {e.activityGroup.name})</span>
+                {e.activityGroups.length > 0 && (
+                  <span className="field-error"> (also in: {e.activityGroups.map((g) => g.name).join(", ")})</span>
                 )}
               </label>
             ))}

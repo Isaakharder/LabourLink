@@ -7,7 +7,7 @@ import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { normalizePhoneNumber } from "../lib/phone";
 import { deleteEmployeePhoto, getSignedPhotoUrl, getSignedPhotoUrls, uploadEmployeePhoto } from "../lib/storage";
-import { reassignEmployeeActivityGroup } from "../lib/activityGroupAssignment";
+import { addEmployeeToActivityGroup, removeEmployeeFromActivityGroup } from "../lib/activityGroupAssignment";
 
 const router = Router();
 
@@ -273,7 +273,7 @@ const SELECT_COLUMNS = `
   e.created_at, e.updated_at,
   sr.name as security_role, tr.name as team_role,
   d.id as device_id, d.device_name,
-  ag.id as activity_group_id, ag.name as activity_group_name
+  coalesce(agg.groups, '[]'::json) as activity_groups
 `;
 
 const FROM_JOINS = `
@@ -282,8 +282,12 @@ const FROM_JOINS = `
   join team_roles tr on tr.id = e.team_role_id
   left join device_assignments da on da.employee_id = e.id and da.unassigned_at is null
   left join devices d on d.id = da.device_id
-  left join employee_activity_group_assignments eaga on eaga.employee_id = e.id and eaga.unassigned_at is null
-  left join activity_groups ag on ag.id = eaga.activity_group_id
+  left join lateral (
+    select json_agg(json_build_object('id', ag.id, 'name', ag.name) order by ag.name) as groups
+    from employee_activity_group_assignments eaga
+    join activity_groups ag on ag.id = eaga.activity_group_id
+    where eaga.employee_id = e.id and eaga.unassigned_at is null
+  ) agg on true
 `;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -309,9 +313,7 @@ function serializeEmployee(row: any, photoUrl: string | null, includeNotes: bool
     teamRoleId: row.team_role_id,
     teamRole: row.team_role,
     device: row.device_id ? { id: row.device_id, name: row.device_name } : null,
-    activityGroup: row.activity_group_id
-      ? { id: row.activity_group_id, name: row.activity_group_name }
-      : null,
+    activityGroups: row.activity_groups,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -577,25 +579,50 @@ router.patch(
   })
 );
 
-router.patch(
-  "/:id/activity-group",
+router.get(
+  "/:id/activity-groups",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid employee id" });
+
+    const empCheck = await pool.query("select id from employees where id = $1", [id]);
+    if (!empCheck.rows[0]) return res.status(404).json({ error: "Employee not found" });
+
+    const { rows } = await pool.query(
+      `select ag.id, ag.name
+       from employee_activity_group_assignments eaga
+       join activity_groups ag on ag.id = eaga.activity_group_id
+       where eaga.employee_id = $1 and eaga.unassigned_at is null
+       order by ag.name`,
+      [id]
+    );
+    res.json({ activityGroups: rows });
+  })
+);
+
+router.put(
+  "/:id/activity-groups",
   requireAuth,
   requireRole("Administrator"),
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid employee id" });
 
-    const { activityGroupId } = req.body as { activityGroupId?: string | null };
-    if (activityGroupId !== null && activityGroupId !== undefined) {
-      if (!UUID_RE.test(activityGroupId)) {
-        return res.status(400).json({ error: "Invalid activityGroupId" });
-      }
-      const groupCheck = await pool.query(
-        "select id from activity_groups where id = $1 and is_active = true",
-        [activityGroupId]
+    const raw = req.body?.activityGroupIds;
+    if (!Array.isArray(raw)) return res.status(400).json({ error: "activityGroupIds must be an array" });
+    const desired = [...new Set(raw)];
+    if (!desired.every((gid) => typeof gid === "string" && UUID_RE.test(gid))) {
+      return res.status(400).json({ error: "One or more activityGroupIds are invalid" });
+    }
+    if (desired.length) {
+      const check = await pool.query(
+        "select id from activity_groups where id = any($1::uuid[]) and is_active = true",
+        [desired]
       );
-      if (!groupCheck.rows[0]) {
-        return res.status(400).json({ error: "activityGroupId does not match an active activity group" });
+      if (check.rows.length !== desired.length) {
+        return res.status(400).json({ error: "One or more activityGroupIds do not match an active activity group" });
       }
     }
 
@@ -609,7 +636,20 @@ router.patch(
         return res.status(404).json({ error: "Employee not found" });
       }
 
-      await reassignEmployeeActivityGroup(client, id, activityGroupId ?? null, req.employee!.id);
+      const current = await client.query(
+        "select activity_group_id from employee_activity_group_assignments where employee_id = $1 and unassigned_at is null",
+        [id]
+      );
+      const currentIds = new Set(current.rows.map((r) => r.activity_group_id as string));
+      const desiredSet = new Set(desired as string[]);
+
+      for (const gid of currentIds) {
+        if (!desiredSet.has(gid)) await removeEmployeeFromActivityGroup(client, id, gid);
+      }
+      for (const gid of desiredSet) {
+        if (!currentIds.has(gid)) await addEmployeeToActivityGroup(client, id, gid, req.employee!.id);
+      }
+
       await client.query("commit");
     } catch (err) {
       await client.query("rollback");
@@ -618,9 +658,15 @@ router.patch(
       client.release();
     }
 
-    const { rows: full } = await pool.query(`select ${SELECT_COLUMNS} ${FROM_JOINS} where e.id = $1`, [id]);
-    const photoUrl = full[0].profile_photo_path ? await getSignedPhotoUrl(full[0].profile_photo_path) : null;
-    res.json({ employee: serializeEmployee(full[0], photoUrl, true) });
+    const { rows } = await pool.query(
+      `select ag.id, ag.name
+       from employee_activity_group_assignments eaga
+       join activity_groups ag on ag.id = eaga.activity_group_id
+       where eaga.employee_id = $1 and eaga.unassigned_at is null
+       order by ag.name`,
+      [id]
+    );
+    res.json({ activityGroups: rows });
   })
 );
 

@@ -2,7 +2,7 @@ import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { reassignEmployeeActivityGroup } from "../lib/activityGroupAssignment";
+import { addEmployeeToActivityGroup, removeEmployeeFromActivityGroup } from "../lib/activityGroupAssignment";
 
 const router = Router();
 
@@ -329,7 +329,7 @@ router.post(
     try {
       await client.query("begin");
       for (const employeeId of employeeIds as string[]) {
-        await reassignEmployeeActivityGroup(client, employeeId, id, req.employee!.id);
+        await addEmployeeToActivityGroup(client, employeeId, id, req.employee!.id);
       }
       await client.query("commit");
     } catch (err) {
@@ -354,6 +354,24 @@ router.post(
         assignedEmployees: employeeRows.map((r) => ({ id: r.id, firstName: r.first_name, lastName: r.last_name })),
       },
     });
+  })
+);
+
+router.delete(
+  "/:id/employees/:employeeId",
+  requireAuth,
+  requireRole("Administrator"),
+  asyncHandler(async (req, res) => {
+    const { id, employeeId } = req.params;
+    if (!UUID_RE.test(id) || !UUID_RE.test(employeeId)) {
+      return res.status(400).json({ error: "Invalid id" });
+    }
+
+    const groupCheck = await pool.query("select id from activity_groups where id = $1", [id]);
+    if (!groupCheck.rows[0]) return res.status(404).json({ error: "Activity group not found" });
+
+    await removeEmployeeFromActivityGroup(pool, employeeId, id);
+    res.status(204).send();
   })
 );
 

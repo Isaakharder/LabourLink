@@ -27,7 +27,7 @@ interface FormState {
   email: string;
   phoneNumber: string;
   notes: string;
-  activityGroupId: string;
+  activityGroupIds: Set<string>;
 }
 
 const SECURITY_ROLES = [
@@ -63,7 +63,7 @@ function toFormState(employee: Employee | null): FormState {
     email: employee?.email ?? "",
     phoneNumber: employee?.phoneNumber ?? "",
     notes: employee?.notes ?? "",
-    activityGroupId: employee?.activityGroup?.id ?? "",
+    activityGroupIds: new Set(employee?.activityGroups.map((g) => g.id) ?? []),
   };
 }
 
@@ -89,6 +89,15 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((f) => ({ ...f, [key]: value }));
+  }
+
+  function toggleActivityGroup(id: string) {
+    setForm((f) => {
+      const next = new Set(f.activityGroupIds);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return { ...f, activityGroupIds: next };
+    });
   }
 
   function handlePhotoPick(e: React.ChangeEvent<HTMLInputElement>) {
@@ -202,15 +211,19 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
         await api(`/api/employees/${employeeId}/photo`, { method: "DELETE" }).catch(() => {});
       }
 
-      const currentGroupId = employee?.activityGroup?.id ?? "";
-      if (form.activityGroupId !== currentGroupId) {
+      const currentGroupIds = new Set(employee?.activityGroups.map((g) => g.id) ?? []);
+      const desiredGroupIds = form.activityGroupIds;
+      const groupsChanged =
+        currentGroupIds.size !== desiredGroupIds.size ||
+        [...desiredGroupIds].some((gid) => !currentGroupIds.has(gid));
+      if (groupsChanged) {
         try {
-          await api(`/api/employees/${employeeId}/activity-group`, {
-            method: "PATCH",
-            body: JSON.stringify({ activityGroupId: form.activityGroupId || null }),
+          await api(`/api/employees/${employeeId}/activity-groups`, {
+            method: "PUT",
+            body: JSON.stringify({ activityGroupIds: [...desiredGroupIds] }),
           });
         } catch {
-          setSubmitError("Employee saved, but the activity group failed to update. You can try again below.");
+          setSubmitError("Employee saved, but activity groups failed to update. You can try again below.");
           setSubmitting(false);
           return;
         }
@@ -396,21 +409,24 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
               />
               Active
             </label>
-            <label>
-              Activity Group
-              <select
-                value={form.activityGroupId}
-                onChange={(e) => set("activityGroupId", e.target.value)}
-              >
-                <option value="">No activity group</option>
-                {activityGroups.map((g) => (
-                  <option key={g.id} value={g.id}>
-                    {g.name}
-                  </option>
-                ))}
-              </select>
-            </label>
           </div>
+          <h3>Activity Groups</h3>
+          {activityGroups.length === 0 ? (
+            <p className="placeholder-page">No active activity groups exist yet.</p>
+          ) : (
+            <div className="activity-checklist">
+              {activityGroups.map((g) => (
+                <label key={g.id} className="activity-checklist-item">
+                  <input
+                    type="checkbox"
+                    checked={form.activityGroupIds.has(g.id)}
+                    onChange={() => toggleActivityGroup(g.id)}
+                  />
+                  {g.name}
+                </label>
+              ))}
+            </div>
+          )}
           {deviceWarning && <p className="form-warning">{deviceWarning}</p>}
         </section>
 

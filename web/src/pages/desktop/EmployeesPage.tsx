@@ -8,6 +8,13 @@ import { useAuth } from "../../context/AuthContext";
 
 type StatusFilter = "active" | "inactive" | "all";
 
+function formatActivityGroups(groups: Employee["activityGroups"]) {
+  if (groups.length === 0) return "No activity groups";
+  if (groups.length <= 2) return groups.map((g) => g.name).join(", ");
+  const allNames = groups.map((g) => g.name).join(", ");
+  return <span title={allNames}>{groups.length} groups</span>;
+}
+
 export function EmployeesPage() {
   const { employee: currentEmployee } = useAuth();
   const isAdmin = currentEmployee?.securityRole === "Administrator";
@@ -171,7 +178,7 @@ export function EmployeesPage() {
                     </span>
                   </td>
                   <td>{emp.device ? emp.device.name ?? "Unnamed device" : "—"}</td>
-                  <td>{emp.activityGroup?.name ?? "No activity group"}</td>
+                  <td>{formatActivityGroups(emp.activityGroups)}</td>
                   <td>{renderActions(emp)}</td>
                 </tr>
               ))}
@@ -223,7 +230,7 @@ export function EmployeesPage() {
                   </div>
                   <div>
                     <dt>Activity Group</dt>
-                    <dd>{emp.activityGroup?.name ?? "No activity group"}</dd>
+                    <dd>{formatActivityGroups(emp.activityGroups)}</dd>
                   </div>
                 </dl>
                 {renderActions(emp)}
