@@ -10,6 +10,7 @@ import employeesRoutes from "./routes/employees";
 import healthRoutes from "./routes/health";
 import mobileTimeRoutes from "./routes/mobileTime";
 import pairingRoutes from "./routes/pairing";
+import passwordResetRoutes from "./routes/passwordReset";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -27,6 +28,7 @@ app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/diagnostics", diagnosticsRoutes);
 app.use("/api/employees", employeesRoutes);
 app.use("/api/pairing", pairingRoutes);
+app.use("/api/password-reset", passwordResetRoutes);
 app.use("/api/devices", devicesRoutes);
 app.use("/api/mobile", mobileTimeRoutes);
 

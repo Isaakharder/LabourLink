@@ -43,6 +43,22 @@ input {
   font-size: 0.9rem;
 }
 
+.success-text {
+  color: var(--color-primary);
+  font-size: 0.9rem;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--color-primary);
+  font-size: 0.85rem;
+  text-decoration: underline;
+  cursor: pointer;
+  align-self: center;
+}
+
 /* ---------- Desktop ---------- */
 
 .login-screen {

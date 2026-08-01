@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useSearchParams } from "react-router-dom";
 import { AppLayout } from "./components/layout/AppLayout";
 import { MobileLayout } from "./components/mobile/MobileLayout";
 import { AuthProvider, useAuth } from "./context/AuthContext";
@@ -8,6 +8,7 @@ import { DevicesPage } from "./pages/desktop/DevicesPage";
 import { EmployeesPage } from "./pages/desktop/EmployeesPage";
 import { InputsPage } from "./pages/desktop/InputsPage";
 import { LoginPage } from "./pages/desktop/LoginPage";
+import { ResetPinPage } from "./pages/desktop/ResetPinPage";
 import { SettingsPage } from "./pages/desktop/SettingsPage";
 import { SetupPage } from "./pages/desktop/SetupPage";
 import { HomeScreen } from "./pages/mobile/HomeScreen";
@@ -18,9 +19,20 @@ import { useIsMobile } from "./lib/useIsMobile";
 
 function DesktopApp() {
   const { employee, loading } = useAuth();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
 
   if (loading) return <p className="centered-message">Loading...</p>;
-  if (!employee) return <LoginPage />;
+  if (!employee) {
+    // A "forgot PIN" email link lands here while logged out. LoginPage
+    // otherwise renders unconditionally (bypassing <Routes> below), so this
+    // deep link needs its own check rather than a matched route.
+    const token = searchParams.get("token");
+    if (location.pathname === "/reset-pin" && token) {
+      return <ResetPinPage token={token} />;
+    }
+    return <LoginPage />;
+  }
 
   return (
     <Routes>
