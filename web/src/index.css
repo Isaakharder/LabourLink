@@ -402,6 +402,18 @@ input {
   gap: 1rem;
 }
 
+.mobile-home-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.mobile-home-header h1 {
+  font-size: 1.2rem;
+  margin: 0;
+}
+
 .connection-bar {
   display: flex;
   align-items: center;
@@ -436,13 +448,213 @@ input {
   font-size: 1.05rem;
 }
 
-.mobile-actions,
-.activity-picker {
+.mobile-actions {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
   width: 100%;
   max-width: 340px;
+}
+
+/* ---------- Mobile: primary activity button + timer ---------- */
+
+.mobile-primary-activity {
+  width: 100%;
+  max-width: 340px;
+  padding: 1.4rem 1.2rem;
+  font-size: 1.3rem;
+  font-weight: 700;
+  text-align: center;
+  border-radius: var(--radius);
+  border: 2px solid var(--color-primary);
+  background: var(--color-primary);
+  color: white;
+  min-height: 72px;
+}
+
+.mobile-primary-activity:disabled {
+  opacity: 0.5;
+}
+
+.mobile-primary-activity-static {
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  color: var(--color-text);
+  cursor: default;
+}
+
+.mobile-timer {
+  font-size: 2rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.03em;
+}
+
+.mobile-timer-static {
+  font-size: 0.85rem;
+  color: var(--color-muted);
+  text-align: center;
+  max-width: 340px;
+}
+
+.mobile-pending-banner {
+  font-size: 0.85rem;
+  color: #92400e;
+  background: #fef3c7;
+  border-radius: var(--radius);
+  padding: 0.5rem 0.85rem;
+  text-align: center;
+  max-width: 340px;
+}
+
+/* ---------- Mobile: activity picker bottom sheet ---------- */
+
+.mobile-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 18, 25, 0.45);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 100;
+}
+
+.mobile-sheet {
+  background: var(--color-surface);
+  border-radius: var(--radius) var(--radius) 0 0;
+  width: 100%;
+  max-width: 480px;
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: 1rem 1.25rem calc(1.25rem + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.mobile-sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mobile-sheet-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.mobile-sheet-close {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  line-height: 1;
+  color: var(--color-muted);
+  padding: 0.25rem 0.5rem;
+}
+
+.mobile-sheet-empty {
+  color: var(--color-muted);
+  text-align: center;
+  padding: 1rem 0;
+}
+
+.mobile-confirm-message {
+  color: var(--color-text);
+  line-height: 1.4;
+}
+
+.mobile-confirm-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.mobile-sheet-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.mobile-sheet-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  text-align: left;
+  width: 100%;
+}
+
+.mobile-sheet-item-current {
+  border-color: var(--color-primary);
+}
+
+.mobile-sheet-item-name {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.mobile-sheet-item-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--color-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.mobile-sheet-item-secondary {
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--color-muted);
+}
+
+/* ---------- Mobile: recent jobs card ---------- */
+
+.recent-jobs-card {
+  width: 100%;
+  max-width: 340px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem;
+  text-align: left;
+}
+
+.recent-jobs-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+  color: var(--color-muted);
+}
+
+.recent-jobs-empty {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.recent-jobs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.recent-jobs-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.recent-jobs-item-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.recent-jobs-item-meta {
+  font-size: 0.78rem;
+  color: var(--color-muted);
 }
 
 .mobile-action-button {
@@ -875,8 +1087,8 @@ input {
 }
 
 /* ---------- Activity / employee checklist (desktop admin multi-select) ---------- */
-/* Not named .activity-picker* — mobile's HomeScreen.tsx already owns that
-   class for the on-device activity picker. */
+/* Not named .mobile-sheet* — mobile's ActivityPicker.tsx already owns that
+   naming for the on-device job picker bottom sheet. */
 
 .activity-checklist {
   display: flex;
@@ -1024,5 +1236,285 @@ input {
     max-width: 100%;
     max-height: 100vh;
     border-radius: 0;
+  }
+}
+
+/* ---------- Inputs page (daily activity-log review) ---------- */
+
+.inputs-page .page-header {
+  margin-bottom: 0.75rem;
+}
+
+.inputs-date-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 0;
+  margin-bottom: 0.85rem;
+}
+
+.inputs-date-nav button {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.inputs-date-display {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.inputs-date-long {
+  font-weight: 600;
+  font-size: 1.05rem;
+  min-width: 260px;
+  text-align: center;
+}
+
+.inputs-date-picker {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+}
+
+.inputs-layout {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.inputs-employee-panel {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  position: sticky;
+  top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-height: calc(100vh - 8rem);
+  overflow-y: auto;
+}
+
+.inputs-employee-search {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.inputs-employee-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.inputs-employee-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  font-size: 0.85rem;
+}
+
+.inputs-employee-item-selected {
+  background: var(--color-primary);
+  color: white;
+}
+
+.inputs-employee-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inputs-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  min-width: 0;
+}
+
+.inputs-logs-card,
+.inputs-workday-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+
+.inputs-logs-header {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  margin-bottom: 1rem;
+}
+
+.inputs-logs-header-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.inputs-logs-header-text h2 {
+  margin: 0 0 0.15rem;
+  font-size: 1.1rem;
+}
+
+.inputs-logs-header-text p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 0.85rem;
+}
+
+.inputs-logs-totals {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.inputs-logs-totals .stat-tile {
+  padding: 0.5rem 0.85rem;
+  min-width: 90px;
+}
+
+.inputs-logs-totals .stat-value {
+  font-size: 1.15rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.inputs-logs-table-scroll {
+  overflow-x: auto;
+}
+
+.inputs-logs-table {
+  /* Explicit display: table — Inputs has no card-list fallback like the
+     Employees page does, so it must not inherit that page's
+     `.employees-table { display: none }` rule at <=900px below. */
+  display: table;
+  table-layout: fixed;
+  width: 100%;
+  min-width: 640px;
+  /* Overrides .employees-table's overflow: hidden (used elsewhere for
+     rounded corners) so the End Time editor's Save/Cancel buttons can
+     spill past the fixed-width column instead of being clipped. */
+  overflow: visible;
+}
+
+.inputs-col-activity {
+  width: 30%;
+}
+
+.inputs-col-speed {
+  width: 25%;
+}
+
+.inputs-col-duration {
+  width: 20%;
+}
+
+.inputs-col-endtime {
+  width: 25%;
+}
+
+.inputs-log-activity {
+  white-space: normal;
+  word-break: break-word;
+}
+
+.inputs-log-row {
+  cursor: pointer;
+}
+
+.inputs-log-row:hover td {
+  background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+}
+
+.inputs-log-row-selected td {
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+}
+
+.inputs-th-duration,
+.inputs-log-duration,
+.inputs-th-endtime,
+.inputs-log-endtime {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.inputs-log-duration-live {
+  font-weight: 600;
+}
+
+.inputs-log-endtime-editable {
+  cursor: text;
+}
+
+.inputs-log-row-selected .inputs-log-endtime-editable {
+  text-decoration: underline dotted;
+}
+
+.inputs-endtime-editor {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+.inputs-endtime-editor input[type="time"] {
+  font-variant-numeric: tabular-nums;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--color-primary);
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.inputs-endtime-editor button {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.78rem;
+  border-radius: 4px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  flex-shrink: 0;
+}
+
+.inputs-log-speed {
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--color-muted);
+}
+
+.inputs-workday-note {
+  color: var(--color-muted);
+  font-size: 0.78rem;
+  margin: -0.4rem 0 0.75rem;
+}
+
+@media (max-width: 900px) {
+  .inputs-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .inputs-employee-panel {
+    position: static;
+    max-height: 260px;
   }
 }

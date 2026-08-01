@@ -10,6 +10,7 @@ import devicesRoutes from "./routes/devices";
 import diagnosticsRoutes from "./routes/diagnostics";
 import employeesRoutes from "./routes/employees";
 import healthRoutes from "./routes/health";
+import inputsRoutes from "./routes/inputs";
 import mobileTimeRoutes from "./routes/mobileTime";
 import pairingRoutes from "./routes/pairing";
 import passwordResetRoutes from "./routes/passwordReset";
@@ -35,6 +36,7 @@ app.use("/api/pairing", pairingRoutes);
 app.use("/api/password-reset", passwordResetRoutes);
 app.use("/api/devices", devicesRoutes);
 app.use("/api/mobile", mobileTimeRoutes);
+app.use("/api/inputs", inputsRoutes);
 
 // Safety net: any error forwarded via next(err) (see asyncHandler) lands
 // here instead of crashing the process. Logged server-side; the client only

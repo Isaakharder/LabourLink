@@ -140,6 +140,59 @@ the browser directly:
   module, and Vite only ever inlines `VITE_`-prefixed variables into the
   client build regardless).
 
+## Daily activity-log review & correction (Inputs page)
+
+The desktop Inputs page (`/inputs`, Administrator/Manager/Supervisor —
+Employee and Crew Leader get a clear "Insufficient permissions" message
+rather than the data, matching how the Employees page already restricts
+reads) is where a supervisor reviews and corrects one employee's activity
+log for one calendar day.
+
+**Layout:** a date selector (defaults to "today" in `APP_TIMEZONE`, with
+prev/next arrows and a direct date picker) above a two-column layout — a
+searchable, alphabetically-sorted employee list on the left (selection
+persists across date changes and is stored in the URL as `?date=&employee=`
+so a link can be shared/bookmarked), and the selected employee's day on the
+right: an activity-logs card followed by a "Workday details" card.
+
+**Activity runs, not raw rows:** consecutive `work` time entries for the
+*same* activity, separated only by breaks, are merged into one row (its
+duration excludes the break time) — the same job-chain contiguity concept
+the mobile timer uses. If the employee later switches to a different
+activity and then comes back to the first one, that's a **separate** row,
+not merged with the earlier one. Columns: Activity, Normal Speed (the
+activity's *configured* `normal_speed`/`speed_unit` — never a measured
+value, see "Known gaps" below; shows "—" when no speed is configured),
+Duration, End Time. The row for whichever activity is still in progress
+shows a live-updating duration and its End Time is not editable.
+
+**Correcting an end time:** click a closed row to select it, then click its
+End Time cell to edit (native `<input type="time" step="1">`; Enter saves,
+Escape cancels). Saving opens a reason modal — a reason of at least 3
+characters is required, and the button stays disabled until one is entered.
+On confirm, the server validates the new time doesn't move outside the
+entry's own calendar day, isn't before the entry's start, and doesn't push
+past the next entry's start time (landing exactly on that boundary is
+allowed, since repairing a chain back into contiguity is the point).  Every
+accepted correction is recorded in `time_entry_corrections` (old value, new
+value, reason, who made the change, when) — nothing is overwritten
+silently, and this is currently the only audited field in the app.
+
+**Workday details card** shows the day's earliest work-entry start time and
+each break's start time and duration.
+
+### Known gaps
+
+- **Speed is configured, not measured.** There's no output-quantity column
+  anywhere in the schema (no kg/rows/plants/boxes completed), so an actual
+  worked-speed figure cannot be calculated. The "Normal Speed" column is
+  always the activity's configured baseline, labeled accordingly.
+- **Breaks aren't classified paid/unpaid.** The Workday details card shows
+  a single Duration column for each break instead of separate Paid/Unpaid
+  columns, since that distinction isn't tracked in the data model yet.
+- Editing a still-*open* (in-progress) entry's end time is out of scope —
+  only already-closed entries can be corrected.
+
 ## Testing from a real phone on the same Wi-Fi
 
 The dev server binds all network interfaces (`server: { host: true }` in
@@ -228,9 +281,15 @@ environment variables.
       PIN-gate placeholder — no real settings behind it yet
 - [x] **Phase 6** — Activities module: desktop Activities / Activity Groups
       pages (CRUD, deactivate not delete), employee-to-activity-group
-      assignment (one active group per employee, reassignment closes the old
-      assignment rather than deleting it), mobile activity picker fully
-      server-driven and scoped to the employee's own assignment
+      assignment (an employee may belong to any number of active groups at
+      once; adding/removing one group never touches the others; history is
+      preserved via `assigned_at`/`unassigned_at`), mobile activity picker
+      fully server-driven and scoped to the union of the employee's own
+      assignments
+- [x] **Phase 7** — Desktop Inputs page: daily activity-log review with
+      job-chain run grouping, end-time correction with a required reason and
+      a full audit trail (`time_entry_corrections`), and a Workday details
+      card — see "Daily activity-log review & correction" above
 
 Basic time tracking now exists, scoped tightly to what field testing needs:
 an `activities` table (plus `activity_groups` and the join/assignment tables
@@ -242,19 +301,20 @@ reporting remain out of scope until explicitly scoped — see the project
 brief.
 
 **Mobile activity assignment**: an employee's phone only ever shows
-activities that are active *and* belong to their currently assigned active
-Activity Group (`GET /api/mobile/activities`) — never a hardcoded or
-fallback list. An employee with no active group, or whose group currently
-has no active activities, sees "No activities have been assigned to you.
-Please contact your supervisor." instead of any activity list, and Start
-Work / Change Activity are disabled until that's resolved. Every Start
-Work/Change Activity request is revalidated server-side against the
-employee's current group regardless of what the client sends, so an
-activity that's been deactivated or removed from the group can never be
-newly selected — including on offline-queue replay. An activity an
-employee is *already* working on stays visible in their status and can
-still be ended/broken out of cleanly even after it's deactivated or removed
-from their group; it just won't be offered again as a new choice.
+activities that are active *and* belong to *any* of their currently assigned
+active Activity Groups (`GET /api/mobile/activities`) — the deduplicated
+union across all their groups, never a hardcoded or fallback list. An
+employee with no active groups, or whose groups currently have no active
+activities between them, sees "No activities have been assigned to you.
+Please contact your supervisor." instead of any activity list, and the
+mobile job picker is disabled until that's resolved. Every job-selection
+request is revalidated server-side against the employee's current groups
+regardless of what the client sends, so an activity that's been deactivated
+or removed from every one of the employee's groups can never be newly
+selected — including on offline-queue replay. An activity an employee is
+*already* working on stays visible in their status and can still be
+ended/broken out of cleanly even after it's deactivated or removed from its
+group; it just won't be offered again as a new choice.
 
 ## Known gaps
 
