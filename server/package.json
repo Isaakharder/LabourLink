@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "commonjs",
+  "engines": {
+    "node": ">=22 <23"
+  },
   "scripts": {
     "dev": "nodemon --watch src --ext ts --exec ts-node src/index.ts",
     "build": "tsc -p tsconfig.json",
