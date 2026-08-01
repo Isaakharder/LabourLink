@@ -226,14 +226,35 @@ environment variables.
 - [x] **Phase 5** — Mobile shell: home screen (start work / change activity /
       break / end day), sync status, nav. Mobile Settings screen is still a
       PIN-gate placeholder — no real settings behind it yet
+- [x] **Phase 6** — Activities module: desktop Activities / Activity Groups
+      pages (CRUD, deactivate not delete), employee-to-activity-group
+      assignment (one active group per employee, reassignment closes the old
+      assignment rather than deleting it), mobile activity picker fully
+      server-driven and scoped to the employee's own assignment
 
 Basic time tracking now exists, scoped tightly to what field testing needs:
-an `activities` table seeded with the two current core activities (Winding &
-Pruning, Picking Peppers) and a `time_entries` table recording work/break
-spans per employee, enforced server-side to allow at most one open entry per
-employee at a time and idempotent under duplicate/retried requests. Payroll,
-row tracking, greenhouse logic, full offline background sync, and reporting
-remain out of scope until explicitly scoped — see the project brief.
+an `activities` table (plus `activity_groups` and the join/assignment tables
+that scope activities to employees) and a `time_entries` table recording
+work/break spans per employee, enforced server-side to allow at most one open
+entry per employee at a time and idempotent under duplicate/retried requests.
+Payroll, row tracking, greenhouse logic, full offline background sync, and
+reporting remain out of scope until explicitly scoped — see the project
+brief.
+
+**Mobile activity assignment**: an employee's phone only ever shows
+activities that are active *and* belong to their currently assigned active
+Activity Group (`GET /api/mobile/activities`) — never a hardcoded or
+fallback list. An employee with no active group, or whose group currently
+has no active activities, sees "No activities have been assigned to you.
+Please contact your supervisor." instead of any activity list, and Start
+Work / Change Activity are disabled until that's resolved. Every Start
+Work/Change Activity request is revalidated server-side against the
+employee's current group regardless of what the client sends, so an
+activity that's been deactivated or removed from the group can never be
+newly selected — including on offline-queue replay. An activity an
+employee is *already* working on stays visible in their status and can
+still be ended/broken out of cleanly even after it's deactivated or removed
+from their group; it just won't be offered again as a new choice.
 
 ## Known gaps
 

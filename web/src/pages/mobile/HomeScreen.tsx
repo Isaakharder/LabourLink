@@ -9,6 +9,11 @@ interface Activity {
   name: string;
 }
 
+interface ActivityGroup {
+  id: string;
+  name: string;
+}
+
 interface MeResponse {
   employee: { id: string; firstName: string; lastName: string };
   status: "idle" | "work" | "break";
@@ -16,10 +21,16 @@ interface MeResponse {
   since: string | null;
 }
 
+// Same message whether the employee has no active group at all or their
+// group currently has zero active activities — both are "nothing to pick
+// from," and the app never falls back to showing all activities either way.
+const NO_ACTIVITIES_MESSAGE = "No activities have been assigned to you. Please contact your supervisor.";
+
 export function HomeScreen() {
   const { markUnpaired } = useDevicePairing();
   const [me, setMe] = useState<MeResponse | null>(null);
   const [activities, setActivities] = useState<Activity[]>([]);
+  const [activitiesLoaded, setActivitiesLoaded] = useState(false);
   const [picking, setPicking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,24 +56,43 @@ export function HomeScreen() {
       });
   }, [handleAuthFailure]);
 
-  useEffect(() => {
-    loadMe();
-  }, [loadMe]);
+  // Always hits the live server endpoint — the phone never has its own
+  // notion of which activities exist. Re-run on mount, when connectivity
+  // returns, when the tab/app comes back to the foreground (covers a
+  // supervisor having changed the employee's group or an activity while the
+  // phone was asleep/backgrounded), and right before opening the picker so
+  // the choice offered is as fresh as possible. Deliberately event-driven
+  // rather than polling on a timer, to avoid unnecessary battery/data use.
+  const loadActivities = useCallback(() => {
+    api<{ activities: Activity[]; activityGroup: ActivityGroup | null }>("/api/mobile/activities")
+      .then((res) => {
+        setActivities(res.activities);
+        setActivitiesLoaded(true);
+      })
+      .catch((err) => {
+        handleAuthFailure(err);
+      });
+  }, [handleAuthFailure]);
 
   useEffect(() => {
-    api<{ activities: Activity[] }>("/api/mobile/activities")
-      .then((res) => setActivities(res.activities))
-      .catch(() => {});
-  }, []);
+    loadMe();
+    loadActivities();
+  }, [loadMe, loadActivities]);
 
   const flush = useCallback(() => {
     flushQueue((path, body) => api(path, { method: "POST", body: JSON.stringify(body) }))
-      .then(() => {
+      .then(({ rejected }) => {
         setPending(getPendingCount());
+        if (rejected.length > 0) {
+          setError(
+            "One or more queued activity changes could not be completed because the activity is no longer available. Your status has been refreshed — please choose again."
+          );
+        }
         loadMe();
+        loadActivities();
       })
       .catch(() => {});
-  }, [loadMe]);
+  }, [loadMe, loadActivities]);
 
   useEffect(() => {
     function goOnline() {
@@ -72,14 +102,22 @@ export function HomeScreen() {
     function goOffline() {
       setOnline(false);
     }
+    function onVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        loadMe();
+        loadActivities();
+      }
+    }
     window.addEventListener("online", goOnline);
     window.addEventListener("offline", goOffline);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     if (navigator.onLine) flush();
     return () => {
       window.removeEventListener("online", goOnline);
       window.removeEventListener("offline", goOffline);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [flush]);
+  }, [flush, loadMe, loadActivities]);
 
   async function perform(path: string, body: Record<string, unknown>) {
     setBusy(true);
@@ -100,6 +138,11 @@ export function HomeScreen() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function openPicker() {
+    loadActivities();
+    setPicking(true);
   }
 
   function chooseActivity(activityId: string) {
@@ -126,6 +169,8 @@ export function HomeScreen() {
     );
   }
 
+  const noActivitiesAvailable = activitiesLoaded && activities.length === 0;
+
   return (
     <div className="mobile-home mobile-home-active">
       <div className="connection-bar">
@@ -150,19 +195,27 @@ export function HomeScreen() {
 
       {error && <p className="error-text">{error}</p>}
 
+      {noActivitiesAvailable && !picking && <p className="error-text">{NO_ACTIVITIES_MESSAGE}</p>}
+
       {picking ? (
         <div className="activity-picker">
-          <p>Choose an activity:</p>
-          {activities.map((a) => (
-            <button
-              key={a.id}
-              className="mobile-action-button mobile-action-primary"
-              disabled={busy}
-              onClick={() => chooseActivity(a.id)}
-            >
-              {a.name}
-            </button>
-          ))}
+          {activities.length === 0 ? (
+            <p>{NO_ACTIVITIES_MESSAGE}</p>
+          ) : (
+            <>
+              <p>Choose an activity:</p>
+              {activities.map((a) => (
+                <button
+                  key={a.id}
+                  className="mobile-action-button mobile-action-primary"
+                  disabled={busy}
+                  onClick={() => chooseActivity(a.id)}
+                >
+                  {a.name}
+                </button>
+              ))}
+            </>
+          )}
           <button
             className="mobile-action-button mobile-action-secondary"
             disabled={busy}
@@ -176,15 +229,19 @@ export function HomeScreen() {
           {me.status === "idle" && (
             <button
               className="mobile-action-button mobile-action-primary"
-              disabled={busy}
-              onClick={() => setPicking(true)}
+              disabled={busy || noActivitiesAvailable}
+              onClick={openPicker}
             >
               Start Work
             </button>
           )}
           {me.status === "work" && (
             <>
-              <button className="mobile-action-button" disabled={busy} onClick={() => setPicking(true)}>
+              <button
+                className="mobile-action-button"
+                disabled={busy || noActivitiesAvailable}
+                onClick={openPicker}
+              >
                 Change Activity
               </button>
               <button className="mobile-action-button" disabled={busy} onClick={startBreak}>

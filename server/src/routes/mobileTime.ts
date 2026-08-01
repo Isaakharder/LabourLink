@@ -116,11 +116,37 @@ router.get(
 
 router.get(
   "/activities",
-  asyncHandler(async (_req, res) => {
-    const { rows } = await pool.query(
-      "select id, name from activities where is_active = true order by sort_order"
+  asyncHandler(async (req, res) => {
+    const d = req.device!;
+
+    // Resolve the employee's currently open group assignment, joined to an
+    // active group — an assignment pointing at an inactive group can't
+    // actually happen (activityGroups.ts closes the row on deactivation),
+    // but the join filter is kept anyway as defense-in-depth, matching how
+    // requireDevice double-checks is_active even after already gating on
+    // assignment closure elsewhere.
+    const groupRows = await pool.query(
+      `select ag.id, ag.name
+       from employee_activity_group_assignments eaga
+       join activity_groups ag on ag.id = eaga.activity_group_id and ag.is_active = true
+       where eaga.employee_id = $1 and eaga.unassigned_at is null`,
+      [d.employeeId]
     );
-    res.json({ activities: rows });
+    const group = groupRows.rows[0];
+    if (!group) {
+      // No active group — never fall back to "all activities."
+      return res.json({ activities: [], activityGroup: null });
+    }
+
+    const { rows } = await pool.query(
+      `select a.id, a.name
+       from activity_group_activities aga
+       join activities a on a.id = aga.activity_id and a.is_active = true
+       where aga.activity_group_id = $1
+       order by a.sort_order, a.name`,
+      [group.id]
+    );
+    res.json({ activities: rows, activityGroup: { id: group.id, name: group.name } });
   })
 );
 
@@ -136,14 +162,23 @@ router.post(
       return res.status(400).json({ error: "activityId and a valid idempotencyKey are required" });
     }
     // activityId is client-supplied — confirm it's a real, active activity
-    // before opening an entry against it, rather than letting a bad id
-    // surface as a raw foreign-key-violation 500.
+    // AND a member of the employee's currently active group before opening
+    // an entry against it. Picker restriction is a UI convenience only; this
+    // is the actual enforcement, since a client-supplied id is never trusted.
     const activityCheck = await pool.query(
-      "select id from activities where id = $1 and is_active = true",
-      [activityId]
+      `select a.id
+       from activities a
+       join activity_group_activities aga on aga.activity_id = a.id
+       join employee_activity_group_assignments eaga
+         on eaga.activity_group_id = aga.activity_group_id
+        and eaga.employee_id = $2
+        and eaga.unassigned_at is null
+       join activity_groups ag on ag.id = aga.activity_group_id and ag.is_active = true
+       where a.id = $1 and a.is_active = true`,
+      [activityId, d.employeeId]
     );
     if (!activityCheck.rows[0]) {
-      return res.status(400).json({ error: "activityId does not match an active activity" });
+      return res.status(400).json({ error: "activityId is not available to this employee" });
     }
     await openEntry(d.employeeId, d.id, "work", activityId, idempotencyKey);
     res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName));

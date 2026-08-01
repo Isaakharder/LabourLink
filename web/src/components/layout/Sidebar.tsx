@@ -1,6 +1,7 @@
 import {
   ClipboardList,
   LayoutDashboard,
+  ListChecks,
   LogOut,
   Settings,
   Smartphone,
@@ -16,6 +17,7 @@ const PRIMARY_NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/inputs", icon: ClipboardList, label: "Inputs" },
   { to: "/employees", icon: Users, label: "Employees" },
+  { to: "/activities", icon: ListChecks, label: "Activities" },
   { to: "/devices", icon: Smartphone, label: "Devices" },
   { to: "/setup", icon: Wrench, label: "Setup" },
 ];

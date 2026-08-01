@@ -7,6 +7,7 @@ import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { normalizePhoneNumber } from "../lib/phone";
 import { deleteEmployeePhoto, getSignedPhotoUrl, getSignedPhotoUrls, uploadEmployeePhoto } from "../lib/storage";
+import { reassignEmployeeActivityGroup } from "../lib/activityGroupAssignment";
 
 const router = Router();
 
@@ -271,7 +272,8 @@ const SELECT_COLUMNS = `
   e.preferred_language, e.notes, e.profile_photo_path, e.security_role_id, e.team_role_id,
   e.created_at, e.updated_at,
   sr.name as security_role, tr.name as team_role,
-  d.id as device_id, d.device_name
+  d.id as device_id, d.device_name,
+  ag.id as activity_group_id, ag.name as activity_group_name
 `;
 
 const FROM_JOINS = `
@@ -280,6 +282,8 @@ const FROM_JOINS = `
   join team_roles tr on tr.id = e.team_role_id
   left join device_assignments da on da.employee_id = e.id and da.unassigned_at is null
   left join devices d on d.id = da.device_id
+  left join employee_activity_group_assignments eaga on eaga.employee_id = e.id and eaga.unassigned_at is null
+  left join activity_groups ag on ag.id = eaga.activity_group_id
 `;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -305,6 +309,9 @@ function serializeEmployee(row: any, photoUrl: string | null, includeNotes: bool
     teamRoleId: row.team_role_id,
     teamRole: row.team_role,
     device: row.device_id ? { id: row.device_id, name: row.device_name } : null,
+    activityGroup: row.activity_group_id
+      ? { id: row.activity_group_id, name: row.activity_group_name }
+      : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -531,6 +538,11 @@ router.patch(
            where employee_id = $1 and unassigned_at is null`,
           [id]
         );
+        await client.query(
+          `update employee_activity_group_assignments set unassigned_at = now()
+           where employee_id = $1 and unassigned_at is null`,
+          [id]
+        );
       }
 
       await client.query("commit");
@@ -562,6 +574,53 @@ router.patch(
     } finally {
       client.release();
     }
+  })
+);
+
+router.patch(
+  "/:id/activity-group",
+  requireAuth,
+  requireRole("Administrator"),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid employee id" });
+
+    const { activityGroupId } = req.body as { activityGroupId?: string | null };
+    if (activityGroupId !== null && activityGroupId !== undefined) {
+      if (!UUID_RE.test(activityGroupId)) {
+        return res.status(400).json({ error: "Invalid activityGroupId" });
+      }
+      const groupCheck = await pool.query(
+        "select id from activity_groups where id = $1 and is_active = true",
+        [activityGroupId]
+      );
+      if (!groupCheck.rows[0]) {
+        return res.status(400).json({ error: "activityGroupId does not match an active activity group" });
+      }
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+
+      const empCheck = await client.query("select id from employees where id = $1", [id]);
+      if (!empCheck.rows[0]) {
+        await client.query("rollback");
+        return res.status(404).json({ error: "Employee not found" });
+      }
+
+      await reassignEmployeeActivityGroup(client, id, activityGroupId ?? null, req.employee!.id);
+      await client.query("commit");
+    } catch (err) {
+      await client.query("rollback");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    const { rows: full } = await pool.query(`select ${SELECT_COLUMNS} ${FROM_JOINS} where e.id = $1`, [id]);
+    const photoUrl = full[0].profile_photo_path ? await getSignedPhotoUrl(full[0].profile_photo_path) : null;
+    res.json({ employee: serializeEmployee(full[0], photoUrl, true) });
   })
 );
 

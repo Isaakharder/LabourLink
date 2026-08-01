@@ -146,6 +146,7 @@ export function EmployeesPage() {
                 <th>Start date</th>
                 <th>Status</th>
                 <th>Device</th>
+                <th>Activity Group</th>
                 <th></th>
               </tr>
             </thead>
@@ -170,6 +171,7 @@ export function EmployeesPage() {
                     </span>
                   </td>
                   <td>{emp.device ? emp.device.name ?? "Unnamed device" : "—"}</td>
+                  <td>{emp.activityGroup?.name ?? "No activity group"}</td>
                   <td>{renderActions(emp)}</td>
                 </tr>
               ))}
@@ -218,6 +220,10 @@ export function EmployeesPage() {
                   <div>
                     <dt>Device</dt>
                     <dd>{emp.device ? emp.device.name ?? "Unnamed device" : "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Activity Group</dt>
+                    <dd>{emp.activityGroup?.name ?? "No activity group"}</dd>
                   </div>
                 </dl>
                 {renderActions(emp)}

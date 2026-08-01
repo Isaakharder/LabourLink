@@ -3,6 +3,11 @@ export interface EmployeeDevice {
   name: string | null;
 }
 
+export interface EmployeeActivityGroup {
+  id: string;
+  name: string;
+}
+
 export interface Employee {
   id: string;
   firstName: string;
@@ -24,6 +29,7 @@ export interface Employee {
   teamRoleId: number;
   teamRole: string;
   device: EmployeeDevice | null;
+  activityGroup: EmployeeActivityGroup | null;
   createdAt: string;
   updatedAt: string;
 }

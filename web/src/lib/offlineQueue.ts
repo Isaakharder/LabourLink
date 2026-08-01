@@ -38,20 +38,31 @@ export function isNetworkError(err: unknown): boolean {
   return err instanceof TypeError;
 }
 
+export interface FlushResult {
+  // Actions the server rejected on replay (e.g. the queued activityId is no
+  // longer active/in the employee's group) — dropped rather than retried
+  // forever, but reported so the caller can tell the employee instead of
+  // silently discarding their queued selection.
+  rejected: QueuedAction[];
+}
+
 // Replays queued actions in order using the same idempotencyKey each one
 // was created with, so a request that actually succeeded server-side before
 // the network dropped doesn't get duplicated on retry. Stops at the first
 // still-offline failure and leaves the remainder queued for next time.
 export async function flushQueue(
   send: (path: string, body: unknown) => Promise<unknown>
-): Promise<void> {
+): Promise<FlushResult> {
+  const rejected: QueuedAction[] = [];
   for (const action of readQueue()) {
     try {
       await send(action.path, action.body);
       dequeue(action.id);
     } catch (err) {
-      if (isNetworkError(err)) return;
+      if (isNetworkError(err)) return { rejected };
       dequeue(action.id); // server rejected it even on retry — drop rather than loop forever
+      rejected.push(action);
     }
   }
+  return { rejected };
 }

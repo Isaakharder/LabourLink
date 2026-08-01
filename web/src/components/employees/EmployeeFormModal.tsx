@@ -1,8 +1,9 @@
-import { FormEvent, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { Avatar } from "./Avatar";
 import { api, ApiError } from "../../lib/api";
 import { Employee, GENDERS, LANGUAGES, NATIONALITIES } from "../../lib/employeeTypes";
+import { ActivityGroup } from "../../lib/activityTypes";
 
 interface EmployeeFormModalProps {
   employee: Employee | null; // null = create mode
@@ -26,6 +27,7 @@ interface FormState {
   email: string;
   phoneNumber: string;
   notes: string;
+  activityGroupId: string;
 }
 
 const SECURITY_ROLES = [
@@ -61,6 +63,7 @@ function toFormState(employee: Employee | null): FormState {
     email: employee?.email ?? "",
     phoneNumber: employee?.phoneNumber ?? "",
     notes: employee?.notes ?? "",
+    activityGroupId: employee?.activityGroup?.id ?? "",
   };
 }
 
@@ -76,6 +79,13 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
   const [removePhoto, setRemovePhoto] = useState(false);
   const [photoPickError, setPhotoPickError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [activityGroups, setActivityGroups] = useState<ActivityGroup[]>([]);
+  useEffect(() => {
+    api<{ activityGroups: ActivityGroup[] }>("/api/activity-groups?status=active")
+      .then((res) => setActivityGroups(res.activityGroups))
+      .catch(() => {});
+  }, []);
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -190,6 +200,20 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
         }
       } else if (removePhoto && isEdit) {
         await api(`/api/employees/${employeeId}/photo`, { method: "DELETE" }).catch(() => {});
+      }
+
+      const currentGroupId = employee?.activityGroup?.id ?? "";
+      if (form.activityGroupId !== currentGroupId) {
+        try {
+          await api(`/api/employees/${employeeId}/activity-group`, {
+            method: "PATCH",
+            body: JSON.stringify({ activityGroupId: form.activityGroupId || null }),
+          });
+        } catch {
+          setSubmitError("Employee saved, but the activity group failed to update. You can try again below.");
+          setSubmitting(false);
+          return;
+        }
       }
 
       onSaved();
@@ -371,6 +395,20 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
                 onChange={(e) => set("isActive", e.target.checked)}
               />
               Active
+            </label>
+            <label>
+              Activity Group
+              <select
+                value={form.activityGroupId}
+                onChange={(e) => set("activityGroupId", e.target.value)}
+              >
+                <option value="">No activity group</option>
+                {activityGroups.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.name}
+                  </option>
+                ))}
+              </select>
             </label>
           </div>
           {deviceWarning && <p className="form-warning">{deviceWarning}</p>}
