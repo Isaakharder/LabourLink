@@ -198,6 +198,34 @@ input {
   background: var(--color-bg);
 }
 
+/* A page (currently only the Greenhouse Layout editor) that wants to own
+   its own full-viewport scrolling/canvas instead of sitting inside the
+   normal admin padding+scrollbar frame. Set via AppShellContext. */
+.app-content-full-bleed {
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Small floating restore control shown in place of the full sidebar when
+   it's hidden — stays visible but unobtrusive at the far-left edge. */
+.sidebar-restore-tab {
+  flex-shrink: 0;
+  width: 18px;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-muted);
+}
+
+.sidebar-restore-tab:hover {
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
 .page-header {
   display: flex;
   align-items: flex-start;
@@ -1515,6 +1543,448 @@ input {
 
   .inputs-employee-panel {
     position: static;
+    max-height: 260px;
+  }
+}
+
+/* ---------- Setup: Greenhouse Layout — full-screen editor shell ----------
+   Deliberately not a bordered/rounded admin card (see .greenhouse-editor-
+   shell below) — this page behaves like drawing software: a fixed compact
+   toolbar, a clipped canvas viewport that pans/zooms via a transform
+   rather than page scrolling, and minimal chrome. */
+
+.greenhouse-editor-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  background: #eef1f4;
+}
+
+.greenhouse-editor-loading {
+  padding: 1.5rem;
+  color: var(--color-muted);
+}
+
+.greenhouse-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 1.5rem;
+}
+
+.greenhouse-editor-banner {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0.4rem 1rem;
+  background: #fef2f2;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.greenhouse-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0.75rem;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.greenhouse-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.greenhouse-toolbar-group button {
+  padding: 0.3rem 0.55rem;
+  font-size: 0.82rem;
+}
+
+.greenhouse-toolbar-divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--color-border);
+  margin: 0 0.1rem;
+}
+
+.greenhouse-zoom-level {
+  min-width: 3.2rem;
+  text-align: center;
+  font-size: 0.82rem;
+  color: var(--color-muted);
+}
+
+.greenhouse-toolbar-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.greenhouse-edit-mode-active {
+  background: var(--color-primary);
+  color: white;
+  border-color: var(--color-primary);
+}
+
+.greenhouse-toolbar-spacer {
+  flex: 1;
+}
+
+.greenhouse-live-coordinates {
+  font-size: 0.78rem;
+  color: var(--color-primary);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.greenhouse-scale-legend {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.1rem;
+  font-size: 0.72rem;
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+
+.greenhouse-editor-body {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  flex: 1;
+  min-height: 0;
+}
+
+.greenhouse-left-panel {
+  border-right: 1px solid var(--color-border);
+  background: var(--color-surface);
+  padding: 0.65rem;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  overflow-y: auto;
+}
+
+.greenhouse-left-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.greenhouse-phase-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.greenhouse-phase-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  font-size: 0.85rem;
+}
+
+.greenhouse-phase-item-selected {
+  background: var(--color-primary);
+  color: white;
+}
+
+.greenhouse-phase-item-selected .status-pill {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.greenhouse-phase-item-inactive {
+  opacity: 0.6;
+}
+
+.greenhouse-phase-item-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.greenhouse-phase-item-dims {
+  color: inherit;
+  opacity: 0.75;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.greenhouse-selected-phase-actions {
+  display: flex;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.greenhouse-canvas-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: #eef1f4;
+}
+
+.greenhouse-north-indicator {
+  position: absolute;
+  top: 0.6rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--color-muted);
+  pointer-events: none;
+}
+
+.greenhouse-north-arrow {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+/* CanvasViewport — a dedicated, clipped pan/zoom surface. It never scrolls
+   or resizes itself; content moves via a transform applied to the
+   TransformLayer group inside the SVG (see LandCanvas.tsx), so this stays
+   a fixed-size window the drawing pans and zooms underneath. */
+.greenhouse-canvas-viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  background: #eef1f4;
+  cursor: default;
+}
+
+.greenhouse-canvas-viewport-pannable {
+  cursor: grab;
+}
+
+.greenhouse-canvas-viewport-panning {
+  cursor: grabbing;
+}
+
+.greenhouse-canvas-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.greenhouse-grid-minor {
+  stroke: #d8e2dc;
+  stroke-width: 1;
+  opacity: 0.6;
+}
+
+.greenhouse-grid-major {
+  stroke: #b9c8bf;
+  stroke-width: 1;
+  opacity: 0.8;
+}
+
+.greenhouse-land-rect {
+  fill: #dcf5e3;
+}
+
+.greenhouse-land-border {
+  stroke: #4c9a6a;
+  stroke-width: 2;
+}
+
+.greenhouse-phase-rect {
+  fill: #cbd5e1;
+  stroke: #475569;
+  stroke-width: 1.5;
+}
+
+.greenhouse-phase-rect-selected {
+  stroke: #2563eb;
+  stroke-width: 3;
+}
+
+.greenhouse-phase-rect-overlapping {
+  stroke: #d97706;
+  stroke-dasharray: 6 4;
+}
+
+.greenhouse-phase-inactive .greenhouse-phase-rect {
+  fill: #e2e8f0;
+  opacity: 0.5;
+}
+
+.greenhouse-phase-inactive .greenhouse-phase-label,
+.greenhouse-phase-inactive .greenhouse-phase-dims {
+  opacity: 0.5;
+}
+
+.greenhouse-phase-label {
+  fill: #1e293b;
+  font-weight: 600;
+}
+
+.greenhouse-phase-dims {
+  fill: #475569;
+}
+
+.greenhouse-simple-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.greenhouse-simple-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+}
+
+.greenhouse-simple-form input {
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  font-family: inherit;
+  color: var(--color-text);
+}
+
+.greenhouse-simple-form .form-warning button {
+  margin-top: 0.5rem;
+}
+
+/* ---------- Greenhouse Layout: phase position editor (D-pad) ---------- */
+
+.greenhouse-position-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.greenhouse-position-editor h4 {
+  margin: 0;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.greenhouse-step-selector {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--color-muted);
+  flex-wrap: wrap;
+}
+
+.greenhouse-step-selector button {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.78rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+}
+
+.greenhouse-step-active {
+  background: var(--color-primary) !important;
+  color: white;
+  border-color: var(--color-primary) !important;
+}
+
+/* Compact 3x3 D-pad — 44px cells meet the usual minimum touch-target size. */
+.greenhouse-dpad {
+  display: grid;
+  grid-template-columns: 44px 44px 44px;
+  grid-template-rows: 44px 44px 44px;
+  grid-template-areas:
+    ". up ."
+    "left . right"
+    ". down .";
+  gap: 0.3rem;
+  justify-content: center;
+}
+
+.greenhouse-dpad button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.3rem;
+  line-height: 1;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  touch-action: manipulation;
+}
+
+.greenhouse-dpad button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.greenhouse-dpad-up {
+  grid-area: up;
+}
+
+.greenhouse-dpad-down {
+  grid-area: down;
+}
+
+.greenhouse-dpad-left {
+  grid-area: left;
+}
+
+.greenhouse-dpad-right {
+  grid-area: right;
+}
+
+.greenhouse-position-coords {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.82rem;
+  color: var(--color-muted);
+}
+
+.greenhouse-position-editor-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+@media (max-width: 900px) {
+  .greenhouse-editor-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .greenhouse-left-panel {
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
     max-height: 260px;
   }
 }

@@ -1,5 +1,7 @@
 import {
+  ChevronRight,
   ClipboardList,
+  Database,
   LayoutDashboard,
   ListChecks,
   LogOut,
@@ -18,12 +20,26 @@ const PRIMARY_NAV = [
   { to: "/inputs", icon: ClipboardList, label: "Inputs" },
   { to: "/employees", icon: Users, label: "Employees" },
   { to: "/activities", icon: ListChecks, label: "Activities" },
+  { to: "/basic-data", icon: Database, label: "Basic data" },
   { to: "/devices", icon: Smartphone, label: "Devices" },
   { to: "/setup", icon: Wrench, label: "Setup" },
 ];
 
-export function Sidebar() {
+interface SidebarProps {
+  hidden?: boolean;
+  onRestore?: () => void;
+}
+
+export function Sidebar({ hidden, onRestore }: SidebarProps) {
   const { logout } = useAuth();
+
+  if (hidden) {
+    return (
+      <button type="button" className="sidebar-restore-tab" onClick={onRestore} aria-label="Show navigation">
+        <ChevronRight size={16} />
+      </button>
+    );
+  }
 
   return (
     <aside className="sidebar">

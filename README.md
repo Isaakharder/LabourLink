@@ -193,6 +193,57 @@ each break's start time and duration.
 - Editing a still-*open* (in-progress) entry's end time is out of scope —
   only already-closed entries can be corrected.
 
+## Greenhouse Layout editor (Setup page)
+
+The desktop Setup page (`/setup/layout`) includes a full-screen, CAD-style
+editor for drawing a greenhouse property ("land") to scale in real feet and
+positioning rectangular "phases" within it. Unlike the rest of the app, this
+route takes over the entire viewport rather than sitting inside the normal
+sidebar/padded-card frame.
+
+**Full-screen mode:** entering the route hides the normal Setup page
+header/tabs and the app goes full-bleed (no padding, no page scrollbar) for
+as long as the editor is mounted — `document.body`'s scroll is locked too.
+Leaving the route by any means (the editor's own **Back** button, a sidebar
+nav click, or the browser Back button) always restores the normal page
+chrome and body scrolling, since that state is owned by `AppLayout` (shared
+via `useOutletContext`) rather than by the editor page itself, so it can
+never strand another page in a hidden-chrome state.
+
+**Sidebar collapse:** the toolbar's **Hide navigation** button collapses the
+main sidebar to a small restore tab at the left edge, reclaiming its width
+for the canvas; clicking the restore tab (or leaving the route) brings the
+full sidebar back.
+
+**Pan/zoom controls:** the canvas is a transform-based viewport (pan in
+screen pixels, scale in pixels-per-foot) — phase/land geometry is always
+kept in real feet.
+- **Zoom:** mouse wheel, centered on the cursor (the land point under the
+  pointer stays put), clamped to roughly 15%–600% of the "fit" scale. The
+  toolbar's `+`/`-` buttons and `Fit to screen` do the same, recomputing
+  against the current viewport size.
+- **Pan:** middle-mouse drag, Spacebar+left-drag, or a plain left-drag
+  starting on empty canvas (dragging a phase itself always moves the phase,
+  never pans). Panning is clamped so the land can't be dragged entirely
+  off-screen.
+- Clicking empty canvas (without dragging) deselects the current phase.
+
+**Keyboard shortcuts** (ignored while typing in a text field, but not
+blocked by a focused checkbox/button):
+- `+` / `-` — zoom in/out
+- `0` — Fit to screen
+- `Escape` — cancels an in-progress pan, or clears the current selection
+- `Ctrl`/`Cmd`+`S` — saves the active edit (phase position or layout draft)
+
+**Save/cancel behavior:** phase edits made in **Edit Phases** mode (drag,
+snap-to-grid, prevent-overlap) are draft-only until **Save Layout** is
+clicked (or `Ctrl`/`Cmd`+`S`) — **Cancel Changes** reverts to the last saved
+positions. When "Prevent overlap" is on and the current draft has an
+overlap, Save Layout is disabled until it's resolved or the toggle is
+turned off. Editing the land's dimensions (**Edit Land**) refreshes the
+canvas — dimensions, scale, and fit — immediately, without requiring a route
+change or reselecting the land.
+
 ## Testing from a real phone on the same Wi-Fi
 
 The dev server binds all network interfaces (`server: { host: true }` in

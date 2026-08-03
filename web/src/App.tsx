@@ -44,7 +44,7 @@ function DesktopApp() {
         <Route path="employees" element={<EmployeesPage />} />
         <Route path="activities/*" element={<ActivitiesPage />} />
         <Route path="devices" element={<DevicesPage />} />
-        <Route path="setup" element={<SetupPage />} />
+        <Route path="setup/*" element={<SetupPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/inputs" replace />} />
       </Route>
