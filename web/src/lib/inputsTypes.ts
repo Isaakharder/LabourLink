@@ -23,6 +23,10 @@ export interface BreakDto {
   startedAt: string;
   endedAt: string | null;
   durationSeconds: number;
+  name: string | null;
+  isPaid: boolean | null;
+  source: "manual" | "auto";
+  breakProfileItemId: string | null;
 }
 
 export interface DailyInputsResponse {
@@ -31,6 +35,6 @@ export interface DailyInputsResponse {
   workStartTime: string | null;
   runs: ActivityRunDto[];
   breaks: BreakDto[];
-  totals: { workedSeconds: number; breakSeconds: number };
+  totals: { workedSeconds: number; breakSeconds: number; paidBreakSeconds: number; unpaidBreakSeconds: number };
   canEdit: boolean;
 }

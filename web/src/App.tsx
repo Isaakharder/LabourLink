@@ -4,6 +4,7 @@ import { MobileLayout } from "./components/mobile/MobileLayout";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { DevicePairingProvider, useDevicePairing } from "./context/DevicePairingContext";
 import { ActivitiesPage } from "./pages/desktop/ActivitiesPage";
+import { BasicDataPage } from "./pages/desktop/BasicDataPage";
 import { DashboardPage } from "./pages/desktop/DashboardPage";
 import { DevicesPage } from "./pages/desktop/DevicesPage";
 import { EmployeesPage } from "./pages/desktop/EmployeesPage";
@@ -43,6 +44,7 @@ function DesktopApp() {
         <Route path="inputs" element={<InputsPage />} />
         <Route path="employees" element={<EmployeesPage />} />
         <Route path="activities/*" element={<ActivitiesPage />} />
+        <Route path="basic-data/*" element={<BasicDataPage />} />
         <Route path="devices" element={<DevicesPage />} />
         <Route path="setup/*" element={<SetupPage />} />
         <Route path="settings" element={<SettingsPage />} />

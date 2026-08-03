@@ -60,6 +60,7 @@ interface EmployeeFields {
   notes: string | null;
   securityRoleId: number | null;
   teamRoleId: number | null;
+  breakProfileId: string | null;
 }
 
 // Validates a full create payload — every required field must be present.
@@ -132,6 +133,13 @@ function validateCreate(body: Record<string, unknown>):
     errors.teamRoleId = "Invalid team role";
   }
 
+  let breakProfileId: string | null = null;
+  if (body.breakProfileId != null && String(body.breakProfileId).trim() !== "") {
+    const v = String(body.breakProfileId);
+    if (!UUID_RE.test(v)) errors.breakProfileId = "Invalid break profile";
+    else breakProfileId = v;
+  }
+
   if (Object.keys(errors).length) return { errors };
 
   return {
@@ -151,6 +159,7 @@ function validateCreate(body: Record<string, unknown>):
       notes: trimOrNull(body.notes as string),
       securityRoleId,
       teamRoleId,
+      breakProfileId,
     },
   };
 }
@@ -252,6 +261,17 @@ function validateUpdate(body: Record<string, unknown>):
     else data.teamRoleId = n;
   }
 
+  if ("breakProfileId" in body) {
+    const raw = body.breakProfileId;
+    if (raw == null || String(raw).trim() === "") {
+      data.breakProfileId = null;
+    } else if (!UUID_RE.test(String(raw))) {
+      errors.breakProfileId = "Invalid break profile";
+    } else {
+      data.breakProfileId = String(raw);
+    }
+  }
+
   if (Object.keys(errors).length) return { errors };
   return { data };
 }
@@ -270,6 +290,7 @@ const SELECT_COLUMNS = `
   to_char(e.start_date, 'YYYY-MM-DD') as start_date,
   e.is_active, e.employee_number, e.nationality,
   e.preferred_language, e.notes, e.profile_photo_path, e.security_role_id, e.team_role_id,
+  e.break_profile_id, bp.name as break_profile_name, bp.is_active as break_profile_is_active,
   e.created_at, e.updated_at,
   sr.name as security_role, tr.name as team_role,
   d.id as device_id, d.device_name,
@@ -280,6 +301,7 @@ const FROM_JOINS = `
   from employees e
   join security_roles sr on sr.id = e.security_role_id
   join team_roles tr on tr.id = e.team_role_id
+  left join break_profiles bp on bp.id = e.break_profile_id
   left join device_assignments da on da.employee_id = e.id and da.unassigned_at is null
   left join devices d on d.id = da.device_id
   left join lateral (
@@ -312,6 +334,10 @@ function serializeEmployee(row: any, photoUrl: string | null, includeNotes: bool
     securityRole: row.security_role,
     teamRoleId: row.team_role_id,
     teamRole: row.team_role,
+    breakProfileId: row.break_profile_id,
+    breakProfile: row.break_profile_id
+      ? { id: row.break_profile_id, name: row.break_profile_name, isActive: row.break_profile_is_active }
+      : null,
     device: row.device_id ? { id: row.device_id, name: row.device_name } : null,
     activityGroups: row.activity_groups,
     createdAt: row.created_at,
@@ -418,17 +444,26 @@ router.post(
     if ("errors" in result) return res.status(400).json({ errors: result.errors });
     const d = result.data;
 
+    if (d.breakProfileId) {
+      const profileCheck = await pool.query("select is_active from break_profiles where id = $1", [
+        d.breakProfileId,
+      ]);
+      if (!profileCheck.rows[0] || !profileCheck.rows[0].is_active) {
+        return res.status(400).json({ errors: { breakProfileId: "Break profile is not active" } });
+      }
+    }
+
     try {
       const { rows } = await pool.query(
         `insert into employees
            (first_name, last_name, gender, date_of_birth, email, phone_number, job_group,
             start_date, is_active, employee_number, nationality, preferred_language, notes,
-            security_role_id, team_role_id, settings_pin_hash)
+            security_role_id, team_role_id, settings_pin_hash, break_profile_id)
          values
            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
             coalesce($14, (select id from security_roles where name = 'Employee')),
             coalesce($15, (select id from team_roles where name = 'Team Member')),
-            null)
+            null, $16)
          returning id`,
         [
           d.firstName,
@@ -446,6 +481,7 @@ router.post(
           d.notes,
           d.securityRoleId,
           d.teamRoleId,
+          d.breakProfileId,
         ]
       );
 
@@ -485,6 +521,25 @@ router.patch(
     if ("errors" in result) return res.status(400).json({ errors: result.errors });
     const d = result.data;
 
+    // A *new* break profile assignment (different from what's already
+    // stored) must reference an active profile — leaving the value
+    // unchanged is always allowed even if that profile has since gone
+    // inactive, which is what keeps history visible without permitting a
+    // fresh assignment to a retired profile.
+    if ("breakProfileId" in d) {
+      const current = await pool.query("select break_profile_id from employees where id = $1", [id]);
+      if (!current.rows[0]) return res.status(404).json({ error: "Employee not found" });
+      const currentBreakProfileId: string | null = current.rows[0].break_profile_id;
+      if (d.breakProfileId !== null && d.breakProfileId !== currentBreakProfileId) {
+        const profileCheck = await pool.query("select is_active from break_profiles where id = $1", [
+          d.breakProfileId,
+        ]);
+        if (!profileCheck.rows[0] || !profileCheck.rows[0].is_active) {
+          return res.status(400).json({ errors: { breakProfileId: "Break profile is not active" } });
+        }
+      }
+    }
+
     const columnMap: Record<keyof EmployeeFields, string> = {
       firstName: "first_name",
       lastName: "last_name",
@@ -501,6 +556,7 @@ router.patch(
       notes: "notes",
       securityRoleId: "security_role_id",
       teamRoleId: "team_role_id",
+      breakProfileId: "break_profile_id",
     };
 
     const keys = Object.keys(d) as (keyof EmployeeFields)[];

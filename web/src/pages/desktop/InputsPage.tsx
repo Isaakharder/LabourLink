@@ -152,9 +152,7 @@ export function InputsPage() {
     <div className="inputs-page">
       <PageHeader title="Inputs" description="Review and correct daily employee activity logs." />
 
-      <DateNav date={date} onChange={(d) => updateParams({ date: d })} />
-
-      <div className="inputs-layout">
+      <div className="inputs-workspace">
         <EmployeeListPanel
           employees={employees}
           error={employeesError}
@@ -164,15 +162,21 @@ export function InputsPage() {
           onSearchChange={setEmployeeSearch}
         />
 
-        <div className="inputs-main">
-          {error && <p className="error-text">{error}</p>}
+        <div className="inputs-workspace-main">
+          <div className="inputs-workspace-datenav">
+            <DateNav date={date} onChange={(d) => updateParams({ date: d })} />
+          </div>
+
+          {error && <p className="error-text inputs-workspace-placeholder">{error}</p>}
 
           {!selectedEmployeeId ? (
             employeesError ? null : (
-              <p className="placeholder-page">Select an employee to view their activity logs.</p>
+              <p className="placeholder-page inputs-workspace-placeholder">
+                Select an employee to view their activity logs.
+              </p>
             )
           ) : !daily ? (
-            <p>Loading...</p>
+            <p className="inputs-workspace-placeholder">Loading...</p>
           ) : (
             <>
               <ActivityLogsCard
@@ -189,7 +193,12 @@ export function InputsPage() {
                 onSaveEdit={handleSaveEdit}
                 onCancelEdit={handleCancelEdit}
               />
-              <WorkdayDetailsCard workStartTime={daily.workStartTime} breaks={daily.breaks} />
+              <WorkdayDetailsCard
+                workStartTime={daily.workStartTime}
+                breaks={daily.breaks}
+                paidBreakSeconds={daily.totals.paidBreakSeconds}
+                unpaidBreakSeconds={daily.totals.unpaidBreakSeconds}
+              />
             </>
           )}
         </div>

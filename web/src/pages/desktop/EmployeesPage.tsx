@@ -154,6 +154,7 @@ export function EmployeesPage() {
                 <th>Status</th>
                 <th>Device</th>
                 <th>Activity Group</th>
+                <th>Break Profile</th>
                 <th></th>
               </tr>
             </thead>
@@ -179,6 +180,7 @@ export function EmployeesPage() {
                   </td>
                   <td>{emp.device ? emp.device.name ?? "Unnamed device" : "—"}</td>
                   <td>{formatActivityGroups(emp.activityGroups)}</td>
+                  <td>{emp.breakProfile?.name ?? "—"}</td>
                   <td>{renderActions(emp)}</td>
                 </tr>
               ))}
@@ -231,6 +233,10 @@ export function EmployeesPage() {
                   <div>
                     <dt>Activity Group</dt>
                     <dd>{formatActivityGroups(emp.activityGroups)}</dd>
+                  </div>
+                  <div>
+                    <dt>Break Profile</dt>
+                    <dd>{emp.breakProfile?.name ?? "—"}</dd>
                   </div>
                 </dl>
                 {renderActions(emp)}

@@ -1270,67 +1270,64 @@ input {
 /* ---------- Inputs page (daily activity-log review) ---------- */
 
 .inputs-page .page-header {
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.5rem;
 }
 
-.inputs-date-nav {
+/* .app-content is a fixed-height (100vh), independently-scrolling column
+   shared by every page. Scoped to when it holds .inputs-page (:has, so no
+   other page is affected): turn it into a flex column so .inputs-page can
+   claim all the leftover height below the page header via flex: 1, instead
+   of the workspace box just shrink-wrapping its content and leaving dead
+   space above the browser chrome/taskbar. */
+.app-content:has(.inputs-page) {
+  padding-top: 1.1rem;
+  padding-bottom: 1.1rem;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 1rem;
-  margin-top: 0;
-  margin-bottom: 0.85rem;
+  flex-direction: column;
 }
 
-.inputs-date-nav button {
-  width: 36px;
-  height: 36px;
-  border-radius: 999px;
-  border: 1px solid var(--color-border);
-  background: var(--color-surface);
-  font-size: 1rem;
-  line-height: 1;
-}
-
-.inputs-date-display {
-  position: relative;
+.inputs-page {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
-.inputs-date-long {
-  font-weight: 600;
-  font-size: 1.05rem;
-  min-width: 260px;
-  text-align: center;
-}
+/* ---------- Inputs: one connected workspace, not floating cards ----------
+   A single bordered/rounded grid (.inputs-workspace) holds the employee
+   panel and the main column side by side; overflow: hidden clips both to
+   the shared outer radius so no inner element needs its own. Sections in
+   the main column are divided by a single border (declared on whichever
+   section is above the seam) instead of each having its own card
+   background/border/gap, so two adjacent sections never draw a doubled
+   line. flex: 1 + min-height: 0 stretches the whole box down to the bottom
+   of the viewport instead of stopping at its content's natural height. */
 
-.inputs-date-picker {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  cursor: pointer;
-  width: 100%;
-}
-
-.inputs-layout {
+.inputs-workspace {
   display: grid;
   grid-template-columns: 240px 1fr;
-  gap: 1.25rem;
-  align-items: start;
-}
-
-.inputs-employee-panel {
+  flex: 1;
+  min-height: 0;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
-  padding: 0.75rem;
-  position: sticky;
-  top: 1rem;
+  overflow: hidden;
+}
+
+.inputs-employee-panel {
+  /* No align-self: start here — the grid's default stretch keeps this
+     panel exactly as tall as the main column (date nav + header + table +
+     workday combined) even when the employee list itself is short, so the
+     border-right divider runs the full height instead of stopping partway
+     down. min-height: 0 stops the employee list's own content from forcing
+     the grid row (and so the whole workspace) taller than the viewport —
+     overflow-y: auto below scrolls the list internally instead. */
+  border-right: 1px solid var(--color-border);
+  padding: 0.65rem;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
-  max-height: calc(100vh - 8rem);
+  gap: 0.55rem;
   overflow-y: auto;
 }
 
@@ -1374,26 +1371,69 @@ input {
   white-space: nowrap;
 }
 
-.inputs-main {
+.inputs-workspace-main {
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
   min-width: 0;
+  min-height: 0;
 }
 
-.inputs-logs-card,
-.inputs-workday-card {
-  background: var(--color-surface);
+.inputs-workspace-datenav {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--color-border);
+  padding: 0.6rem 1rem;
+}
+
+.inputs-date-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+}
+
+.inputs-date-nav button {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  padding: 1rem;
+  background: var(--color-surface);
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.inputs-date-display {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.inputs-date-long {
+  font-weight: 600;
+  font-size: 1.05rem;
+  min-width: 260px;
+  text-align: center;
+}
+
+.inputs-date-picker {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+}
+
+.inputs-workspace-placeholder {
+  flex-shrink: 0;
+  padding: 1.5rem 1rem;
 }
 
 .inputs-logs-header {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 0.85rem;
-  margin-bottom: 1rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--color-border);
 }
 
 .inputs-logs-header-text {
@@ -1428,7 +1468,16 @@ input {
 }
 
 .inputs-logs-table-scroll {
+  /* The one flexible/scrollable region in the workspace: it absorbs all
+     the extra height freed up by stretching .inputs-workspace to the
+     bottom of the viewport, so a handful of rows still get a roomy area
+     instead of the box shrink-wrapping to just those rows — and once
+     enough activities exist to exceed that space, this scrolls on its own
+     without pushing Workday Details off-screen. */
+  flex: 1;
+  min-height: 0;
   overflow-x: auto;
+  overflow-y: auto;
 }
 
 .inputs-logs-table {
@@ -1439,10 +1488,20 @@ input {
   table-layout: fixed;
   width: 100%;
   min-width: 640px;
-  /* Overrides .employees-table's overflow: hidden (used elsewhere for
-     rounded corners) so the End Time editor's Save/Cancel buttons can
-     spill past the fixed-width column instead of being clipped. */
+  /* Flattens .employees-table's own background/border/radius — the table
+     now sits flush inside .inputs-workspace's single shared border instead
+     of drawing a nested card of its own. Also overrides its overflow:
+     hidden so the End Time editor's Save/Cancel buttons can spill past the
+     fixed-width column instead of being clipped. */
+  background: transparent;
+  border: none;
+  border-radius: 0;
   overflow: visible;
+}
+
+.inputs-logs-table th,
+.inputs-logs-table td {
+  padding: 0.5rem 1rem;
 }
 
 .inputs-col-activity {
@@ -1530,20 +1589,348 @@ input {
   color: var(--color-muted);
 }
 
+.inputs-workday-section {
+  flex-shrink: 0;
+  border-top: 1px solid var(--color-border);
+  padding: 0.85rem 1rem;
+}
+
+.inputs-workday-section h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+}
+
 .inputs-workday-note {
   color: var(--color-muted);
   font-size: 0.78rem;
-  margin: -0.4rem 0 0.75rem;
+  margin: 0 0 0.75rem;
+}
+
+.inputs-workday-table {
+  /* Same reasoning as .inputs-logs-table above: must not inherit the
+     Employees page's `.employees-table { display: none }` fallback at
+     <=900px, since this page has no card-list alternative. */
+  display: table;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+
+.inputs-workday-table th,
+.inputs-workday-table td {
+  padding: 0.45rem 0;
 }
 
 @media (max-width: 900px) {
-  .inputs-layout {
+  .inputs-workspace {
     grid-template-columns: 1fr;
+    /* Stacked layout: the employee panel row keeps its own natural/capped
+       height below, and the main column's row (1fr) still claims the rest
+       of the viewport-height box, same as the two-column desktop case. */
+    grid-template-rows: auto 1fr;
   }
 
   .inputs-employee-panel {
-    position: static;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
     max-height: 260px;
+  }
+}
+
+/* ---------- Base Data: Break Profiles (Breaks tab) ----------
+   Same connected two-pane workspace shape as .inputs-workspace, kept as its
+   own class family rather than reusing those names — this app's convention
+   is one CSS namespace per feature even when the shape is identical (see
+   ActivityPicker's own note about not reusing .mobile-sheet*). */
+
+.break-profiles-workspace {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  flex: 1;
+  min-height: 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.break-profiles-list-panel {
+  border-right: 1px solid var(--color-border);
+  padding: 0.65rem;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  overflow-y: auto;
+}
+
+.break-profiles-search {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.break-profiles-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.break-profiles-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  font-size: 0.85rem;
+}
+
+.break-profiles-item-selected {
+  background: var(--color-primary);
+  color: white;
+}
+
+.break-profiles-item-selected .status-pill {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.break-profiles-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.break-profiles-main {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1.25rem;
+}
+
+.break-profile-editor-placeholder {
+  padding: 0;
+}
+
+.break-profile-items-section {
+  margin-top: 1.5rem;
+}
+
+.break-profile-items-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.break-profile-items-header h3 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-muted);
+  margin: 0;
+}
+
+.break-profile-warning {
+  color: #92400e;
+  background: #fef3c7;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8rem;
+  margin-bottom: 0.75rem;
+}
+
+.break-item-row-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.break-item-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas:
+    "order fields remove"
+    "toggles toggles toggles";
+  gap: 0.75rem;
+  align-items: start;
+  padding: 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.break-item-row-order {
+  grid-area: order;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.break-item-row-order button {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+}
+
+.break-item-row-order button:disabled {
+  opacity: 0.4;
+}
+
+.break-item-row-fields {
+  grid-area: fields;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr) auto;
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.break-item-row-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+}
+
+.break-item-row-fields input,
+.break-item-row-fields select {
+  padding: 0.45rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-family: inherit;
+  color: var(--color-text);
+}
+
+.break-item-row-duration {
+  font-size: 0.85rem;
+  color: var(--color-muted);
+  padding-bottom: 0.5rem;
+  white-space: nowrap;
+}
+
+.break-item-row-toggles {
+  grid-area: toggles;
+  display: flex;
+  gap: 1.5rem;
+}
+
+.break-item-toggle-group {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.break-item-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.field-hint {
+  color: var(--color-muted);
+  font-size: 0.75rem;
+  margin: 0;
+}
+
+.break-item-window-fields {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.2rem;
+}
+
+.break-item-window-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--color-muted);
+}
+
+.break-item-window-fields input {
+  width: 70px;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-family: inherit;
+  color: var(--color-text);
+}
+
+.break-item-row-remove {
+  grid-area: remove;
+  align-self: start;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.break-profile-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 1.5rem;
+}
+
+.inputs-break-source-badge {
+  margin-left: 0.5rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: var(--color-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.inputs-workday-table tfoot td {
+  font-weight: 600;
+  border-top: 1px solid var(--color-border);
+}
+
+@media (max-width: 900px) {
+  .break-profiles-workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .break-profiles-list-panel {
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+    max-height: 260px;
+  }
+
+  .break-item-row {
+    grid-template-columns: auto 1fr;
+    grid-template-areas:
+      "order fields"
+      "remove remove"
+      "toggles toggles";
+  }
+
+  .break-item-row-fields {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .break-item-row-toggles {
+    flex-direction: column;
+    gap: 0.75rem;
   }
 }
 

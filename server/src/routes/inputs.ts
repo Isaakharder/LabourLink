@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { getSignedPhotoUrl, getSignedPhotoUrls } from "../lib/storage";
 import { calendarDateInAppTimezone, getDayBoundsUtc } from "../lib/timezone";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
+import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 
 const router = Router();
 
@@ -81,15 +82,26 @@ router.get(
     const employee = empRes.rows[0];
     if (!employee) return res.status(404).json({ error: "Employee not found" });
 
+    // Reconcile scheduled breaks the employee worked straight through before
+    // reading the day back — never for a future date (nothing to reconcile
+    // yet, and reconcileEmployeeBreaks would just no-op on future-dated
+    // items anyway, but skipping avoids the wasted round trip).
+    if (date <= calendarDateInAppTimezone(new Date())) {
+      await reconcileEmployeeBreaks(employeeId, date);
+    }
+
     const { start, end } = getDayBoundsUtc(date);
     // Not filtered on activities.is_active — activities are never
     // hard-deleted, only deactivated, so filtering here would silently hide
     // legitimate history against a since-deactivated activity.
     const { rows: entryRows } = await pool.query(
       `select te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
-              a.name as activity_name, a.normal_speed, a.speed_unit
+              te.break_profile_item_id, te.source, te.is_paid,
+              a.name as activity_name, a.normal_speed, a.speed_unit,
+              bpi.name as break_item_name
        from time_entries te
        left join activities a on a.id = te.activity_id
+       left join break_profile_items bpi on bpi.id = te.break_profile_item_id
        where te.employee_id = $1 and te.started_at >= $2 and te.started_at < $3
        order by te.started_at asc`,
       [employeeId, start, end]
@@ -105,9 +117,24 @@ router.get(
     const { runs, breaks } = groupIntoActivityRuns(segments);
 
     const activityMeta = new Map<string, { name: string; normalSpeed: string | null; speedUnit: string | null }>();
+    // Unclassified/legacy breaks (is_paid null, recorded before this column
+    // existed) are bucketed as unpaid — a break must be explicitly marked
+    // paid to count as paid, nothing is inferred from duration or time.
+    const breakMeta = new Map<
+      string,
+      { name: string | null; isPaid: boolean | null; source: "manual" | "auto"; breakProfileItemId: string | null }
+    >();
     for (const r of entryRows) {
       if (r.activity_id && !activityMeta.has(r.activity_id)) {
         activityMeta.set(r.activity_id, { name: r.activity_name, normalSpeed: r.normal_speed, speedUnit: r.speed_unit });
+      }
+      if (r.entry_type === "break") {
+        breakMeta.set(r.id, {
+          name: r.break_item_name ?? null,
+          isPaid: r.is_paid,
+          source: r.source,
+          breakProfileItemId: r.break_profile_item_id,
+        });
       }
     }
 
@@ -118,6 +145,13 @@ router.get(
     const totalBreakSeconds = Math.round(
       breaks.reduce((sum, b) => sum + (b.endedAt ? (b.endedAt.getTime() - b.startedAt.getTime()) / 1000 : 0), 0)
     );
+    let totalPaidBreakSeconds = 0;
+    let totalUnpaidBreakSeconds = 0;
+    for (const b of breaks) {
+      const dur = b.endedAt ? Math.round((b.endedAt.getTime() - b.startedAt.getTime()) / 1000) : 0;
+      if (breakMeta.get(b.id)?.isPaid) totalPaidBreakSeconds += dur;
+      else totalUnpaidBreakSeconds += dur;
+    }
 
     const photoUrl = employee.profile_photo_path ? await getSignedPhotoUrl(employee.profile_photo_path) : null;
 
@@ -148,13 +182,25 @@ router.get(
           canEdit: canEditRole && !r.isOpen,
         };
       }),
-      breaks: breaks.map((b) => ({
-        id: b.id,
-        startedAt: b.startedAt,
-        endedAt: b.endedAt,
-        durationSeconds: b.endedAt ? Math.round((b.endedAt.getTime() - b.startedAt.getTime()) / 1000) : 0,
-      })),
-      totals: { workedSeconds: totalWorkedSeconds, breakSeconds: totalBreakSeconds },
+      breaks: breaks.map((b) => {
+        const meta = breakMeta.get(b.id);
+        return {
+          id: b.id,
+          startedAt: b.startedAt,
+          endedAt: b.endedAt,
+          durationSeconds: b.endedAt ? Math.round((b.endedAt.getTime() - b.startedAt.getTime()) / 1000) : 0,
+          name: meta?.name ?? null,
+          isPaid: meta?.isPaid ?? null,
+          source: meta?.source ?? "manual",
+          breakProfileItemId: meta?.breakProfileItemId ?? null,
+        };
+      }),
+      totals: {
+        workedSeconds: totalWorkedSeconds,
+        breakSeconds: totalBreakSeconds,
+        paidBreakSeconds: totalPaidBreakSeconds,
+        unpaidBreakSeconds: totalUnpaidBreakSeconds,
+      },
       canEdit: canEditRole,
     });
   })

@@ -4,25 +4,26 @@ import { formatDurationHMS, formatTimeInAppTimezone } from "../../lib/timezone";
 interface WorkdayDetailsCardProps {
   workStartTime: string | null;
   breaks: BreakDto[];
+  paidBreakSeconds: number;
+  unpaidBreakSeconds: number;
 }
 
-// Break rows show a single Duration column, not Paid/Unpaid — time_entries
-// has no paid/unpaid or break-type classification of any kind (confirmed
-// during planning: no such column exists anywhere in this app's schema).
-// Reporting that limitation here rather than guessing at a split.
-export function WorkdayDetailsCard({ workStartTime, breaks }: WorkdayDetailsCardProps) {
+export function WorkdayDetailsCard({
+  workStartTime,
+  breaks,
+  paidBreakSeconds,
+  unpaidBreakSeconds,
+}: WorkdayDetailsCardProps) {
   return (
-    <div className="inputs-workday-card">
+    <div className="inputs-workday-section">
       <h3>Workday details</h3>
-      <p className="inputs-workday-note">
-        Paid/unpaid break classification isn't tracked yet — showing total break duration only.
-      </p>
-      <table className="employees-table">
+      <table className="employees-table inputs-workday-table">
         <thead>
           <tr>
             <th>Activity</th>
             <th>Start Time</th>
-            <th>Duration</th>
+            <th>Paid Time</th>
+            <th>Unpaid Time</th>
           </tr>
         </thead>
         <tbody>
@@ -31,23 +32,40 @@ export function WorkdayDetailsCard({ workStartTime, breaks }: WorkdayDetailsCard
               <td>Work start time</td>
               <td>{formatTimeInAppTimezone(workStartTime)}</td>
               <td>—</td>
+              <td>—</td>
             </tr>
           )}
-          {breaks.map((b) => (
-            <tr key={b.id}>
-              <td>Break</td>
-              <td>{formatTimeInAppTimezone(b.startedAt)}</td>
-              <td>{b.endedAt ? formatDurationHMS(b.durationSeconds) : "In progress"}</td>
-            </tr>
-          ))}
+          {breaks.map((b) => {
+            const durationDisplay = b.endedAt ? formatDurationHMS(b.durationSeconds) : "In progress";
+            return (
+              <tr key={b.id}>
+                <td>
+                  {b.name ?? "Break"}
+                  {b.source === "auto" && <span className="inputs-break-source-badge">Auto-added</span>}
+                </td>
+                <td>{formatTimeInAppTimezone(b.startedAt)}</td>
+                <td>{b.isPaid ? durationDisplay : "—"}</td>
+                <td>{!b.isPaid ? durationDisplay : "—"}</td>
+              </tr>
+            );
+          })}
           {!workStartTime && breaks.length === 0 && (
             <tr>
-              <td colSpan={3} className="placeholder-page">
+              <td colSpan={4} className="placeholder-page">
                 No work start time or breaks recorded for this day.
               </td>
             </tr>
           )}
         </tbody>
+        {breaks.length > 0 && (
+          <tfoot>
+            <tr>
+              <td colSpan={2}>Total break time</td>
+              <td>{formatDurationHMS(paidBreakSeconds)}</td>
+              <td>{formatDurationHMS(unpaidBreakSeconds)}</td>
+            </tr>
+          </tfoot>
+        )}
       </table>
     </div>
   );

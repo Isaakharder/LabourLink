@@ -104,3 +104,13 @@ export function formatTimeInAppTimezone(instant: Date, tz: string = APP_TIMEZONE
     hour12: true,
   }).format(instant);
 }
+
+// Splits a Postgres `time` column value ("HH:MM:SS", as returned by pg) into
+// its numeric parts. Shared by break_profile_items consumers —
+// breakReconciliation.ts (auto-add) and mobileTime.ts (fixed-break
+// rounding) — that both need to combine a scheduled time-of-day with a
+// calendar date via zonedWallTimeToUtc.
+export function parseTimeParts(t: string): [number, number, number] {
+  const [h, m, s] = t.split(":").map(Number);
+  return [h, m, s || 0];
+}

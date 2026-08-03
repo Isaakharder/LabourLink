@@ -48,7 +48,7 @@ export function ActivityLogsCard({
   }
 
   return (
-    <div className="inputs-logs-card">
+    <>
       <div className="inputs-logs-header">
         <Avatar photoUrl={employee.photoUrl} firstName={employee.firstName} lastName={employee.lastName} size="large" />
         <div className="inputs-logs-header-text">
@@ -70,7 +70,7 @@ export function ActivityLogsCard({
       </div>
 
       {runs.length === 0 ? (
-        <p className="placeholder-page">No activity logs for this date.</p>
+        <p className="placeholder-page inputs-workspace-placeholder">No activity logs for this date.</p>
       ) : (
         <div className="inputs-logs-table-scroll">
           <table className="employees-table inputs-logs-table">
@@ -161,6 +161,6 @@ export function ActivityLogsCard({
           </table>
         </div>
       )}
-    </div>
+    </>
   );
 }

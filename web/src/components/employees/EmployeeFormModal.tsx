@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { Avatar } from "./Avatar";
 import { api, ApiError } from "../../lib/api";
-import { Employee, GENDERS, LANGUAGES, NATIONALITIES } from "../../lib/employeeTypes";
+import { Employee, EmployeeBreakProfile, GENDERS, LANGUAGES, NATIONALITIES } from "../../lib/employeeTypes";
 import { ActivityGroup } from "../../lib/activityTypes";
 
 interface EmployeeFormModalProps {
@@ -24,6 +24,7 @@ interface FormState {
   isActive: boolean;
   securityRoleId: string;
   teamRoleId: string;
+  breakProfileId: string;
   email: string;
   phoneNumber: string;
   notes: string;
@@ -60,6 +61,7 @@ function toFormState(employee: Employee | null): FormState {
     isActive: employee?.isActive ?? true,
     securityRoleId: String(employee?.securityRoleId ?? 1),
     teamRoleId: String(employee?.teamRoleId ?? 1),
+    breakProfileId: employee?.breakProfileId ?? "",
     email: employee?.email ?? "",
     phoneNumber: employee?.phoneNumber ?? "",
     notes: employee?.notes ?? "",
@@ -86,6 +88,20 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
       .then((res) => setActivityGroups(res.activityGroups))
       .catch(() => {});
   }, []);
+
+  const [breakProfiles, setBreakProfiles] = useState<EmployeeBreakProfile[]>([]);
+  useEffect(() => {
+    api<{ breakProfiles: EmployeeBreakProfile[] }>("/api/break-profiles?status=active")
+      .then((res) => setBreakProfiles(res.breakProfiles))
+      .catch(() => {});
+  }, []);
+  // The employee's current profile stays selectable even if it's since been
+  // deactivated (history stays visible), but only if it isn't already in the
+  // active list above — a brand-new assignment must still pick an active one.
+  const selectableBreakProfiles =
+    employee?.breakProfile && !employee.breakProfile.isActive
+      ? [...breakProfiles, employee.breakProfile]
+      : breakProfiles;
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -177,6 +193,7 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
         isActive: form.isActive,
         securityRoleId: Number(form.securityRoleId),
         teamRoleId: Number(form.teamRoleId),
+        breakProfileId: form.breakProfileId || null,
         email: form.email.trim() || null,
         phoneNumber: form.phoneNumber.trim() || null,
         notes: form.notes.trim() || null,
@@ -400,6 +417,19 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
                   </option>
                 ))}
               </select>
+            </label>
+            <label>
+              Break Profile
+              <select value={form.breakProfileId} onChange={(e) => set("breakProfileId", e.target.value)}>
+                <option value="">None</option>
+                {selectableBreakProfiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                    {!p.isActive ? " (inactive)" : ""}
+                  </option>
+                ))}
+              </select>
+              {errors.breakProfileId && <span className="field-error">{errors.breakProfileId}</span>}
             </label>
             <label className="employee-form-checkbox">
               <input

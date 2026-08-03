@@ -2,6 +2,8 @@ import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireDevice } from "../middleware/device";
+import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
+import { calendarDateInAppTimezone, parseTimeParts, zonedWallTimeToUtc } from "../lib/timezone";
 
 const router = Router();
 router.use(asyncHandler(requireDevice));
@@ -17,6 +19,23 @@ interface OpenEntry {
   entry_type: "work" | "break";
   activity_id: string | null;
   started_at: string;
+}
+
+interface OpenEntryOverrides {
+  // Rounds the recorded boundary: used for both the new row's started_at
+  // AND (if this call closes a prior row) that row's ended_at — both must
+  // get the same explicit value, not just the new row, or the chain's
+  // exact-boundary contiguity check (accumulateChainSeconds /
+  // groupIntoActivityRuns) breaks.
+  startedAt?: Date;
+  // Real tap timestamps, kept alongside the possibly-rounded started_at/
+  // ended_at for audit purposes.
+  actualStartedAt?: Date;
+  actualEndedAt?: Date;
+  breakProfileItemId?: string | null;
+  scheduledBreakDate?: string | null;
+  source?: "manual" | "auto";
+  isPaid?: boolean | null;
 }
 
 async function getOpenEntry(employeeId: string): Promise<OpenEntry | null> {
@@ -43,24 +62,41 @@ async function openEntry(
   deviceId: string,
   entryType: "work" | "break",
   activityId: string | null,
-  idempotencyKey: string
+  idempotencyKey: string,
+  overrides: OpenEntryOverrides = {}
 ): Promise<OpenEntry> {
   const client = await pool.connect();
   try {
     await client.query("begin");
 
     await client.query(
-      `update time_entries set ended_at = now()
+      `update time_entries
+       set ended_at = coalesce($3, now()),
+           actual_ended_at = coalesce($4, actual_ended_at)
        where employee_id = $1 and ended_at is null and idempotency_key <> $2`,
-      [employeeId, idempotencyKey]
+      [employeeId, idempotencyKey, overrides.startedAt ?? null, overrides.actualEndedAt ?? null]
     );
 
     const insert = await client.query(
-      `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key)
-       values ($1, $2, $3, $4, $5)
+      `insert into time_entries
+         (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at,
+          actual_started_at, break_profile_item_id, scheduled_break_date, source, is_paid)
+       values ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8, $9, coalesce($10, 'manual'), $11)
        on conflict (idempotency_key) do nothing
        returning id, entry_type, activity_id, started_at`,
-      [employeeId, deviceId, entryType, activityId, idempotencyKey]
+      [
+        employeeId,
+        deviceId,
+        entryType,
+        activityId,
+        idempotencyKey,
+        overrides.startedAt ?? null,
+        overrides.actualStartedAt ?? null,
+        overrides.breakProfileItemId ?? null,
+        overrides.scheduledBreakDate ?? null,
+        overrides.source ?? null,
+        overrides.isPaid ?? null,
+      ]
     );
 
     let row = insert.rows[0];
@@ -134,7 +170,39 @@ function accumulateChainSeconds(entries: ChainEntry[], activityId: string, bound
   return Math.round(totalSeconds);
 }
 
+interface FixedItem {
+  id: string;
+  start_time: string;
+  end_time: string;
+  is_paid: boolean;
+  fixed_start_window_minutes: number;
+  fixed_end_window_minutes: number;
+}
+
+// Fixed-break items on the employee's currently active assigned profile —
+// used to decide whether a manual Start/End Break tap should be rounded to
+// the scheduled time. Inactive profile/employee naturally returns nothing.
+async function loadActiveFixedItems(employeeId: string): Promise<FixedItem[]> {
+  const { rows } = await pool.query(
+    `select bpi.id, bpi.start_time, bpi.end_time, bpi.is_paid,
+            bpi.fixed_start_window_minutes, bpi.fixed_end_window_minutes
+     from employees e
+     join break_profiles bp on bp.id = e.break_profile_id and bp.is_active = true
+     join break_profile_items bpi
+       on bpi.break_profile_id = bp.id and bpi.fixed_break = true and bpi.is_active = true
+     where e.id = $1 and e.is_active = true`,
+    [employeeId]
+  );
+  return rows;
+}
+
 async function serializeStatus(employeeId: string, employeeFirstName: string, employeeLastName: string) {
+  // Server-side reconciliation for scheduled breaks the employee worked
+  // straight through — runs on every status fetch and every mutating
+  // action (they all call this function), so it never depends on a
+  // background worker. Idempotent: see breakReconciliation.ts.
+  await reconcileEmployeeBreaks(employeeId, calendarDateInAppTimezone(new Date()));
+
   const open = await getOpenEntry(employeeId);
 
   // Bounded window used to walk the current job chain backward — work/break
@@ -342,7 +410,57 @@ router.post(
     if (!isValidIdempotencyKey(idempotencyKey)) {
       return res.status(400).json({ error: "a valid idempotencyKey is required" });
     }
-    await openEntry(d.employeeId, d.id, "break", null, idempotencyKey);
+
+    // If the employee's assigned profile has a fixed-break item whose start
+    // grace window contains this moment, round to the scheduled time and
+    // tag the entry with that item — otherwise record the actual tap time
+    // with no profile association. Nearest scheduled time wins on overlap
+    // between two items' windows.
+    //
+    // `now` is always server-processing time, same as every other
+    // timestamp in this file — for a request replayed from the offline
+    // queue (offlineQueue.ts) after connectivity returns, that's when it's
+    // replayed, not the original tap. A long-delayed replay can therefore
+    // miss the window it should have matched, or (rarely) land inside a
+    // different item's window. Accepted: the offline queue is already
+    // documented as not meant to survive an extended fully-offline shift,
+    // and every other timestamp here has the same server-time
+    // characteristic — fixed-break rounding doesn't introduce a new class
+    // of problem, it just makes an existing one slightly more visible.
+    const now = new Date();
+    const todayLocal = calendarDateInAppTimezone(now);
+    const [y, mo, da] = todayLocal.split("-").map(Number);
+    const fixedItems = await loadActiveFixedItems(d.employeeId);
+
+    let match: { item: FixedItem; scheduledStart: Date } | null = null;
+    for (const item of fixedItems) {
+      const [sh, sm, ss] = parseTimeParts(item.start_time);
+      const scheduledStart = zonedWallTimeToUtc(y, mo, da, sh, sm, ss);
+      const windowMs = item.fixed_start_window_minutes * 60 * 1000;
+      const distance = Math.abs(now.getTime() - scheduledStart.getTime());
+      if (distance > windowMs) continue;
+      if (!match || distance < Math.abs(now.getTime() - match.scheduledStart.getTime())) {
+        match = { item, scheduledStart };
+      }
+    }
+
+    await openEntry(
+      d.employeeId,
+      d.id,
+      "break",
+      null,
+      idempotencyKey,
+      match
+        ? {
+            startedAt: match.scheduledStart,
+            actualStartedAt: now,
+            breakProfileItemId: match.item.id,
+            scheduledBreakDate: todayLocal,
+            source: "manual",
+            isPaid: match.item.is_paid,
+          }
+        : {}
+    );
     res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName));
   })
 );
@@ -368,7 +486,34 @@ router.post(
       return res.status(409).json({ error: "No prior activity to resume" });
     }
 
-    await openEntry(d.employeeId, d.id, "work", resumeActivityId, idempotencyKey);
+    const now = new Date();
+    const overrides: OpenEntryOverrides = { actualEndedAt: now };
+
+    // Only round the end if the currently open break was itself matched to
+    // a fixed item at start time (never retroactively match on end alone).
+    const open = await getOpenEntry(d.employeeId);
+    if (open?.entry_type === "break") {
+      const { rows: itemRows } = await pool.query(
+        `select bpi.end_time, bpi.fixed_end_window_minutes,
+                to_char(te.scheduled_break_date, 'YYYY-MM-DD') as scheduled_break_date
+         from time_entries te
+         join break_profile_items bpi on bpi.id = te.break_profile_item_id
+         where te.id = $1`,
+        [open.id]
+      );
+      const row = itemRows[0];
+      if (row) {
+        const [y, mo, da] = (row.scheduled_break_date as string).split("-").map(Number);
+        const [eh, em, es] = parseTimeParts(row.end_time);
+        const scheduledEnd = zonedWallTimeToUtc(y, mo, da, eh, em, es);
+        const windowMs = row.fixed_end_window_minutes * 60 * 1000;
+        if (Math.abs(now.getTime() - scheduledEnd.getTime()) <= windowMs) {
+          overrides.startedAt = scheduledEnd;
+        }
+      }
+    }
+
+    await openEntry(d.employeeId, d.id, "work", resumeActivityId, idempotencyKey, overrides);
     res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName));
   })
 );

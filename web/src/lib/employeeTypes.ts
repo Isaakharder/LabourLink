@@ -8,6 +8,12 @@ export interface EmployeeActivityGroup {
   name: string;
 }
 
+export interface EmployeeBreakProfile {
+  id: string;
+  name: string;
+  isActive: boolean;
+}
+
 export interface Employee {
   id: string;
   firstName: string;
@@ -30,6 +36,8 @@ export interface Employee {
   teamRole: string;
   device: EmployeeDevice | null;
   activityGroups: EmployeeActivityGroup[];
+  breakProfileId: string | null;
+  breakProfile: EmployeeBreakProfile | null;
   createdAt: string;
   updatedAt: string;
 }
