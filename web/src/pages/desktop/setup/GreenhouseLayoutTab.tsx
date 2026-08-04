@@ -19,7 +19,7 @@ import { LandFormModal } from "../../../components/greenhouseLayout/LandFormModa
 import { PhaseFormModal } from "../../../components/greenhouseLayout/PhaseFormModal";
 import { PhaseList } from "../../../components/greenhouseLayout/PhaseList";
 import { PhasePositionEditor } from "../../../components/greenhouseLayout/PhasePositionEditor";
-import { RowBuilderPanel } from "../../../components/greenhouseLayout/RowBuilderPanel";
+import { RowBuilderModal } from "../../../components/greenhouseLayout/RowBuilderModal";
 import { RowDetailsPanel } from "../../../components/greenhouseLayout/RowDetailsPanel";
 
 type PhaseModalState = { mode: "create" } | { mode: "edit"; phase: GreenhousePhase } | null;
@@ -77,10 +77,11 @@ export function GreenhouseLayoutTab() {
   const [phaseModal, setPhaseModal] = useState<PhaseModalState>(null);
 
   // Rows: allRows backs the canvas render for every phase in this land;
-  // rowBuilderPhaseId/rowBuilderBatches back the Add/Edit Rows panel for
-  // whichever one phase it's currently open for; previewRows is that
-  // panel's live unsaved preview, reported up so LandCanvas (the single
-  // source of truth for what's drawn) can render it. selectedRowId is
+  // rowBuilderPhaseId/rowBuilderBatches back the Add/Edit Rows modal for
+  // whichever one phase it's currently open for; previewRows/previewValid
+  // is that modal's live unsaved preview, reported up so LandCanvas (the
+  // single source of truth for what's drawn) can render it — including
+  // switching the preview to its red "invalid" style. selectedRowId is
   // deliberately independent of selectedId (the phase selection) — see
   // RowDetailsPanel for why a row and a phase are never the "primary
   // selection" at the same time.
@@ -88,6 +89,7 @@ export function GreenhouseLayoutTab() {
   const [rowBuilderPhaseId, setRowBuilderPhaseId] = useState<string | null>(null);
   const [rowBuilderBatches, setRowBuilderBatches] = useState<GreenhouseRowBatch[]>([]);
   const [previewRows, setPreviewRows] = useState<RowRect[]>([]);
+  const [previewValid, setPreviewValid] = useState(true);
   const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
 
   // Pan/zoom view state — see lib/canvasTransform.ts. Lives here (not in
@@ -208,16 +210,20 @@ export function GreenhouseLayoutTab() {
   }, [draftPhases, land]);
 
   const selectedPhase = draftPhases.find((p) => p.id === selectedId) ?? null;
+  // The row builder modal is deliberately independent of phase selection
+  // (see openRowBuilder/handleSelect) — looked up by its own id, not
+  // selectedPhase, though in practice the two always agree while it's open.
+  const rowBuilderPhase = draftPhases.find((p) => p.id === rowBuilderPhaseId) ?? null;
 
-  // Memoized (not a plain inline .filter()) so RowBuilderPanel gets a
+  // Memoized (not a plain inline .filter()) so RowBuilderModal gets a
   // referentially-stable array whenever the underlying data hasn't
   // actually changed. Without this, a fresh array every render feeds
-  // RowBuilderPanel's live-preview useEffect (which reports back up via
-  // onPreviewRowsChange -> setPreviewRows -> a re-render here), an
-  // infinite loop.
-  const selectedPhaseRows = useMemo(
-    () => (selectedPhase ? allRows.filter((r) => r.phaseId === selectedPhase.id) : []),
-    [allRows, selectedPhase]
+  // RowBuilderModal's live-preview useEffect (which reports back up via
+  // onPreviewChange -> setPreviewRows -> a re-render here), an infinite
+  // loop.
+  const rowBuilderPhaseRows = useMemo(
+    () => (rowBuilderPhase ? allRows.filter((r) => r.phaseId === rowBuilderPhase.id) : []),
+    [allRows, rowBuilderPhase]
   );
 
   const minScale = fitScale * 0.15;
@@ -286,6 +292,12 @@ export function GreenhouseLayoutTab() {
     setRowBuilderPhaseId(null);
     setRowBuilderBatches([]);
     setPreviewRows([]);
+    setPreviewValid(true);
+  }
+
+  function handlePreviewChange(rows: RowRect[], valid: boolean) {
+    setPreviewRows(rows);
+    setPreviewValid(valid);
   }
 
   function handleSelectRow(id: string | null) {
@@ -622,7 +634,7 @@ export function GreenhouseLayoutTab() {
 
           <PhaseList phases={draftPhases} selectedId={selectedId} onSelect={handleSelect} />
 
-          {selectedPhase && positionEditId !== selectedPhase.id && rowBuilderPhaseId !== selectedPhase.id && (
+          {selectedPhase && positionEditId !== selectedPhase.id && (
             <div className="greenhouse-selected-phase-actions">
               <button type="button" onClick={() => setPhaseModal({ mode: "edit", phase: selectedPhase })}>
                 Edit Phase
@@ -653,21 +665,9 @@ export function GreenhouseLayoutTab() {
             />
           )}
 
-          {selectedPhase && rowBuilderPhaseId === selectedPhase.id && (
-            <RowBuilderPanel
-              phase={selectedPhase}
-              savedRows={selectedPhaseRows}
-              batches={rowBuilderBatches}
-              onClose={closeRowBuilder}
-              onSaved={handleRowBatchSaved}
-              onPreviewRowsChange={setPreviewRows}
-            />
-          )}
-
           {selectedRow && (
             <RowDetailsPanel
               row={selectedRow}
-              batchName={selectedRow.batchName}
               startSide={selectedRow.startSide}
               anchorSide={selectedRow.anchorSide}
               onDeleted={handleRowDeleted}
@@ -691,6 +691,7 @@ export function GreenhouseLayoutTab() {
             overlappingPhaseIds={overlapInfo.ids}
             rows={allRows}
             previewRows={previewRows}
+            previewValid={previewValid}
             previewPhaseId={rowBuilderPhaseId}
             selectedRowId={selectedRowId}
             onSelectRow={handleSelectRow}
@@ -739,6 +740,17 @@ export function GreenhouseLayoutTab() {
             setPhaseModal(null);
             loadLandDetail(land.id);
           }}
+        />
+      )}
+
+      {rowBuilderPhaseId && rowBuilderPhase && (
+        <RowBuilderModal
+          phase={rowBuilderPhase}
+          savedRows={rowBuilderPhaseRows}
+          batches={rowBuilderBatches}
+          onClose={closeRowBuilder}
+          onSaved={handleRowBatchSaved}
+          onPreviewChange={handlePreviewChange}
         />
       )}
     </div>

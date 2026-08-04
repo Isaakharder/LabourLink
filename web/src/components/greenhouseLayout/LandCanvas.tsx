@@ -25,6 +25,10 @@ interface LandCanvasProps {
   // truth for "what's on the canvas."
   rows: GreenhouseRow[];
   previewRows: RowRect[];
+  // False while the row builder's current form has a validation error
+  // (overlap, out of bounds, duplicate numbers, etc.) — swaps the preview
+  // rows from blue to red so the map itself flags the problem.
+  previewValid: boolean;
   previewPhaseId: string | null;
   selectedRowId: string | null;
   onSelectRow: (id: string | null) => void;
@@ -84,6 +88,7 @@ export function LandCanvas({
   overlappingPhaseIds,
   rows,
   previewRows,
+  previewValid,
   previewPhaseId,
   selectedRowId,
   onSelectRow,
@@ -496,7 +501,7 @@ export function LandCanvas({
                           y={rowY}
                           width={width}
                           height={height}
-                          className="greenhouse-row-rect-preview"
+                          className={previewValid ? "greenhouse-row-rect-preview" : "greenhouse-row-rect-preview-invalid"}
                           vectorEffect="non-scaling-stroke"
                           pointerEvents="none"
                         />
@@ -507,7 +512,7 @@ export function LandCanvas({
                             textAnchor="middle"
                             dominantBaseline="middle"
                             fontSize={Math.min(Math.max(6, Math.min(width, height) * 0.5), 10)}
-                            className="greenhouse-row-preview-label"
+                            className={previewValid ? "greenhouse-row-preview-label" : "greenhouse-row-preview-label-invalid"}
                             pointerEvents="none"
                           >
                             {row.rowNumber}

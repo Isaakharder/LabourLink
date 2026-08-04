@@ -1172,6 +1172,14 @@ input {
   max-width: 720px;
 }
 
+/* Large variant for content-heavy forms (e.g. the row builder) that need
+   real width for a two-column layout, plus enough height that a tall form
+   still gets meaningful internal scroll room above a pinned footer. */
+.modal-panel-xl {
+  max-width: 960px;
+  max-height: 88vh;
+}
+
 .modal-header {
   display: flex;
   align-items: center;
@@ -1198,6 +1206,24 @@ input {
 .modal-body {
   padding: 1.5rem;
   overflow-y: auto;
+  /* Lets the body (not the whole panel) be the one scrolling region when a
+     footer is present — the panel is already a column flexbox, so the body
+     claiming the remaining space is what keeps a pinned footer pinned. Safe
+     for every existing modal too: with no footer sibling, this just means
+     the body still naturally sizes to its content up to the panel's own
+     max-height, identical to before. */
+  flex: 1;
+  min-height: 0;
+}
+
+.modal-footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  padding: 1rem 1.5rem;
+  border-top: 1px solid var(--color-border);
 }
 
 /* ---------- Responsive: employees table -> cards, form -> one column ---------- */
@@ -1260,7 +1286,8 @@ input {
   }
 
   .modal-panel,
-  .modal-panel-wide {
+  .modal-panel-wide,
+  .modal-panel-xl {
     max-width: 100%;
     max-height: 100vh;
     border-radius: 0;
@@ -2364,6 +2391,9 @@ input {
 }
 
 /* ---------- Greenhouse rows (saved + live preview) ---------- */
+/* One consistent color for every saved row regardless of which batch
+   created it — batch membership is never expressed through color, only
+   through row_batch_id (see rowLayout.ts / greenhouseLayout.ts). */
 
 .greenhouse-row-rect {
   fill: #fde68a;
@@ -2403,9 +2433,24 @@ input {
   pointer-events: none;
 }
 
-/* ---------- Row builder panel (Add/Edit Rows) ---------- */
+/* Preview rows while the current batch form has a validation error —
+   e.g. an overlap or out-of-bounds row — swaps blue for red so the map
+   itself flags the problem, not just the form's own error text. */
+.greenhouse-row-rect-preview-invalid {
+  fill: rgba(220, 38, 38, 0.16);
+  stroke: #dc2626;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
 
-.row-builder-panel,
+.greenhouse-row-preview-label-invalid {
+  fill: #b91c1c;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+/* ---------- Row details (sidebar, saved-row selection) ---------- */
+
 .row-details-panel {
   display: flex;
   flex-direction: column;
@@ -2426,10 +2471,29 @@ input {
   font-size: 0.95rem;
 }
 
+.row-details-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.6rem;
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.row-details-list dt {
+  color: var(--color-muted);
+}
+
+.row-details-list dd {
+  margin: 0;
+  font-weight: 500;
+}
+
+/* ---------- Row builder modal (Add/Edit Rows) ---------- */
+
 .row-builder-form {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: 1.25rem;
 }
 
 .row-builder-form label {
@@ -2442,32 +2506,101 @@ input {
 
 .row-builder-form input,
 .row-builder-form select {
-  padding: 0.4rem 0.5rem;
+  padding: 0.5rem 0.6rem;
   border: 1px solid var(--color-border);
   border-radius: 6px;
-  font-size: 0.85rem;
+  font-size: 0.9rem;
   color: var(--color-text);
   background: var(--color-surface);
 }
 
-.row-builder-form-grid {
+.row-builder-field-invalid input,
+.row-builder-field-invalid select {
+  border-color: var(--color-danger);
+}
+
+/* One labeled group per logical section (Placement / Dimensions /
+   Numbering / Preview) — the two-column grid inside each group is what
+   replaces the old single long flat column, and collapses to one column
+   on narrow screens (see the max-width: 900px block below). */
+.row-builder-group {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 1rem 1.1rem;
+}
+
+.row-builder-group h5 {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted);
+}
+
+.row-builder-group-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0.5rem 0.75rem;
+  gap: 0.85rem 1rem;
+}
+
+.row-builder-field-span2 {
+  grid-column: 1 / -1;
 }
 
 .row-builder-continue {
   flex-direction: row !important;
   align-items: center;
-  gap: 0.4rem !important;
-  font-size: 0.82rem !important;
+  gap: 0.5rem !important;
+  font-size: 0.85rem !important;
+  color: var(--color-text) !important;
 }
 
-.row-builder-preview-summary {
+.row-builder-field-error {
+  color: var(--color-danger);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+/* ---------- Preview summary group ---------- */
+
+.row-builder-preview-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.25rem;
+  font-size: 0.85rem;
+}
+
+.row-builder-preview-stats strong {
+  font-weight: 700;
+}
+
+.row-builder-summary-box {
+  margin-top: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  background: #fef2f2;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.row-builder-summary-box p {
   margin: 0;
   font-size: 0.82rem;
+  color: #991b1b;
+}
+
+.row-builder-success {
+  margin-top: 0.75rem;
+  padding: 0.6rem 0.85rem;
+  border: 1px solid #bbf7d0;
+  border-radius: 6px;
+  background: #f0fdf4;
+  color: #166534;
+  font-size: 0.85rem;
   font-weight: 600;
-  color: #1d4ed8;
 }
 
 .row-builder-form-actions {
@@ -2475,6 +2608,8 @@ input {
   justify-content: flex-end;
   gap: 0.5rem;
 }
+
+/* ---------- Saved batches list (inside the modal) ---------- */
 
 .row-builder-batches h5 {
   margin: 0 0 0.4rem;
@@ -2523,6 +2658,7 @@ input {
   display: flex;
   gap: 0.35rem;
   flex-shrink: 0;
+  align-items: center;
 }
 
 .row-builder-batch-actions button {
@@ -2535,36 +2671,14 @@ input {
   border-color: var(--color-danger) !important;
 }
 
-.row-builder-batch-rename {
-  display: flex;
-  gap: 0.35rem;
-  align-items: center;
-  flex: 1;
-}
+@media (max-width: 640px) {
+  .row-builder-group-grid {
+    grid-template-columns: 1fr;
+  }
 
-.row-builder-batch-rename input {
-  flex: 1;
-  padding: 0.3rem 0.45rem;
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  font-size: 0.8rem;
-}
-
-.row-details-list {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 0.25rem 0.6rem;
-  margin: 0;
-  font-size: 0.82rem;
-}
-
-.row-details-list dt {
-  color: var(--color-muted);
-}
-
-.row-details-list dd {
-  margin: 0;
-  font-weight: 500;
+  .row-builder-field-span2 {
+    grid-column: 1;
+  }
 }
 
 @media (max-width: 900px) {

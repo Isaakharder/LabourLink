@@ -6,7 +6,6 @@ const SIDE_LABELS: Record<string, string> = { north: "North", south: "South", ea
 
 interface RowDetailsPanelProps {
   row: GreenhouseRow;
-  batchName: string | null;
   startSide: string | null;
   anchorSide: string | null;
   onDeleted: () => void;
@@ -17,7 +16,10 @@ interface RowDetailsPanelProps {
 // phase) is the current selection — deliberately a separate, narrower
 // panel rather than folding row details into the phase's own action block,
 // so it's never ambiguous which object a button on screen actually acts on.
-export function RowDetailsPanel({ row, batchName, startSide, anchorSide, onDeleted, onClose }: RowDetailsPanelProps) {
+// Deliberately doesn't show batch name — batches no longer carry a
+// user-facing name (see RowBuilderModal); side/anchor plus dimensions
+// already identify which batch a row belongs to well enough for this view.
+export function RowDetailsPanel({ row, startSide, anchorSide, onDeleted, onClose }: RowDetailsPanelProps) {
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,8 +48,6 @@ export function RowDetailsPanel({ row, batchName, startSide, anchorSide, onDelet
       </div>
 
       <dl className="row-details-list">
-        <dt>Batch</dt>
-        <dd>{batchName ?? "—"}</dd>
         <dt>Side / anchor</dt>
         <dd>{startSide ? `${SIDE_LABELS[startSide]} → ${SIDE_LABELS[anchorSide!]}` : "—"}</dd>
         <dt>Orientation</dt>
