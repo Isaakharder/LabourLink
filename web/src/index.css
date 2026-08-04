@@ -2015,7 +2015,23 @@ input {
 
 .greenhouse-toolbar-group button {
   padding: 0.3rem 0.55rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
   font-size: 0.82rem;
+}
+
+/* .employees-add-button is shared with other pages' primary buttons — scope
+   this override to the toolbar so it outranks the plain-button base above
+   without touching the shared class itself. */
+.greenhouse-toolbar-group .employees-add-button {
+  border: none;
+  background: var(--color-primary);
+}
+
+.greenhouse-toolbar-group button:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .greenhouse-toolbar-divider {
@@ -2040,7 +2056,7 @@ input {
   white-space: nowrap;
 }
 
-.greenhouse-edit-mode-active {
+.greenhouse-toolbar-group .greenhouse-edit-mode-active {
   background: var(--color-primary);
   color: white;
   border-color: var(--color-primary);
@@ -2069,7 +2085,7 @@ input {
 
 .greenhouse-editor-body {
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: 300px 1fr;
   flex: 1;
   min-height: 0;
 }
@@ -2083,11 +2099,36 @@ input {
   flex-direction: column;
   gap: 0.65rem;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .greenhouse-left-panel-actions {
   display: flex;
   flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.greenhouse-left-panel-actions button:not(.employees-add-button) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.55rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-size: 0.9rem;
+}
+
+.greenhouse-left-panel-actions button:not(.employees-add-button):hover {
+  background: var(--color-bg);
+}
+
+/* .employees-add-button is shared with other pages' primary buttons — scope
+   the icon layout to this panel so it doesn't touch the shared class. */
+.greenhouse-left-panel-actions .employees-add-button {
+  display: inline-flex;
+  align-items: center;
   gap: 0.5rem;
 }
 
@@ -2142,10 +2183,61 @@ input {
 }
 
 .greenhouse-selected-phase-actions {
-  display: flex;
-  gap: 0.5rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+  gap: 0.4rem;
   padding-top: 0.5rem;
   border-top: 1px solid var(--color-border);
+}
+
+.greenhouse-selected-phase-actions button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-width: 0;
+  padding: 0.5rem 0.35rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-size: 0.78rem;
+  line-height: 1.15;
+  text-align: center;
+  white-space: normal;
+}
+
+.greenhouse-selected-phase-actions button:hover {
+  background: var(--color-bg);
+}
+
+.greenhouse-selected-phase-actions button svg {
+  flex-shrink: 0;
+}
+
+/* The toggle button (Deactivate/Activate) always spans the full row,
+   independent of whether it's currently styled as destructive. */
+.greenhouse-phase-action-toggle {
+  grid-column: 1 / -1;
+}
+
+.greenhouse-selected-phase-actions .greenhouse-phase-action-deactivate {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+.greenhouse-selected-phase-actions .greenhouse-phase-action-deactivate:hover {
+  background: rgba(220, 38, 38, 0.08);
+}
+
+/* Confirmation modal's destructive submit — solid fill (vs. the trigger
+   button's red-outline style) for the extra visual weight a final confirm
+   step warrants, matching the primary-button weight convention already
+   used elsewhere (e.g. .employee-form-save). */
+.greenhouse-phase-deactivate-confirm {
+  background: var(--color-danger) !important;
+  border-color: var(--color-danger) !important;
+  color: white;
+  font-weight: 600;
 }
 
 .greenhouse-canvas-panel {
@@ -2690,7 +2782,10 @@ input {
   .greenhouse-left-panel {
     border-right: none;
     border-bottom: 1px solid var(--color-border);
-    max-height: 260px;
+    /* Taller than the app's usual 260px stacked-panel convention — this
+       panel's action grid (icons + up to two rows of buttons) needs more
+       room before it's forced to rely on the panel's own vertical scroll. */
+    max-height: 340px;
   }
 }
 

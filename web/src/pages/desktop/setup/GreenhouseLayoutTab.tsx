@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useOutletContext } from "react-router-dom";
+import { Crosshair, Frame, Pencil, Plus, Power, Rows3 } from "lucide-react";
 import { api, ApiError } from "../../../lib/api";
 import { AppShellContext } from "../../../components/layout/AppLayout";
 import {
@@ -15,6 +16,7 @@ import { RowRect } from "../../../lib/rowLayout";
 import { LayoutToolbar } from "../../../components/greenhouseLayout/LayoutToolbar";
 import { LandCanvas } from "../../../components/greenhouseLayout/LandCanvas";
 import { NorthIndicator } from "../../../components/greenhouseLayout/NorthIndicator";
+import { DeactivatePhaseModal } from "../../../components/greenhouseLayout/DeactivatePhaseModal";
 import { LandFormModal } from "../../../components/greenhouseLayout/LandFormModal";
 import { PhaseFormModal } from "../../../components/greenhouseLayout/PhaseFormModal";
 import { PhaseList } from "../../../components/greenhouseLayout/PhaseList";
@@ -75,6 +77,9 @@ export function GreenhouseLayoutTab() {
 
   const [landModalMode, setLandModalMode] = useState<"create" | "edit" | null>(null);
   const [phaseModal, setPhaseModal] = useState<PhaseModalState>(null);
+  const [deactivateConfirmPhase, setDeactivateConfirmPhase] = useState<GreenhousePhase | null>(null);
+  const [deactivating, setDeactivating] = useState(false);
+  const [deactivateError, setDeactivateError] = useState<string | null>(null);
 
   // Rows: allRows backs the canvas render for every phase in this land;
   // rowBuilderPhaseId/rowBuilderBatches back the Add/Edit Rows modal for
@@ -422,6 +427,40 @@ export function GreenhouseLayoutTab() {
     }
   }
 
+  // Deactivating goes through an explicit confirm step (below); activating
+  // doesn't need one and still goes straight through handleTogglePhaseActive.
+  function handleDeactivateClick(phase: GreenhousePhase) {
+    setDeactivateError(null);
+    setDeactivateConfirmPhase(phase);
+  }
+
+  function cancelDeactivate() {
+    if (deactivating) return;
+    setDeactivateConfirmPhase(null);
+    setDeactivateError(null);
+  }
+
+  async function confirmDeactivate() {
+    if (!land || !deactivateConfirmPhase) return;
+    setDeactivating(true);
+    setDeactivateError(null);
+    try {
+      await api(`/api/greenhouse-layout/phases/${deactivateConfirmPhase.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ isActive: false }),
+      });
+      // Only refreshed on success — a failed request never touches
+      // draftPhases, so the phase can't visually flip to inactive unless
+      // the deactivation actually went through.
+      await loadLandDetail(land.id);
+      setDeactivateConfirmPhase(null);
+    } catch (err) {
+      setDeactivateError(err instanceof ApiError ? err.message : "Could not deactivate this phase");
+    } finally {
+      setDeactivating(false);
+    }
+  }
+
   function handleRowDeleted() {
     setSelectedRowId(null);
     if (land) loadLandDetail(land.id);
@@ -617,9 +656,11 @@ export function GreenhouseLayoutTab() {
         <div className="greenhouse-left-panel">
           <div className="greenhouse-left-panel-actions">
             <button type="button" onClick={() => setLandModalMode("edit")}>
+              <Frame size={18} />
               Edit Land
             </button>
             <button type="button" className="employees-add-button" onClick={() => setPhaseModal({ mode: "create" })}>
+              <Plus size={18} />
               Create Phase
             </button>
           </div>
@@ -637,16 +678,30 @@ export function GreenhouseLayoutTab() {
           {selectedPhase && positionEditId !== selectedPhase.id && (
             <div className="greenhouse-selected-phase-actions">
               <button type="button" onClick={() => setPhaseModal({ mode: "edit", phase: selectedPhase })}>
+                <Pencil size={18} />
                 Edit Phase
               </button>
               <button type="button" onClick={() => startPositionEdit(selectedPhase)}>
+                <Crosshair size={18} />
                 Edit Position
               </button>
               <button type="button" onClick={() => openRowBuilder(selectedPhase)}>
+                <Rows3 size={18} />
                 Add/Edit Rows
               </button>
-              <button type="button" onClick={() => handleTogglePhaseActive(selectedPhase)}>
-                {selectedPhase.isActive ? "Deactivate" : "Activate"}
+              <button
+                type="button"
+                className={`greenhouse-phase-action-toggle${
+                  selectedPhase.isActive ? " greenhouse-phase-action-deactivate" : ""
+                }`}
+                onClick={() =>
+                  selectedPhase.isActive
+                    ? handleDeactivateClick(selectedPhase)
+                    : handleTogglePhaseActive(selectedPhase)
+                }
+              >
+                <Power size={18} />
+                {selectedPhase.isActive ? "Deactivate Phase" : "Activate Phase"}
               </button>
             </div>
           )}
@@ -751,6 +806,15 @@ export function GreenhouseLayoutTab() {
           onClose={closeRowBuilder}
           onSaved={handleRowBatchSaved}
           onPreviewChange={handlePreviewChange}
+        />
+      )}
+
+      {deactivateConfirmPhase && (
+        <DeactivatePhaseModal
+          submitting={deactivating}
+          error={deactivateError}
+          onConfirm={confirmDeactivate}
+          onCancel={cancelDeactivate}
         />
       )}
     </div>
