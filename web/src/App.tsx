@@ -76,9 +76,18 @@ function DesktopApp() {
 }
 
 function MobileApp() {
-  const { paired } = useDevicePairing();
+  const { status } = useDevicePairing();
 
-  if (!paired) {
+  // Brief, one-time window at boot while local storage (and, if needed, its
+  // IndexedDB backup) is read — see DevicePairingContext. Deliberately not
+  // the pairing screen: that screen's own mount effect immediately starts a
+  // new pairing request, which a device that's actually still validly
+  // paired must never trigger just because recovery hasn't resolved yet.
+  if (status === "checking") {
+    return <p className="centered-message">Loading...</p>;
+  }
+
+  if (status === "unpaired") {
     return <PairingScreen />;
   }
 

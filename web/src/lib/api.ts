@@ -1,4 +1,5 @@
-import { DEVICE_ID_KEY } from "./device";
+import { DEVICE_ID_KEY, PERMANENT_DEVICE_ERROR_CODES } from "./device";
+import { isNetworkError } from "./offlineQueue";
 
 function resolveApiUrl(): string {
   const envUrl = import.meta.env.VITE_API_URL;
@@ -18,10 +19,17 @@ export class ApiError extends Error {
   // Field-level validation errors, e.g. { email: "..." } — present when the
   // server responded with { errors: {...} } instead of a single { error }.
   errors?: Record<string, string>;
-  constructor(status: number, message: string, errors?: Record<string, string>) {
+  // Stable machine-readable reason, e.g. "DEVICE_INACTIVE" (see
+  // server/src/middleware/device.ts). Only ever set for responses that
+  // include one — a plain 401/500 with no code is deliberately left
+  // undefined, not guessed at, so callers can't mistake an unrelated error
+  // for a specific one.
+  code?: string;
+  constructor(status: number, message: string, errors?: Record<string, string>, code?: string) {
     super(message);
     this.status = status;
     this.errors = errors;
+    this.code = code;
   }
 }
 
@@ -47,7 +55,8 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     throw new ApiError(
       res.status,
       body.error || (typeof firstFieldError === "string" ? firstFieldError : "Request failed"),
-      body.errors
+      body.errors,
+      typeof body.code === "string" ? body.code : undefined
     );
   }
 
@@ -56,4 +65,27 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   }
 
   return res.json() as Promise<T>;
+}
+
+// True only for a confirmed permanent device-auth rejection — the sole
+// condition under which mobile pairing should ever be cleared (see
+// DevicePairingContext.markUnpaired and PERMANENT_DEVICE_ERROR_CODES for the
+// exact codes and why a 401 with no code, or an unrecognized code, does not
+// count). Every mobile screen that talks to the API funnels its error
+// handling through this one check instead of reimplementing it.
+export function isPermanentDeviceAuthError(err: unknown): boolean {
+  return (
+    err instanceof ApiError &&
+    err.status === 401 &&
+    !!err.code &&
+    (PERMANENT_DEVICE_ERROR_CODES as readonly string[]).includes(err.code)
+  );
+}
+
+// True for "the server was not actually reached, or had a server-side
+// problem" — a raw network failure/timeout, or any 5xx. Distinguishes
+// "keep the last known good state and show Offline/Reconnecting" from "the
+// server responded and rejected this request for a real, specific reason."
+export function isServerUnreachableError(err: unknown): boolean {
+  return isNetworkError(err) || (err instanceof ApiError && err.status >= 500);
 }

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { fingerprintDeviceIdentifier } from "../middleware/device";
 
 const router = Router();
 router.use(requireAuth, requireRole("Administrator", "Manager"));
@@ -74,14 +75,23 @@ router.post(
       // Re-pairing/reassigning a known device: close whatever active
       // assignment it has before opening a new one, so the partial unique
       // index on device_assignments (one active row per device) never trips.
-      await client.query(
+      const closed = await client.query(
         `update device_assignments set unassigned_at = now()
-         where device_id = $1 and unassigned_at is null`,
+         where device_id = $1 and unassigned_at is null
+         returning employee_id`,
         [deviceId]
       );
       await client.query(
         `insert into device_assignments (device_id, employee_id) values ($1, $2)`,
         [deviceId, employeeId]
+      );
+
+      console.log(
+        `[device-admin] device=${fingerprintDeviceIdentifier(deviceIdentifier)} ` +
+          (closed.rows[0]
+            ? `reassigned from employee=${closed.rows[0].employee_id} to employee=${employeeId}`
+            : `paired to employee=${employeeId}`) +
+          ` by=${req.employee!.id}`
       );
 
       await client.query(
@@ -124,10 +134,17 @@ router.post(
     if (!UUID_RE.test(id)) {
       return res.status(400).json({ error: "Invalid device id" });
     }
-    const result = await pool.query("update devices set is_active = false where id = $1", [id]);
+    const result = await pool.query(
+      "update devices set is_active = false where id = $1 returning device_identifier",
+      [id]
+    );
     if (result.rowCount === 0) {
       return res.status(404).json({ error: "Device not found" });
     }
+    console.log(
+      `[device-admin] device=${fingerprintDeviceIdentifier(result.rows[0].device_identifier)} ` +
+        `deactivated by=${req.employee!.id}`
+    );
     res.status(204).send();
   })
 );
