@@ -11,6 +11,14 @@ function sideSummary(row: GreenhouseRowListItem): string {
   return `${SIDE_LABELS[row.startSide]} → ${SIDE_LABELS[row.anchorSide]}`;
 }
 
+// Stored row dimensions are in feet (see rowLayout.ts/greenhouseLayout.ts)
+// — 1 sq ft = 0.3048^2 sq m exactly.
+const SQFT_TO_SQM = 0.09290304;
+
+function areaM2(row: GreenhouseRowListItem): string {
+  return (row.widthFt * row.lengthFt * SQFT_TO_SQM).toFixed(1);
+}
+
 export function RowsTab() {
   const [rows, setRows] = useState<GreenhouseRowListItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -83,7 +91,7 @@ export function RowsTab() {
       <div className="rows-tab-filters">
         <input
           type="search"
-          placeholder="Search row number, phase, or batch"
+          placeholder="Search row number or phase"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
@@ -116,11 +124,9 @@ export function RowsTab() {
               <tr>
                 <th>Row #</th>
                 <th>Phase</th>
-                <th>Batch</th>
-                <th>Orientation</th>
                 <th>Width</th>
                 <th>Length</th>
-                <th>Position / side</th>
+                <th>Area (m²)</th>
                 <th>Status</th>
                 <th></th>
               </tr>
@@ -134,11 +140,9 @@ export function RowsTab() {
                 >
                   <td>{r.rowNumber}</td>
                   <td>{r.phaseName}</td>
-                  <td>{r.batchName ?? "—"}</td>
-                  <td>{r.orientation}</td>
                   <td>{r.widthFt} ft</td>
                   <td>{r.lengthFt} ft</td>
-                  <td>{sideSummary(r)}</td>
+                  <td>{areaM2(r)} m²</td>
                   <td>
                     <span className={`status-pill ${r.isActive ? "status-active" : "status-inactive"}`}>
                       {r.isActive ? "Active" : "Inactive"}
@@ -173,8 +177,6 @@ export function RowsTab() {
             <dl className="row-details-list">
               <dt>Phase</dt>
               <dd>{selectedRow.phaseName}</dd>
-              <dt>Batch</dt>
-              <dd>{selectedRow.batchName ?? "—"}</dd>
               <dt>Side / anchor</dt>
               <dd>{sideSummary(selectedRow)}</dd>
               <dt>Orientation</dt>
