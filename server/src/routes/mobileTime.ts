@@ -19,6 +19,7 @@ interface OpenEntry {
   entry_type: "work" | "break";
   activity_id: string | null;
   started_at: string;
+  greenhouse_row_id: string | null;
 }
 
 interface OpenEntryOverrides {
@@ -36,11 +37,16 @@ interface OpenEntryOverrides {
   scheduledBreakDate?: string | null;
   source?: "manual" | "auto";
   isPaid?: boolean | null;
+  // Greenhouse row this work entry is attached to, if the activity's
+  // configured question supplied/permits one. Never set for breaks (see the
+  // chk_time_entries_row_only_on_work constraint, 015_time_entries_
+  // greenhouse_row.sql).
+  greenhouseRowId?: string | null;
 }
 
 async function getOpenEntry(employeeId: string): Promise<OpenEntry | null> {
   const { rows } = await pool.query(
-    `select id, entry_type, activity_id, started_at
+    `select id, entry_type, activity_id, started_at, greenhouse_row_id
      from time_entries where employee_id = $1 and ended_at is null`,
     [employeeId]
   );
@@ -80,10 +86,11 @@ async function openEntry(
     const insert = await client.query(
       `insert into time_entries
          (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at,
-          actual_started_at, break_profile_item_id, scheduled_break_date, source, is_paid)
-       values ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8, $9, coalesce($10, 'manual'), $11)
+          actual_started_at, break_profile_item_id, scheduled_break_date, source, is_paid,
+          greenhouse_row_id)
+       values ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8, $9, coalesce($10, 'manual'), $11, $12)
        on conflict (idempotency_key) do nothing
-       returning id, entry_type, activity_id, started_at`,
+       returning id, entry_type, activity_id, started_at, greenhouse_row_id`,
       [
         employeeId,
         deviceId,
@@ -96,13 +103,14 @@ async function openEntry(
         overrides.scheduledBreakDate ?? null,
         overrides.source ?? null,
         overrides.isPaid ?? null,
+        overrides.greenhouseRowId ?? null,
       ]
     );
 
     let row = insert.rows[0];
     if (!row) {
       const existing = await client.query(
-        `select id, entry_type, activity_id, started_at from time_entries where idempotency_key = $1`,
+        `select id, entry_type, activity_id, started_at, greenhouse_row_id from time_entries where idempotency_key = $1`,
         [idempotencyKey]
       );
       row = existing.rows[0];
@@ -130,11 +138,12 @@ interface ChainEntry {
   activity_id: string | null;
   started_at: Date;
   ended_at: Date | null;
+  greenhouse_row_id: string | null;
 }
 
 // Walks backward from `boundary` through the employee's recent entries,
-// summing completed work-entry durations for `activityId`, treating breaks
-// as transparent (skipped, not counted) as long as the chain stays
+// summing completed work-entry durations for `activityId`/`rowId`, treating
+// breaks as transparent (skipped, not counted) as long as the chain stays
 // unbroken. A step only continues if the previous entry's ended_at exactly
 // equals the timestamp being walked back from — openEntry() always closes
 // the prior row and inserts the next one inside a single transaction, and
@@ -148,7 +157,19 @@ interface ChainEntry {
 // millisecond precision node-postgres applies when parsing timestamptz into
 // a JS Date is applied identically on both sides and can't cause the kind
 // of false mismatch a fresh round trip would.
-function accumulateChainSeconds(entries: ChainEntry[], activityId: string, boundary: Date): number {
+//
+// The row-equality check exists alongside the activity check because a row
+// change (same activity, different location) already produces a fresh
+// time_entries row the same way an activity change does (same openEntry()
+// close+insert transaction) — a changed row is a new logical job segment,
+// so the accumulated timer must reset there too, not just on activity
+// change.
+function accumulateChainSeconds(
+  entries: ChainEntry[],
+  activityId: string,
+  rowId: string | null,
+  boundary: Date
+): number {
   const byEndedAt = new Map<number, ChainEntry>();
   for (const e of entries) {
     if (e.ended_at) byEndedAt.set(e.ended_at.getTime(), e);
@@ -163,7 +184,7 @@ function accumulateChainSeconds(entries: ChainEntry[], activityId: string, bound
       cursor = prev.started_at.getTime();
       continue;
     }
-    if (prev.activity_id !== activityId) break;
+    if (prev.activity_id !== activityId || prev.greenhouse_row_id !== rowId) break;
     totalSeconds += (prev.ended_at!.getTime() - prev.started_at.getTime()) / 1000;
     cursor = prev.started_at.getTime();
   }
@@ -209,14 +230,20 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
   // segments are short-lived, so a day's worth of history is always enough;
   // this is a cheap indexed scan, not an unbounded per-employee history read.
   const { rows: chainRows } = await pool.query<ChainEntry>(
-    `select entry_type, activity_id, started_at, ended_at
+    `select entry_type, activity_id, started_at, ended_at, greenhouse_row_id
      from time_entries
      where employee_id = $1 and started_at >= now() - interval '24 hours'`,
     [employeeId]
   );
 
   let currentActivity:
-    | { id: string; name: string; startedAt: string; accumulatedWorkedSecondsBeforeCurrentEntry: number }
+    | {
+        id: string;
+        name: string;
+        startedAt: string;
+        accumulatedWorkedSecondsBeforeCurrentEntry: number;
+        row: { id: string; label: string } | null;
+      }
     | null = null;
   if (open?.entry_type === "work" && open.activity_id) {
     const { rows } = await pool.query("select id, name from activities where id = $1", [
@@ -224,12 +251,32 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
     ]);
     const a = rows[0];
     if (a) {
-      const accumulated = accumulateChainSeconds(chainRows, open.activity_id, new Date(open.started_at));
+      const accumulated = accumulateChainSeconds(
+        chainRows,
+        open.activity_id,
+        open.greenhouse_row_id,
+        new Date(open.started_at)
+      );
+      // Deliberately not filtered on the row/phase's active state — this
+      // describes the employee's *current* location and must still resolve
+      // if an admin deactivated it after the shift started (see plan A5-2).
+      let row: { id: string; label: string } | null = null;
+      if (open.greenhouse_row_id) {
+        const { rows: rowRows } = await pool.query(
+          `select gr.row_number, gp.name as phase_name
+           from greenhouse_rows gr join greenhouse_phases gp on gp.id = gr.phase_id
+           where gr.id = $1`,
+          [open.greenhouse_row_id]
+        );
+        const r = rowRows[0];
+        if (r) row = { id: open.greenhouse_row_id, label: `${r.phase_name} · Row ${r.row_number}` };
+      }
       currentActivity = {
         id: a.id,
         name: a.name,
         startedAt: open.started_at,
         accumulatedWorkedSecondsBeforeCurrentEntry: accumulated,
+        row,
       };
     }
   }
@@ -251,7 +298,7 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
   let previousActivity: { id: string; name: string; accumulatedWorkedSeconds: number } | null = null;
   if (open?.entry_type === "break") {
     const { rows } = await pool.query(
-      `select te.activity_id as id, a.name
+      `select te.activity_id as id, a.name, te.greenhouse_row_id
        from time_entries te
        join activities a on a.id = te.activity_id
        where te.employee_id = $1
@@ -267,7 +314,7 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
       // segment that just closed (its ended_at equals the break's
       // started_at) plus everything earlier in the same chain — this is
       // the running total "worked so far," not just the last segment.
-      const accumulated = accumulateChainSeconds(chainRows, row.id, new Date(open.started_at));
+      const accumulated = accumulateChainSeconds(chainRows, row.id, row.greenhouse_row_id, new Date(open.started_at));
       previousActivity = { id: row.id, name: row.name, accumulatedWorkedSeconds: accumulated };
     }
   }
@@ -279,9 +326,12 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
   // at-the-time snapshot exists).
   const { rows: recentRows } = await pool.query(
     `select te.id, te.activity_id, a.name, te.started_at, te.ended_at,
-            extract(epoch from (te.ended_at - te.started_at))::int as duration_seconds
+            extract(epoch from (te.ended_at - te.started_at))::int as duration_seconds,
+            gr.row_number, gp.name as row_phase_name
      from time_entries te
      join activities a on a.id = te.activity_id
+     left join greenhouse_rows gr on gr.id = te.greenhouse_row_id
+     left join greenhouse_phases gp on gp.id = gr.phase_id
      where te.employee_id = $1
        and te.entry_type = 'work'
        and te.ended_at is not null
@@ -297,6 +347,7 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
     startedAt: r.started_at,
     endedAt: r.ended_at,
     durationSeconds: r.duration_seconds,
+    row: r.row_number != null ? { label: `${r.row_phase_name} · Row ${r.row_number}` } : null,
   }));
 
   return {
@@ -346,9 +397,11 @@ router.get(
     // activity belonging to more than one of the employee's groups is
     // returned once, via select distinct rather than per-group queries.
     const { rows } = await pool.query(
-      `select distinct a.id, a.name, a.normal_speed, a.speed_unit, a.sort_order
+      `select distinct a.id, a.name, a.normal_speed, a.speed_unit, a.sort_order,
+              aq.question_type, aq.label as question_label, aq.is_required as question_required
        from activity_group_activities aga
        join activities a on a.id = aga.activity_id and a.is_active = true
+       left join activity_questions aq on aq.activity_id = a.id
        where aga.activity_group_id = any($1::uuid[])
        order by a.sort_order, a.name`,
       [groups.map((g) => g.id)]
@@ -361,6 +414,9 @@ router.get(
         name: r.name,
         normalSpeed: r.normal_speed !== null ? Number(r.normal_speed) : null,
         speedUnit: r.speed_unit,
+        question: r.question_type
+          ? { type: r.question_type as "greenhouse_row", label: r.question_label, isRequired: r.question_required }
+          : null,
       })),
       activityGroups: groups.map((g) => ({ id: g.id, name: g.name })),
     });
@@ -371,9 +427,10 @@ router.post(
   "/time-entries/work",
   asyncHandler(async (req, res) => {
     const d = req.device!;
-    const { activityId, idempotencyKey } = req.body as {
+    const { activityId, idempotencyKey, greenhouseRowId } = req.body as {
       activityId?: string;
       idempotencyKey?: string;
+      greenhouseRowId?: string;
     };
     if (!activityId || !UUID_RE.test(activityId) || !isValidIdempotencyKey(idempotencyKey)) {
       return res.status(400).json({ error: "activityId and a valid idempotencyKey are required" });
@@ -397,7 +454,45 @@ router.post(
     if (!activityCheck.rows[0]) {
       return res.status(400).json({ error: "activityId is not available to this employee" });
     }
-    await openEntry(d.employeeId, d.id, "work", activityId, idempotencyKey);
+
+    // A client-supplied greenhouseRowId is never trusted either — it must
+    // both (a) be permitted/required by this activity's own configured
+    // question, and (b) resolve to a real, currently active row in an
+    // active phase. Both checks happen here, not just in the mobile UI.
+    const questionCheck = await pool.query(
+      `select label, is_required from activity_questions
+       where activity_id = $1 and question_type = 'greenhouse_row'`,
+      [activityId]
+    );
+    const question = questionCheck.rows[0];
+    let validatedRowId: string | null = null;
+    if (question) {
+      if (question.is_required && !greenhouseRowId) {
+        return res.status(400).json({ error: "greenhouseRowId is required for this activity" });
+      }
+      if (greenhouseRowId) {
+        if (!UUID_RE.test(greenhouseRowId)) {
+          return res.status(400).json({ error: "Invalid or inactive greenhouseRowId" });
+        }
+        const rowCheck = await pool.query(
+          `select gr.id
+           from greenhouse_rows gr
+           join greenhouse_phases gp on gp.id = gr.phase_id and gp.is_active = true
+           where gr.id = $1 and gr.deleted_at is null`,
+          [greenhouseRowId]
+        );
+        if (!rowCheck.rows[0]) {
+          return res.status(400).json({ error: "Invalid or inactive greenhouseRowId" });
+        }
+        validatedRowId = greenhouseRowId;
+      }
+    } else if (greenhouseRowId) {
+      // This activity has no greenhouse-row question at all — a client
+      // can never attach a row to an unrelated activity.
+      return res.status(400).json({ error: "This activity does not accept a greenhouseRowId" });
+    }
+
+    await openEntry(d.employeeId, d.id, "work", activityId, idempotencyKey, { greenhouseRowId: validatedRowId });
     res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName));
   })
 );
@@ -474,20 +569,25 @@ router.post(
       return res.status(400).json({ error: "a valid idempotencyKey is required" });
     }
 
-    // Resume whatever activity was active before the break.
+    // Resume whatever activity — and greenhouse row, if any — was active
+    // before the break. Reattaching the same row here, with no client input
+    // at all, is what makes "resume the same activity and same row
+    // automatically, no re-asking" work: the mobile app never needs to
+    // send (or re-collect) a greenhouseRowId on break/end.
     const { rows } = await pool.query(
-      `select activity_id from time_entries
+      `select activity_id, greenhouse_row_id from time_entries
        where employee_id = $1 and entry_type = 'work'
        order by started_at desc limit 1`,
       [d.employeeId]
     );
     const resumeActivityId = rows[0]?.activity_id ?? null;
+    const resumeRowId = rows[0]?.greenhouse_row_id ?? null;
     if (!resumeActivityId) {
       return res.status(409).json({ error: "No prior activity to resume" });
     }
 
     const now = new Date();
-    const overrides: OpenEntryOverrides = { actualEndedAt: now };
+    const overrides: OpenEntryOverrides = { actualEndedAt: now, greenhouseRowId: resumeRowId };
 
     // Only round the end if the currently open break was itself matched to
     // a fixed item at start time (never retroactively match on end alone).
@@ -527,6 +627,48 @@ router.post(
       [d.employeeId]
     );
     res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName));
+  })
+);
+
+// Row options for the mobile row picker — device authenticated only (no
+// role check, matching GET /activities), active phases/rows only. A plain
+// list/grid on the phone, not a second map: reuses the same greenhouse_*
+// tables the desktop editor and live view do.
+router.get(
+  "/greenhouse-rows",
+  asyncHandler(async (_req, res) => {
+    const { rows } = await pool.query(
+      `select gl.id as land_id, gl.name as land_name, gp.id as phase_id, gp.name as phase_name,
+              gp.sort_order, gr.id as row_id, gr.row_number
+       from greenhouse_rows gr
+       join greenhouse_phases gp on gp.id = gr.phase_id and gp.is_active = true
+       join greenhouse_lands gl on gl.id = gp.land_id and gl.is_active = true
+       where gr.deleted_at is null
+       order by gl.name, gp.sort_order, gp.name, gr.row_number`
+    );
+
+    const lands = new Map<string, { id: string; name: string; phases: Map<string, { id: string; name: string; rows: { id: string; rowNumber: number }[] }> }>();
+    for (const r of rows) {
+      let land = lands.get(r.land_id);
+      if (!land) {
+        land = { id: r.land_id, name: r.land_name, phases: new Map() };
+        lands.set(r.land_id, land);
+      }
+      let phase = land.phases.get(r.phase_id);
+      if (!phase) {
+        phase = { id: r.phase_id, name: r.phase_name, rows: [] };
+        land.phases.set(r.phase_id, phase);
+      }
+      phase.rows.push({ id: r.row_id, rowNumber: r.row_number });
+    }
+
+    res.json({
+      lands: Array.from(lands.values()).map((l) => ({
+        id: l.id,
+        name: l.name,
+        phases: Array.from(l.phases.values()),
+      })),
+    });
   })
 );
 

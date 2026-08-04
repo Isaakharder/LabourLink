@@ -1,0 +1,101 @@
+// DTOs for GET /api/greenhouse/live — server/src/routes/greenhouseLive.ts.
+// Live row state is derived server-side from time_entries, never stored;
+// see that route's LIVE_LAND_SELECT comment for the blue/green/neutral rules.
+
+export interface LiveEmployee {
+  id: string;
+  firstName: string;
+  lastName: string;
+  // Present when this employee is currently working the row (blue state).
+  activityName?: string;
+  startedAt?: string;
+  // Present when this is the employee's most recent completed segment on
+  // the row for the viewed date (green state).
+  endedAt?: string;
+}
+
+export type LiveRowState = "blue" | "green" | "neutral";
+
+export interface LiveRow {
+  id: string;
+  rowNumber: number;
+  xFt: number;
+  yFt: number;
+  widthFt: number;
+  lengthFt: number;
+  orientation: "horizontal" | "vertical";
+  state: LiveRowState;
+  employees: LiveEmployee[];
+}
+
+export interface LivePhase {
+  id: string;
+  name: string;
+  description: string | null;
+  northSouthFeet: number;
+  eastWestFeet: number;
+  xFeetFromWest: number;
+  yFeetFromNorth: number;
+  isActive: boolean;
+  sortOrder: number | null;
+  rows: LiveRow[];
+}
+
+export interface LiveLand {
+  id: string;
+  name: string;
+  northSouthFeet: number;
+  eastWestFeet: number;
+  isActive: boolean;
+  phases: LivePhase[];
+}
+
+export interface LiveGreenhouseResponse {
+  // Present only when dateStart === dateEnd — kept for minimal churn;
+  // dateStart/dateEnd are always present and are what the office page
+  // renders its range label from.
+  date: string | null;
+  dateStart: string;
+  dateEnd: string;
+  activityId: string | null;
+  generatedAt: string;
+  land: LiveLand;
+}
+
+export interface AvailableActivity {
+  id: string;
+  name: string;
+}
+
+export interface GreenhouseDisplaySummary {
+  id: string;
+  name: string;
+  landId: string;
+  landName: string;
+  activityId: string | null;
+  activityName: string | null;
+  dateStart: string;
+  dateEnd: string;
+  isActive: boolean;
+  updatedAt: string;
+}
+
+export interface GreenhouseDisplayCreateResponse {
+  display: GreenhouseDisplaySummary;
+  token: string;
+}
+
+export interface GreenhouseDisplayRegenerateResponse {
+  token: string;
+}
+
+export interface GreenhouseDisplayStateResponse {
+  name: string;
+  activityId: string | null;
+  activityName: string | null;
+  dateStart: string;
+  dateEnd: string;
+  configVersion: string;
+  generatedAt: string;
+  land: LiveLand;
+}

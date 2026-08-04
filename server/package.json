@@ -12,6 +12,7 @@
     "start": "node dist/index.js",
     "migrate": "ts-node src/migrate.ts",
     "create-admin": "ts-node src/cli/createAdmin.ts",
+    "create-greenhouse-display": "ts-node src/cli/createGreenhouseDisplay.ts",
     "typecheck": "tsc --noEmit",
     "test:row-layout": "ts-node src/lib/rowLayout.test.ts"
   },

@@ -8,11 +8,14 @@ import { BasicDataPage } from "./pages/desktop/BasicDataPage";
 import { DashboardPage } from "./pages/desktop/DashboardPage";
 import { DevicesPage } from "./pages/desktop/DevicesPage";
 import { EmployeesPage } from "./pages/desktop/EmployeesPage";
+import { GreenhouseDisplayPage } from "./pages/desktop/GreenhouseDisplayPage";
+import { GreenhousePage } from "./pages/desktop/GreenhousePage";
 import { InputsPage } from "./pages/desktop/InputsPage";
 import { LoginPage } from "./pages/desktop/LoginPage";
 import { ResetPinPage } from "./pages/desktop/ResetPinPage";
 import { SettingsPage } from "./pages/desktop/SettingsPage";
 import { SetupPage } from "./pages/desktop/SetupPage";
+import { RequireRole } from "./components/auth/RequireRole";
 import { HomeScreen } from "./pages/mobile/HomeScreen";
 import { PairingScreen } from "./pages/mobile/PairingScreen";
 import { SettingsScreen } from "./pages/mobile/SettingsScreen";
@@ -23,6 +26,16 @@ function DesktopApp() {
   const { employee, loading } = useAuth();
   const location = useLocation();
   const [searchParams] = useSearchParams();
+
+  // The break-room TV never has a login — it's reached via an unguessable
+  // per-display token embedded in the URL itself (see
+  // server/src/middleware/displayAuth.ts), not a session. This bypass runs
+  // before the `!employee` gate below (same pattern as the /reset-pin deep
+  // link) so the TV never waits on, or depends on, any auth/session state.
+  const displayMatch = location.pathname.match(/^\/greenhouse\/display\/([^/]+)$/);
+  if (displayMatch) {
+    return <GreenhouseDisplayPage displayKey={displayMatch[1]} />;
+  }
 
   if (loading) return <p className="centered-message">Loading...</p>;
   if (!employee) {
@@ -41,6 +54,14 @@ function DesktopApp() {
       <Route element={<AppLayout />}>
         <Route index element={<Navigate to="/inputs" replace />} />
         <Route path="dashboard" element={<DashboardPage />} />
+        <Route
+          path="greenhouse"
+          element={
+            <RequireRole roles={["Administrator", "Manager"]}>
+              <GreenhousePage />
+            </RequireRole>
+          }
+        />
         <Route path="inputs" element={<InputsPage />} />
         <Route path="employees" element={<EmployeesPage />} />
         <Route path="activities/*" element={<ActivitiesPage />} />

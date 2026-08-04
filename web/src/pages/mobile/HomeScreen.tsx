@@ -4,6 +4,7 @@ import { api, ApiError } from "../../lib/api";
 import { enqueue, flushQueue, getPendingCount, isNetworkError } from "../../lib/offlineQueue";
 import { uuid } from "../../lib/uuid";
 import { ActivityPicker, NO_ACTIVITIES_MESSAGE, PickerActivity } from "../../components/mobile/ActivityPicker";
+import { RowPickerSheet, RowPickerLand } from "../../components/mobile/RowPickerSheet";
 import { ActivityTimer, formatElapsed } from "../../components/mobile/ActivityTimer";
 import { RecentJobsCard, RecentJob } from "../../components/mobile/RecentJobsCard";
 import { ConfirmEndDayModal } from "../../components/mobile/ConfirmEndDayModal";
@@ -18,6 +19,7 @@ interface CurrentActivity {
   // chain (same activity, separated only by breaks) before this entry —
   // the live elapsed time since startedAt is added on top by ActivityTimer.
   accumulatedWorkedSecondsBeforeCurrentEntry: number;
+  row: { id: string; label: string } | null;
 }
 
 interface PreviousActivity {
@@ -43,6 +45,14 @@ export function HomeScreen() {
   const [activities, setActivities] = useState<Activity[]>([]);
   const [activitiesLoaded, setActivitiesLoaded] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [rowLands, setRowLands] = useState<RowPickerLand[] | null>(null);
+  const [rowPickerOpen, setRowPickerOpen] = useState(false);
+  // The activity a row is being picked for — either a brand-new
+  // start/switch (from chooseActivity) or a same-activity "Change Row"
+  // (from the current-activity affordance). Only id/name are needed here;
+  // RowPickerSheet itself only needs a name to display and reports back a
+  // chosen rowId, the caller already knows which activityId it's for.
+  const [pendingRowActivity, setPendingRowActivity] = useState<{ id: string; name: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [online, setOnline] = useState(navigator.onLine);
@@ -90,10 +100,21 @@ export function HomeScreen() {
       });
   }, [handleAuthFailure]);
 
+  // Same event-driven wiring as loadActivities — the phone never has its
+  // own notion of which rows exist either.
+  const loadGreenhouseRows = useCallback(() => {
+    api<{ lands: RowPickerLand[] }>("/api/mobile/greenhouse-rows")
+      .then((res) => setRowLands(res.lands))
+      .catch((err) => {
+        handleAuthFailure(err);
+      });
+  }, [handleAuthFailure]);
+
   useEffect(() => {
     loadMe();
     loadActivities();
-  }, [loadMe, loadActivities]);
+    loadGreenhouseRows();
+  }, [loadMe, loadActivities, loadGreenhouseRows]);
 
   const flush = useCallback(() => {
     flushQueue((path, body) => api(path, { method: "POST", body: JSON.stringify(body) }))
@@ -125,6 +146,7 @@ export function HomeScreen() {
       if (document.visibilityState === "visible") {
         loadMe();
         loadActivities();
+        loadGreenhouseRows();
       }
     }
     window.addEventListener("online", goOnline);
@@ -136,7 +158,7 @@ export function HomeScreen() {
       window.removeEventListener("offline", goOffline);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [flush, loadMe, loadActivities]);
+  }, [flush, loadMe, loadActivities, loadGreenhouseRows]);
 
   async function perform(path: string, body: Record<string, unknown>, pendingLabel?: string) {
     setBusy(true);
@@ -146,6 +168,8 @@ export function HomeScreen() {
       setMe(result);
       setPendingActivityName(null);
       setPickerOpen(false);
+      setRowPickerOpen(false);
+      setPendingRowActivity(null);
     } catch (err) {
       if (handleAuthFailure(err)) return;
       if (isNetworkError(err)) {
@@ -156,7 +180,12 @@ export function HomeScreen() {
         // successful flush. This just tells the employee what's queued.
         if (pendingLabel) setPendingActivityName(pendingLabel);
         setPickerOpen(false);
+        setRowPickerOpen(false);
+        setPendingRowActivity(null);
       } else {
+        // Stays open (whichever sheet — ActivityPicker or RowPickerSheet —
+        // triggered this) so the employee sees the error and can retry
+        // without losing their place; both sheets render `error` inline.
         setError(err instanceof ApiError ? err.message : "Something went wrong");
       }
     } finally {
@@ -171,7 +200,58 @@ export function HomeScreen() {
 
   function chooseActivity(activityId: string) {
     const activity = activities.find((a) => a.id === activityId);
+    // Any configured question — required or optional — opens the row
+    // picker so its label and Skip/Confirm choice are always shown. Only
+    // an activity with no question at all starts immediately.
+    if (activity?.question) {
+      loadGreenhouseRows();
+      setPendingRowActivity({ id: activity.id, name: activity.name });
+      setPickerOpen(false);
+      setRowPickerOpen(true);
+      return;
+    }
     perform("/api/mobile/time-entries/work", { activityId, idempotencyKey: uuid() }, activity?.name);
+  }
+
+  function confirmRow(rowId: string) {
+    if (!pendingRowActivity) return;
+    perform(
+      "/api/mobile/time-entries/work",
+      { activityId: pendingRowActivity.id, greenhouseRowId: rowId, idempotencyKey: uuid() },
+      pendingRowActivity.name
+    );
+  }
+
+  // Only reachable when the pending activity's question is optional (see
+  // RowPickerSheet's allowSkip prop) — starts the activity with no row
+  // rather than forcing a selection.
+  function skipRow() {
+    if (!pendingRowActivity) return;
+    perform(
+      "/api/mobile/time-entries/work",
+      { activityId: pendingRowActivity.id, idempotencyKey: uuid() },
+      pendingRowActivity.name
+    );
+  }
+
+  function cancelRowPicker() {
+    if (busy) return;
+    setRowPickerOpen(false);
+    setPendingRowActivity(null);
+  }
+
+  // "Change Row" — the only UI path for requirement 8's "same activity,
+  // different row." Reuses the exact same perform() call the initial
+  // required-question start does, just with the current activity's id
+  // instead of a newly-picked one; a fresh idempotencyKey is what makes the
+  // server open a new row/close the old one (see openEntry in
+  // mobileTime.ts), and accumulateChainSeconds' row-equality check is what
+  // makes the timer correctly reset for it.
+  function openChangeRow() {
+    if (!me?.currentActivity) return;
+    loadGreenhouseRows();
+    setPendingRowActivity({ id: me.currentActivity.id, name: me.currentActivity.name });
+    setRowPickerOpen(true);
   }
 
   function startBreak() {
@@ -253,7 +333,7 @@ export function HomeScreen() {
         {me.status === "break" && <p>On break</p>}
       </div>
 
-      {error && !pickerOpen && !endDayConfirmOpen && <p className="error-text">{error}</p>}
+      {error && !pickerOpen && !rowPickerOpen && !endDayConfirmOpen && <p className="error-text">{error}</p>}
 
       {/* 3. Primary activity button */}
       {me.status === "idle" && (
@@ -269,6 +349,11 @@ export function HomeScreen() {
       {me.status === "work" && me.currentActivity && (
         <button type="button" className="mobile-primary-activity" disabled={busy} onClick={openPicker}>
           {me.currentActivity.name}
+        </button>
+      )}
+      {me.status === "work" && me.currentActivity?.row && (
+        <button type="button" className="mobile-change-row" disabled={busy} onClick={openChangeRow}>
+          {me.currentActivity.row.label} · Change
         </button>
       )}
       {me.status === "break" && (
@@ -335,6 +420,20 @@ export function HomeScreen() {
           onClose={() => setPickerOpen(false)}
           busy={busy}
           error={error}
+        />
+      )}
+
+      {rowPickerOpen && pendingRowActivity && (
+        <RowPickerSheet
+          activityName={pendingRowActivity.name}
+          questionLabel={activities.find((a) => a.id === pendingRowActivity.id)?.question?.label ?? "Where?"}
+          allowSkip={activities.find((a) => a.id === pendingRowActivity.id)?.question?.isRequired === false}
+          lands={rowLands}
+          error={error}
+          busy={busy}
+          onConfirm={confirmRow}
+          onSkip={skipRow}
+          onCancel={cancelRowPicker}
         />
       )}
 

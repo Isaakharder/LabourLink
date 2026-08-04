@@ -76,6 +76,7 @@ export function ActivityLogsCard({
           <table className="employees-table inputs-logs-table">
             <colgroup>
               <col className="inputs-col-activity" />
+              <col className="inputs-col-row" />
               <col className="inputs-col-speed" />
               <col className="inputs-col-duration" />
               <col className="inputs-col-endtime" />
@@ -83,6 +84,7 @@ export function ActivityLogsCard({
             <thead>
               <tr>
                 <th>Activity</th>
+                <th>Row</th>
                 <th>Normal Speed</th>
                 <th className="inputs-th-duration">Duration</th>
                 <th className="inputs-th-endtime">End Time</th>
@@ -96,6 +98,7 @@ export function ActivityLogsCard({
                   onClick={() => onSelectRun(run.id)}
                 >
                   <td className="inputs-log-activity">{run.activityName}</td>
+                  <td className="inputs-log-row-cell">{run.row?.label ?? "—"}</td>
                   <td className="inputs-log-speed">
                     {run.normalSpeedPerHour ? (
                       <span title="Configured normal speed for this activity — not measured actual output">

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Outlet } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
+import { UnsavedChangesProvider } from "../../context/UnsavedChangesContext";
 
 // The Greenhouse Layout editor is the only page that hides the sidebar or
 // goes full-bleed today, but that state lives here (not in that page) so
@@ -22,11 +23,13 @@ export function AppLayout() {
   const [contentFullBleed, setContentFullBleed] = useState(false);
 
   return (
-    <div className="app-shell">
-      <Sidebar hidden={sidebarHidden} onRestore={() => setSidebarHidden(false)} />
-      <main className={`app-content${contentFullBleed ? " app-content-full-bleed" : ""}`}>
-        <Outlet context={{ sidebarHidden, setSidebarHidden, setContentFullBleed } satisfies AppShellContext} />
-      </main>
-    </div>
+    <UnsavedChangesProvider>
+      <div className="app-shell">
+        <Sidebar hidden={sidebarHidden} onRestore={() => setSidebarHidden(false)} />
+        <main className={`app-content${contentFullBleed ? " app-content-full-bleed" : ""}`}>
+          <Outlet context={{ sidebarHidden, setSidebarHidden, setContentFullBleed } satisfies AppShellContext} />
+        </main>
+      </div>
+    </UnsavedChangesProvider>
   );
 }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../../../lib/api";
-import { Activity } from "../../../lib/activityTypes";
+import { Activity, QUESTION_TYPE_LABELS } from "../../../lib/activityTypes";
 import { useAuth } from "../../../context/AuthContext";
 import { ActivityFormModal } from "../../../components/activities/ActivityFormModal";
 import { ActivityQuestionsModal } from "../../../components/activities/ActivityQuestionsModal";
@@ -11,6 +11,12 @@ function formatSpeed(activity: Activity): string {
   if (activity.normalSpeed == null) return "—";
   const speed = activity.normalSpeed;
   return activity.speedUnit ? `${speed} ${activity.speedUnit}` : String(speed);
+}
+
+function formatQuestion(activity: Activity): string {
+  if (!activity.question) return "No questions";
+  const { label, type, isRequired } = activity.question;
+  return `${label} · ${QUESTION_TYPE_LABELS[type]}${isRequired ? " · Required" : ""}`;
 }
 
 export function ActivitiesTab() {
@@ -128,6 +134,7 @@ export function ActivitiesTab() {
                 <th>Minimum duration</th>
                 <th>Status</th>
                 <th>Groups</th>
+                <th>Question</th>
                 <th></th>
               </tr>
             </thead>
@@ -143,6 +150,7 @@ export function ActivitiesTab() {
                     </span>
                   </td>
                   <td>{a.assignedGroupCount}</td>
+                  <td>{formatQuestion(a)}</td>
                   <td>{renderActions(a)}</td>
                 </tr>
               ))}
@@ -173,6 +181,10 @@ export function ActivitiesTab() {
                     <dt>Groups</dt>
                     <dd>{a.assignedGroupCount}</dd>
                   </div>
+                  <div>
+                    <dt>Question</dt>
+                    <dd>{formatQuestion(a)}</dd>
+                  </div>
                 </dl>
                 {renderActions(a)}
               </div>
@@ -193,7 +205,14 @@ export function ActivitiesTab() {
       )}
 
       {questionsActivity && (
-        <ActivityQuestionsModal activity={questionsActivity} onClose={() => setQuestionsActivity(null)} />
+        <ActivityQuestionsModal
+          activity={questionsActivity}
+          onClose={() => setQuestionsActivity(null)}
+          onSaved={() => {
+            setQuestionsActivity(null);
+            load();
+          }}
+        />
       )}
     </>
   );

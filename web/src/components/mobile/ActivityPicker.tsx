@@ -5,6 +5,7 @@ export interface PickerActivity {
   name: string;
   normalSpeed: number | null;
   speedUnit: string | null;
+  question: { type: "greenhouse_row"; label: string; isRequired: boolean } | null;
 }
 
 interface ActivityPickerProps {

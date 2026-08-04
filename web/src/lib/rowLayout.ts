@@ -58,6 +58,16 @@ export interface RowRect {
   orientation: Orientation;
 }
 
+// Screen/SVG width+height for a row rect — orientation determines which of
+// widthFt/lengthFt maps to which rendered dimension. Used by the read-only
+// live map's GreenhouseLiveCanvas (LandCanvas keeps its own local copy of
+// this same small calculation).
+export function rowScreenRect(row: { widthFt: number; lengthFt: number; orientation: string }) {
+  const w = row.orientation === "horizontal" ? row.lengthFt : row.widthFt;
+  const h = row.orientation === "horizontal" ? row.widthFt : row.lengthFt;
+  return { width: w, height: h };
+}
+
 export interface BatchParams {
   startSide: Side;
   anchorSide: Side;

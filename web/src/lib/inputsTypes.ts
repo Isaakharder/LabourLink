@@ -16,6 +16,7 @@ export interface ActivityRunDto {
   endedAt: string | null;
   isOpen: boolean;
   canEdit: boolean;
+  row: { id: string; label: string } | null;
 }
 
 export interface BreakDto {

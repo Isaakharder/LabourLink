@@ -81,6 +81,32 @@ export function getDayBoundsUtc(dateStr: string): { start: Date; end: Date } {
   return { start, end };
 }
 
+// [start, end) UTC instants spanning every calendar date from dateStart
+// through dateEnd inclusive, as observed in APP_TIMEZONE. dateStart ===
+// dateEnd reduces to exactly getDayBoundsUtc(dateStart) — used by every
+// greenhouse live-state query (single-date and date-range callers share the
+// same bounds shape) so a range is never assembled as start + N*24h, which
+// would be wrong across a DST transition the same way getDayBoundsUtc's own
+// end-of-day math already avoids.
+export function getRangeBoundsUtc(dateStart: string, dateEnd: string): { start: Date; end: Date } {
+  return { start: getDayBoundsUtc(dateStart).start, end: getDayBoundsUtc(dateEnd).end };
+}
+
+// Inclusive day-count spanned by [dateStart, dateEnd] (1 for a single day) —
+// plain calendar-date arithmetic, no timezone conversion needed since both
+// ends are already Y/M/D strings. Used to enforce MAX_DATE_RANGE_DAYS on any
+// endpoint accepting a caller-supplied greenhouse date range (see
+// greenhouseLive.ts and greenhouseDisplays.ts) — a published TV display's
+// range gets re-queried on every ~10s poll indefinitely, so an unbounded
+// span isn't just a slow one-off request, it's a standing load.
+export function inclusiveDayCount(dateStart: string, dateEnd: string): number {
+  const [sy, sm, sd] = dateStart.split("-").map(Number);
+  const [ey, em, ed] = dateEnd.split("-").map(Number);
+  const startMs = Date.UTC(sy, sm - 1, sd);
+  const endMs = Date.UTC(ey, em - 1, ed);
+  return Math.round((endMs - startMs) / 86400000) + 1;
+}
+
 // The YYYY-MM-DD calendar date `instant` falls on, as observed in
 // APP_TIMEZONE — used to confirm a correction's new end time stays on the
 // same calendar day as the run it belongs to.

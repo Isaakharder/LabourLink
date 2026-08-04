@@ -511,6 +511,20 @@ input {
   cursor: default;
 }
 
+.mobile-change-row {
+  background: none;
+  border: none;
+  color: var(--color-primary);
+  font-size: 0.9rem;
+  font-weight: 600;
+  padding: 0.1rem;
+  margin-top: -0.4rem;
+}
+
+.mobile-change-row:disabled {
+  opacity: 0.5;
+}
+
 .mobile-timer {
   font-size: 2rem;
   font-weight: 700;
@@ -636,6 +650,78 @@ input {
   color: var(--color-muted);
 }
 
+/* ---------- Mobile: greenhouse row picker ---------- */
+
+.mobile-row-picker-subtitle {
+  margin: 0.2rem 0 0;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.mobile-row-search input {
+  width: 100%;
+  padding: 0.75rem 0.9rem;
+  font-size: 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-bg);
+}
+
+.mobile-row-back {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  color: var(--color-primary);
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 0.25rem 0;
+}
+
+.mobile-row-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 0.6rem;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 0.1rem;
+}
+
+.mobile-row-grid-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.15rem;
+  min-height: 56px;
+  padding: 0.5rem 0.3rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.mobile-row-grid-item:disabled {
+  opacity: 0.5;
+}
+
+.mobile-row-grid-item-selected {
+  border-color: var(--color-primary);
+  border-width: 2px;
+  background: #e8edfc;
+  color: var(--color-primary);
+}
+
+.mobile-row-grid-item-number {
+  line-height: 1;
+}
+
+.mobile-row-grid-item-phase {
+  font-size: 0.68rem;
+  font-weight: 400;
+  color: var(--color-muted);
+}
+
 /* ---------- Mobile: recent jobs card ---------- */
 
 .recent-jobs-card {
@@ -678,6 +764,11 @@ input {
 .recent-jobs-item-name {
   font-size: 0.9rem;
   font-weight: 600;
+}
+
+.recent-jobs-item-row {
+  font-size: 0.8rem;
+  color: var(--color-primary);
 }
 
 .recent-jobs-item-meta {
@@ -1532,19 +1623,23 @@ input {
 }
 
 .inputs-col-activity {
-  width: 30%;
+  width: 24%;
+}
+
+.inputs-col-row {
+  width: 18%;
 }
 
 .inputs-col-speed {
-  width: 25%;
-}
-
-.inputs-col-duration {
   width: 20%;
 }
 
+.inputs-col-duration {
+  width: 16%;
+}
+
 .inputs-col-endtime {
-  width: 25%;
+  width: 22%;
 }
 
 .inputs-log-activity {
@@ -1612,6 +1707,12 @@ input {
 .inputs-log-speed {
   text-align: left;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--color-muted);
+}
+
+.inputs-log-row-cell {
+  text-align: left;
   white-space: nowrap;
   color: var(--color-muted);
 }
@@ -2865,4 +2966,370 @@ input {
 .rows-tab-details h4 {
   margin: 0 0 0.6rem;
   font-size: 0.95rem;
+}
+
+/* ---------- Greenhouse live page (read-only) ---------- */
+
+.greenhouse-live-land-bar {
+  margin-bottom: 1rem;
+}
+
+.greenhouse-live-land-bar label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.greenhouse-live-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.greenhouse-live-canvas-wrapper {
+  display: flex;
+  flex-direction: column;
+  height: 65vh;
+  min-height: 420px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.greenhouse-live-updated {
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+
+.greenhouse-live-legend {
+  display: flex;
+  gap: 1.25rem;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.greenhouse-live-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.greenhouse-live-legend-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+}
+
+/* Dedicated live-row rect class (not .greenhouse-row-rect) — the editor's
+   row class carries its own :hover fill and selection styling that would
+   otherwise fight this page's state colors on specificity. No hover/cursor
+   affordance here beyond the native <title> tooltip; rows aren't clickable
+   in this read-only view. */
+.greenhouse-live-row-rect {
+  stroke-width: 1;
+}
+
+.greenhouse-live-row-blue {
+  fill: #2563eb;
+  stroke: #1d4ed8;
+}
+
+.greenhouse-live-row-green {
+  fill: #16a34a;
+  stroke: #15803d;
+}
+
+.greenhouse-live-row-neutral {
+  fill: #cbd5e1;
+  stroke: #94a3b8;
+}
+
+/* ---------- Greenhouse office control page layout ---------- */
+
+.greenhouse-office-layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.greenhouse-office-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  position: sticky;
+  top: 0;
+}
+
+.greenhouse-office-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.greenhouse-office-section label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.greenhouse-office-new-display {
+  padding: 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+}
+
+.greenhouse-office-token-reveal {
+  padding: 0.75rem;
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius);
+  background: #e8edfc;
+  font-size: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.greenhouse-office-token-reveal code {
+  display: block;
+  padding: 0.5rem;
+  background: var(--color-surface);
+  border-radius: 6px;
+  word-break: break-all;
+  font-size: 0.8rem;
+}
+
+.greenhouse-office-range-label {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.greenhouse-office-publish-button {
+  width: 100%;
+  margin-left: 0;
+}
+
+.greenhouse-office-unsaved-note {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--color-muted);
+}
+
+.greenhouse-office-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.greenhouse-office-toprow {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.greenhouse-office-toprow label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.greenhouse-office-activity-note {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--color-muted);
+  align-self: center;
+}
+
+.greenhouse-office-published-status {
+  margin-left: auto;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+  align-self: center;
+}
+
+@media (max-width: 900px) {
+  .greenhouse-office-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .greenhouse-office-sidebar {
+    position: static;
+  }
+}
+
+/* ---------- Date-range calendar (drag/click-to-select) ---------- */
+
+.date-range-calendar {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 0.65rem;
+  background: var(--color-surface);
+  user-select: none;
+}
+
+.date-range-calendar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.date-range-calendar-header button {
+  border: none;
+  background: none;
+  color: var(--color-muted);
+  font-size: 0.9rem;
+  padding: 0.1rem 0.4rem;
+}
+
+.date-range-calendar-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  font-size: 0.7rem;
+  color: var(--color-muted);
+  text-align: center;
+  margin-bottom: 0.2rem;
+}
+
+.date-range-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.date-range-calendar-day {
+  aspect-ratio: 1;
+  border: none;
+  background: none;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.date-range-calendar-day:hover {
+  background: var(--color-bg);
+}
+
+.date-range-calendar-day-outside {
+  color: var(--color-muted);
+  opacity: 0.5;
+}
+
+.date-range-calendar-day-in-range {
+  background: #e8edfc;
+  border-radius: 0;
+}
+
+.date-range-calendar-day-edge {
+  background: var(--color-primary);
+  color: white;
+  border-radius: 4px;
+}
+
+/* ---------- Greenhouse TV display page (full viewport, no chrome) ---------- */
+
+.greenhouse-tv-page {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: #eef1f4;
+  overflow: hidden;
+  user-select: none;
+}
+
+.greenhouse-tv-page-error {
+  align-items: center;
+  justify-content: center;
+  color: var(--color-muted);
+  font-size: 1.5rem;
+}
+
+.greenhouse-tv-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 1.25rem 2rem;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.greenhouse-tv-title h1 {
+  margin: 0;
+  font-size: 2.75rem;
+}
+
+.greenhouse-tv-subtitle {
+  margin: 0.4rem 0 0;
+  font-size: 1.5rem;
+  color: var(--color-muted);
+}
+
+.greenhouse-tv-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.4rem;
+}
+
+.greenhouse-tv-updated {
+  font-size: 1.1rem;
+  color: var(--color-muted);
+}
+
+.greenhouse-tv-stale-badge {
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 1.1rem;
+  padding: 0.35rem 0.9rem;
+}
+
+.greenhouse-tv-canvas-wrapper {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.greenhouse-tv-loading {
+  margin: auto;
+  font-size: 1.5rem;
+}
+
+.greenhouse-tv-legend {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  gap: 3rem;
+  padding: 1.25rem;
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  font-size: 1.75rem;
+}
+
+.greenhouse-tv-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.greenhouse-tv-legend .greenhouse-live-legend-swatch {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
 }

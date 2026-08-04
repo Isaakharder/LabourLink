@@ -1,3 +1,9 @@
+export interface ActivityQuestion {
+  type: "greenhouse_row";
+  label: string;
+  isRequired: boolean;
+}
+
 export interface Activity {
   id: string;
   name: string;
@@ -7,7 +13,15 @@ export interface Activity {
   isActive: boolean;
   assignedGroupCount: number;
   updatedAt: string;
+  question: ActivityQuestion | null;
 }
+
+// Only question type v1 supports — surfaced wherever a human-readable
+// question-type name is shown (Activities table summary, question config
+// modal). A second type, when it exists, gets its own label here too.
+export const QUESTION_TYPE_LABELS: Record<ActivityQuestion["type"], string> = {
+  greenhouse_row: "Greenhouse Row",
+};
 
 export interface ActivityGroupMember {
   id: string;

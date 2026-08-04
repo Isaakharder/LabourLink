@@ -70,6 +70,37 @@ export function addCalendarDays(dateStr: string, deltaDays: number): string {
   ).padStart(2, "0")}`;
 }
 
+// Monday of the calendar week containing `dateStr` — pure UTC Y/M/D
+// arithmetic via addCalendarDays, same approach as every other helper here
+// (never round-trips through a locally-parsed Date). Week start is Monday,
+// not Sunday — getUTCDay() is 0=Sun..6=Sat, so the Monday offset is
+// (day + 6) % 7 days back (Sunday, day 0, is 6 days after the preceding
+// Monday; Monday itself, day 1, is 0 days back).
+export function startOfWeekMonday(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const day = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  const offset = (day + 6) % 7;
+  return addCalendarDays(dateStr, -offset);
+}
+
+// "YYYY-MM-01" for the month containing `dateStr`.
+export function startOfMonth(dateStr: string): string {
+  const [y, m] = dateStr.split("-").map(Number);
+  return `${y}-${String(m).padStart(2, "0")}-01`;
+}
+
+// The last real calendar day of the month containing `dateStr` — computed
+// by asking for day 0 of the *next* month (JS/UTC date arithmetic rolls
+// that back to the last day of the current one), not a hardcoded 28-31
+// lookup table.
+export function endOfMonth(dateStr: string): string {
+  const [y, m] = dateStr.split("-").map(Number);
+  const last = new Date(Date.UTC(y, m, 0));
+  return `${last.getUTCFullYear()}-${String(last.getUTCMonth() + 1).padStart(2, "0")}-${String(
+    last.getUTCDate()
+  ).padStart(2, "0")}`;
+}
+
 // "Saturday, August 1, 2026" — the date string is a plain calendar date, not
 // an instant, so this formats it directly rather than going through any
 // timezone conversion (there's no "instant" to convert; a calendar date

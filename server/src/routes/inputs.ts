@@ -94,14 +94,20 @@ router.get(
     // Not filtered on activities.is_active — activities are never
     // hard-deleted, only deactivated, so filtering here would silently hide
     // legitimate history against a since-deactivated activity.
+    // Not filtered on greenhouse_rows.deleted_at/greenhouse_phases.is_active
+    // either — same "history always resolves" convention as the
+    // unfiltered activities join above.
     const { rows: entryRows } = await pool.query(
       `select te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
-              te.break_profile_item_id, te.source, te.is_paid,
+              te.break_profile_item_id, te.source, te.is_paid, te.greenhouse_row_id,
               a.name as activity_name, a.normal_speed, a.speed_unit,
-              bpi.name as break_item_name
+              bpi.name as break_item_name,
+              gr.row_number, gphase.name as row_phase_name
        from time_entries te
        left join activities a on a.id = te.activity_id
        left join break_profile_items bpi on bpi.id = te.break_profile_item_id
+       left join greenhouse_rows gr on gr.id = te.greenhouse_row_id
+       left join greenhouse_phases gphase on gphase.id = gr.phase_id
        where te.employee_id = $1 and te.started_at >= $2 and te.started_at < $3
        order by te.started_at asc`,
       [employeeId, start, end]
@@ -113,10 +119,12 @@ router.get(
       activity_id: r.activity_id,
       started_at: r.started_at,
       ended_at: r.ended_at,
+      greenhouse_row_id: r.greenhouse_row_id,
     }));
     const { runs, breaks } = groupIntoActivityRuns(segments);
 
     const activityMeta = new Map<string, { name: string; normalSpeed: string | null; speedUnit: string | null }>();
+    const rowMeta = new Map<string, { rowNumber: number; phaseName: string }>();
     // Unclassified/legacy breaks (is_paid null, recorded before this column
     // existed) are bucketed as unpaid — a break must be explicitly marked
     // paid to count as paid, nothing is inferred from duration or time.
@@ -127,6 +135,9 @@ router.get(
     for (const r of entryRows) {
       if (r.activity_id && !activityMeta.has(r.activity_id)) {
         activityMeta.set(r.activity_id, { name: r.activity_name, normalSpeed: r.normal_speed, speedUnit: r.speed_unit });
+      }
+      if (r.greenhouse_row_id && !rowMeta.has(r.greenhouse_row_id)) {
+        rowMeta.set(r.greenhouse_row_id, { rowNumber: r.row_number, phaseName: r.row_phase_name });
       }
       if (r.entry_type === "break") {
         breakMeta.set(r.id, {
@@ -166,6 +177,7 @@ router.get(
       workStartTime: workStart ? workStart.started_at : null,
       runs: runs.map((r) => {
         const meta = activityMeta.get(r.activityId);
+        const row = r.greenhouseRowId ? rowMeta.get(r.greenhouseRowId) : undefined;
         return {
           id: r.id,
           activityId: r.activityId,
@@ -180,6 +192,7 @@ router.get(
           endedAt: r.endedAt,
           isOpen: r.isOpen,
           canEdit: canEditRole && !r.isOpen,
+          row: row ? { id: r.greenhouseRowId, label: `${row.phaseName} · Row ${row.rowNumber}` } : null,
         };
       }),
       breaks: breaks.map((b) => {

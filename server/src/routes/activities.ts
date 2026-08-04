@@ -118,13 +118,22 @@ function validateUpdate(body: Record<string, unknown>):
 const SELECT_COLUMNS = `
   a.id, a.name, a.normal_speed, a.speed_unit, a.minimum_duration_minutes,
   a.is_active, a.sort_order, a.updated_at,
-  count(aga.activity_group_id) as assigned_group_count
+  count(aga.activity_group_id) as assigned_group_count,
+  aq.id as question_id, aq.question_type, aq.label as question_label, aq.is_required as question_required
 `;
 
 const FROM_JOINS = `
   from activities a
   left join activity_group_activities aga on aga.activity_id = a.id
+  left join activity_questions aq on aq.activity_id = a.id
 `;
+
+// activity_questions.activity_id is unique (see 014_activity_questions.sql),
+// so joining it never fans out a.id's rows the way activity_group_activities
+// does — grouping by its columns too (alongside a.id) just satisfies
+// Postgres's "every selected column must be grouped or aggregated" rule
+// without changing result cardinality.
+const GROUP_BY = `group by a.id, aq.id, aq.question_type, aq.label, aq.is_required`;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function serializeActivity(row: any) {
@@ -137,6 +146,13 @@ function serializeActivity(row: any) {
     isActive: row.is_active,
     assignedGroupCount: Number(row.assigned_group_count),
     updatedAt: row.updated_at,
+    question: row.question_id
+      ? {
+          type: row.question_type as "greenhouse_row",
+          label: row.question_label as string,
+          isRequired: row.question_required as boolean,
+        }
+      : null,
   };
 }
 
@@ -161,7 +177,7 @@ router.get(
 
     const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
     const { rows } = await pool.query(
-      `select ${SELECT_COLUMNS} ${FROM_JOINS} ${where} group by a.id order by a.sort_order, a.name`,
+      `select ${SELECT_COLUMNS} ${FROM_JOINS} ${where} ${GROUP_BY} order by a.sort_order, a.name`,
       params
     );
 
@@ -178,7 +194,7 @@ router.get(
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid activity id" });
 
     const { rows } = await pool.query(
-      `select ${SELECT_COLUMNS} ${FROM_JOINS} where a.id = $1 group by a.id`,
+      `select ${SELECT_COLUMNS} ${FROM_JOINS} where a.id = $1 ${GROUP_BY}`,
       [id]
     );
     const row = rows[0];
@@ -205,7 +221,7 @@ router.post(
       );
 
       const { rows: full } = await pool.query(
-        `select ${SELECT_COLUMNS} ${FROM_JOINS} where a.id = $1 group by a.id`,
+        `select ${SELECT_COLUMNS} ${FROM_JOINS} where a.id = $1 ${GROUP_BY}`,
         [rows[0].id]
       );
       res.status(201).json({ activity: serializeActivity(full[0]) });
@@ -260,7 +276,7 @@ router.patch(
       if (!rows[0]) return res.status(404).json({ error: "Activity not found" });
 
       const { rows: full } = await pool.query(
-        `select ${SELECT_COLUMNS} ${FROM_JOINS} where a.id = $1 group by a.id`,
+        `select ${SELECT_COLUMNS} ${FROM_JOINS} where a.id = $1 ${GROUP_BY}`,
         [id]
       );
       res.json({ activity: serializeActivity(full[0]) });
@@ -275,6 +291,70 @@ router.patch(
       }
       throw err;
     }
+  })
+);
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function serializeQuestion(row: any) {
+  return {
+    id: row.id,
+    activityId: row.activity_id,
+    questionType: row.question_type as "greenhouse_row",
+    label: row.label as string,
+    isRequired: row.is_required as boolean,
+    updatedAt: row.updated_at,
+  };
+}
+
+router.get(
+  "/:id/questions",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid activity id" });
+
+    const activity = await pool.query("select id from activities where id = $1", [id]);
+    if (!activity.rows[0]) return res.status(404).json({ error: "Activity not found" });
+
+    const { rows } = await pool.query(
+      "select id, activity_id, question_type, label, is_required, updated_at from activity_questions where activity_id = $1",
+      [id]
+    );
+    res.json({ question: rows[0] ? serializeQuestion(rows[0]) : null });
+  })
+);
+
+router.put(
+  "/:id/questions",
+  requireAuth,
+  requireRole("Administrator"),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid activity id" });
+
+    const activity = await pool.query("select id from activities where id = $1", [id]);
+    if (!activity.rows[0]) return res.status(404).json({ error: "Activity not found" });
+
+    const body = (req.body ?? {}) as { enabled?: boolean; label?: string; isRequired?: boolean };
+
+    if (!body.enabled) {
+      await pool.query("delete from activity_questions where activity_id = $1", [id]);
+      return res.json({ question: null });
+    }
+
+    const label = trimOrNull(body.label) || "Where?";
+    const isRequired = body.isRequired === undefined ? true : Boolean(body.isRequired);
+
+    const { rows } = await pool.query(
+      `insert into activity_questions (activity_id, question_type, label, is_required)
+       values ($1, 'greenhouse_row', $2, $3)
+       on conflict (activity_id) do update
+         set label = excluded.label, is_required = excluded.is_required, updated_at = now()
+       returning id, activity_id, question_type, label, is_required, updated_at`,
+      [id, label, isRequired]
+    );
+    res.json({ question: serializeQuestion(rows[0]) });
   })
 );
 

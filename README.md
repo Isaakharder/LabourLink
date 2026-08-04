@@ -359,6 +359,130 @@ number, phase name, or batch name; results can also be filtered by phase and
 by active/inactive/all. Deleting a row here uses the same soft-delete as
 deleting it from the map, so it disappears from both surfaces together.
 
+## Live Greenhouse Map, Activity Row Questions & Break Area TV display
+
+The live map shows which greenhouse rows currently have crews working
+(blue), which had qualifying work completed in a chosen date range (green),
+and which have neither (neutral) — derived fresh from `time_entries` on
+every request, never stored on `greenhouse_rows` itself. It is split into
+two pages that share one implementation:
+
+- **`/greenhouse`** — the authenticated office controller (Administrator or
+  Manager). Draft date-range/activity-filter controls drive an immediate
+  live preview; nothing reaches the TV until **Publish to TV** is pressed.
+- **`/greenhouse/display/:displayKey`** — the read-only TV display, reached
+  by an unguessable per-display URL token, no employee login involved.
+
+Both pages render through the same `GreenhouseLiveCanvas` component, and
+both the office `GET /api/greenhouse/live` endpoint and the TV's
+`GET /api/greenhouse/display/:displayKey/state` endpoint call the same
+`buildLiveLandQuery` (`server/src/lib/greenhouseLiveState.ts`) — one query
+shape, one place row state is defined. This is a distinct, read-only
+counterpart to the editable map in Setup → Greenhouse Layout (`LandCanvas`);
+that page remains the only place the map's geometry itself can be changed.
+
+**Row state**: blue = an open work entry (optionally matching an activity
+filter) that existed as of the selected range's end; green = no matching
+open entry, but at least one completed qualifying work entry in the range;
+neutral = neither. Blue always wins over green. An activity filter is
+applied identically to both the blue and green checks, so a row that only
+had *unrelated* activity completed on it is never marked green while
+filtered to a different activity.
+
+**Activity Row Questions**: an activity can be configured (Activities page →
+row action → *Questions*) to ask a Greenhouse Row question before an
+employee's phone lets them start it — configurable label (default "Where?")
+and **Required** vs **Optional**:
+- **Required** — the row picker must be used; Cancel returns to the job
+  list without starting anything; Confirm requires a row be selected first.
+- **Optional** — the row picker still opens (showing the configured label),
+  but a **Skip — No row** action is always available and starts the
+  activity immediately with no row attached. An optional question is never
+  silently skipped the way "no question at all" is — the label and picker
+  still appear.
+- Every server-side write independently re-validates any row id a client
+  supplies (real, non-deleted row in an active phase; only accepted at all
+  if the activity's question permits one) — the mobile picker is a
+  convenience, not the enforcement.
+- Changing rows mid-activity ("Change Row" on the phone) closes the current
+  segment and opens a new one on the new row, which also resets the visible
+  job timer (a row change is a new logical job segment, exactly like an
+  activity change). Starting and ending a break automatically resumes the
+  same activity *and* the same row with no re-prompt. An auto-added break
+  (scheduled break the employee worked straight through) splits the work
+  entry around it while carrying the same row forward on both sides.
+
+**Office controls**:
+- **Date range** — a Monday-start month calendar supports both drag-to-select
+  (mousedown → drag → mouseup) and click-click (first click = start, second
+  = end, order-independent) selection, plus 8 quick presets (Today,
+  Yesterday, This week, Last week, Last 7 days, This month, Last month,
+  Custom range). All range/preset math is computed in `APP_TIMEZONE`
+  (`server/.env` / `web/.env`'s `VITE_APP_TIMEZONE`, default
+  `America/Toronto`), not the browser's local timezone.
+- **Activity filter** — server-derived; only ever lists activities with real
+  qualifying work in the currently selected land/range (`GET
+  /api/greenhouse/available-activities`), never a static "all activities"
+  list. Changing the range re-derives the list; if the previously selected
+  activity no longer qualifies, the filter resets to "All activities" with
+  an inline explanation rather than silently keeping a stale filter.
+- **Publish workflow** — editing date range/activity/land only updates the
+  office's own live preview. The **Publish to TV** button (disabled until
+  something has actually changed since the last publish) writes the draft
+  to the selected display; the TV picks it up on its next poll (≤10s), no
+  reload. Leaving the page with unsaved changes triggers a confirmation —
+  both a browser-level `beforeunload` warning (hard reload/tab-close/
+  external navigation) and, since navigating between pages here is regular
+  in-app routing rather than a full page load, an in-app confirmation on the
+  sidebar's own nav links and Sign Out button (`UnsavedChangesContext`).
+  Every date-range/publish control on the office page stays disabled until
+  the currently-published configuration has finished loading, closing a
+  race where a fast click could land before that seed and then get
+  silently overwritten.
+- A maximum 90-day custom range is enforced server-side (office preview,
+  activity list, and Publish all reject a longer span) — not proven safe at
+  a larger scale, kept conservative rather than assumed.
+
+**Display tokens (TV security)**: a display is created via `npm run
+create-greenhouse-display -- "<name>" "<land name or id>"` or the office
+page's *New Display* form (Administrator only). Creation/regeneration
+returns a 256-bit random token (`crypto.randomBytes(32)`) exactly once —
+**copy it immediately**, it is never shown or logged again. Only its SHA-256
+hash is ever stored (`greenhouse_displays.display_key_hash`); the raw
+plaintext token never touches the database. A bad or deactivated token
+returns a bare `404` (not `401`/`403`) — the same response whether the
+token is wrong or the display was disabled, giving a prober no signal
+either way. Regenerating a display's key immediately invalidates its old
+URL. The token is a narrow read-only capability: it can only ever reach
+`GET /api/greenhouse/display/:displayKey/state` (the one route that accepts
+it) — it grants no access whatsoever to employee data, Inputs, Setup,
+activity management, or any mutating endpoint. Employee names returned to
+the TV are redacted server-side to "First L." (first name + last initial)
+before the response is ever sent — a display token is a bearer credential
+embedded in a URL, so this redaction happens at the actual security
+boundary, not just in how the TV page happens to render it (the
+authenticated office view still shows full names).
+
+**TV display behavior**: full viewport (`position: fixed; inset: 0`), no
+sidebar, no admin chrome, no editing, no page scrolling, neutral (not
+green) background. The map and its phases/rows auto-fit on load and on any
+resolution/window change. The published display name, activity filter, and
+date range are shown in a header; a compact legend (Blue/Green/Neutral,
+large/high-contrast for reading from across a break room) replaces the
+office page's hover tooltips, since a TV has no mouse. It polls its state
+endpoint every 10 seconds plus on focus/visibility-regain. A failed poll
+never blanks the screen — the last successfully loaded map stays up with a
+small "Reconnecting…" indicator, and it recovers automatically (no manual
+refresh, no reload) once polling succeeds again.
+
+**Current limitation**: in-app unsaved-changes protection on the office
+page covers the sidebar's own navigation (NavLink clicks, Sign Out) — it
+cannot intercept the browser's own Back/Forward buttons. This repo uses a
+plain `BrowserRouter` (not a data router), and `useBlocker`/
+`unstable_usePrompt` — the mechanism that *can* cover Back/Forward — require
+`createBrowserRouter`/`RouterProvider`, a separate, larger routing change
+left out of this milestone rather than faked.
+
 ## Testing from a real phone on the same Wi-Fi
 
 The dev server binds all network interfaces (`server: { host: true }` in
@@ -456,6 +580,9 @@ environment variables.
       job-chain run grouping, end-time correction with a required reason and
       a full audit trail (`time_entry_corrections`), and a Workday details
       card — see "Daily activity-log review & correction" above
+- [x] **Phase 8** — Live Greenhouse Map, Activity Row Questions, and Break
+      Area TV display — see "Live Greenhouse Map, Activity Row Questions &
+      Break Area TV display" above
 
 Basic time tracking now exists, scoped tightly to what field testing needs:
 an `activities` table (plus `activity_groups` and the join/assignment tables
@@ -497,3 +624,15 @@ group; it just won't be offered again as a new choice.
 - A deactivated device's phone is correctly rejected and returned to the
   pairing screen, but there's no explicit "this device was removed" message
   — it just looks like a fresh pairing flow.
+- **Office page unsaved-changes protection doesn't cover browser Back/
+  Forward** — see "Live Greenhouse Map..." above for why (plain
+  `BrowserRouter`, not a data router).
+- The greenhouse live-state queries (`greenhouseLiveState.ts`,
+  `greenhouseLive.ts`) filter on `time_entries.deleted_at`, a column added
+  by migration `012_inputs_deletion_and_break_corrections.sql`. That
+  migration belongs to a separate, still-uncommitted Inputs
+  correction/deletion feature and is deliberately not part of this
+  commit's migration set. The live database already has it applied, so
+  this works correctly today — but a database built fresh from only this
+  repo's committed migrations would be missing that column until 012 is
+  committed on its own.

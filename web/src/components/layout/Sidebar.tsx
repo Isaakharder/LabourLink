@@ -7,16 +7,22 @@ import {
   LogOut,
   Settings,
   Smartphone,
+  Sprout,
   Users,
   Wrench,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
+import { useUnsavedChangesGuard } from "../../context/UnsavedChangesContext";
 import { NavItem } from "./NavItem";
 
 // Add future sections here (Reports, Time Logs, Schedules, Organizations,
 // Administration, Food Safety, CropLink) as their routes/pages land.
-const PRIMARY_NAV = [
+// `roles`, when set, hides the nav item for anyone else — App.tsx's
+// RequireRole wrapper enforces the same list on the route itself, so direct
+// navigation is blocked too, not just the link.
+const PRIMARY_NAV: { to: string; icon: typeof LayoutDashboard; label: string; roles?: string[] }[] = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
+  { to: "/greenhouse", icon: Sprout, label: "Greenhouse", roles: ["Administrator", "Manager"] },
   { to: "/inputs", icon: ClipboardList, label: "Inputs" },
   { to: "/employees", icon: Users, label: "Employees" },
   { to: "/activities", icon: ListChecks, label: "Activities" },
@@ -31,7 +37,11 @@ interface SidebarProps {
 }
 
 export function Sidebar({ hidden, onRestore }: SidebarProps) {
-  const { logout } = useAuth();
+  const { employee, logout } = useAuth();
+  const { confirmNavigation } = useUnsavedChangesGuard();
+  const visibleNav = PRIMARY_NAV.filter(
+    (item) => !item.roles || (employee && item.roles.includes(employee.securityRole))
+  );
 
   if (hidden) {
     return (
@@ -48,7 +58,7 @@ export function Sidebar({ hidden, onRestore }: SidebarProps) {
       </div>
 
       <nav className="sidebar-nav">
-        {PRIMARY_NAV.map((item) => (
+        {visibleNav.map((item) => (
           <NavItem key={item.to} to={item.to} icon={item.icon} label={item.label} />
         ))}
       </nav>
@@ -57,7 +67,13 @@ export function Sidebar({ hidden, onRestore }: SidebarProps) {
 
       <div className="sidebar-bottom">
         <NavItem to="/settings" icon={Settings} label="Settings" />
-        <button type="button" className="nav-item nav-item-button" onClick={() => logout()}>
+        <button
+          type="button"
+          className="nav-item nav-item-button"
+          onClick={() => {
+            if (confirmNavigation()) logout();
+          }}
+        >
           <LogOut size={18} className="nav-item-icon" />
           <span className="nav-item-label">Sign Out</span>
         </button>
