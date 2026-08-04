@@ -2363,6 +2363,210 @@ input {
   gap: 0.5rem;
 }
 
+/* ---------- Greenhouse rows (saved + live preview) ---------- */
+
+.greenhouse-row-rect {
+  fill: #fde68a;
+  stroke: #b45309;
+  stroke-width: 1;
+  cursor: pointer;
+}
+
+.greenhouse-row-rect:hover {
+  fill: #fcd34d;
+}
+
+.greenhouse-row-rect-selected {
+  stroke: #2563eb;
+  stroke-width: 2.5;
+}
+
+.greenhouse-row-label {
+  fill: #78350f;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+/* Unsaved preview rows — visually distinct from saved rows (semi-
+   transparent blue + dashed outline) so they can never be mistaken for
+   already-persisted geometry. */
+.greenhouse-row-rect-preview {
+  fill: rgba(37, 99, 235, 0.18);
+  stroke: #2563eb;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+
+.greenhouse-row-preview-label {
+  fill: #1d4ed8;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+/* ---------- Row builder panel (Add/Edit Rows) ---------- */
+
+.row-builder-panel,
+.row-details-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.row-builder-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.row-builder-header h4 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.row-builder-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.row-builder-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+}
+
+.row-builder-form input,
+.row-builder-form select {
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+.row-builder-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem 0.75rem;
+}
+
+.row-builder-continue {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.4rem !important;
+  font-size: 0.82rem !important;
+}
+
+.row-builder-preview-summary {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #1d4ed8;
+}
+
+.row-builder-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.row-builder-batches h5 {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.row-builder-batch-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.row-builder-batch-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.78rem;
+}
+
+.row-builder-batch-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.row-builder-batch-info strong {
+  font-size: 0.82rem;
+}
+
+.row-builder-batch-info span {
+  color: var(--color-muted);
+}
+
+.row-builder-batch-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.row-builder-batch-actions button {
+  font-size: 0.75rem;
+  padding: 0.3rem 0.55rem;
+}
+
+.row-builder-batch-delete {
+  color: var(--color-danger);
+  border-color: var(--color-danger) !important;
+}
+
+.row-builder-batch-rename {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  flex: 1;
+}
+
+.row-builder-batch-rename input {
+  flex: 1;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+.row-details-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.6rem;
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.row-details-list dt {
+  color: var(--color-muted);
+}
+
+.row-details-list dd {
+  margin: 0;
+  font-weight: 500;
+}
+
 @media (max-width: 900px) {
   .greenhouse-editor-body {
     grid-template-columns: 1fr;
@@ -2374,4 +2578,82 @@ input {
     border-bottom: 1px solid var(--color-border);
     max-height: 260px;
   }
+}
+
+/* ---------- Base Data > Rows tab ---------- */
+
+.rows-tab-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.rows-tab-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.rows-tab-filters input[type="search"] {
+  flex: 1 1 220px;
+  min-width: 180px;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+
+.rows-tab-filters select {
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  background: var(--color-surface);
+}
+
+.rows-tab-body {
+  display: flex;
+  gap: 1.25rem;
+  align-items: flex-start;
+}
+
+.rows-tab-table {
+  flex: 1;
+  min-width: 0;
+}
+
+.rows-tab-table tbody tr {
+  cursor: pointer;
+}
+
+.rows-tab-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+}
+
+.rows-tab-row-selected td {
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+}
+
+.rows-tab-confirm {
+  display: inline-flex;
+  gap: 0.35rem;
+}
+
+.rows-tab-confirm button {
+  font-size: 0.78rem;
+  padding: 0.25rem 0.5rem;
+}
+
+.rows-tab-details {
+  flex: 0 0 280px;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+}
+
+.rows-tab-details h4 {
+  margin: 0 0 0.6rem;
+  font-size: 0.95rem;
 }

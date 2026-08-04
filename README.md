@@ -244,6 +244,121 @@ turned off. Editing the land's dimensions (**Edit Land**) refreshes the
 canvas — dimensions, scale, and fit — immediately, without requiring a route
 change or reselecting the land.
 
+## Greenhouse row layouts (Add/Edit Rows)
+
+Inside the Greenhouse Layout editor, selecting a phase shows four action
+buttons: **Edit Phase**, **Edit Position**, **Add/Edit Rows**, **Deactivate**
+— in that order, unchanged from before rows existed. **Add/Edit Rows** opens
+a panel beneath those buttons (the phase stays selected and visible on the
+canvas; its drag is disabled while this panel is open, so placing rows can
+never accidentally move the phase) where a supervisor defines one *batch* of
+rows at a time and saves it.
+
+**Row coordinates are relative to their phase**, not the land — a row's
+`x_ft`/`y_ft` are an offset from its own phase's north-west corner, the same
+nesting pattern phases already use relative to their land
+(`x_feet_from_west`/`y_feet_from_north`). The canvas renders a row at
+`phase.xFeetFromWest + row.xFt`, `phase.yFeetFromNorth + row.yFt`, so:
+- **Moving a phase moves its rows for free** — no row is ever rewritten when
+  a phase is dragged or repositioned.
+- **Resizing a phase smaller is blocked** (409) if any existing row would no
+  longer fit inside the new dimensions — delete or adjust those rows first.
+- **Resizing the *land*** already proportionally rescales every phase it
+  contains (position and size); that same per-axis ratio is cascaded to
+  every row in every affected phase in the same transaction, so rows never
+  drift out of sync with a rescaled phase. The row *batch* (the recipe that
+  created the rows — see below) is deliberately left as originally entered;
+  only the persisted row geometry is rescaled.
+
+**Start side and anchor side** together determine where a batch's rows go.
+`startSide` (North/South/East/West) is the edge rows are stacked outward
+from — row 1 sits nearest that edge, each following row number one step
+further in. `anchorSide` is the edge each row's own length is flush against;
+the row extends away from that edge for the chosen length. The two must be
+perpendicular (South/North only ever pairs with East/West, and vice versa —
+pairing a side with itself or its opposite has no defined meaning and is
+rejected). The full mapping is documented as a table at the top of
+`server/src/lib/rowLayout.ts` (mirrored for client-side preview at
+`web/src/lib/rowLayout.ts`); for example, South start + East anchor stacks
+rows inward from the south edge, each one flush against the east edge and
+extending west.
+
+**Numbering modes** — *All numbers*, *Odd only*, *Even only* — apply to the
+inclusive start/end row-number range by filtering, not rounding: an odd-only
+batch numbered 2–16 produces 3, 5, 7, …, 15 (the odd numbers actually inside
+that range), never silently shifting the boundary itself.
+
+**Row width, length, gap, and offset** are all in feet. Width is the row's
+short dimension (perpendicular to its length); gap is empty space left
+between consecutive rows in the same batch (0 means rows sit directly beside
+each other, sharing an edge — that's "touching," not "overlapping," and is
+allowed). Offset is a manual inset from the phase edge the batch starts
+from, e.g. to leave a walkway.
+
+**Continuation**: checking "Continue from the last row on this side" makes
+a new batch start immediately after the furthest-stacked row that shares the
+*same phase and start side* (any prior batch, not just the one before it),
+plus that new batch's own gap. A manual offset combines additively on top of
+that computed point, e.g. to leave extra breathing room before a follow-up
+batch begins. A batch anchored from the *opposite* side (e.g. North instead
+of South) with its own manual offset is how an intentional centre walkway
+between two opposing batches is expressed — there's no separate walkway
+object in this first version.
+
+**Validation** happens both live in the browser (as fields change, before
+saving) and independently on the server when the batch is actually
+submitted — the server always recomputes every row's geometry itself from
+the submitted batch parameters via the same `rowLayout.ts` placement
+functions; it never trusts client-submitted row coordinates. A save is
+rejected if any row would fall outside the phase, overlap another row
+(within the new batch or against any existing active row in the phase,
+regardless of which batch placed it), or reuse a row number already active
+in that phase.
+
+**Saved geometry is final, not regenerated.** `greenhouse_row_batches` is
+only the creation recipe (side, anchor, numbering, gap, offset — useful for
+display and for continuation math); `greenhouse_rows` holds each row's
+actual persisted `x_ft`/`y_ft`/`width_ft`/`length_ft`, computed once at save
+time and never recalculated from the batch afterward. Deleting one row
+never shifts, renumbers, or otherwise touches any other row — deleted rows
+are soft-deleted (`deleted_at`), excluded from every normal read, and their
+row number becomes immediately reusable. Deleting an entire batch soft-
+deletes all (and only) its own rows; other batches in the same phase are
+untouched.
+
+**Selecting a saved row** (click its rectangle on the canvas) is independent
+of phase selection — the phase's own action buttons are hidden while a row
+is the current selection, to keep it unambiguous which object any visible
+button acts on. The row-details panel shows its batch, side/anchor,
+dimensions, and position, with a two-step confirm **Delete Row** action. Row
+number labels are hidden below a low zoom level to avoid illegible
+overlapping text, and reappear once zoomed in far enough to read.
+
+**Permissions** match the rest of the Greenhouse Layout editor: Administrator
+and Manager can read (view rows, batches, and the Basic Data → Rows list);
+only Administrator can create, edit (rename), or delete a row or batch.
+
+**Current limitation:** an existing batch's *geometry* (side, anchor,
+numbering, width, length, gap, offset) cannot be edited after it's saved —
+only its name can be changed, and individual rows can only be deleted, not
+repositioned or resized. To change a batch's layout, delete it and create a
+new one. Full batch re-editing was deliberately left out of this first
+version rather than risk the save/validation/continuation logic on a
+partial implementation.
+
+### Basic Data → Rows
+
+The Basic Data page (`/basic-data`) has a **Rows** tab alongside **Breaks**
+(`/basic-data/rows`, tab selection preserved in the URL) listing every
+active greenhouse row across every phase — Row #, Phase, Batch, Orientation,
+Width, Length, a Side/anchor summary, Active status, and a Delete action.
+It reads the exact same `greenhouse_rows` records the map does (via the same
+`GET /api/greenhouse-layout/rows` endpoint, just without a `phaseId` filter)
+— there's no separate copy of row data for this page. Search matches row
+number, phase name, or batch name; results can also be filtered by phase and
+by active/inactive/all. Deleting a row here uses the same soft-delete as
+deleting it from the map, so it disappears from both surfaces together.
+
 ## Testing from a real phone on the same Wi-Fi
 
 The dev server binds all network interfaces (`server: { host: true }` in

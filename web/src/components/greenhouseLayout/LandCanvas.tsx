@@ -1,7 +1,8 @@
 import { PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
-import { GreenhouseLand, GreenhousePhase } from "../../lib/greenhouseLayoutTypes";
+import { GreenhouseLand, GreenhousePhase, GreenhouseRow } from "../../lib/greenhouseLayoutTypes";
 import { CanvasTransform, clampPan, zoomAtPoint } from "../../lib/canvasTransform";
 import { isTypingIntoFormField } from "../../lib/isTypingTarget";
+import { RowRect } from "../../lib/rowLayout";
 
 interface LandCanvasProps {
   land: GreenhouseLand;
@@ -17,6 +18,21 @@ interface LandCanvasProps {
   snapEnabled: boolean;
   gridFeet: number;
   overlappingPhaseIds: Set<string>;
+  // Saved rows across every phase (phase-relative x/y — see
+  // lib/rowLayout.ts) plus, while the row builder is open for one phase, a
+  // live unsaved preview for just that phase. Rendering both here (rather
+  // than the builder drawing its own overlay) keeps a single source of
+  // truth for "what's on the canvas."
+  rows: GreenhouseRow[];
+  previewRows: RowRect[];
+  previewPhaseId: string | null;
+  selectedRowId: string | null;
+  onSelectRow: (id: string | null) => void;
+  // Disables dragging on this one phase even while editMode/positionEditId
+  // would otherwise allow it — set while its row builder is open, so
+  // placing rows can never accidentally drag the phase out from under
+  // them.
+  dragDisabledPhaseId: string | null;
   // View transform (pan in screen px, scale in px/ft) is owned by the
   // parent editor shell — the toolbar's zoom buttons and keyboard
   // shortcuts drive the exact same state this canvas's own wheel/drag
@@ -27,6 +43,16 @@ interface LandCanvasProps {
   onViewportSize: (size: { width: number; height: number }) => void;
   minScale: number;
   maxScale: number;
+}
+
+// Below this many screen px-per-foot, row number labels are hidden rather
+// than rendered as illegible/overlapping text.
+const ROW_LABEL_MIN_SCALE = 3;
+
+function rowScreenRect(row: { xFt: number; yFt: number; widthFt: number; lengthFt: number; orientation: string }) {
+  const w = row.orientation === "horizontal" ? row.lengthFt : row.widthFt;
+  const h = row.orientation === "horizontal" ? row.widthFt : row.lengthFt;
+  return { width: w, height: h };
 }
 
 // A plain left press doesn't capture the pointer (and so isn't yet treated
@@ -56,6 +82,12 @@ export function LandCanvas({
   snapEnabled,
   gridFeet,
   overlappingPhaseIds,
+  rows,
+  previewRows,
+  previewPhaseId,
+  selectedRowId,
+  onSelectRow,
+  dragDisabledPhaseId,
   transform,
   onTransformChange,
   onViewportSize,
@@ -174,7 +206,8 @@ export function LandCanvas({
 
     e.stopPropagation();
     onSelect(phase.id);
-    const draggable = editMode || phase.id === positionEditId;
+    onSelectRow(null);
+    const draggable = (editMode || phase.id === positionEditId) && phase.id !== dragDisabledPhaseId;
     if (!draggable) return;
     const pt = screenToFeet(e.clientX, e.clientY);
     if (!pt) return;
@@ -208,6 +241,18 @@ export function LandCanvas({
 
   function handlePhasePointerUp() {
     dragRef.current = null;
+  }
+
+  // Rows are never draggable in this version (see RowDetailsPanel — repositioning
+  // a saved row isn't supported yet) — a row click only ever selects it, and
+  // always stops propagation so it can never also trigger the phase drag/select
+  // handler on the rect it's rendered inside.
+  function handleRowPointerDown(e: ReactPointerEvent<SVGRectElement>, rowId: string) {
+    const isPanGesture = e.button === 1 || (e.button === 0 && spacePressed);
+    if (isPanGesture) return;
+    e.stopPropagation();
+    onSelect(null);
+    onSelectRow(rowId);
   }
 
   // Middle-mouse drag, Space+left-drag, or a plain left-drag starting on
@@ -291,7 +336,15 @@ export function LandCanvas({
       onPointerUp={handleViewportPointerUp}
       onPointerCancel={handleViewportPointerUp}
     >
-      <svg ref={svgRef} className="greenhouse-canvas-svg" onClick={(e) => e.target === svgRef.current && onSelect(null)}>
+      <svg
+        ref={svgRef}
+        className="greenhouse-canvas-svg"
+        onClick={(e) => {
+          if (e.target !== svgRef.current) return;
+          onSelect(null);
+          onSelectRow(null);
+        }}
+      >
         <g ref={gRef} transform={`translate(${transform.pan.x} ${transform.pan.y}) scale(${transform.scale})`}>
           <rect
             x={0}
@@ -299,7 +352,10 @@ export function LandCanvas({
             width={land.eastWestFeet}
             height={land.northSouthFeet}
             className="greenhouse-land-rect"
-            onClick={() => onSelect(null)}
+            onClick={() => {
+              onSelect(null);
+              onSelectRow(null);
+            }}
           />
 
           <g className="greenhouse-grid" aria-hidden="true">
@@ -386,6 +442,80 @@ export function LandCanvas({
                 >
                   {phase.eastWestFeet} ft × {phase.northSouthFeet} ft
                 </text>
+
+                {rows
+                  .filter((r) => r.phaseId === phase.id)
+                  .map((row) => {
+                    const { width, height } = rowScreenRect(row);
+                    const rowX = phase.xFeetFromWest + row.xFt;
+                    const rowY = phase.yFeetFromNorth + row.yFt;
+                    const rowSelected = row.id === selectedRowId;
+                    const showLabel = transform.scale >= ROW_LABEL_MIN_SCALE;
+                    const rowFontSize = Math.max(6, Math.min(width, height) * 0.5);
+                    return (
+                      <g key={row.id} className="greenhouse-row-group">
+                        <rect
+                          x={rowX}
+                          y={rowY}
+                          width={width}
+                          height={height}
+                          className={`greenhouse-row-rect${rowSelected ? " greenhouse-row-rect-selected" : ""}`}
+                          vectorEffect="non-scaling-stroke"
+                          onPointerDown={(e) => handleRowPointerDown(e, row.id)}
+                        >
+                          <title>
+                            Row {row.rowNumber} — {row.widthFt} ft × {row.lengthFt} ft
+                          </title>
+                        </rect>
+                        {showLabel && (
+                          <text
+                            x={rowX + width / 2}
+                            y={rowY + height / 2}
+                            textAnchor="middle"
+                            dominantBaseline="middle"
+                            fontSize={Math.min(rowFontSize, 10)}
+                            className="greenhouse-row-label"
+                            pointerEvents="none"
+                          >
+                            {row.rowNumber}
+                          </text>
+                        )}
+                      </g>
+                    );
+                  })}
+
+                {phase.id === previewPhaseId &&
+                  previewRows.map((row) => {
+                    const { width, height } = rowScreenRect(row);
+                    const rowX = phase.xFeetFromWest + row.xFt;
+                    const rowY = phase.yFeetFromNorth + row.yFt;
+                    return (
+                      <g key={`preview-${row.rowNumber}`} className="greenhouse-row-preview-group">
+                        <rect
+                          x={rowX}
+                          y={rowY}
+                          width={width}
+                          height={height}
+                          className="greenhouse-row-rect-preview"
+                          vectorEffect="non-scaling-stroke"
+                          pointerEvents="none"
+                        />
+                        {transform.scale >= ROW_LABEL_MIN_SCALE && (
+                          <text
+                            x={rowX + width / 2}
+                            y={rowY + height / 2}
+                            textAnchor="middle"
+                            dominantBaseline="middle"
+                            fontSize={Math.min(Math.max(6, Math.min(width, height) * 0.5), 10)}
+                            className="greenhouse-row-preview-label"
+                            pointerEvents="none"
+                          >
+                            {row.rowNumber}
+                          </text>
+                        )}
+                      </g>
+                    );
+                  })}
               </g>
             );
           })}

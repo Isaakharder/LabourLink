@@ -1,11 +1,15 @@
 import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { BreaksTab } from "./basic-data/BreaksTab";
+import { RowsTab } from "./basic-data/RowsTab";
 
 // Add future Basic Data sections here (Holidays, Pay Codes, Departments,
 // Teams, Nationalities, Languages, ...) as their tabs land. Each entry
 // drives both the tab nav and its route below.
-const TABS = [{ path: "", label: "Breaks", element: <BreaksTab /> }];
+const TABS = [
+  { path: "", label: "Breaks", element: <BreaksTab /> },
+  { path: "rows", label: "Rows", element: <RowsTab /> },
+];
 
 export function BasicDataPage() {
   return (

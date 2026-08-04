@@ -2,9 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useOutletContext } from "react-router-dom";
 import { api, ApiError } from "../../../lib/api";
 import { AppShellContext } from "../../../components/layout/AppLayout";
-import { GreenhouseLand, GreenhouseLandListItem, GreenhousePhase } from "../../../lib/greenhouseLayoutTypes";
+import {
+  GreenhouseLand,
+  GreenhouseLandListItem,
+  GreenhousePhase,
+  GreenhouseRowListItem,
+  GreenhouseRowBatch,
+} from "../../../lib/greenhouseLayoutTypes";
 import { CanvasTransform, computeFitTransform, zoomAtPoint } from "../../../lib/canvasTransform";
 import { isTypingIntoFormField } from "../../../lib/isTypingTarget";
+import { RowRect } from "../../../lib/rowLayout";
 import { LayoutToolbar } from "../../../components/greenhouseLayout/LayoutToolbar";
 import { LandCanvas } from "../../../components/greenhouseLayout/LandCanvas";
 import { NorthIndicator } from "../../../components/greenhouseLayout/NorthIndicator";
@@ -12,6 +19,8 @@ import { LandFormModal } from "../../../components/greenhouseLayout/LandFormModa
 import { PhaseFormModal } from "../../../components/greenhouseLayout/PhaseFormModal";
 import { PhaseList } from "../../../components/greenhouseLayout/PhaseList";
 import { PhasePositionEditor } from "../../../components/greenhouseLayout/PhasePositionEditor";
+import { RowBuilderPanel } from "../../../components/greenhouseLayout/RowBuilderPanel";
+import { RowDetailsPanel } from "../../../components/greenhouseLayout/RowDetailsPanel";
 
 type PhaseModalState = { mode: "create" } | { mode: "edit"; phase: GreenhousePhase } | null;
 
@@ -67,6 +76,20 @@ export function GreenhouseLayoutTab() {
   const [landModalMode, setLandModalMode] = useState<"create" | "edit" | null>(null);
   const [phaseModal, setPhaseModal] = useState<PhaseModalState>(null);
 
+  // Rows: allRows backs the canvas render for every phase in this land;
+  // rowBuilderPhaseId/rowBuilderBatches back the Add/Edit Rows panel for
+  // whichever one phase it's currently open for; previewRows is that
+  // panel's live unsaved preview, reported up so LandCanvas (the single
+  // source of truth for what's drawn) can render it. selectedRowId is
+  // deliberately independent of selectedId (the phase selection) — see
+  // RowDetailsPanel for why a row and a phase are never the "primary
+  // selection" at the same time.
+  const [allRows, setAllRows] = useState<GreenhouseRowListItem[]>([]);
+  const [rowBuilderPhaseId, setRowBuilderPhaseId] = useState<string | null>(null);
+  const [rowBuilderBatches, setRowBuilderBatches] = useState<GreenhouseRowBatch[]>([]);
+  const [previewRows, setPreviewRows] = useState<RowRect[]>([]);
+  const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
+
   // Pan/zoom view state — see lib/canvasTransform.ts. Lives here (not in
   // LandCanvas) so the toolbar's zoom buttons and keyboard shortcuts drive
   // the exact same state the canvas's own wheel/drag gestures do.
@@ -114,20 +137,47 @@ export function GreenhouseLayoutTab() {
     }
   }, []);
 
+  // Fetches every active row belonging to any phase in this land — one
+  // request for the whole land (the flat /rows listing, same endpoint
+  // Base Data's Rows tab uses) rather than one per phase. Non-fatal on
+  // failure: the map still works with just no rows drawn.
+  const loadRows = useCallback(async (currentLand: GreenhouseLand) => {
+    try {
+      const res = await api<{ rows: GreenhouseRowListItem[] }>("/api/greenhouse-layout/rows?status=active");
+      const phaseIds = new Set(currentLand.phases.map((p) => p.id));
+      setAllRows(res.rows.filter((r) => phaseIds.has(r.phaseId)));
+    } catch {
+      setAllRows([]);
+    }
+  }, []);
+
   // Returns the freshly loaded land (or null on failure) so callers that
   // need to act on the up-to-date data immediately — e.g. re-fitting the
   // view after an edit — don't have to read it back from a `land` state
   // closure that may not have re-rendered yet.
-  const loadLandDetail = useCallback(async (id: string) => {
+  const loadLandDetail = useCallback(
+    async (id: string) => {
+      try {
+        const res = await api<{ land: GreenhouseLand }>(`/api/greenhouse-layout/lands/${id}`);
+        setLand(res.land);
+        setDraftPhases(res.land.phases);
+        setLoadError(null);
+        loadRows(res.land);
+        return res.land;
+      } catch (err) {
+        setLoadError(err instanceof ApiError ? err.message : "Could not load the land layout");
+        return null;
+      }
+    },
+    [loadRows]
+  );
+
+  const loadRowBuilderBatches = useCallback(async (phaseId: string) => {
     try {
-      const res = await api<{ land: GreenhouseLand }>(`/api/greenhouse-layout/lands/${id}`);
-      setLand(res.land);
-      setDraftPhases(res.land.phases);
-      setLoadError(null);
-      return res.land;
-    } catch (err) {
-      setLoadError(err instanceof ApiError ? err.message : "Could not load the land layout");
-      return null;
+      const res = await api<{ batches: GreenhouseRowBatch[] }>(`/api/greenhouse-layout/phases/${phaseId}/rows`);
+      setRowBuilderBatches(res.batches);
+    } catch {
+      setRowBuilderBatches([]);
     }
   }, []);
 
@@ -158,6 +208,17 @@ export function GreenhouseLayoutTab() {
   }, [draftPhases, land]);
 
   const selectedPhase = draftPhases.find((p) => p.id === selectedId) ?? null;
+
+  // Memoized (not a plain inline .filter()) so RowBuilderPanel gets a
+  // referentially-stable array whenever the underlying data hasn't
+  // actually changed. Without this, a fresh array every render feeds
+  // RowBuilderPanel's live-preview useEffect (which reports back up via
+  // onPreviewRowsChange -> setPreviewRows -> a re-render here), an
+  // infinite loop.
+  const selectedPhaseRows = useMemo(
+    () => (selectedPhase ? allRows.filter((r) => r.phaseId === selectedPhase.id) : []),
+    [allRows, selectedPhase]
+  );
 
   const minScale = fitScale * 0.15;
   const maxScale = fitScale * 6;
@@ -199,14 +260,40 @@ export function GreenhouseLayoutTab() {
   // Selecting a different phase while one is mid-position-edit discards its
   // unsaved draft (same as an explicit Cancel) rather than leaving it in
   // limbo — only one phase's position can be actively edited at a time.
+  // Same idea for the row builder: it stays open across an incidental row
+  // click (see RowDetailsPanel/selectedRowId), but selecting a genuinely
+  // different phase closes it, same as position-edit.
   function handleSelect(id: string | null) {
     if (positionEditId && id !== positionEditId) {
       cancelPositionEdit();
     }
+    if (rowBuilderPhaseId && id !== rowBuilderPhaseId) {
+      closeRowBuilder();
+    }
     setSelectedId(id);
+    setSelectedRowId(null);
+  }
+
+  function openRowBuilder(phase: GreenhousePhase) {
+    if (positionEditId) cancelPositionEdit();
+    setSelectedId(phase.id);
+    setSelectedRowId(null);
+    setRowBuilderPhaseId(phase.id);
+    loadRowBuilderBatches(phase.id);
+  }
+
+  function closeRowBuilder() {
+    setRowBuilderPhaseId(null);
+    setRowBuilderBatches([]);
+    setPreviewRows([]);
+  }
+
+  function handleSelectRow(id: string | null) {
+    setSelectedRowId(id);
   }
 
   function startPositionEdit(phase: GreenhousePhase) {
+    if (rowBuilderPhaseId) closeRowBuilder();
     setSelectedId(phase.id);
     setPositionEditId(phase.id);
     setSaveError(null);
@@ -322,6 +409,22 @@ export function GreenhouseLayoutTab() {
       setLoadError(err instanceof ApiError ? err.message : "Could not update the phase");
     }
   }
+
+  function handleRowDeleted() {
+    setSelectedRowId(null);
+    if (land) loadLandDetail(land.id);
+  }
+
+  function handleRowBatchSaved() {
+    if (rowBuilderPhaseId) loadRowBuilderBatches(rowBuilderPhaseId);
+    if (land) loadLandDetail(land.id);
+  }
+
+  // allRows already carries batchName/startSide/anchorSide from the flat
+  // /rows listing (see GreenhouseRowListItem) — no separate fetch needed
+  // just to show a selected row's details, whether or not the row builder
+  // panel happens to be open for its phase at the same time.
+  const selectedRow = allRows.find((r) => r.id === selectedRowId) ?? null;
 
   function handleBack() {
     if (hasDraftChanges) {
@@ -519,13 +622,16 @@ export function GreenhouseLayoutTab() {
 
           <PhaseList phases={draftPhases} selectedId={selectedId} onSelect={handleSelect} />
 
-          {selectedPhase && positionEditId !== selectedPhase.id && (
+          {selectedPhase && positionEditId !== selectedPhase.id && rowBuilderPhaseId !== selectedPhase.id && (
             <div className="greenhouse-selected-phase-actions">
               <button type="button" onClick={() => setPhaseModal({ mode: "edit", phase: selectedPhase })}>
                 Edit Phase
               </button>
               <button type="button" onClick={() => startPositionEdit(selectedPhase)}>
                 Edit Position
+              </button>
+              <button type="button" onClick={() => openRowBuilder(selectedPhase)}>
+                Add/Edit Rows
               </button>
               <button type="button" onClick={() => handleTogglePhaseActive(selectedPhase)}>
                 {selectedPhase.isActive ? "Deactivate" : "Activate"}
@@ -546,6 +652,28 @@ export function GreenhouseLayoutTab() {
               saveError={saveError}
             />
           )}
+
+          {selectedPhase && rowBuilderPhaseId === selectedPhase.id && (
+            <RowBuilderPanel
+              phase={selectedPhase}
+              savedRows={selectedPhaseRows}
+              batches={rowBuilderBatches}
+              onClose={closeRowBuilder}
+              onSaved={handleRowBatchSaved}
+              onPreviewRowsChange={setPreviewRows}
+            />
+          )}
+
+          {selectedRow && (
+            <RowDetailsPanel
+              row={selectedRow}
+              batchName={selectedRow.batchName}
+              startSide={selectedRow.startSide}
+              anchorSide={selectedRow.anchorSide}
+              onDeleted={handleRowDeleted}
+              onClose={() => setSelectedRowId(null)}
+            />
+          )}
         </div>
 
         <div className="greenhouse-canvas-panel">
@@ -561,6 +689,12 @@ export function GreenhouseLayoutTab() {
             snapEnabled={snapEnabled}
             gridFeet={gridFeet}
             overlappingPhaseIds={overlapInfo.ids}
+            rows={allRows}
+            previewRows={previewRows}
+            previewPhaseId={rowBuilderPhaseId}
+            selectedRowId={selectedRowId}
+            onSelectRow={handleSelectRow}
+            dragDisabledPhaseId={rowBuilderPhaseId}
             transform={transform}
             onTransformChange={setTransform}
             onViewportSize={handleViewportSize}

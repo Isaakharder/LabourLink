@@ -2,6 +2,15 @@ import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
+import {
+  BatchParams,
+  RowRect,
+  generateRowPreview,
+  detectRowOverlap,
+  validateRowsInsidePhase,
+  isValidSide,
+  isValidNumberingMode,
+} from "../lib/rowLayout";
 
 const router = Router();
 
@@ -284,6 +293,28 @@ router.patch(
            where land_id = $3`,
           [nsRatio, ewRatio, id]
         );
+
+        // Rows are phase-relative (see rowLayout.ts) — cascading the exact
+        // same per-axis ratio to every active row keeps each one at the
+        // same relative position/size within its (also just-rescaled)
+        // phase, so nothing is "left behind" by a land resize. Safe by the
+        // same always-fits argument as the phase rescale above: scaling
+        // both a row's position and size by the same ratio the phase
+        // itself just scaled by preserves every boundary relationship that
+        // held before. The batch's own recipe (greenhouse_row_batches) is
+        // deliberately left as originally entered — it's a historical
+        // record of what was asked for, not live geometry.
+        await client.query(
+          `update greenhouse_rows gr
+           set x_ft = gr.x_ft * $1,
+               y_ft = gr.y_ft * $2,
+               width_ft = case when gr.orientation = 'horizontal' then gr.width_ft * $2 else gr.width_ft * $1 end,
+               length_ft = case when gr.orientation = 'horizontal' then gr.length_ft * $1 else gr.length_ft * $2 end,
+               updated_at = now()
+           from greenhouse_phases gp
+           where gr.phase_id = gp.id and gp.land_id = $3 and gr.deleted_at is null`,
+          [ewRatio, nsRatio, id]
+        );
       }
 
       await client.query("commit");
@@ -458,6 +489,38 @@ router.patch(
         return res.status(409).json({
           error: "This size/position does not fit within the land. Reposition the phase and try again.",
         });
+      }
+
+      // Rows are stored phase-relative (see rowLayout.ts) and never
+      // recomputed on their own — so a phase resize that would leave any
+      // existing active row outside the new (smaller) bounds is rejected
+      // outright rather than silently clipping or moving rows.
+      if (northSouthFeet !== undefined || eastWestFeet !== undefined) {
+        const rowsRes = await client.query(
+          `select row_number, x_ft, y_ft, width_ft, length_ft, orientation
+           from greenhouse_rows where phase_id = $1 and deleted_at is null`,
+          [id]
+        );
+        if (rowsRes.rows.length > 0) {
+          const rowRects: RowRect[] = rowsRes.rows.map((r) => ({
+            rowNumber: r.row_number,
+            xFt: Number(r.x_ft),
+            yFt: Number(r.y_ft),
+            widthFt: Number(r.width_ft),
+            lengthFt: Number(r.length_ft),
+            orientation: r.orientation,
+          }));
+          const outOfBounds = validateRowsInsidePhase(rowRects, {
+            eastWestFeet: finalEastWest,
+            northSouthFeet: finalNorthSouth,
+          });
+          if (outOfBounds.length > 0) {
+            await client.query("rollback");
+            return res.status(409).json({
+              error: `Resizing this phase would leave ${outOfBounds.length} row(s) (e.g. row ${outOfBounds[0].rowNumber}) outside its new bounds. Delete or adjust those rows first.`,
+            });
+          }
+        }
       }
 
       const columns: string[] = [];
@@ -658,6 +721,421 @@ router.patch(
     } finally {
       client.release();
     }
+  })
+);
+
+// -- row batches / rows ------------------------------------------------------
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function serializeRow(row: any) {
+  return {
+    id: row.id,
+    phaseId: row.phase_id,
+    rowBatchId: row.row_batch_id,
+    rowNumber: row.row_number,
+    xFt: Number(row.x_ft),
+    yFt: Number(row.y_ft),
+    widthFt: Number(row.width_ft),
+    lengthFt: Number(row.length_ft),
+    orientation: row.orientation,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function serializeBatch(row: any) {
+  return {
+    id: row.id,
+    phaseId: row.phase_id,
+    name: row.name,
+    startSide: row.start_side,
+    anchorSide: row.anchor_side,
+    rowWidthFt: Number(row.row_width_ft),
+    rowLengthFt: Number(row.row_length_ft),
+    rowGapFt: Number(row.row_gap_ft),
+    offsetFt: Number(row.offset_ft),
+    numberingMode: row.numbering_mode,
+    startRowNumber: row.start_row_number,
+    endRowNumber: row.end_row_number,
+    continuationMode: row.continuation_mode,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+const ROW_SELECT = `
+  select id, phase_id, row_batch_id, row_number, x_ft, y_ft, width_ft, length_ft, orientation, created_at, updated_at
+  from greenhouse_rows
+`;
+const BATCH_SELECT = `
+  select id, phase_id, name, start_side, anchor_side, row_width_ft, row_length_ft, row_gap_ft, offset_ft,
+         numbering_mode, start_row_number, end_row_number, continuation_mode, created_at, updated_at
+  from greenhouse_row_batches
+`;
+
+function parseRowNumber(v: unknown): number | null {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) return null;
+  return n;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toRowRect(r: any): RowRect {
+  return {
+    rowNumber: r.row_number,
+    xFt: Number(r.x_ft),
+    yFt: Number(r.y_ft),
+    widthFt: Number(r.width_ft),
+    lengthFt: Number(r.length_ft),
+    orientation: r.orientation,
+  };
+}
+
+router.get(
+  "/phases/:phaseId/rows",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (req, res) => {
+    const { phaseId } = req.params;
+    if (!UUID_RE.test(phaseId)) return res.status(400).json({ error: "Invalid phase id" });
+
+    const phaseRes = await pool.query("select id from greenhouse_phases where id = $1", [phaseId]);
+    if (!phaseRes.rows[0]) return res.status(404).json({ error: "Phase not found" });
+
+    const { rows } = await pool.query(
+      `${ROW_SELECT} where phase_id = $1 and deleted_at is null order by row_number`,
+      [phaseId]
+    );
+    const { rows: batches } = await pool.query(
+      `${BATCH_SELECT} where phase_id = $1 and deleted_at is null order by created_at`,
+      [phaseId]
+    );
+    res.json({ rows: rows.map(serializeRow), batches: batches.map(serializeBatch) });
+  })
+);
+
+router.post(
+  "/phases/:phaseId/row-batches",
+  requireAuth,
+  requireRole("Administrator"),
+  asyncHandler(async (req, res) => {
+    const { phaseId } = req.params;
+    if (!UUID_RE.test(phaseId)) return res.status(400).json({ error: "Invalid phase id" });
+
+    const body = req.body ?? {};
+    const errors: Record<string, string> = {};
+
+    const name = trimOrNull(body.name);
+    const startSide = body.startSide;
+    if (!isValidSide(startSide)) errors.startSide = "Start side must be north, south, east, or west";
+    const anchorSide = body.anchorSide;
+    if (!isValidSide(anchorSide)) errors.anchorSide = "Anchor side must be north, south, east, or west";
+    const numberingMode = body.numberingMode;
+    if (!isValidNumberingMode(numberingMode)) errors.numberingMode = "Numbering mode must be all, odd, or even";
+
+    const rowWidthFt = parsePositiveNumber(body.rowWidthFt);
+    if (rowWidthFt === null) errors.rowWidthFt = "Row width must be a number greater than 0";
+    const rowLengthFt = parsePositiveNumber(body.rowLengthFt);
+    if (rowLengthFt === null) errors.rowLengthFt = "Row length must be a number greater than 0";
+    const rowGapFt = body.rowGapFt === undefined ? 0 : parseNonNegativeNumber(body.rowGapFt);
+    if (rowGapFt === null) errors.rowGapFt = "Row gap must be a number of 0 or greater";
+    const offsetFt = body.offsetFt === undefined ? 0 : parseNonNegativeNumber(body.offsetFt);
+    if (offsetFt === null) errors.offsetFt = "Offset must be a number of 0 or greater";
+    const startRowNumber = parseRowNumber(body.startRowNumber);
+    if (startRowNumber === null) errors.startRowNumber = "Start row number must be a whole number of 1 or greater";
+    const endRowNumber = parseRowNumber(body.endRowNumber);
+    if (endRowNumber === null) errors.endRowNumber = "End row number must be a whole number of 1 or greater";
+    const continueAfterExisting = Boolean(body.continueAfterExisting);
+
+    if (Object.keys(errors).length) return res.status(400).json({ errors });
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+
+      const phaseRes = await client.query(
+        "select north_south_feet, east_west_feet, is_active from greenhouse_phases where id = $1 for update",
+        [phaseId]
+      );
+      const phase = phaseRes.rows[0];
+      if (!phase) {
+        await client.query("rollback");
+        return res.status(404).json({ error: "Phase not found" });
+      }
+      if (!phase.is_active) {
+        await client.query("rollback");
+        return res.status(409).json({ error: "Rows cannot be added to a deactivated phase" });
+      }
+
+      const phaseSize = { eastWestFeet: Number(phase.east_west_feet), northSouthFeet: Number(phase.north_south_feet) };
+      const params: BatchParams = {
+        startSide,
+        anchorSide,
+        rowWidthFt: rowWidthFt!,
+        rowLengthFt: rowLengthFt!,
+        rowGapFt: rowGapFt!,
+        offsetFt: offsetFt!,
+        numberingMode,
+        startRowNumber: startRowNumber!,
+        endRowNumber: endRowNumber!,
+      };
+
+      // Continuation is scoped to rows placed from the SAME phase + start
+      // side — a row's own geometry can't tell "started from south" apart
+      // from "started from north" on its own, so this has to join back to
+      // the batch that placed it.
+      let existingRowsSameStartSide: RowRect[] = [];
+      if (continueAfterExisting) {
+        const sameSideRes = await client.query(
+          `select gr.row_number, gr.x_ft, gr.y_ft, gr.width_ft, gr.length_ft, gr.orientation
+           from greenhouse_rows gr
+           join greenhouse_row_batches grb on grb.id = gr.row_batch_id
+           where gr.phase_id = $1 and gr.deleted_at is null and grb.deleted_at is null and grb.start_side = $2`,
+          [phaseId, startSide]
+        );
+        existingRowsSameStartSide = sameSideRes.rows.map(toRowRect);
+      }
+
+      const preview = generateRowPreview(params, phaseSize, { continueAfterExisting, existingRowsSameStartSide });
+      if (preview.errors.length > 0) {
+        await client.query("rollback");
+        return res.status(422).json({ error: preview.errors[0], errors: preview.errors });
+      }
+
+      // Duplicate-number and overlap checks are against EVERY active row
+      // in the phase (any batch, any start side), not just the
+      // continuation-scoped set above — locked so a concurrent batch
+      // create on the same phase can't race past these checks.
+      const allExistingRes = await client.query(
+        `select row_number, x_ft, y_ft, width_ft, length_ft, orientation
+         from greenhouse_rows where phase_id = $1 and deleted_at is null for update`,
+        [phaseId]
+      );
+      const allExisting: RowRect[] = allExistingRes.rows.map(toRowRect);
+
+      const existingNumbers = new Set(allExisting.map((r) => r.rowNumber));
+      const duplicates = preview.rowNumbers.filter((n) => existingNumbers.has(n));
+      if (duplicates.length > 0) {
+        await client.query("rollback");
+        return res.status(409).json({
+          error: `Row number${duplicates.length > 1 ? "s" : ""} ${duplicates.join(", ")} already exist in this phase.`,
+        });
+      }
+
+      const overlaps = detectRowOverlap(preview.rows, allExisting);
+      if (overlaps.length > 0) {
+        await client.query("rollback");
+        const [a, b] = overlaps[0];
+        return res.status(409).json({ error: `New row ${a.rowNumber} would overlap existing row ${b.rowNumber}.` });
+      }
+
+      const batchIns = await client.query(
+        `insert into greenhouse_row_batches
+           (phase_id, name, start_side, anchor_side, row_width_ft, row_length_ft, row_gap_ft, offset_ft,
+            numbering_mode, start_row_number, end_row_number, continuation_mode)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         returning id`,
+        [
+          phaseId,
+          name,
+          startSide,
+          anchorSide,
+          rowWidthFt,
+          rowLengthFt,
+          rowGapFt,
+          offsetFt,
+          numberingMode,
+          startRowNumber,
+          endRowNumber,
+          continueAfterExisting ? "continue" : null,
+        ]
+      );
+      const batchId = batchIns.rows[0].id;
+
+      for (const r of preview.rows) {
+        await client.query(
+          `insert into greenhouse_rows (phase_id, row_batch_id, row_number, x_ft, y_ft, width_ft, length_ft, orientation)
+           values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [phaseId, batchId, r.rowNumber, r.xFt, r.yFt, r.widthFt, r.lengthFt, r.orientation]
+        );
+      }
+
+      await client.query("commit");
+
+      const { rows: batchFull } = await pool.query(`${BATCH_SELECT} where id = $1`, [batchId]);
+      const { rows: rowsFull } = await pool.query(`${ROW_SELECT} where row_batch_id = $1 order by row_number`, [batchId]);
+      res.status(201).json({ batch: serializeBatch(batchFull[0]), rows: rowsFull.map(serializeRow) });
+    } catch (err) {
+      await client.query("rollback");
+      throw err;
+    } finally {
+      client.release();
+    }
+  })
+);
+
+router.get(
+  "/row-batches/:id",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid batch id" });
+
+    const { rows } = await pool.query(`${BATCH_SELECT} where id = $1 and deleted_at is null`, [id]);
+    const batch = rows[0];
+    if (!batch) return res.status(404).json({ error: "Row batch not found" });
+
+    const { rows: rowsFull } = await pool.query(
+      `${ROW_SELECT} where row_batch_id = $1 and deleted_at is null order by row_number`,
+      [id]
+    );
+    res.json({ batch: serializeBatch(batch), rows: rowsFull.map(serializeRow) });
+  })
+);
+
+router.patch(
+  "/row-batches/:id",
+  requireAuth,
+  requireRole("Administrator"),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid batch id" });
+
+    const body = req.body ?? {};
+    // Scoped to renaming a batch only for this first implementation —
+    // editing a batch's geometry (side/anchor/numbering/etc.) safely would
+    // mean re-deriving and re-validating every one of its rows against
+    // whatever else now exists in the phase; out of scope here per the
+    // spec's "do not expand scope if it risks the first implementation."
+    if (!("name" in body)) return res.status(400).json({ error: "Only the batch name can be edited here" });
+    const name = trimOrNull(body.name);
+
+    const { rows } = await pool.query(
+      `update greenhouse_row_batches set name = $1, updated_at = now() where id = $2 and deleted_at is null returning id`,
+      [name, id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: "Row batch not found" });
+
+    const { rows: full } = await pool.query(`${BATCH_SELECT} where id = $1`, [id]);
+    res.json({ batch: serializeBatch(full[0]) });
+  })
+);
+
+router.delete(
+  "/rows/:id",
+  requireAuth,
+  requireRole("Administrator"),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid row id" });
+
+    const { rows } = await pool.query(
+      `update greenhouse_rows set deleted_at = now(), updated_at = now() where id = $1 and deleted_at is null returning id`,
+      [id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: "Row not found" });
+    res.json({ ok: true });
+  })
+);
+
+router.delete(
+  "/row-batches/:id",
+  requireAuth,
+  requireRole("Administrator"),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid batch id" });
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+
+      const batchRes = await client.query(
+        "select id from greenhouse_row_batches where id = $1 and deleted_at is null for update",
+        [id]
+      );
+      if (!batchRes.rows[0]) {
+        await client.query("rollback");
+        return res.status(404).json({ error: "Row batch not found" });
+      }
+
+      await client.query("update greenhouse_row_batches set deleted_at = now(), updated_at = now() where id = $1", [id]);
+      // Only this batch's own rows — other batches in the same phase are
+      // untouched.
+      await client.query(
+        "update greenhouse_rows set deleted_at = now(), updated_at = now() where row_batch_id = $1 and deleted_at is null",
+        [id]
+      );
+
+      await client.query("commit");
+      res.json({ ok: true });
+    } catch (err) {
+      await client.query("rollback");
+      throw err;
+    } finally {
+      client.release();
+    }
+  })
+);
+
+// Flat, cross-phase listing for the Base Data > Rows tab — reads the exact
+// same greenhouse_rows table the map does, never a separate copy.
+router.get(
+  "/rows",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (req, res) => {
+    const search = trimOrNull(req.query.search as string);
+    const phaseId = req.query.phaseId as string | undefined;
+    const status = (req.query.status as string) || "active";
+
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (status === "active") conditions.push("gr.deleted_at is null");
+    else if (status === "inactive") conditions.push("gr.deleted_at is not null");
+    // status === "all": no condition.
+
+    if (phaseId) {
+      if (!UUID_RE.test(phaseId)) return res.status(400).json({ error: "Invalid phase id" });
+      params.push(phaseId);
+      conditions.push(`gr.phase_id = $${params.length}`);
+    }
+    if (search) {
+      params.push(`%${search.toLowerCase()}%`);
+      const p = params.length;
+      conditions.push(
+        `(gr.row_number::text like $${p} or lower(gp.name) like $${p} or lower(coalesce(grb.name, '')) like $${p})`
+      );
+    }
+
+    const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
+    const { rows } = await pool.query(
+      `select gr.id, gr.phase_id, gr.row_batch_id, gr.row_number, gr.x_ft, gr.y_ft, gr.width_ft, gr.length_ft,
+              gr.orientation, gr.created_at, gr.updated_at, gr.deleted_at,
+              gp.name as phase_name,
+              grb.name as batch_name, grb.start_side, grb.anchor_side
+       from greenhouse_rows gr
+       join greenhouse_phases gp on gp.id = gr.phase_id
+       left join greenhouse_row_batches grb on grb.id = gr.row_batch_id
+       ${where}
+       order by gp.name, gr.row_number
+       limit 1000`,
+      params
+    );
+
+    res.json({
+      rows: rows.map((r) => ({
+        ...serializeRow(r),
+        phaseName: r.phase_name,
+        batchName: r.batch_name,
+        startSide: r.start_side,
+        anchorSide: r.anchor_side,
+        isActive: r.deleted_at === null,
+      })),
+    });
   })
 );
 

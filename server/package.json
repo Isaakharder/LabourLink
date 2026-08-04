@@ -12,7 +12,8 @@
     "start": "node dist/index.js",
     "migrate": "ts-node src/migrate.ts",
     "create-admin": "ts-node src/cli/createAdmin.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:row-layout": "ts-node src/lib/rowLayout.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",
