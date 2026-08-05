@@ -64,11 +64,26 @@ export async function reconcileEmployeeBreaks(employeeId: string, dateStr: strin
       // The scheduled time must have fully passed.
       if (scheduledEnd.getTime() > now) continue;
 
+      // A supervisor deleted a previously auto-added break for this exact
+      // item/date via the Inputs page — respect that and never re-add it.
+      // Without this check, reconciliation would just recreate the break on
+      // the very next status fetch or Inputs load (it re-derives from the
+      // schedule and the covering work entry every time, neither of which
+      // a deletion changes), making the deletion pointless.
+      const suppressed = await client.query(
+        `select id from break_schedule_exceptions
+         where employee_id = $1 and break_profile_item_id = $2 and scheduled_date = $3
+         limit 1`,
+        [employeeId, item.id, dateStr]
+      );
+      if (suppressed.rows[0]) continue;
+
       // Already recorded for this profile item/date, whether by a prior
       // auto-add pass or a manual fixed-match — either way, never add again.
       const already = await client.query(
         `select id from time_entries
          where employee_id = $1 and break_profile_item_id = $2 and scheduled_break_date = $3
+           and deleted_at is null
          limit 1`,
         [employeeId, item.id, dateStr]
       );
@@ -78,7 +93,7 @@ export async function reconcileEmployeeBreaks(employeeId: string, dateStr: strin
       // the scheduled window — don't double up on top of it.
       const overlapping = await client.query(
         `select id from time_entries
-         where employee_id = $1 and entry_type = 'break'
+         where employee_id = $1 and entry_type = 'break' and deleted_at is null
            and started_at < $2 and (ended_at is null or ended_at > $3)
          limit 1`,
         [employeeId, scheduledEnd, scheduledStart]
@@ -91,7 +106,7 @@ export async function reconcileEmployeeBreaks(employeeId: string, dateStr: strin
       const workRes = await client.query(
         `select id, device_id, activity_id, started_at, ended_at, greenhouse_row_id
          from time_entries
-         where employee_id = $1 and entry_type = 'work'
+         where employee_id = $1 and entry_type = 'work' and deleted_at is null
            and started_at <= $2 and (ended_at is null or ended_at >= $3)
          order by started_at desc
          limit 1`,

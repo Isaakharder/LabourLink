@@ -108,7 +108,7 @@ router.get(
        left join break_profile_items bpi on bpi.id = te.break_profile_item_id
        left join greenhouse_rows gr on gr.id = te.greenhouse_row_id
        left join greenhouse_phases gphase on gphase.id = gr.phase_id
-       where te.employee_id = $1 and te.started_at >= $2 and te.started_at < $3
+       where te.employee_id = $1 and te.started_at >= $2 and te.started_at < $3 and te.deleted_at is null
        order by te.started_at asc`,
       [employeeId, start, end]
     );
@@ -206,6 +206,9 @@ router.get(
           isPaid: meta?.isPaid ?? null,
           source: meta?.source ?? "manual",
           breakProfileItemId: meta?.breakProfileItemId ?? null,
+          // Same rule as an activity run: role-gated, and only once it's
+          // closed — an open break can't be edited or deleted from here.
+          canEdit: canEditRole && b.endedAt !== null,
         };
       }),
       totals: {
@@ -245,7 +248,7 @@ router.patch(
       // "next entry" lock below, so two concurrent corrections can never
       // deadlock against each other over lock order.
       const targetRes = await client.query(
-        "select id, employee_id, entry_type, started_at, ended_at from time_entries where id = $1 for update",
+        "select id, employee_id, entry_type, started_at, ended_at from time_entries where id = $1 and deleted_at is null for update",
         [id]
       );
       const target = targetRes.rows[0];
@@ -283,6 +286,7 @@ router.patch(
       const nextRes = await client.query(
         `select started_at from time_entries
          where employee_id = $1
+           and deleted_at is null
            and started_at > (select started_at from time_entries where id = $2)
          order by started_at asc limit 1
          for update`,
@@ -306,6 +310,532 @@ router.patch(
          values ($1, $2, $3, 'ended_at', $4, $5, $6)`,
         [id, target.employee_id, req.employee!.id, targetEndedAt.toISOString(), newEndedAt.toISOString(), trimmedReason]
       );
+
+      await client.query("commit");
+    } catch (err) {
+      await client.query("rollback");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    res.json({ ok: true });
+  })
+);
+
+router.post(
+  "/activity-runs/:id/delete",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid activity run id" });
+
+    const { reason } = req.body as { reason?: string };
+    const trimmedReason = typeof reason === "string" ? reason.trim() : "";
+    if (trimmedReason.length < 3) {
+      return res.status(400).json({ error: "A deletion reason of at least 3 characters is required" });
+    }
+
+    // Unlocked peek: the client only ever knows a run by its last segment's
+    // id (ActivityRun.id — see activityRuns.ts), never the full set of
+    // underlying time_entries rows a multi-fragment run is made of. Re-derive
+    // that set the same way GET /daily does (regroup that employee's whole
+    // day), then lock and delete every segment together.
+    const peek = await pool.query(
+      `select employee_id, entry_type, started_at, ended_at, deleted_at from time_entries where id = $1`,
+      [id]
+    );
+    const peekRow = peek.rows[0];
+    if (!peekRow || peekRow.deleted_at) {
+      return res.status(404).json({ error: "Activity log not found" });
+    }
+    if (peekRow.entry_type !== "work") {
+      return res.status(409).json({ error: "Only a work activity log can be deleted" });
+    }
+    if (peekRow.ended_at === null) {
+      return res.status(409).json({ error: "An in-progress activity cannot be deleted from this screen" });
+    }
+
+    const dateStr = calendarDateInAppTimezone(new Date(peekRow.started_at));
+    const { start, end } = getDayBoundsUtc(dateStr);
+    const dayRows = await pool.query(
+      `select id, entry_type, activity_id, started_at, ended_at, greenhouse_row_id
+       from time_entries
+       where employee_id = $1 and started_at >= $2 and started_at < $3 and deleted_at is null
+       order by started_at asc`,
+      [peekRow.employee_id, start, end]
+    );
+    const segments: RunSegment[] = dayRows.rows.map((r) => ({
+      id: r.id,
+      entry_type: r.entry_type,
+      activity_id: r.activity_id,
+      started_at: r.started_at,
+      ended_at: r.ended_at,
+      greenhouse_row_id: r.greenhouse_row_id,
+    }));
+    const { runs } = groupIntoActivityRuns(segments);
+    const run = runs.find((r) => r.id === id);
+    if (!run || run.isOpen) {
+      return res.status(409).json({ error: "An in-progress activity cannot be deleted from this screen" });
+    }
+
+    // segmentIds is already in started_at-ascending order (groupIntoActivityRuns
+    // builds it by iterating entries in that order) — locking in that same
+    // order keeps this consistent with every other place in this file that
+    // might lock more than one time_entries row, so nothing here can
+    // deadlock against a concurrent correction or another deletion.
+    const segmentIds = run.segmentIds;
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+
+      for (const segId of segmentIds) {
+        const r = await client.query(
+          `select id from time_entries where id = $1 and deleted_at is null and entry_type = 'work' for update`,
+          [segId]
+        );
+        if (!r.rows[0]) {
+          // A segment of this run was deleted or changed by someone else
+          // since it was loaded — bail out rather than deleting a partial,
+          // now-inconsistent subset of the run.
+          await client.query("rollback");
+          return res
+            .status(409)
+            .json({ error: "This activity log changed since it was loaded — please refresh and try again" });
+        }
+      }
+
+      await client.query(
+        `update time_entries
+         set deleted_at = now(), deleted_by_employee_id = $1, deletion_reason = $2
+         where id = any($3::uuid[])`,
+        [req.employee!.id, trimmedReason, segmentIds]
+      );
+      await client.query(
+        `insert into time_entry_deletions
+           (employee_id, deleted_by_employee_id, deletion_type, affected_time_entry_ids, reason)
+         values ($1, $2, 'activity_run', $3, $4)`,
+        [peekRow.employee_id, req.employee!.id, segmentIds, trimmedReason]
+      );
+
+      await client.query("commit");
+    } catch (err) {
+      await client.query("rollback");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    res.json({ ok: true });
+  })
+);
+
+router.patch(
+  "/breaks/:id",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid break id" });
+
+    const { startTime, endTime, reason } = req.body as { startTime?: string; endTime?: string; reason?: string };
+    const trimmedReason = typeof reason === "string" ? reason.trim() : "";
+    if (trimmedReason.length < 3) {
+      return res.status(400).json({ error: "A correction reason of at least 3 characters is required" });
+    }
+    if (startTime === undefined && endTime === undefined) {
+      return res.status(400).json({ error: "startTime and/or endTime is required" });
+    }
+    if (startTime !== undefined && (typeof startTime !== "string" || isNaN(Date.parse(startTime)))) {
+      return res.status(400).json({ error: "A valid startTime is required" });
+    }
+    if (endTime !== undefined && (typeof endTime !== "string" || isNaN(Date.parse(endTime)))) {
+      return res.status(400).json({ error: "A valid endTime is required" });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+
+      // Unlocked peek, needed to know which adjacent work rows (if any)
+      // must also be locked, and in the right chronological order, before
+      // any row is actually locked. Re-validated against the real locked
+      // read of the break itself below.
+      const peek = await client.query(
+        `select employee_id, entry_type, started_at, ended_at, deleted_at
+         from time_entries where id = $1`,
+        [id]
+      );
+      const peekRow = peek.rows[0];
+      if (!peekRow || peekRow.deleted_at) {
+        await client.query("rollback");
+        return res.status(404).json({ error: "Break not found" });
+      }
+      if (peekRow.entry_type !== "break") {
+        await client.query("rollback");
+        return res.status(409).json({ error: "Only a break can be corrected here" });
+      }
+      if (peekRow.ended_at === null) {
+        await client.query("rollback");
+        return res.status(409).json({ error: "An in-progress break cannot be corrected here" });
+      }
+
+      // Compared via a subquery on this break's own id, not by passing
+      // peekRow.started_at back in as a parameter — node-postgres's
+      // timestamptz parser only holds millisecond precision, while Postgres
+      // stores microseconds, so a round-tripped Date can silently fail to
+      // match a genuinely contiguous neighbor whose boundary was set via
+      // now() (see the identical fix already applied in mobileTime.ts's
+      // previousActivity lookup and this file's own end-time correction
+      // route above).
+      const precedingPeek = await client.query(
+        `select id from time_entries
+         where employee_id = $1 and entry_type = 'work' and deleted_at is null
+           and ended_at = (select started_at from time_entries where id = $2)`,
+        [peekRow.employee_id, id]
+      );
+
+      // Chronological lock order: preceding work entry (if any) first, then
+      // the break itself, then the following work entry (if any) last —
+      // the same order every code path in this file uses whenever it might
+      // lock more than one time_entries row, so two concurrent corrections
+      // can never deadlock against each other over lock order.
+      let preceding: { id: string; started_at: string; ended_at: string } | null = null;
+      if (precedingPeek.rows[0]) {
+        const r = await client.query(
+          `select id, started_at, ended_at from time_entries where id = $1 and deleted_at is null for update`,
+          [precedingPeek.rows[0].id]
+        );
+        preceding = r.rows[0] ?? null;
+      }
+
+      const targetRes = await client.query(
+        `select id, employee_id, started_at, ended_at from time_entries
+         where id = $1 and entry_type = 'break' and deleted_at is null for update`,
+        [id]
+      );
+      const target = targetRes.rows[0];
+      if (!target || target.ended_at === null) {
+        await client.query("rollback");
+        return res
+          .status(409)
+          .json({ error: "This break changed since it was loaded — please refresh and try again" });
+      }
+
+      // Same subquery-based comparison as precedingPeek above, for the same
+      // precision reason.
+      const followingPeek = await client.query(
+        `select id from time_entries
+         where employee_id = $1 and entry_type = 'work' and deleted_at is null
+           and started_at = (select ended_at from time_entries where id = $2)`,
+        [target.employee_id, id]
+      );
+      let following: { id: string; started_at: string; ended_at: string | null } | null = null;
+      if (followingPeek.rows[0]) {
+        const r = await client.query(
+          `select id, started_at, ended_at from time_entries where id = $1 and deleted_at is null for update`,
+          [followingPeek.rows[0].id]
+        );
+        following = r.rows[0] ?? null;
+      }
+
+      const oldStart = new Date(target.started_at);
+      const oldEnd = new Date(target.ended_at);
+      const newStart = startTime !== undefined ? new Date(startTime) : oldStart;
+      const newEnd = endTime !== undefined ? new Date(endTime) : oldEnd;
+
+      if (newStart.getTime() >= newEnd.getTime()) {
+        await client.query("rollback");
+        return res.status(422).json({ error: "Start time must be before end time" });
+      }
+      if (
+        calendarDateInAppTimezone(oldStart) !== calendarDateInAppTimezone(newStart) ||
+        calendarDateInAppTimezone(oldStart) !== calendarDateInAppTimezone(newEnd)
+      ) {
+        await client.query("rollback");
+        return res.status(422).json({ error: "The corrected times must stay on the same date as the break" });
+      }
+
+      // No overlap with any OTHER break.
+      const overlap = await client.query(
+        `select id from time_entries
+         where employee_id = $1 and entry_type = 'break' and deleted_at is null and id <> $2
+           and started_at < $3 and (ended_at is null or ended_at > $4)
+         limit 1`,
+        [target.employee_id, id, newEnd, newStart]
+      );
+      if (overlap.rows[0]) {
+        await client.query("rollback");
+        return res.status(409).json({ error: "Corrected break overlaps another break" });
+      }
+
+      // No overlap with any work entry either — preceding/following are
+      // excluded since they're the two entries this correction is allowed
+      // to legitimately touch/reattach to (validated separately below).
+      // This is a safety net beyond the preceding/following-specific checks
+      // — e.g. if a gap already existed further out (from an earlier
+      // deletion), a large correction shouldn't be able to reach into it.
+      const workOverlap = await client.query(
+        `select id from time_entries
+         where employee_id = $1 and entry_type = 'work' and deleted_at is null
+           and id <> all($2::uuid[])
+           and started_at < $3 and (ended_at is null or ended_at > $4)
+         limit 1`,
+        [target.employee_id, [preceding?.id, following?.id].filter((v): v is string => Boolean(v)), newEnd, newStart]
+      );
+      if (workOverlap.rows[0]) {
+        await client.query("rollback");
+        return res.status(409).json({ error: "Corrected break overlaps a work entry" });
+      }
+
+      // Timeline repair validation: a moved boundary can't erase the
+      // adjacent activity segment it would reattach to.
+      if (preceding && newStart.getTime() !== oldStart.getTime()) {
+        if (newStart.getTime() <= new Date(preceding.started_at).getTime()) {
+          await client.query("rollback");
+          return res
+            .status(422)
+            .json({ error: "Corrected start time would leave no time for the preceding activity" });
+        }
+      }
+      if (following && following.ended_at !== null && newEnd.getTime() !== oldEnd.getTime()) {
+        if (newEnd.getTime() >= new Date(following.ended_at).getTime()) {
+          await client.query("rollback");
+          return res
+            .status(422)
+            .json({ error: "Corrected end time would leave no time for the following activity" });
+        }
+      }
+      // The following work entry is still open (in progress) — there's no
+      // ended_at to bound the correction against above, but pushing its
+      // started_at into the future would still corrupt it: an in-progress
+      // entry whose clock hasn't started yet breaks its own live timer and
+      // every duration computed from it.
+      if (following && following.ended_at === null && newEnd.getTime() !== oldEnd.getTime()) {
+        if (newEnd.getTime() > Date.now()) {
+          await client.query("rollback");
+          return res
+            .status(422)
+            .json({ error: "Corrected end time cannot be in the future while the following activity is still in progress" });
+        }
+      }
+
+      await client.query(`update time_entries set started_at = $1, ended_at = $2 where id = $3`, [
+        newStart,
+        newEnd,
+        id,
+      ]);
+
+      // Every affected timestamp — the break's own boundary plus whichever
+      // adjacent work entry got dragged along with it — gets its own audit
+      // row, same shape as the existing end-time correction. Metadata this
+      // break carries (break_profile_item_id, scheduled_break_date, source,
+      // is_paid) is never touched here, preserving it exactly as the task
+      // requires for an auto-added/fixed-matched break.
+      const auditInsert = (entryId: string, field: "started_at" | "ended_at", oldVal: Date, newVal: Date) =>
+        client.query(
+          `insert into time_entry_corrections
+             (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+           values ($1, $2, $3, $4, $5, $6, $7)`,
+          [entryId, target.employee_id, req.employee!.id, field, oldVal.toISOString(), newVal.toISOString(), trimmedReason]
+        );
+
+      if (newStart.getTime() !== oldStart.getTime()) {
+        await auditInsert(id, "started_at", oldStart, newStart);
+        if (preceding) {
+          await client.query(`update time_entries set ended_at = $1 where id = $2`, [newStart, preceding.id]);
+          await auditInsert(preceding.id, "ended_at", new Date(preceding.ended_at), newStart);
+        }
+      }
+      if (newEnd.getTime() !== oldEnd.getTime()) {
+        await auditInsert(id, "ended_at", oldEnd, newEnd);
+        if (following) {
+          await client.query(`update time_entries set started_at = $1 where id = $2`, [newEnd, following.id]);
+          await auditInsert(following.id, "started_at", new Date(following.started_at), newEnd);
+        }
+      }
+
+      await client.query("commit");
+    } catch (err) {
+      await client.query("rollback");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    res.json({ ok: true });
+  })
+);
+
+router.post(
+  "/breaks/:id/delete",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid break id" });
+
+    const { reason } = req.body as { reason?: string };
+    const trimmedReason = typeof reason === "string" ? reason.trim() : "";
+    if (trimmedReason.length < 3) {
+      return res.status(400).json({ error: "A deletion reason of at least 3 characters is required" });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+
+      const peek = await client.query(
+        `select employee_id, entry_type, started_at, ended_at, deleted_at,
+                break_profile_item_id, to_char(scheduled_break_date, 'YYYY-MM-DD') as scheduled_break_date, source
+         from time_entries where id = $1`,
+        [id]
+      );
+      const peekRow = peek.rows[0];
+      if (!peekRow || peekRow.deleted_at) {
+        await client.query("rollback");
+        return res.status(404).json({ error: "Break not found" });
+      }
+      if (peekRow.entry_type !== "break") {
+        await client.query("rollback");
+        return res.status(409).json({ error: "Only a break can be deleted here" });
+      }
+      if (peekRow.ended_at === null) {
+        await client.query("rollback");
+        return res.status(409).json({ error: "An in-progress break cannot be deleted from this screen" });
+      }
+
+      // Subquery-based comparison, not a round-tripped Date parameter — see
+      // the identical fix (and its rationale) in the PATCH handler above.
+      const precedingPeek = await client.query(
+        `select id, activity_id from time_entries
+         where employee_id = $1 and entry_type = 'work' and deleted_at is null
+           and ended_at = (select started_at from time_entries where id = $2)`,
+        [peekRow.employee_id, id]
+      );
+      const followingPeek = await client.query(
+        `select id, activity_id from time_entries
+         where employee_id = $1 and entry_type = 'work' and deleted_at is null
+           and started_at = (select ended_at from time_entries where id = $2)`,
+        [peekRow.employee_id, id]
+      );
+
+      // Different activities on either side: never guess how to bridge the
+      // gap — reject and ask the supervisor to correct the adjacent
+      // activity's times (or delete one of them) first.
+      if (
+        precedingPeek.rows[0] &&
+        followingPeek.rows[0] &&
+        precedingPeek.rows[0].activity_id !== followingPeek.rows[0].activity_id
+      ) {
+        await client.query("rollback");
+        return res.status(409).json({
+          error:
+            "This break sits between two different activities and can't be safely removed automatically. " +
+            "Correct the adjacent activity's times first, or delete one of them, before removing this break.",
+        });
+      }
+
+      // Chronological lock order (see the PATCH handler above for why).
+      let preceding: { id: string } | null = null;
+      if (precedingPeek.rows[0]) {
+        const r = await client.query(`select id from time_entries where id = $1 and deleted_at is null for update`, [
+          precedingPeek.rows[0].id,
+        ]);
+        preceding = r.rows[0] ?? null;
+      }
+
+      const targetRes = await client.query(
+        `select id, employee_id, ended_at from time_entries
+         where id = $1 and entry_type = 'break' and deleted_at is null for update`,
+        [id]
+      );
+      const target = targetRes.rows[0];
+      if (!target || target.ended_at === null) {
+        await client.query("rollback");
+        return res
+          .status(409)
+          .json({ error: "This break changed since it was loaded — please refresh and try again" });
+      }
+
+      let following: { id: string } | null = null;
+      if (followingPeek.rows[0]) {
+        const r = await client.query(`select id from time_entries where id = $1 and deleted_at is null for update`, [
+          followingPeek.rows[0].id,
+        ]);
+        following = r.rows[0] ?? null;
+      }
+
+      // Reconnect only when both sides survived the lock and are still the
+      // same activity — extend the preceding entry to meet the following
+      // one exactly, the reverse of how reconcileEmployeeBreaks shrinks a
+      // work entry to carve an auto-added break out of it. A break at the
+      // start or end of the day (only one side, or neither) is just
+      // deleted outright: there's nothing to reconnect, and — deliberately
+      // — the single remaining neighbor's own boundary is left untouched
+      // rather than guessed at (see report for this chosen behavior).
+      if (preceding && following) {
+        // Set via a subquery on the break's own id rather than passing
+        // target.ended_at back in as a parameter, so preceding.ended_at
+        // ends up bit-identical to the value following.started_at already
+        // holds (same precision reasoning as the lookups above) instead of
+        // a millisecond-truncated copy of it.
+        await client.query(
+          `update time_entries set ended_at = (select ended_at from time_entries where id = $1) where id = $2`,
+          [id, preceding.id]
+        );
+        await client.query(
+          `insert into time_entry_corrections
+             (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+           values ($1, $2, $3, 'ended_at', $4, $5, $6)`,
+          [
+            preceding.id,
+            peekRow.employee_id,
+            req.employee!.id,
+            new Date(peekRow.started_at).toISOString(),
+            new Date(target.ended_at).toISOString(),
+            trimmedReason,
+          ]
+        );
+      }
+
+      await client.query(
+        `update time_entries
+         set deleted_at = now(), deleted_by_employee_id = $1, deletion_reason = $2
+         where id = $3`,
+        [req.employee!.id, trimmedReason, id]
+      );
+      await client.query(
+        `insert into time_entry_deletions
+           (employee_id, deleted_by_employee_id, deletion_type, affected_time_entry_ids, reason)
+         values ($1, $2, 'break', $3, $4)`,
+        [peekRow.employee_id, req.employee!.id, [id], trimmedReason]
+      );
+
+      // Suppress reconciliation from recreating this break on the next
+      // status fetch or Inputs load — for ANY break tied to a scheduled
+      // item, not just ones recorded with source='auto'. A manual break
+      // that landed inside a fixed item's grace window (mobileTime.ts's
+      // break/start) is tagged with the same break_profile_item_id/
+      // scheduled_break_date, and the reconnect step just above can
+      // re-merge the surrounding work entries back into a single span that
+      // fully covers the scheduled window again — at which point
+      // reconcileEmployeeBreaks would see that window as unaccounted-for
+      // and re-add it (as a new 'auto' entry) unless suppressed here.
+      // Freeform manual breaks (no break_profile_item_id at all) never
+      // match reconciliation's schedule-driven checks in the first place,
+      // so they correctly never need a row here.
+      if (peekRow.break_profile_item_id && peekRow.scheduled_break_date) {
+        await client.query(
+          `insert into break_schedule_exceptions
+             (employee_id, break_profile_item_id, scheduled_date, reason, created_by_employee_id)
+           values ($1, $2, $3, $4, $5)
+           on conflict (employee_id, break_profile_item_id, scheduled_date) do nothing`,
+          [peekRow.employee_id, peekRow.break_profile_item_id, peekRow.scheduled_break_date, trimmedReason, req.employee!.id]
+        );
+      }
 
       await client.query("commit");
     } catch (err) {

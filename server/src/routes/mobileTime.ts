@@ -47,7 +47,7 @@ interface OpenEntryOverrides {
 async function getOpenEntry(employeeId: string): Promise<OpenEntry | null> {
   const { rows } = await pool.query(
     `select id, entry_type, activity_id, started_at, greenhouse_row_id
-     from time_entries where employee_id = $1 and ended_at is null`,
+     from time_entries where employee_id = $1 and ended_at is null and deleted_at is null`,
     [employeeId]
   );
   return rows[0] ?? null;
@@ -79,7 +79,7 @@ async function openEntry(
       `update time_entries
        set ended_at = coalesce($3, now()),
            actual_ended_at = coalesce($4, actual_ended_at)
-       where employee_id = $1 and ended_at is null and idempotency_key <> $2`,
+       where employee_id = $1 and ended_at is null and deleted_at is null and idempotency_key <> $2`,
       [employeeId, idempotencyKey, overrides.startedAt ?? null, overrides.actualEndedAt ?? null]
     );
 
@@ -232,7 +232,7 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
   const { rows: chainRows } = await pool.query<ChainEntry>(
     `select entry_type, activity_id, started_at, ended_at, greenhouse_row_id
      from time_entries
-     where employee_id = $1 and started_at >= now() - interval '24 hours'`,
+     where employee_id = $1 and started_at >= now() - interval '24 hours' and deleted_at is null`,
     [employeeId]
   );
 
@@ -303,6 +303,7 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
        join activities a on a.id = te.activity_id
        where te.employee_id = $1
          and te.entry_type = 'work'
+         and te.deleted_at is null
          and te.ended_at = (select started_at from time_entries where id = $2)
        order by te.started_at desc
        limit 1`,
@@ -335,6 +336,7 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
      where te.employee_id = $1
        and te.entry_type = 'work'
        and te.ended_at is not null
+       and te.deleted_at is null
        and te.started_at >= date_trunc('day', now())
      order by te.started_at desc
      limit 5`,
@@ -576,7 +578,7 @@ router.post(
     // send (or re-collect) a greenhouseRowId on break/end.
     const { rows } = await pool.query(
       `select activity_id, greenhouse_row_id from time_entries
-       where employee_id = $1 and entry_type = 'work'
+       where employee_id = $1 and entry_type = 'work' and deleted_at is null
        order by started_at desc limit 1`,
       [d.employeeId]
     );
@@ -623,7 +625,7 @@ router.post(
   asyncHandler(async (req, res) => {
     const d = req.device!;
     await pool.query(
-      `update time_entries set ended_at = now() where employee_id = $1 and ended_at is null`,
+      `update time_entries set ended_at = now() where employee_id = $1 and ended_at is null and deleted_at is null`,
       [d.employeeId]
     );
     res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName));

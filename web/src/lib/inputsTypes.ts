@@ -28,6 +28,7 @@ export interface BreakDto {
   isPaid: boolean | null;
   source: "manual" | "auto";
   breakProfileItemId: string | null;
+  canEdit: boolean;
 }
 
 export interface DailyInputsResponse {

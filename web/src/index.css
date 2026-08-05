@@ -1250,6 +1250,13 @@ input {
   opacity: 0.6;
 }
 
+.employee-form-delete {
+  background: var(--color-danger) !important;
+  border-color: var(--color-danger) !important;
+  color: white;
+  font-weight: 600;
+}
+
 /* ---------- Tabs (Activities page) ---------- */
 
 .tabs {
@@ -1710,6 +1717,10 @@ input {
   width: 22%;
 }
 
+.inputs-col-actions {
+  width: 90px;
+}
+
 .inputs-log-activity {
   white-space: normal;
   word-break: break-word;
@@ -1748,14 +1759,16 @@ input {
   text-decoration: underline dotted;
 }
 
-.inputs-endtime-editor {
+.inputs-endtime-editor,
+.inputs-time-editor {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 0.4rem;
 }
 
-.inputs-endtime-editor input[type="time"] {
+.inputs-endtime-editor input[type="time"],
+.inputs-time-editor input[type="time"] {
   font-variant-numeric: tabular-nums;
   padding: 0.2rem 0.4rem;
   border: 1px solid var(--color-primary);
@@ -1763,13 +1776,35 @@ input {
   font-size: 0.85rem;
 }
 
-.inputs-endtime-editor button {
+.inputs-endtime-editor button,
+.inputs-time-editor button {
   padding: 0.2rem 0.55rem;
   font-size: 0.78rem;
   border-radius: 4px;
   border: 1px solid var(--color-border);
   background: var(--color-surface);
   flex-shrink: 0;
+}
+
+.inputs-th-actions,
+.inputs-row-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.inputs-delete-btn {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border-radius: 4px;
+  border: 1px solid var(--color-danger);
+  background: transparent;
+  color: var(--color-danger);
+}
+
+.inputs-delete-btn:hover {
+  background: var(--color-danger);
+  color: white;
 }
 
 .inputs-log-speed {
@@ -1815,7 +1850,32 @@ input {
 
 .inputs-workday-table th,
 .inputs-workday-table td {
-  padding: 0.45rem 0;
+  padding: 0.45rem 0.5rem;
+}
+
+.inputs-break-row {
+  cursor: pointer;
+}
+
+.inputs-break-row:hover td {
+  background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+}
+
+.inputs-break-row-selected td {
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+}
+
+.inputs-time-cell {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.inputs-time-cell-editable {
+  cursor: text;
+}
+
+.inputs-break-row-selected .inputs-time-cell-editable {
+  text-decoration: underline dotted;
 }
 
 @media (max-width: 900px) {

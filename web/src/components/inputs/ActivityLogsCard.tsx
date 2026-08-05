@@ -23,6 +23,7 @@ interface ActivityLogsCardProps {
   onEditTimeChange: (value: string) => void;
   onSaveEdit: () => void;
   onCancelEdit: () => void;
+  onDeleteRun: (run: ActivityRunDto) => void;
 }
 
 export function ActivityLogsCard({
@@ -38,6 +39,7 @@ export function ActivityLogsCard({
   onEditTimeChange,
   onSaveEdit,
   onCancelEdit,
+  onDeleteRun,
 }: ActivityLogsCardProps) {
   function handleEndTimeCellClick(run: ActivityRunDto) {
     if (run.id === selectedRunId && run.canEdit && editingRunId !== run.id) {
@@ -80,6 +82,7 @@ export function ActivityLogsCard({
               <col className="inputs-col-speed" />
               <col className="inputs-col-duration" />
               <col className="inputs-col-endtime" />
+              <col className="inputs-col-actions" />
             </colgroup>
             <thead>
               <tr>
@@ -88,6 +91,7 @@ export function ActivityLogsCard({
                 <th>Normal Speed</th>
                 <th className="inputs-th-duration">Duration</th>
                 <th className="inputs-th-endtime">End Time</th>
+                <th className="inputs-th-actions">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -156,6 +160,20 @@ export function ActivityLogsCard({
                       formatTimeInAppTimezone(run.endedAt)
                     ) : (
                       "—"
+                    )}
+                  </td>
+                  <td className="inputs-row-actions">
+                    {run.id === selectedRunId && run.canEdit && (
+                      <button
+                        type="button"
+                        className="inputs-delete-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteRun(run);
+                        }}
+                      >
+                        Delete
+                      </button>
                     )}
                   </td>
                 </tr>

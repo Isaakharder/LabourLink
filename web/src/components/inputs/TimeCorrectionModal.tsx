@@ -1,25 +1,31 @@
 import { FormEvent, useState } from "react";
 import { Modal } from "../ui/Modal";
 
-interface CorrectionReasonModalProps {
-  activityName: string;
-  oldEndTimeDisplay: string;
-  newEndTimeDisplay: string;
+interface TimeCorrectionModalProps {
+  subjectLabel: string;
+  fieldLabel: string;
+  oldDisplay: string;
+  newDisplay: string;
   submitting: boolean;
   error: string | null;
   onConfirm: (reason: string) => void;
   onCancel: () => void;
 }
 
-export function CorrectionReasonModal({
-  activityName,
-  oldEndTimeDisplay,
-  newEndTimeDisplay,
+// Generalized from the activity-run end-time-only version: same reason-gated
+// confirm flow, now also reused for a break's start or end time. subjectLabel
+// carries the activity/break name and fieldLabel the timestamp being changed
+// ("End Time" / "Start Time"), so the sentence below stays accurate for both.
+export function TimeCorrectionModal({
+  subjectLabel,
+  fieldLabel,
+  oldDisplay,
+  newDisplay,
   submitting,
   error,
   onConfirm,
   onCancel,
-}: CorrectionReasonModalProps) {
+}: TimeCorrectionModalProps) {
   const [reason, setReason] = useState("");
   const reasonValid = reason.trim().length >= 3;
 
@@ -33,8 +39,8 @@ export function CorrectionReasonModal({
     <Modal title="Reason for correction" onClose={submitting ? () => {} : onCancel}>
       <form onSubmit={handleSubmit} className="employee-form" noValidate>
         <p>
-          Changing <strong>{activityName}</strong> end time from <strong>{oldEndTimeDisplay}</strong> to{" "}
-          <strong>{newEndTimeDisplay}</strong>.
+          Changing <strong>{subjectLabel}</strong> {fieldLabel.toLowerCase()} from <strong>{oldDisplay}</strong> to{" "}
+          <strong>{newDisplay}</strong>.
         </p>
         <label>
           Reason *
