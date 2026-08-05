@@ -28,10 +28,10 @@ interface CurrentActivity {
 // State for an in-progress multi-question flow — built up one answer at a
 // time as the employee steps through `questions` in order, then submitted
 // as a single batch once the last question is answered (or skipped). Used
-// both for a brand-new activity start/switch and for "Change job details"
-// (same activity, re-answering to open a new segment) — the two differ
-// only in what activityId/activityName/questions get passed in, never in
-// how the flow itself advances.
+// only for a brand-new activity start/switch (chooseActivity); editing one
+// question of an already-running activity goes through SingleQuestionEdit
+// below instead, which submits a single answer directly rather than
+// stepping through the whole question list again.
 interface PendingQuestionFlow {
   activityId: string;
   activityName: string;
@@ -40,6 +40,19 @@ interface PendingQuestionFlow {
   // Keyed by questionId so a Back navigation can look up "was this question
   // already answered" without caring about array position.
   answers: Record<string, QuestionAnswer>;
+}
+
+// A single tap-to-edit question button (see the per-question button list in
+// the render below) — editing one question submits the current activity's
+// full answer set with just this one question's value replaced, rather
+// than stepping back through every question the way changing job details
+// used to. activity/question are captured at the moment the button is
+// tapped so the edit sheet doesn't need to re-derive them from `activities`
+// (which could theoretically change while the sheet is open).
+interface SingleQuestionEdit {
+  activityId: string;
+  activityName: string;
+  question: ActivityQuestion;
 }
 
 interface PreviousActivity {
@@ -84,6 +97,7 @@ export function HomeScreen() {
   // brand-new activity start/switch or a same-activity "Change job
   // details" — see PendingQuestionFlow's own comment.
   const [questionFlow, setQuestionFlow] = useState<PendingQuestionFlow | null>(null);
+  const [singleQuestionEdit, setSingleQuestionEdit] = useState<SingleQuestionEdit | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [online, setOnline] = useState(navigator.onLine);
@@ -307,23 +321,15 @@ export function HomeScreen() {
     setPickerOpen(true);
   }
 
-  // Shared by a brand-new activity start/switch (chooseActivity) and
-  // same-activity "Change job details" (openChangeJobDetails) — both just
-  // need to know which activity, which ordered questions to ask, and what
-  // (if anything) each question should start out already answered with;
-  // everything about *advancing* through them is identical either way.
-  // initialAnswers defaults to empty for a brand-new start/switch — Change
-  // job details is the only caller that ever passes a non-empty one.
-  function startQuestionFlow(
-    activityId: string,
-    activityName: string,
-    questions: ActivityQuestion[],
-    initialAnswers: Record<string, QuestionAnswer> = {}
-  ) {
+  // Only ever called for a brand-new activity start/switch (chooseActivity)
+  // — editing a question of the already-running activity goes through
+  // openSingleQuestionEdit instead, which never steps through the other
+  // questions at all.
+  function startQuestionFlow(activityId: string, activityName: string, questions: ActivityQuestion[]) {
     loadGreenhouseRows();
     loadCarriers();
     setError(null);
-    setQuestionFlow({ activityId, activityName, questions, stepIndex: 0, answers: initialAnswers });
+    setQuestionFlow({ activityId, activityName, questions, stepIndex: 0, answers: {} });
     setPickerOpen(false);
   }
 
@@ -347,16 +353,17 @@ export function HomeScreen() {
   // the final question hasn't necessarily re-rendered with that answer
   // committed to state yet.
   //
-  // Change job details' "do not start a new segment unless something
+  // A single-question edit's "do not start a new segment unless something
   // actually changed" requirement is enforced here, generically, rather
   // than as a special mode: if the target activity is the one already
   // running and every submitted answer matches what's already recorded on
   // it, there's nothing to change — the flow just closes with no API call
   // (no new segment, no fresh idempotencyKey, no timer reset). This can
-  // only actually trigger for Change job details; a brand-new
-  // start/switch's activityId is never the currently-open one (the
-  // ActivityPicker already short-circuits re-picking the current activity
-  // before any question flow opens at all).
+  // only actually trigger from confirmSingleQuestionEdit/
+  // skipSingleQuestionEdit; a brand-new start/switch's activityId is never
+  // the currently-open one (the ActivityPicker already short-circuits
+  // re-picking the current activity before any question flow opens at
+  // all).
   function submitQuestionFlow(
     activityId: string,
     activityName: string,
@@ -412,9 +419,10 @@ export function HomeScreen() {
   // for this questionId at all (the server treats an absent answer as "not
   // provided," never as an explicit null). Explicitly *removes* any answer
   // already present for this questionId rather than just leaving it
-  // untouched — Change job details can open this step pre-filled from the
-  // current segment, and skipping it must mean "no carrier," not "silently
-  // keep submitting the old one."
+  // untouched — this flow only ever starts from chooseActivity with an
+  // empty answer set, so there's nothing to remove here in practice today,
+  // but staying consistent with skipSingleQuestionEdit's same defensive
+  // delete keeps both skip paths identical in shape.
   function skipQuestionStep() {
     if (!questionFlow) return;
     const currentQuestion = questionFlow.questions[questionFlow.stepIndex];
@@ -442,37 +450,88 @@ export function HomeScreen() {
     setQuestionFlow(null);
   }
 
-  // "Change job details" — the only UI path for requirement 10's "same
-  // activity, different row or carrier." Re-runs the full question
-  // sequence, pre-filled with whatever the current segment is already
-  // answered with (each picker sheet reads its own question's entry out of
-  // questionFlow.answers as `initialSelectedRowId`/`initialSelectedCarrierId`
-  // — see the render below), so the employee can keep an answer with a
-  // plain Confirm, change just one, or Skip an optional one back to "none."
-  // Submitting reuses the exact same perform() call the initial
-  // required-question start does, just with the current activity's id; a
-  // fresh idempotencyKey is what makes the server open a new row/carrier
-  // segment and close the old one (see openEntry in mobileTime.ts), and
-  // accumulateChainSeconds' row/carrier-equality check is what makes the
-  // timer correctly reset for it — but only when something actually
-  // changed, see submitQuestionFlow's own no-op check.
-  function openChangeJobDetails() {
-    if (!me?.currentActivity) return;
-    const activity = activities.find((a) => a.id === me.currentActivity!.id);
-    if (!activity || activity.questions.length === 0) return;
-
-    const currentRowId = me.currentActivity.row?.id ?? null;
-    const currentCarrierId = me.currentActivity.carrier?.id ?? null;
-    const initialAnswers: Record<string, QuestionAnswer> = {};
+  // The activity's full current answer set, derived from
+  // me.currentActivity's row/carrier fields. Used to seed a single-question
+  // edit's submission: editing just one question still has to submit the
+  // complete answer set the server's work-start endpoint expects (it
+  // validates every configured question, not just the one that changed),
+  // with only the edited question's value replaced — see
+  // confirmSingleQuestionEdit/skipSingleQuestionEdit below. This is the one
+  // place a future question type's "what's the current value" lookup needs
+  // a new case; everything else about the single-question edit flow (the
+  // handlers, the button list, the sheet dispatch) is already generic over
+  // `activity.questions`.
+  function currentAnswersFor(activity: Activity): Record<string, QuestionAnswer> {
+    const currentRowId = me?.currentActivity?.row?.id ?? null;
+    const currentCarrierId = me?.currentActivity?.carrier?.id ?? null;
+    const answers: Record<string, QuestionAnswer> = {};
     for (const q of activity.questions) {
       if (q.questionType === "greenhouse_row" && currentRowId) {
-        initialAnswers[q.id] = { questionId: q.id, questionType: "greenhouse_row", greenhouseRowId: currentRowId };
+        answers[q.id] = { questionId: q.id, questionType: "greenhouse_row", greenhouseRowId: currentRowId };
       } else if (q.questionType === "carrier" && currentCarrierId) {
-        initialAnswers[q.id] = { questionId: q.id, questionType: "carrier", carrierId: currentCarrierId };
+        answers[q.id] = { questionId: q.id, questionType: "carrier", carrierId: currentCarrierId };
       }
     }
+    return answers;
+  }
 
-    startQuestionFlow(activity.id, activity.name, activity.questions, initialAnswers);
+  // The generic per-question button label: what's currently answered for
+  // this one question, formatted for display, or null if unanswered (an
+  // optional question that was skipped) — in which case the button falls
+  // back to the question's own label as a tappable prompt (see the render
+  // below). Same "one place to add a case" genericity as currentAnswersFor
+  // above — the button-list rendering itself never needs to change.
+  function currentAnswerDisplay(question: ActivityQuestion): string | null {
+    if (question.questionType === "greenhouse_row") return me?.currentActivity?.row?.label ?? null;
+    if (question.questionType === "carrier") return me?.currentActivity?.carrier?.name ?? null;
+    return null;
+  }
+
+  // Opens a single question's picker sheet directly — no step counter, no
+  // Back, no stepping through the activity's other questions — pre-filled
+  // with that one question's current answer. Replaces the old "Change job
+  // details" full re-ask flow: each configured question now has its own
+  // always-visible button (see the render below) and edits independently.
+  function openSingleQuestionEdit(activity: Activity, question: ActivityQuestion) {
+    loadGreenhouseRows();
+    loadCarriers();
+    setError(null);
+    setSingleQuestionEdit({ activityId: activity.id, activityName: activity.name, question });
+  }
+
+  function cancelSingleQuestionEdit() {
+    if (busy) return;
+    setSingleQuestionEdit(null);
+  }
+
+  // Submits the activity's full current answer set with just this one
+  // question's value replaced — reuses submitQuestionFlow's existing no-op
+  // detection (if the new value matches what's already recorded, nothing
+  // is submitted at all) and its "close the old segment, open a new one"
+  // behavior otherwise, the same mechanics the old full re-ask flow relied
+  // on, just scoped to one question instead of stepping through all of
+  // them.
+  function confirmSingleQuestionEdit(answer: QuestionAnswer) {
+    if (!singleQuestionEdit) return;
+    const activity = activities.find((a) => a.id === singleQuestionEdit.activityId);
+    if (!activity) return;
+    const answers = { ...currentAnswersFor(activity), [answer.questionId]: answer };
+    setSingleQuestionEdit(null);
+    submitQuestionFlow(singleQuestionEdit.activityId, singleQuestionEdit.activityName, answers);
+  }
+
+  // Only reachable when the question being edited is optional (see
+  // allowSkip in the render below) — submits the current answer set with
+  // this one question's answer removed entirely, same "absent, not
+  // explicit null" convention skipQuestionStep already uses.
+  function skipSingleQuestionEdit() {
+    if (!singleQuestionEdit) return;
+    const activity = activities.find((a) => a.id === singleQuestionEdit.activityId);
+    if (!activity) return;
+    const answers = currentAnswersFor(activity);
+    delete answers[singleQuestionEdit.question.id];
+    setSingleQuestionEdit(null);
+    submitQuestionFlow(singleQuestionEdit.activityId, singleQuestionEdit.activityName, answers);
   }
 
   function startBreak() {
@@ -594,7 +653,9 @@ export function HomeScreen() {
         {me!.status === "break" && <p>On break</p>}
       </div>
 
-      {error && !pickerOpen && !questionFlow && !endDayConfirmOpen && <p className="error-text">{error}</p>}
+      {error && !pickerOpen && !questionFlow && !singleQuestionEdit && !endDayConfirmOpen && (
+        <p className="error-text">{error}</p>
+      )}
 
       {/* 3. Primary activity button */}
       {me!.status === "idle" && (
@@ -612,11 +673,33 @@ export function HomeScreen() {
           {me!.currentActivity.name}
         </button>
       )}
-      {me!.status === "work" && (me!.currentActivity?.row || me!.currentActivity?.carrier) && (
-        <button type="button" className="mobile-change-row" disabled={actionsLocked} onClick={openChangeJobDetails}>
-          {[me!.currentActivity?.row?.label, me!.currentActivity?.carrier?.name].filter(Boolean).join(" · ")} · Change
-        </button>
-      )}
+      {/* One button per configured activity question, in order — fully
+          generic over activity.questions, never hardcoded per question
+          type (see currentAnswersFor/currentAnswerDisplay above for the
+          one place a future question type needs its own case). Tapping a
+          button edits only that question; the others are left exactly as
+          they are. */}
+      {me!.status === "work" &&
+        me!.currentActivity &&
+        (() => {
+          const activity = activities.find((a) => a.id === me!.currentActivity!.id);
+          if (!activity || activity.questions.length === 0) return null;
+          return (
+            <>
+              {activity.questions.map((q) => (
+                <button
+                  key={q.id}
+                  type="button"
+                  className="mobile-question-button"
+                  disabled={actionsLocked}
+                  onClick={() => openSingleQuestionEdit(activity, q)}
+                >
+                  {currentAnswerDisplay(q) ?? q.label}
+                </button>
+              ))}
+            </>
+          );
+        })()}
       {me!.status === "break" && (
         <div className="mobile-primary-activity mobile-primary-activity-static">
           {me!.previousActivity?.name ?? "On break"}
@@ -625,7 +708,9 @@ export function HomeScreen() {
 
       {noActivitiesAvailable && me!.status === "idle" && <p className="error-text">{NO_ACTIVITIES_MESSAGE}</p>}
 
-      {/* 4. Activity timer */}
+      {/* 4. Activity timer — always directly below the last question
+          button above (plain DOM order), or directly below the activity
+          button itself when it has no questions. */}
       {me!.status === "work" && me!.currentActivity && (
         <ActivityTimer
           startedAt={me!.currentActivity.startedAt}
@@ -733,6 +818,49 @@ export function HomeScreen() {
               onSkip={skipQuestionStep}
               onBack={onBack}
               onCancel={cancelQuestionFlow}
+            />
+          );
+        })()}
+
+      {/* Single-question edit sheet — opened by tapping one of the
+          per-question buttons above. Same per-type dispatch as the
+          multi-question flow above (each question type still needs its own
+          picker sheet component), but no stepLabel/onBack: this always
+          edits exactly one question, pre-filled with its current answer. */}
+      {singleQuestionEdit &&
+        (() => {
+          const q = singleQuestionEdit.question;
+          if (q.questionType === "greenhouse_row") {
+            return (
+              <RowPickerSheet
+                activityName={singleQuestionEdit.activityName}
+                questionLabel={q.label}
+                allowSkip={!q.isRequired}
+                initialSelectedRowId={me!.currentActivity?.row?.id ?? null}
+                lands={rowLands}
+                error={error}
+                busy={busy}
+                onConfirm={(rowId) =>
+                  confirmSingleQuestionEdit({ questionId: q.id, questionType: "greenhouse_row", greenhouseRowId: rowId })
+                }
+                onSkip={skipSingleQuestionEdit}
+                onCancel={cancelSingleQuestionEdit}
+              />
+            );
+          }
+
+          return (
+            <CarrierPickerSheet
+              activityName={singleQuestionEdit.activityName}
+              questionLabel={q.label}
+              allowSkip={!q.isRequired}
+              initialSelectedCarrierId={me!.currentActivity?.carrier?.id ?? null}
+              carriers={carriers}
+              error={error}
+              busy={busy}
+              onConfirm={(carrierId) => confirmSingleQuestionEdit({ questionId: q.id, questionType: "carrier", carrierId })}
+              onSkip={skipSingleQuestionEdit}
+              onCancel={cancelSingleQuestionEdit}
             />
           );
         })()}

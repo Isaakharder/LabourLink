@@ -426,8 +426,12 @@ input {
 
 .mobile-home-active {
   justify-content: flex-start;
-  padding-top: 1.5rem;
-  gap: 1rem;
+  /* Moved up slightly and tightened from 1.5rem/1rem — an activity with
+     several configured questions now stacks a button per question beneath
+     the activity button, so the whole column needs to sit a bit higher and
+     a bit more compact to keep the timer comfortably on-screen below them. */
+  padding-top: 1rem;
+  gap: 0.7rem;
 }
 
 .mobile-home-header {
@@ -489,7 +493,9 @@ input {
 .mobile-primary-activity {
   width: 100%;
   max-width: 340px;
-  padding: 1.4rem 1.2rem;
+  /* Flatter than the original 1.4rem/72px — makes room for a stack of
+     per-question buttons underneath without pushing the timer off-screen. */
+  padding: 1.05rem 1.2rem;
   font-size: 1.3rem;
   font-weight: 700;
   text-align: center;
@@ -497,7 +503,7 @@ input {
   border: 2px solid var(--color-primary);
   background: var(--color-primary);
   color: white;
-  min-height: 72px;
+  min-height: 60px;
 }
 
 .mobile-primary-activity:disabled {
@@ -511,17 +517,26 @@ input {
   cursor: default;
 }
 
-.mobile-change-row {
-  background: none;
-  border: none;
-  color: var(--color-primary);
-  font-size: 0.9rem;
+/* One per configured activity question, stacked beneath the primary
+   activity button in question order — see the per-question button list in
+   HomeScreen.tsx. Deliberately flatter/lighter than .mobile-primary-activity
+   (outlined rather than filled) so the activity button stays the visually
+   dominant one; tapping any of these edits only that one question. */
+.mobile-question-button {
+  width: 100%;
+  max-width: 340px;
+  padding: 0.65rem 1.1rem;
+  font-size: 1rem;
   font-weight: 600;
-  padding: 0.1rem;
-  margin-top: -0.4rem;
+  text-align: center;
+  border-radius: var(--radius);
+  border: 1.5px solid var(--color-primary);
+  background: var(--color-surface);
+  color: var(--color-primary);
+  min-height: 44px;
 }
 
-.mobile-change-row:disabled {
+.mobile-question-button:disabled {
   opacity: 0.5;
 }
 
