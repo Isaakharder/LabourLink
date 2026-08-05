@@ -64,7 +64,10 @@ export interface BatchParams {
   rowWidthFt: number;
   rowLengthFt: number;
   rowGapFt: number;
-  offsetFt: number;
+  startOffsetFt: number;
+  anchorOffsetFt: number;
+  // Backward-compatible alias; treated as startOffsetFt when present.
+  offsetFt?: number;
   numberingMode: NumberingMode;
   startRowNumber: number;
   endRowNumber: number;
@@ -119,7 +122,9 @@ export function generateRowNumbers(
 // startSide). Pure function of the batch parameters and phase size only —
 // never reads or mutates any other row.
 export function placeBatchFromSide(params: BatchParams, phase: PhaseSize, rowNumbers: number[]): RowRect[] {
-  const { startSide, anchorSide, rowWidthFt, rowLengthFt, rowGapFt, offsetFt } = params;
+  const { startSide, anchorSide, rowWidthFt, rowLengthFt, rowGapFt } = params;
+  const startOffsetFt = Number.isFinite(params.startOffsetFt) ? params.startOffsetFt : Number(params.offsetFt ?? 0);
+  const anchorOffsetFt = Number.isFinite(params.anchorOffsetFt) ? params.anchorOffsetFt : 0;
   const orientation = orientationForStartSide(startSide);
   const pitch = rowWidthFt + rowGapFt;
 
@@ -132,22 +137,23 @@ export function placeBatchFromSide(params: BatchParams, phase: PhaseSize, rowNum
     let yFt: number;
 
     if (startSide === "south") {
-      yFt = phase.northSouthFeet - offsetFt - (i + 1) * rowWidthFt - i * rowGapFt;
+      yFt = phase.northSouthFeet - startOffsetFt - (i + 1) * rowWidthFt - i * rowGapFt;
     } else if (startSide === "north") {
-      yFt = offsetFt + i * pitch;
+      yFt = startOffsetFt + i * pitch;
     } else if (startSide === "east") {
-      xFt = phase.eastWestFeet - offsetFt - (i + 1) * rowWidthFt - i * rowGapFt;
+      xFt = phase.eastWestFeet - startOffsetFt - (i + 1) * rowWidthFt - i * rowGapFt;
     } else {
-      xFt = offsetFt + i * pitch;
+      xFt = startOffsetFt + i * pitch;
     }
 
     if (orientation === "horizontal") {
       // south/north start -> stacked on y (computed above); x comes from
-      // the anchor side, flush against it for the row's full length.
-      xFt = anchorSide === "east" ? phase.eastWestFeet - rowLengthFt : 0;
+      // the anchor side, inset by anchorOffsetFt, then extends away.
+      xFt = anchorSide === "east" ? phase.eastWestFeet - anchorOffsetFt - rowLengthFt : anchorOffsetFt;
     } else {
-      // east/west start -> stacked on x (computed above); y from anchor.
-      yFt = anchorSide === "south" ? phase.northSouthFeet - rowLengthFt : 0;
+      // east/west start -> stacked on x (computed above); y from anchor,
+      // inset by anchorOffsetFt, then extends away.
+      yFt = anchorSide === "south" ? phase.northSouthFeet - anchorOffsetFt - rowLengthFt : anchorOffsetFt;
     }
 
     return {
@@ -258,8 +264,13 @@ export function generateRowPreview(
   if (!Number.isFinite(params.rowGapFt) || params.rowGapFt < 0) {
     errors.push("Row gap must be a number of 0 or greater.");
   }
-  if (!Number.isFinite(params.offsetFt) || params.offsetFt < 0) {
-    errors.push("Offset must be a number of 0 or greater.");
+  const startOffsetFt = Number.isFinite(params.startOffsetFt) ? params.startOffsetFt : Number(params.offsetFt ?? 0);
+  if (!Number.isFinite(startOffsetFt) || startOffsetFt < 0) {
+    errors.push("Start-side offset must be a number of 0 or greater.");
+  }
+  const anchorOffsetFt = Number.isFinite(params.anchorOffsetFt) ? params.anchorOffsetFt : 0;
+  if (!Number.isFinite(anchorOffsetFt) || anchorOffsetFt < 0) {
+    errors.push("Anchor-side offset must be a number of 0 or greater.");
   }
   if (!Number.isInteger(params.startRowNumber) || params.startRowNumber < 1) {
     errors.push("Start row number must be a whole number of 1 or greater.");
@@ -286,10 +297,17 @@ export function generateRowPreview(
       params.startSide,
       params.rowGapFt
     );
-    // The batch's own offsetFt is additive on top of the auto-computed
+    // The batch's own startOffsetFt is additive on top of the
+    // auto-computed continuation point
     // continuation point — e.g. leaving extra breathing room after Batch 1
     // before Batch 2's first row, on top of just the row gap.
-    effectiveParams = { ...params, offsetFt: continuationBase + params.offsetFt };
+    effectiveParams = {
+      ...params,
+      startOffsetFt: continuationBase + startOffsetFt,
+      offsetFt: continuationBase + startOffsetFt,
+    };
+  } else {
+    effectiveParams = { ...params, startOffsetFt, anchorOffsetFt, offsetFt: startOffsetFt };
   }
 
   const rows = placeBatchFromSide(effectiveParams, phase, rowNumbers);

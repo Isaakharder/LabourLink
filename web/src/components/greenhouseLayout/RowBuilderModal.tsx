@@ -31,7 +31,8 @@ const FIELD_ERROR_PREFIXES = [
   "Row width must be",
   "Row length must be",
   "Row gap must be",
-  "Offset must be",
+  "Start-side offset must be",
+  "Anchor-side offset must be",
   "Start row number must be",
   "End row number must be",
 ];
@@ -42,7 +43,8 @@ const DEFAULTS = {
   rowWidthFt: "4",
   rowLengthFt: "",
   rowGapFt: "0",
-  offsetFt: "0",
+  startOffsetFt: "0",
+  anchorOffsetFt: "0",
   numberingMode: "odd" as NumberingMode,
   startRowNumber: "1",
   endRowNumber: "",
@@ -95,7 +97,8 @@ export function RowBuilderModal({ phase, savedRows, batches, onClose, onSaved, o
   const [rowWidthFt, setRowWidthFt] = useState(DEFAULTS.rowWidthFt);
   const [rowLengthFt, setRowLengthFt] = useState(DEFAULTS.rowLengthFt);
   const [rowGapFt, setRowGapFt] = useState(DEFAULTS.rowGapFt);
-  const [offsetFt, setOffsetFt] = useState(DEFAULTS.offsetFt);
+  const [startOffsetFt, setStartOffsetFt] = useState(DEFAULTS.startOffsetFt);
+  const [anchorOffsetFt, setAnchorOffsetFt] = useState(DEFAULTS.anchorOffsetFt);
   const [numberingMode, setNumberingMode] = useState<NumberingMode>(DEFAULTS.numberingMode);
   const [startRowNumber, setStartRowNumber] = useState(DEFAULTS.startRowNumber);
   const [endRowNumber, setEndRowNumber] = useState(DEFAULTS.endRowNumber);
@@ -130,27 +133,35 @@ export function RowBuilderModal({ phase, savedRows, batches, onClose, onSaved, o
       rowWidthFt: Number(rowWidthFt),
       rowLengthFt: Number(rowLengthFt),
       rowGapFt: Number(rowGapFt || 0),
-      offsetFt: Number(offsetFt || 0),
+      startOffsetFt: Number(startOffsetFt || 0),
+      anchorOffsetFt: Number(anchorOffsetFt || 0),
+      offsetFt: Number(startOffsetFt || 0),
       numberingMode,
       startRowNumber: Number(startRowNumber),
       endRowNumber: Number(endRowNumber),
     }),
-    [startSide, anchorSide, rowWidthFt, rowLengthFt, rowGapFt, offsetFt, numberingMode, startRowNumber, endRowNumber]
+    [startSide, anchorSide, rowWidthFt, rowLengthFt, rowGapFt, startOffsetFt, anchorOffsetFt, numberingMode, startRowNumber, endRowNumber]
   );
 
   const phaseSize = useMemo(() => ({ eastWestFeet: phase.eastWestFeet, northSouthFeet: phase.northSouthFeet }), [phase]);
 
-  const existingRowsSameStartSide = useMemo(() => {
+  const existingRowsSameLane = useMemo(() => {
     const batchById = new Map(batches.map((b) => [b.id, b]));
-    return savedRows.filter((r) => r.rowBatchId && batchById.get(r.rowBatchId)?.startSide === startSide).map(toRowRect);
-  }, [savedRows, batches, startSide]);
+    return savedRows
+      .filter((r) => {
+        if (!r.rowBatchId) return false;
+        const batch = batchById.get(r.rowBatchId);
+        return batch?.startSide === startSide && batch?.anchorSide === anchorSide;
+      })
+      .map(toRowRect);
+  }, [savedRows, batches, startSide, anchorSide]);
 
   // Unchanged from before this UI refactor: the same placement/validation
   // engine, called the same way — only how its output is *displayed* below
   // has changed.
   const preview = useMemo(
-    () => generateRowPreview(params, phaseSize, { continueAfterExisting, existingRowsSameStartSide }),
-    [params, phaseSize, continueAfterExisting, existingRowsSameStartSide]
+    () => generateRowPreview(params, phaseSize, { continueAfterExisting, existingRowsSameStartSide: existingRowsSameLane }),
+    [params, phaseSize, continueAfterExisting, existingRowsSameLane]
   );
 
   const crossChecks = useMemo(() => {
@@ -174,7 +185,8 @@ export function RowBuilderModal({ phase, savedRows, batches, onClose, onSaved, o
   const widthError = touched.has("rowWidthFt") ? requiredPositiveError(rowWidthFt, "Row width") : null;
   const lengthError = touched.has("rowLengthFt") ? requiredPositiveError(rowLengthFt, "Row length") : null;
   const gapError = touched.has("rowGapFt") ? nonNegativeError(rowGapFt, "Row gap") : null;
-  const offsetError = touched.has("offsetFt") ? nonNegativeError(offsetFt, "Offset") : null;
+  const startOffsetError = touched.has("startOffsetFt") ? nonNegativeError(startOffsetFt, "Start-side offset") : null;
+  const anchorOffsetError = touched.has("anchorOffsetFt") ? nonNegativeError(anchorOffsetFt, "Anchor-side offset") : null;
   const startRowError = touched.has("startRowNumber") ? positiveIntError(startRowNumber, "Start row number") : null;
   const endRowErrorMsg = touched.has("endRowNumber") ? endRowError(endRowNumber, startRowNumber) : null;
 
@@ -212,7 +224,8 @@ export function RowBuilderModal({ phase, savedRows, batches, onClose, onSaved, o
     rowWidthFt !== DEFAULTS.rowWidthFt ||
     rowLengthFt !== DEFAULTS.rowLengthFt ||
     rowGapFt !== DEFAULTS.rowGapFt ||
-    offsetFt !== DEFAULTS.offsetFt ||
+    startOffsetFt !== DEFAULTS.startOffsetFt ||
+    anchorOffsetFt !== DEFAULTS.anchorOffsetFt ||
     numberingMode !== DEFAULTS.numberingMode ||
     startRowNumber !== DEFAULTS.startRowNumber ||
     endRowNumber !== DEFAULTS.endRowNumber ||
@@ -224,7 +237,8 @@ export function RowBuilderModal({ phase, savedRows, batches, onClose, onSaved, o
     setRowWidthFt(DEFAULTS.rowWidthFt);
     setRowLengthFt(DEFAULTS.rowLengthFt);
     setRowGapFt(DEFAULTS.rowGapFt);
-    setOffsetFt(DEFAULTS.offsetFt);
+    setStartOffsetFt(DEFAULTS.startOffsetFt);
+    setAnchorOffsetFt(DEFAULTS.anchorOffsetFt);
     setNumberingMode(DEFAULTS.numberingMode);
     setStartRowNumber(DEFAULTS.startRowNumber);
     setEndRowNumber(DEFAULTS.endRowNumber);
@@ -250,7 +264,7 @@ export function RowBuilderModal({ phase, savedRows, batches, onClose, onSaved, o
     if (allErrors.length > 0) {
       // Surface every field's own message rather than leaving the admin
       // guessing which of several still-untouched fields is the problem.
-      setTouched(new Set(["rowWidthFt", "rowLengthFt", "rowGapFt", "offsetFt", "startRowNumber", "endRowNumber"]));
+      setTouched(new Set(["rowWidthFt", "rowLengthFt", "rowGapFt", "startOffsetFt", "anchorOffsetFt", "startRowNumber", "endRowNumber"]));
       return;
     }
     setSubmitting(true);
@@ -265,7 +279,9 @@ export function RowBuilderModal({ phase, savedRows, batches, onClose, onSaved, o
           rowWidthFt: params.rowWidthFt,
           rowLengthFt: params.rowLengthFt,
           rowGapFt: params.rowGapFt,
-          offsetFt: params.offsetFt,
+          startOffsetFt: params.startOffsetFt,
+          anchorOffsetFt: params.anchorOffsetFt,
+          offsetFt: params.startOffsetFt,
           numberingMode,
           startRowNumber: params.startRowNumber,
           endRowNumber: params.endRowNumber,
@@ -364,19 +380,34 @@ export function RowBuilderModal({ phase, savedRows, batches, onClose, onSaved, o
               Continue from previous batch on this side
             </label>
 
-            <label className={offsetError ? "row-builder-field-invalid" : ""}>
-              Offset from side (ft)
+            <label className={startOffsetError ? "row-builder-field-invalid" : ""}>
+              Offset from start side (ft)
               <input
                 type="number"
                 min="0"
                 step="any"
-                value={offsetFt}
+                value={startOffsetFt}
                 onChange={(e) => {
-                  setOffsetFt(e.target.value);
-                  touch("offsetFt");
+                  setStartOffsetFt(e.target.value);
+                  touch("startOffsetFt");
                 }}
               />
-              {offsetError && <span className="row-builder-field-error">{offsetError}</span>}
+              {startOffsetError && <span className="row-builder-field-error">{startOffsetError}</span>}
+            </label>
+
+            <label className={anchorOffsetError ? "row-builder-field-invalid" : ""}>
+              Offset from anchor side (ft)
+              <input
+                type="number"
+                min="0"
+                step="any"
+                value={anchorOffsetFt}
+                onChange={(e) => {
+                  setAnchorOffsetFt(e.target.value);
+                  touch("anchorOffsetFt");
+                }}
+              />
+              {anchorOffsetError && <span className="row-builder-field-error">{anchorOffsetError}</span>}
             </label>
           </div>
         </div>
@@ -524,6 +555,13 @@ export function RowBuilderModal({ phase, savedRows, batches, onClose, onSaved, o
                       {" · "}
                       {b.rowWidthFt} ft wide · {b.rowLengthFt} ft long
                     </span>
+                    {(b.startOffsetFt !== 0 || b.anchorOffsetFt !== 0) && (
+                      <span>
+                        {b.startOffsetFt !== 0 ? `Start offset: ${b.startOffsetFt} ft` : "Start offset: 0 ft"}
+                        {" · "}
+                        {b.anchorOffsetFt !== 0 ? `Anchor offset: ${b.anchorOffsetFt} ft` : "Anchor offset: 0 ft"}
+                      </span>
+                    )}
                   </div>
                   {confirmingDeleteBatchId === b.id ? (
                     <div className="row-builder-batch-actions">

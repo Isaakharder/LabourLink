@@ -754,6 +754,9 @@ function serializeBatch(row: any) {
     rowWidthFt: Number(row.row_width_ft),
     rowLengthFt: Number(row.row_length_ft),
     rowGapFt: Number(row.row_gap_ft),
+    startOffsetFt: Number(row.offset_ft),
+    anchorOffsetFt: Number(row.anchor_offset_ft),
+    // Backward-compatible alias.
     offsetFt: Number(row.offset_ft),
     numberingMode: row.numbering_mode,
     startRowNumber: row.start_row_number,
@@ -769,7 +772,7 @@ const ROW_SELECT = `
   from greenhouse_rows
 `;
 const BATCH_SELECT = `
-  select id, phase_id, name, start_side, anchor_side, row_width_ft, row_length_ft, row_gap_ft, offset_ft,
+  select id, phase_id, name, start_side, anchor_side, row_width_ft, row_length_ft, row_gap_ft, offset_ft, anchor_offset_ft,
          numbering_mode, start_row_number, end_row_number, continuation_mode, created_at, updated_at
   from greenhouse_row_batches
 `;
@@ -840,8 +843,12 @@ router.post(
     if (rowLengthFt === null) errors.rowLengthFt = "Row length must be a number greater than 0";
     const rowGapFt = body.rowGapFt === undefined ? 0 : parseNonNegativeNumber(body.rowGapFt);
     if (rowGapFt === null) errors.rowGapFt = "Row gap must be a number of 0 or greater";
-    const offsetFt = body.offsetFt === undefined ? 0 : parseNonNegativeNumber(body.offsetFt);
-    if (offsetFt === null) errors.offsetFt = "Offset must be a number of 0 or greater";
+    // Legacy clients send offsetFt. New clients send startOffsetFt.
+    const startOffsetInput = body.startOffsetFt ?? body.offsetFt;
+    const startOffsetFt = startOffsetInput === undefined ? 0 : parseNonNegativeNumber(startOffsetInput);
+    if (startOffsetFt === null) errors.startOffsetFt = "Start-side offset must be a number of 0 or greater";
+    const anchorOffsetFt = body.anchorOffsetFt === undefined ? 0 : parseNonNegativeNumber(body.anchorOffsetFt);
+    if (anchorOffsetFt === null) errors.anchorOffsetFt = "Anchor-side offset must be a number of 0 or greater";
     const startRowNumber = parseRowNumber(body.startRowNumber);
     if (startRowNumber === null) errors.startRowNumber = "Start row number must be a whole number of 1 or greater";
     const endRowNumber = parseRowNumber(body.endRowNumber);
@@ -875,24 +882,25 @@ router.post(
         rowWidthFt: rowWidthFt!,
         rowLengthFt: rowLengthFt!,
         rowGapFt: rowGapFt!,
-        offsetFt: offsetFt!,
+        startOffsetFt: startOffsetFt!,
+        anchorOffsetFt: anchorOffsetFt!,
+        offsetFt: startOffsetFt!,
         numberingMode,
         startRowNumber: startRowNumber!,
         endRowNumber: endRowNumber!,
       };
 
-      // Continuation is scoped to rows placed from the SAME phase + start
-      // side — a row's own geometry can't tell "started from south" apart
-      // from "started from north" on its own, so this has to join back to
-      // the batch that placed it.
+      // Continuation is scoped to rows placed from the SAME phase +
+      // start-side/anchor-side lane — e.g. South+West must not continue
+      // from South+East occupancy.
       let existingRowsSameStartSide: RowRect[] = [];
       if (continueAfterExisting) {
         const sameSideRes = await client.query(
           `select gr.row_number, gr.x_ft, gr.y_ft, gr.width_ft, gr.length_ft, gr.orientation
            from greenhouse_rows gr
            join greenhouse_row_batches grb on grb.id = gr.row_batch_id
-           where gr.phase_id = $1 and gr.deleted_at is null and grb.deleted_at is null and grb.start_side = $2`,
-          [phaseId, startSide]
+           where gr.phase_id = $1 and gr.deleted_at is null and grb.deleted_at is null and grb.start_side = $2 and grb.anchor_side = $3`,
+          [phaseId, startSide, anchorSide]
         );
         existingRowsSameStartSide = sameSideRes.rows.map(toRowRect);
       }
@@ -932,9 +940,9 @@ router.post(
 
       const batchIns = await client.query(
         `insert into greenhouse_row_batches
-           (phase_id, name, start_side, anchor_side, row_width_ft, row_length_ft, row_gap_ft, offset_ft,
+            (phase_id, name, start_side, anchor_side, row_width_ft, row_length_ft, row_gap_ft, offset_ft, anchor_offset_ft,
             numbering_mode, start_row_number, end_row_number, continuation_mode)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
          returning id`,
         [
           phaseId,
@@ -944,7 +952,8 @@ router.post(
           rowWidthFt,
           rowLengthFt,
           rowGapFt,
-          offsetFt,
+          startOffsetFt,
+          anchorOffsetFt,
           numberingMode,
           startRowNumber,
           endRowNumber,

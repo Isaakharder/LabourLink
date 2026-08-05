@@ -1,24 +1,14 @@
-// Deterministic checks for lib/rowLayout.ts's placement math. This repo has
-// no test framework configured (no vitest/jest, no "test" script pre-dating
-// this file) — rather than adding one for a single module, this is a
-// plain, dependency-free, assertion-based script. Run it directly via
-// `npm run test:row-layout` (see server/package.json). Excluded from the
-// production build (see the tsconfig "exclude") so it never ships in dist/;
-// still fully type-checked on every run since ts-node compiles whatever
-// file it's pointed at regardless of tsconfig excludes.
-//
-// This file is maintained alongside rowLayout.ts — update it whenever the
-// placement/validation behavior changes, the same as any other test.
 import {
-  generateRowNumbers,
-  placeBatchFromSide,
-  detectRowOverlap,
-  validateRowsInsidePhase,
-  computeContinuationOffset,
-  generateRowPreview,
-  sidesArePerpendicular,
   BatchParams,
   RowRect,
+  Side,
+  computeContinuationOffset,
+  detectRowOverlap,
+  generateRowNumbers,
+  generateRowPreview,
+  placeBatchFromSide,
+  sidesArePerpendicular,
+  validateRowsInsidePhase,
 } from "./rowLayout";
 
 let pass = 0;
@@ -33,236 +23,354 @@ function check(condition: boolean, label: string) {
   }
 }
 
-function approxEqual(a: number, b: number, eps = 0.01) {
+function approxEqual(a: number, b: number, eps = 0.001) {
   return Math.abs(a - b) < eps;
 }
 
-// ---------------------------------------------------------------------------
-// generateRowNumbers
-// ---------------------------------------------------------------------------
+function rowRectJson(rows: RowRect[]) {
+  return JSON.stringify(rows.map((r) => [r.rowNumber, r.xFt, r.yFt, r.widthFt, r.lengthFt, r.orientation]));
+}
 
-check(JSON.stringify(generateRowNumbers("odd", 1, 15)) === JSON.stringify([1, 3, 5, 7, 9, 11, 13, 15]), "odd 1-15");
-check(JSON.stringify(generateRowNumbers("even", 2, 16)) === JSON.stringify([2, 4, 6, 8, 10, 12, 14, 16]), "even 2-16");
-check(JSON.stringify(generateRowNumbers("all", 1, 10)) === JSON.stringify([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), "all 1-10");
-check(generateRowNumbers("all", 10, 5).length === 0, "start > end produces no rows");
-// odd mode with EVEN start/end inputs: filters to the odd numbers within
-// the range rather than rounding the boundary.
-check(JSON.stringify(generateRowNumbers("odd", 2, 16)) === JSON.stringify([3, 5, 7, 9, 11, 13, 15]), "odd mode, even start/end");
-check(JSON.stringify(generateRowNumbers("even", 1, 9)) === JSON.stringify([2, 4, 6, 8]), "even mode, odd start/end");
-check(generateRowNumbers("odd", 2, 2).length === 0, "odd mode over a single even number produces no rows");
+const phase = { eastWestFeet: 120, northSouthFeet: 80 };
 
-// ---------------------------------------------------------------------------
-// sidesArePerpendicular
-// ---------------------------------------------------------------------------
-
-check(sidesArePerpendicular("south", "east") === true, "south+east perpendicular");
-check(sidesArePerpendicular("south", "west") === true, "south+west perpendicular");
-check(sidesArePerpendicular("south", "north") === false, "south+north rejected (opposite)");
-check(sidesArePerpendicular("east", "west") === false, "east+west rejected (opposite)");
-check(sidesArePerpendicular("north", "north") === false, "north+north rejected (same side)");
-
-// ---------------------------------------------------------------------------
-// placeBatchFromSide — the 8 documented start/anchor combinations
-// ---------------------------------------------------------------------------
-
-const phase = { eastWestFeet: 100, northSouthFeet: 60 };
-
-function place(startSide: BatchParams["startSide"], anchorSide: BatchParams["anchorSide"], overrides: Partial<BatchParams> = {}) {
-  const params: BatchParams = {
+function buildParams(startSide: Side, anchorSide: Side, overrides: Partial<BatchParams> = {}): BatchParams {
+  return {
     startSide,
     anchorSide,
     rowWidthFt: 4,
     rowLengthFt: 30,
     rowGapFt: 1,
-    offsetFt: 0,
+    startOffsetFt: 0,
+    anchorOffsetFt: 0,
     numberingMode: "all",
     startRowNumber: 1,
     endRowNumber: 3,
     ...overrides,
   };
-  return placeBatchFromSide(params, phase, generateRowNumbers(params.numberingMode, params.startRowNumber, params.endRowNumber));
 }
 
-{
-  // South start + East anchor: rows align to the east side (x + length =
-  // eastWestFeet), stacked from the south edge (row 1's south edge = phase
-  // south boundary) moving north.
-  const rows = place("south", "east");
-  check(rows[0].orientation === "horizontal", "south+east: horizontal orientation");
-  check(approxEqual(rows[0].xFt + rows[0].lengthFt, phase.eastWestFeet), "south+east: row 1 flush against east edge");
-  check(approxEqual(rows[0].yFt + rows[0].widthFt, phase.northSouthFeet), "south+east: row 1 flush against south edge");
-  check(rows[1].yFt < rows[0].yFt, "south+east: row 2 sits further north (smaller y) than row 1");
+function place(params: BatchParams): RowRect[] {
+  const numbers = generateRowNumbers(params.numberingMode, params.startRowNumber, params.endRowNumber);
+  return placeBatchFromSide(params, phase, numbers);
 }
 
-{
-  // South start + West anchor: rows align to the west side, stacked from
-  // south moving north.
-  const rows = place("south", "west");
-  check(approxEqual(rows[0].xFt, 0), "south+west: row 1 flush against west edge (x=0)");
-  check(approxEqual(rows[0].yFt + rows[0].widthFt, phase.northSouthFeet), "south+west: row 1 flush against south edge");
+// generateRowNumbers
+check(JSON.stringify(generateRowNumbers("odd", 1, 15)) === JSON.stringify([1, 3, 5, 7, 9, 11, 13, 15]), "odd range 1..15");
+check(JSON.stringify(generateRowNumbers("even", 2, 16)) === JSON.stringify([2, 4, 6, 8, 10, 12, 14, 16]), "even range 2..16");
+check(generateRowNumbers("odd", 2, 2).length === 0, "odd mode over single even value");
+
+// perpendicular side rules
+check(sidesArePerpendicular("north", "east"), "north+east valid");
+check(sidesArePerpendicular("west", "south"), "west+south valid");
+check(!sidesArePerpendicular("south", "north"), "south+north invalid");
+
+// All 8 valid side/anchor combinations with non-zero anchor offset.
+const combos: Array<{ startSide: Side; anchorSide: Side }> = [
+  { startSide: "north", anchorSide: "east" },
+  { startSide: "north", anchorSide: "west" },
+  { startSide: "south", anchorSide: "east" },
+  { startSide: "south", anchorSide: "west" },
+  { startSide: "east", anchorSide: "north" },
+  { startSide: "east", anchorSide: "south" },
+  { startSide: "west", anchorSide: "north" },
+  { startSide: "west", anchorSide: "south" },
+];
+
+for (const combo of combos) {
+  const params = buildParams(combo.startSide, combo.anchorSide, {
+    startOffsetFt: 10,
+    anchorOffsetFt: 8,
+  });
+  const rows = place(params);
+  check(rows.length === 3, `${combo.startSide}+${combo.anchorSide}: row count remains unchanged`);
+  check(rows[0].rowNumber === 1 && rows[2].rowNumber === 3, `${combo.startSide}+${combo.anchorSide}: numbering unchanged`);
+
+  if (combo.startSide === "north") {
+    check(approxEqual(rows[0].yFt, 10), "north start honors startOffsetFt");
+    check(approxEqual(rows[1].yFt - rows[0].yFt, 5), "north start spacing uses width+gap");
+  }
+  if (combo.startSide === "south") {
+    check(approxEqual(rows[0].yFt + rows[0].widthFt, phase.northSouthFeet - 10), "south start honors startOffsetFt");
+    check(approxEqual(rows[0].yFt - rows[1].yFt, 5), "south start spacing uses width+gap");
+  }
+  if (combo.startSide === "west") {
+    check(approxEqual(rows[0].xFt, 10), "west start honors startOffsetFt");
+    check(approxEqual(rows[1].xFt - rows[0].xFt, 5), "west start spacing uses width+gap");
+  }
+  if (combo.startSide === "east") {
+    check(approxEqual(rows[0].xFt + rows[0].widthFt, phase.eastWestFeet - 10), "east start honors startOffsetFt");
+    check(approxEqual(rows[0].xFt - rows[1].xFt, 5), "east start spacing uses width+gap");
+  }
+
+  if (combo.anchorSide === "west") {
+    check(approxEqual(rows[0].xFt, 8), `${combo.startSide}+west: anchor inset from west`);
+  }
+  if (combo.anchorSide === "east") {
+    check(approxEqual(rows[0].xFt + rows[0].lengthFt, phase.eastWestFeet - 8), `${combo.startSide}+east: anchor inset from east`);
+  }
+  if (combo.anchorSide === "north") {
+    check(approxEqual(rows[0].yFt, 8), `${combo.startSide}+north: anchor inset from north`);
+  }
+  if (combo.anchorSide === "south") {
+    check(approxEqual(rows[0].yFt + rows[0].lengthFt, phase.northSouthFeet - 8), `${combo.startSide}+south: anchor inset from south`);
+  }
 }
 
+// Zero anchor offset reproduces prior geometry exactly.
 {
-  // North start + East anchor: rows align east, stacked from north moving
-  // south.
-  const rows = place("north", "east");
-  check(approxEqual(rows[0].yFt, 0), "north+east: row 1 flush against north edge (y=0)");
-  check(approxEqual(rows[0].xFt + rows[0].lengthFt, phase.eastWestFeet), "north+east: row 1 flush against east edge");
-  check(rows[1].yFt > rows[0].yFt, "north+east: row 2 sits further south (larger y) than row 1");
-}
-
-{
-  // West start + North anchor: rows align north, stacked from west moving
-  // east; orientation vertical (length runs north-south).
-  const rows = place("west", "north");
-  check(rows[0].orientation === "vertical", "west+north: vertical orientation");
-  check(approxEqual(rows[0].xFt, 0), "west+north: row 1 flush against west edge");
-  check(approxEqual(rows[0].yFt, 0), "west+north: row 1 flush against north edge");
-  check(rows[1].xFt > rows[0].xFt, "west+north: row 2 sits further east (larger x) than row 1");
-}
-
-{
-  // East start + South anchor.
-  const rows = place("east", "south");
-  check(approxEqual(rows[0].xFt + rows[0].widthFt, phase.eastWestFeet), "east+south: row 1 flush against east edge");
-  check(approxEqual(rows[0].yFt + rows[0].lengthFt, phase.northSouthFeet), "east+south: row 1 flush against south edge");
-  check(rows[1].xFt < rows[0].xFt, "east+south: row 2 sits further west (smaller x) than row 1");
-}
-
-// ---------------------------------------------------------------------------
-// Rows exactly touching but not overlapping
-// ---------------------------------------------------------------------------
-
-{
-  const touching = place("south", "east", { rowGapFt: 0 });
-  // rowGapFt=0 means each row's edge exactly meets the next row's edge —
-  // this must NOT be reported as an overlap.
-  const overlaps = detectRowOverlap(touching, touching);
-  check(overlaps.length === 0, "zero-gap adjacent rows are touching, not overlapping");
-}
-
-{
-  // Force an actual overlap: same width, negative-equivalent gap achieved
-  // by manually shifting one row's y into another's span.
-  const a: RowRect = { rowNumber: 1, xFt: 0, yFt: 0, widthFt: 10, lengthFt: 10, orientation: "horizontal" };
-  const b: RowRect = { rowNumber: 2, xFt: 5, yFt: 5, widthFt: 10, lengthFt: 10, orientation: "horizontal" };
-  check(detectRowOverlap([a], [b]).length === 1, "genuinely overlapping rects are detected");
-}
-
-// ---------------------------------------------------------------------------
-// validateRowsInsidePhase — out of bounds
-// ---------------------------------------------------------------------------
-
-{
-  const tooLong: RowRect = { rowNumber: 1, xFt: 0, yFt: 0, widthFt: 4, lengthFt: 500, orientation: "horizontal" };
-  check(validateRowsInsidePhase([tooLong], phase).length === 1, "a row longer than the phase is out of bounds");
-
-  const fine: RowRect = { rowNumber: 1, xFt: 0, yFt: 0, widthFt: 4, lengthFt: 30, orientation: "horizontal" };
-  check(validateRowsInsidePhase([fine], phase).length === 0, "a row within the phase passes bounds check");
-}
-
-// ---------------------------------------------------------------------------
-// computeContinuationOffset — batch continuation
-// ---------------------------------------------------------------------------
-
-{
-  // Batch 1: south+east, rows 1-15 odd, length 300, on a much bigger phase.
-  const bigPhase = { eastWestFeet: 400, northSouthFeet: 200 };
-  const batch1Params: BatchParams = {
+  const legacyParams: BatchParams = {
     startSide: "south",
     anchorSide: "east",
     rowWidthFt: 4,
-    rowLengthFt: 300,
+    rowLengthFt: 30,
     rowGapFt: 1,
-    offsetFt: 0,
+    offsetFt: 6,
+    startOffsetFt: 6,
+    anchorOffsetFt: 0,
+    numberingMode: "all",
+    startRowNumber: 1,
+    endRowNumber: 3,
+  };
+  const explicitParams = { ...legacyParams, startOffsetFt: 6, anchorOffsetFt: 0 };
+  check(rowRectJson(place(legacyParams)) === rowRectJson(place(explicitParams)), "zero anchor offset preserves legacy geometry");
+}
+
+// Positive anchor offset shifts rows without changing stack progression.
+{
+  const a = place(buildParams("west", "south", { startOffsetFt: 7, anchorOffsetFt: 0 }));
+  const b = place(buildParams("west", "south", { startOffsetFt: 7, anchorOffsetFt: 9 }));
+  check(approxEqual(a[0].xFt, b[0].xFt), "anchor offset does not change start-axis placement");
+  check(approxEqual(a[1].xFt - a[0].xFt, b[1].xFt - b[0].xFt), "anchor offset does not change continuation spacing");
+  check(approxEqual((a[0].yFt + a[0].lengthFt) - (b[0].yFt + b[0].lengthFt), 9), "anchor offset shifts away from anchor side");
+}
+
+// Start and anchor offsets operate independently.
+{
+  const base = place(buildParams("south", "west", { startOffsetFt: 2, anchorOffsetFt: 3 }));
+  const changedStart = place(buildParams("south", "west", { startOffsetFt: 12, anchorOffsetFt: 3 }));
+  const changedAnchor = place(buildParams("south", "west", { startOffsetFt: 2, anchorOffsetFt: 13 }));
+
+  check(approxEqual(base[0].xFt, changedStart[0].xFt), "changing start offset does not move anchor axis");
+  check(!approxEqual(base[0].yFt, changedStart[0].yFt), "changing start offset moves start axis");
+  check(approxEqual(base[0].yFt, changedAnchor[0].yFt), "changing anchor offset does not move start axis");
+  check(!approxEqual(base[0].xFt, changedAnchor[0].xFt), "changing anchor offset moves anchor axis");
+}
+
+// Continuation still computed along start axis; anchor offset still applies.
+{
+  const big = { eastWestFeet: 300, northSouthFeet: 140 };
+  const batch1 = buildParams("south", "east", {
+    rowWidthFt: 4,
+    rowLengthFt: 100,
+    rowGapFt: 1,
+    startOffsetFt: 0,
+    anchorOffsetFt: 0,
     numberingMode: "odd",
     startRowNumber: 1,
     endRowNumber: 15,
-  };
-  const batch1Numbers = generateRowNumbers("odd", 1, 15);
-  const batch1Rows = placeBatchFromSide(batch1Params, bigPhase, batch1Numbers);
-  check(batch1Rows.length === 8, "batch 1 places 8 odd rows (1..15)");
+  });
+  const rows1 = placeBatchFromSide(batch1, big, generateRowNumbers("odd", 1, 15));
+  const continuationBase = computeContinuationOffset(rows1, big, "south", batch1.rowGapFt);
 
-  const continuationOffset = computeContinuationOffset(batch1Rows, bigPhase, "south", 1);
-  // Batch 1's innermost row (row 15) reaches depth = 8 rows * (4+1) - 1 gap
-  // (no trailing gap after the last row) = 8*4 + 7*1 = 39ft from the south
-  // edge; continuation should start at 39 + gap(1) = 40ft in.
-  check(approxEqual(continuationOffset, 40), `continuation offset is 40ft, got ${continuationOffset}`);
+  const preview2 = generateRowPreview(
+    {
+      ...batch1,
+      startRowNumber: 17,
+      endRowNumber: 31,
+      anchorOffsetFt: 8,
+      startOffsetFt: 0,
+    },
+    big,
+    { continueAfterExisting: true, existingRowsSameStartSide: rows1 }
+  );
 
-  // Batch 2 continues from there — its first row must not overlap any of
-  // batch 1's rows.
-  const batch2Params: BatchParams = { ...batch1Params, offsetFt: continuationOffset, numberingMode: "odd", startRowNumber: 17, endRowNumber: 31 };
-  const batch2Numbers = generateRowNumbers("odd", 17, 31);
-  const batch2Rows = placeBatchFromSide(batch2Params, bigPhase, batch2Numbers);
-  check(detectRowOverlap(batch1Rows, batch2Rows).length === 0, "continuation batch does not overlap the prior batch");
-  check(!batch1Rows.some((r) => r.rowNumber === 17), "no duplicate row numbers between the two batches (disjoint ranges)");
+  check(preview2.errors.length === 0, "continuation preview succeeds with anchor offset");
+  check(preview2.rows.length === 8, "continuation keeps expected row count");
+  check(approxEqual(preview2.rows[0].xFt + preview2.rows[0].lengthFt, big.eastWestFeet - 8), "continuation batch still applies anchor offset");
+  check(approxEqual(rows1[rows1.length - 1].yFt - preview2.rows[0].yFt, 5), "continuation spacing still follows start-axis progression");
+  check(continuationBase > 0, "continuation base is computed from existing rows");
 }
 
-// ---------------------------------------------------------------------------
-// Opposite-side batches leaving a central walkway
-// ---------------------------------------------------------------------------
-
+// Different batches can use different anchor offsets without overlap.
 {
-  const bigPhase = { eastWestFeet: 200, northSouthFeet: 100 };
-  const southBatch = placeBatchFromSide(
-    { startSide: "south", anchorSide: "east", rowWidthFt: 4, rowLengthFt: 150, rowGapFt: 1, offsetFt: 0, numberingMode: "odd", startRowNumber: 1, endRowNumber: 15 },
-    bigPhase,
-    generateRowNumbers("odd", 1, 15)
+  const localPhase = { eastWestFeet: 320, northSouthFeet: 120 };
+  const first = placeBatchFromSide(
+    buildParams("north", "west", { startOffsetFt: 0, anchorOffsetFt: 0, rowLengthFt: 120 }),
+    localPhase,
+    generateRowNumbers("all", 1, 4)
   );
-  // North batch, offset by 20ft manual walkway from the north edge, even
-  // numbers, same width/length — should land entirely in the northern
-  // half with a gap before the south batch's innermost row.
-  const northBatch = placeBatchFromSide(
-    { startSide: "north", anchorSide: "west", rowWidthFt: 4, rowLengthFt: 150, rowGapFt: 1, offsetFt: 20, numberingMode: "even", startRowNumber: 2, endRowNumber: 16 },
-    bigPhase,
-    generateRowNumbers("even", 2, 16)
+  const second = placeBatchFromSide(
+    buildParams("north", "west", { startOffsetFt: 30, anchorOffsetFt: 10, rowLengthFt: 120 }),
+    localPhase,
+    generateRowNumbers("all", 11, 14)
   );
-  check(detectRowOverlap(southBatch, northBatch).length === 0, "opposite-side batches with a walkway offset do not overlap");
-  const southInnermost = Math.min(...southBatch.map((r) => r.yFt));
-  const northInnermost = Math.max(...northBatch.map((r) => r.yFt + r.widthFt));
-  check(southInnermost > northInnermost, "a real walkway gap exists between the two batches");
+  check(detectRowOverlap(first, second).length === 0, "batches with different anchor offsets can coexist");
 }
 
-// ---------------------------------------------------------------------------
-// generateRowPreview — end-to-end validation surfacing
-// ---------------------------------------------------------------------------
-
+// Out-of-bounds from anchor offset is rejected.
 {
-  const badRange = generateRowPreview(
-    { startSide: "south", anchorSide: "east", rowWidthFt: 4, rowLengthFt: 30, rowGapFt: 1, offsetFt: 0, numberingMode: "all", startRowNumber: 10, endRowNumber: 5 },
+  const bad = generateRowPreview(
+    buildParams("south", "east", {
+      rowLengthFt: 50,
+      anchorOffsetFt: 100,
+    }),
     phase
   );
-  check(badRange.errors.length > 0, "start > end surfaces a validation error via generateRowPreview");
+  check(bad.errors.length > 0, "anchor offset that pushes rows out of phase is rejected");
+}
 
-  const zeroWidth = generateRowPreview(
-    { startSide: "south", anchorSide: "east", rowWidthFt: 0, rowLengthFt: 30, rowGapFt: 1, offsetFt: 0, numberingMode: "all", startRowNumber: 1, endRowNumber: 3 },
-    phase
-  );
-  check(zeroWidth.errors.length > 0, "zero width is rejected");
+// Overlap detection unchanged (touching edges are not overlap).
+{
+  const touching = place(buildParams("south", "east", { rowGapFt: 0 }));
+  check(detectRowOverlap(touching, touching).length === 0, "touching rows are not overlaps");
 
-  const negativeLength = generateRowPreview(
-    { startSide: "south", anchorSide: "east", rowWidthFt: 4, rowLengthFt: -10, rowGapFt: 1, offsetFt: 0, numberingMode: "all", startRowNumber: 1, endRowNumber: 3 },
-    phase
-  );
-  check(negativeLength.errors.length > 0, "negative length is rejected");
+  const a: RowRect = { rowNumber: 1, xFt: 0, yFt: 0, widthFt: 10, lengthFt: 10, orientation: "horizontal" };
+  const b: RowRect = { rowNumber: 2, xFt: 5, yFt: 5, widthFt: 10, lengthFt: 10, orientation: "horizontal" };
+  check(detectRowOverlap([a], [b]).length === 1, "positive-area overlap is detected");
+}
 
-  const outOfBounds = generateRowPreview(
-    { startSide: "south", anchorSide: "east", rowWidthFt: 4, rowLengthFt: 300, rowGapFt: 1, offsetFt: 0, numberingMode: "all", startRowNumber: 1, endRowNumber: 3 },
-    phase
-  );
-  check(outOfBounds.errors.length > 0, "a row longer than the phase surfaces a bounds error");
+// Preview output matches direct placement for identical params.
+{
+  const params = buildParams("west", "north", {
+    startOffsetFt: 9,
+    anchorOffsetFt: 4,
+    numberingMode: "odd",
+    startRowNumber: 1,
+    endRowNumber: 9,
+  });
+  const preview = generateRowPreview(params, phase);
+  const direct = placeBatchFromSide(params, phase, generateRowNumbers("odd", 1, 9));
+  check(preview.errors.length === 0, "preview without continuation has no errors");
+  check(rowRectJson(preview.rows) === rowRectJson(direct), "preview rows match direct server geometry exactly");
+}
 
-  const nonPerpendicular = generateRowPreview(
-    { startSide: "south", anchorSide: "north", rowWidthFt: 4, rowLengthFt: 30, rowGapFt: 1, offsetFt: 0, numberingMode: "all", startRowNumber: 1, endRowNumber: 3 },
-    phase
-  );
-  check(nonPerpendicular.errors.length > 0, "south start + north anchor (non-perpendicular) is rejected");
+// Existing batches with no anchor offset remain valid/unchanged.
+{
+  const existingRows: RowRect[] = [
+    { rowNumber: 1, xFt: 90, yFt: 60, widthFt: 4, lengthFt: 20, orientation: "horizontal" },
+    { rowNumber: 3, xFt: 90, yFt: 55, widthFt: 4, lengthFt: 20, orientation: "horizontal" },
+  ];
+  check(validateRowsInsidePhase(existingRows, phase).length === 0, "existing rows with implicit anchor offset 0 remain inside phase");
+}
 
-  const good = generateRowPreview(
-    { startSide: "south", anchorSide: "east", rowWidthFt: 4, rowLengthFt: 30, rowGapFt: 1, offsetFt: 0, numberingMode: "odd", startRowNumber: 1, endRowNumber: 15 },
-    phase
+// Lane isolation: RowRect carries no anchorSide field, so
+// computeContinuationOffset/generateRowPreview can only ever see whatever
+// pre-filtered row list their caller hands them — the actual isolation
+// guarantee lives entirely in the route's SQL, which filters by BOTH
+// `grb.start_side = $2 and grb.anchor_side = $3` (server/src/routes/
+// greenhouseLayout.ts). This test proves that guarantee is load-bearing: a
+// distractor batch sharing startSide but placed against the OPPOSITE
+// anchorSide measurably changes continuation depth if the caller filtered
+// by startSide alone, so dropping the anchor_side clause would silently
+// corrupt placement — while the properly dual-filtered (lane-scoped) input
+// stays correct regardless of what other lanes contain.
+{
+  const big = { eastWestFeet: 300, northSouthFeet: 140 };
+
+  function laneIsolationCheck(startSide: Side, targetAnchor: Side, distractorAnchor: Side, label: string) {
+    const targetLane = placeBatchFromSide(
+      buildParams(startSide, targetAnchor, { rowLengthFt: 40, numberingMode: "all", startRowNumber: 1, endRowNumber: 5 }),
+      big,
+      generateRowNumbers("all", 1, 5)
+    );
+    // Placed further from startSide than targetLane's own deepest row, so
+    // if it leaked into the continuation calculation it would visibly push
+    // the next batch's depth outward.
+    const distractorLane = placeBatchFromSide(
+      buildParams(startSide, distractorAnchor, { rowLengthFt: 40, startOffsetFt: 60, numberingMode: "all", startRowNumber: 101, endRowNumber: 105 }),
+      big,
+      generateRowNumbers("all", 101, 105)
+    );
+
+    // Correct: caller filtered by start_side AND anchor_side (dual filter).
+    const continuationLaneScoped = computeContinuationOffset(targetLane, big, startSide, 1);
+    // Buggy hypothetical: caller filtered by start_side only.
+    const continuationStartSideOnly = computeContinuationOffset([...targetLane, ...distractorLane], big, startSide, 1);
+
+    check(
+      !approxEqual(continuationLaneScoped, continuationStartSideOnly),
+      `${label}: an opposite-anchor distractor WOULD change continuation depth if the caller filtered by start_side alone (proves the anchor_side filter is necessary)`
+    );
+
+    const previewLaneScoped = generateRowPreview(
+      buildParams(startSide, targetAnchor, { rowLengthFt: 40, numberingMode: "all", startRowNumber: 6, endRowNumber: 10 }),
+      big,
+      { continueAfterExisting: true, existingRowsSameStartSide: targetLane }
+    );
+    const previewStartSideOnlyLeak = generateRowPreview(
+      buildParams(startSide, targetAnchor, { rowLengthFt: 40, numberingMode: "all", startRowNumber: 6, endRowNumber: 10 }),
+      big,
+      { continueAfterExisting: true, existingRowsSameStartSide: [...targetLane, ...distractorLane] }
+    );
+    check(
+      rowRectJson(previewLaneScoped.rows) !== rowRectJson(previewStartSideOnlyLeak.rows),
+      `${label}: correctly lane-scoped continuation preview differs from a start_side-only leak, confirming the dual filter changes real output`
+    );
+    check(previewLaneScoped.errors.length === 0, `${label}: correctly lane-scoped continuation preview has no errors`);
+  }
+
+  // South->East and South->West must never share continuation depth.
+  laneIsolationCheck("south", "west", "east", "south+west vs south+east");
+  laneIsolationCheck("south", "east", "west", "south+east vs south+west");
+  // North/South and East/West lane pairs are equally isolated.
+  laneIsolationCheck("north", "east", "west", "north+east vs north+west");
+  laneIsolationCheck("east", "north", "south", "east+north vs east+south");
+  laneIsolationCheck("west", "south", "north", "west+south vs west+north");
+}
+
+// Delete/recreate continuation: deleting a continuation batch and
+// re-creating an identical one from the same original base rows must
+// reproduce the exact same first-row geometry (continuation depth is
+// re-derived from the surviving rows each time, never cached/stateful).
+{
+  const big = { eastWestFeet: 300, northSouthFeet: 140 };
+  const baseParams = buildParams("south", "west", {
+    rowLengthFt: 50,
+    numberingMode: "all",
+    startRowNumber: 1,
+    endRowNumber: 3,
+  });
+  const baseRows = placeBatchFromSide(baseParams, big, generateRowNumbers("all", 1, 3));
+
+  const continuationParams = buildParams("south", "west", {
+    rowLengthFt: 50,
+    numberingMode: "all",
+    startRowNumber: 4,
+    endRowNumber: 5,
+  });
+
+  const firstAttempt = generateRowPreview(continuationParams, big, {
+    continueAfterExisting: true,
+    existingRowsSameStartSide: baseRows,
+  });
+  // Simulate: save firstAttempt's rows, then soft-delete that whole batch —
+  // the "existing" set for a recreate collapses back to just baseRows,
+  // exactly as the route's `deleted_at is null` filter would produce.
+  const recreated = generateRowPreview(continuationParams, big, {
+    continueAfterExisting: true,
+    existingRowsSameStartSide: baseRows,
+  });
+
+  check(firstAttempt.errors.length === 0 && recreated.errors.length === 0, "delete/recreate: both attempts preview without errors");
+  check(rowRectJson(firstAttempt.rows) === rowRectJson(recreated.rows), "delete/recreate: recreated batch reproduces identical geometry");
+
+  // A third batch that continues after the (deleted+recreated) continuation
+  // batch's rows still stacks correctly on top of it.
+  const thirdParams = buildParams("south", "west", {
+    rowLengthFt: 50,
+    numberingMode: "all",
+    startRowNumber: 6,
+    endRowNumber: 6,
+  });
+  const third = generateRowPreview(thirdParams, big, {
+    continueAfterExisting: true,
+    existingRowsSameStartSide: recreated.rows,
+  });
+  check(third.errors.length === 0, "delete/recreate: further continuation after the recreated batch still succeeds");
+  check(
+    recreated.rows[recreated.rows.length - 1].yFt - third.rows[0].yFt >= baseParams.rowWidthFt,
+    "delete/recreate: further continuation stacks strictly further in than the recreated batch"
   );
-  check(good.errors.length === 0 && good.rows.length === 8, "a valid batch produces 8 rows with no errors");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

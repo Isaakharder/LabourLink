@@ -79,6 +79,8 @@ export interface GreenhouseRowBatch {
   rowWidthFt: number;
   rowLengthFt: number;
   rowGapFt: number;
+  startOffsetFt: number;
+  anchorOffsetFt: number;
   offsetFt: number;
   numberingMode: "all" | "odd" | "even";
   startRowNumber: number;
