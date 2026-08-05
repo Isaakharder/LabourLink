@@ -203,7 +203,10 @@ export function WorkdayDetailsCard({
                       </button>
                     </div>
                   ) : b.endedAt ? (
-                    formatTimeInAppTimezone(b.endedAt)
+                    <>
+                      {formatTimeInAppTimezone(b.endedAt)}
+                      {b.autoClosed && <span className="inputs-autoclosed-badge">Auto-closed</span>}
+                    </>
                   ) : (
                     "In progress"
                   )}

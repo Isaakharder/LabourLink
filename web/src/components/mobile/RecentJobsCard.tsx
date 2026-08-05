@@ -7,6 +7,9 @@ export interface RecentJob {
   durationSeconds: number;
   row: { label: string } | null;
   carrier: { label: string } | null;
+  // Closed by the server-side daily-cutoff safety net (a forgotten End
+  // Work carried past local midnight) rather than a real tap.
+  autoClosed: boolean;
 }
 
 interface RecentJobsCardProps {
@@ -39,6 +42,7 @@ export function RecentJobsCard({ jobs }: RecentJobsCardProps) {
               {job.carrier && <span className="recent-jobs-item-row">{job.carrier.label}</span>}
               <span className="recent-jobs-item-meta">
                 {formatTime(job.startedAt)} – {formatTime(job.endedAt)} · {formatDuration(job.durationSeconds)}
+                {job.autoClosed && <span className="recent-jobs-item-autoclosed"> · Auto-closed</span>}
               </span>
             </li>
           ))}

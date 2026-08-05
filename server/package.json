@@ -13,8 +13,11 @@
     "migrate": "ts-node src/migrate.ts",
     "create-admin": "ts-node src/cli/createAdmin.ts",
     "create-greenhouse-display": "ts-node src/cli/createGreenhouseDisplay.ts",
+    "cutoff:run": "ts-node src/cli/dailyCutoffRun.ts",
+    "cutoff:repair": "ts-node src/cli/repairStaleEntries.ts",
     "typecheck": "tsc --noEmit",
-    "test:row-layout": "ts-node src/lib/rowLayout.test.ts"
+    "test:row-layout": "ts-node src/lib/rowLayout.test.ts",
+    "test:daily-cutoff": "ts-node src/lib/dailyCutoff.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",

@@ -18,6 +18,10 @@ export interface ActivityRunDto {
   canEdit: boolean;
   row: { id: string; label: string } | null;
   carrier: { id: string; name: string } | null;
+  // Closed by the server-side daily-cutoff safety net (a forgotten End
+  // Work carried past local midnight), not a real end-time — cleared once
+  // a supervisor corrects it via the normal Inputs tools.
+  autoClosed: boolean;
 }
 
 export interface BreakDto {
@@ -30,6 +34,8 @@ export interface BreakDto {
   source: "manual" | "auto";
   breakProfileItemId: string | null;
   canEdit: boolean;
+  // Same daily-cutoff meaning as ActivityRunDto.autoClosed above.
+  autoClosed: boolean;
 }
 
 export interface DailyInputsResponse {

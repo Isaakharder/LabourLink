@@ -844,6 +844,10 @@ input {
   color: var(--color-muted);
 }
 
+.recent-jobs-item-autoclosed {
+  font-style: italic;
+}
+
 .mobile-action-button {
   padding: 1.1rem 1rem;
   font-size: 1.05rem;
@@ -1783,6 +1787,16 @@ input {
 
 .inputs-log-endtime-editable {
   cursor: text;
+}
+
+/* Subtle — never the same weight/color as a real error or warning state.
+   Closed by the server-side daily-cutoff safety net, not a real end-time
+   tap; a supervisor correcting it via the normal tools clears this. */
+.inputs-autoclosed-badge {
+  display: block;
+  font-size: 0.72rem;
+  font-style: italic;
+  color: var(--color-muted);
 }
 
 .inputs-log-row-selected .inputs-log-endtime-editable {

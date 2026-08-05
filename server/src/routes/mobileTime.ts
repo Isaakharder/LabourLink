@@ -354,7 +354,7 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
   // resolves; the name shown is whatever it's currently named (no
   // at-the-time snapshot exists). Same for the carrier left join.
   const { rows: recentRows } = await pool.query(
-    `select te.id, te.activity_id, a.name, te.started_at, te.ended_at,
+    `select te.id, te.activity_id, a.name, te.started_at, te.ended_at, te.auto_closed_at,
             extract(epoch from (te.ended_at - te.started_at))::int as duration_seconds,
             gr.row_number, gp.name as row_phase_name,
             c.id as carrier_id, c.name as carrier_name
@@ -381,6 +381,10 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
     durationSeconds: r.duration_seconds,
     row: r.row_number != null ? { label: `${r.row_phase_name} · Row ${r.row_number}` } : null,
     carrier: r.carrier_id ? { label: r.carrier_name as string } : null,
+    // Closed by the daily-cutoff safety net rather than a real End Work
+    // tap — surfaced so the mobile app can optionally label it, matching
+    // the same indicator Inputs shows.
+    autoClosed: r.auto_closed_at !== null,
   }));
 
   return {

@@ -160,7 +160,10 @@ export function ActivityLogsCard({
                     ) : run.isOpen ? (
                       "In progress"
                     ) : run.endedAt ? (
-                      formatTimeInAppTimezone(run.endedAt)
+                      <>
+                        {formatTimeInAppTimezone(run.endedAt)}
+                        {run.autoClosed && <span className="inputs-autoclosed-badge">Auto-closed</span>}
+                      </>
                     ) : (
                       "—"
                     )}

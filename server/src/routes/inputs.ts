@@ -110,6 +110,7 @@ router.get(
     const { rows: entryRows } = await pool.query(
       `select te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
               te.break_profile_item_id, te.source, te.is_paid, te.greenhouse_row_id, te.carrier_id,
+              te.auto_closed_at,
               a.name as activity_name, a.normal_speed, a.speed_unit,
               bpi.name as break_item_name,
               gr.row_number, gphase.name as row_phase_name,
@@ -139,6 +140,11 @@ router.get(
     const activityMeta = new Map<string, { name: string; normalSpeed: string | null; speedUnit: string | null }>();
     const rowMeta = new Map<string, { rowNumber: number; phaseName: string }>();
     const carrierMeta = new Map<string, string>();
+    // Keyed by the individual time_entries row id (not a grouped run id) —
+    // a run's own `id` is its last underlying segment's id (see
+    // activityRuns.ts), which is exactly what's looked up below, so this
+    // needs no involvement from the grouping logic itself.
+    const autoClosedMeta = new Map<string, boolean>();
     // Unclassified/legacy breaks (is_paid null, recorded before this column
     // existed) are bucketed as unpaid — a break must be explicitly marked
     // paid to count as paid, nothing is inferred from duration or time.
@@ -147,6 +153,7 @@ router.get(
       { name: string | null; isPaid: boolean | null; source: "manual" | "auto"; breakProfileItemId: string | null }
     >();
     for (const r of entryRows) {
+      autoClosedMeta.set(r.id, r.auto_closed_at !== null);
       if (r.activity_id && !activityMeta.has(r.activity_id)) {
         activityMeta.set(r.activity_id, { name: r.activity_name, normalSpeed: r.normal_speed, speedUnit: r.speed_unit });
       }
@@ -212,6 +219,11 @@ router.get(
           canEdit: canEditRole && !r.isOpen,
           row: row ? { id: r.greenhouseRowId, label: `${row.phaseName} · Row ${row.rowNumber}` } : null,
           carrier: carrierName ? { id: r.carrierId, name: carrierName } : null,
+          // A run's own id is its last segment's id — exactly the row
+          // whose end time is displayed/editable here, so this is a
+          // direct lookup, not something groupIntoActivityRuns needs to
+          // carry through itself.
+          autoClosed: autoClosedMeta.get(r.id) ?? false,
         };
       }),
       breaks: breaks.map((b) => {
@@ -225,6 +237,7 @@ router.get(
           isPaid: meta?.isPaid ?? null,
           source: meta?.source ?? "manual",
           breakProfileItemId: meta?.breakProfileItemId ?? null,
+          autoClosed: autoClosedMeta.get(b.id) ?? false,
           // Same rule as an activity run: role-gated, and only once it's
           // closed — an open break can't be edited or deleted from here.
           canEdit: canEditRole && b.endedAt !== null,
@@ -299,43 +312,59 @@ router.patch(
         return res.json({ ok: true });
       }
 
-      const targetEndedAt = target.ended_at !== null ? new Date(target.ended_at) : null;
-      if (targetEndedAt && newStart.getTime() >= targetEndedAt.getTime()) {
+      // Every check below is done in one query, entirely server-side
+      // against this row's own live, full microsecond-precision values —
+      // never a JS Date round-trip of a previously-fetched column, which
+      // node-postgres truncates to millisecond precision (same fix already
+      // applied throughout this file's other correction routes; see the
+      // extensive comments on the break-correction route above).
+      //
+      // The overlap check is bounded by the entry's own ORIGINAL
+      // started_at, not by its end (with a now()-if-open fallback, as an
+      // earlier version of this query did). Moving started_at *later* only
+      // shrinks the entry and can never create a new overlap, so the only
+      // territory that ever needs checking is [newStart, original
+      // started_at) — the sliver being newly claimed when moving earlier.
+      // Bounding by end-or-now() instead was a real bug: whenever the
+      // target happened to be the currently *open* entry, the bound
+      // collapsed to now(), and the query would then match essentially the
+      // employee's entire past history (anything with started_at < now())
+      // as a false "previous entry." Using the target's own fixed,
+      // non-null original start avoids that failure mode entirely, and
+      // also naturally excludes the target row itself (an entry's own
+      // started_at is never < its own started_at).
+      const checkRes = await client.query(
+        `select
+           (t.ended_at is not null and $2::timestamptz >= t.ended_at) as start_after_end,
+           (t.ended_at is null and $2::timestamptz > now()) as future_while_open,
+           exists (
+             select 1 from time_entries o
+             where o.employee_id = t.employee_id and o.deleted_at is null and o.id <> t.id
+               and o.started_at < t.started_at
+               and (o.ended_at is null or o.ended_at > $2::timestamptz)
+           ) as overlaps_previous
+         from time_entries t
+         where t.id = $1`,
+        [target.id, newStart]
+      );
+      const checks = checkRes.rows[0];
+
+      if (checks.start_after_end) {
         await client.query("rollback");
         return res.status(422).json({ error: "Start time must be before the activity's end time" });
       }
-      // The entry is still open (in progress) — there's no ended_at to
-      // bound the correction against above, but pushing its started_at
-      // into the future would still corrupt it: an in-progress entry whose
-      // clock hasn't started yet breaks its own live timer and every
-      // duration computed from it. Same protection the break correction
-      // route above already applies to a still-open following entry.
-      if (!targetEndedAt && newStart.getTime() > Date.now()) {
+      // The entry is still open (in progress) — pushing its started_at
+      // into the future would corrupt it: an in-progress entry whose clock
+      // hasn't started yet breaks its own live timer and every duration
+      // computed from it. Same protection the break correction route above
+      // already applies to a still-open following entry.
+      if (checks.future_while_open) {
         await client.query("rollback");
         return res
           .status(422)
           .json({ error: "Start time cannot be in the future while the activity is still in progress" });
       }
-
-      // No overlap with any other entry (work or break) for this employee.
-      // target is by construction the earliest entry of the selected day,
-      // so in a well-formed timeline the only entry that could realistically
-      // overlap the new, earlier window is a preceding one from just before
-      // it — but this checks the target's whole [newStart, end-or-now)
-      // window generically, the same defensive "safety net beyond the
-      // specific case" the break correction route above also keeps.
-      // Deliberately does NOT touch or even look at any entry *after*
-      // target — moving the first entry's start must never move or modify
-      // whatever follows it.
-      const overlap = await client.query(
-        `select id from time_entries
-         where employee_id = $1 and deleted_at is null and id <> $2
-           and started_at < coalesce((select ended_at from time_entries where id = $2), now())
-           and (ended_at is null or ended_at > $3)
-         limit 1`,
-        [employeeId, target.id, newStart]
-      );
-      if (overlap.rows[0]) {
+      if (checks.overlaps_previous) {
         await client.query("rollback");
         return res.status(409).json({ error: "Corrected start time overlaps a previous entry" });
       }
@@ -444,7 +473,14 @@ router.patch(
         return res.status(409).json({ error: "Corrected end time overlaps the next activity or break" });
       }
 
-      await client.query("update time_entries set ended_at = $1 where id = $2", [newEndedAt, id]);
+      // A real correction supersedes any daily-cutoff placeholder this row
+      // may have been left with — the displayed end time is now a genuine
+      // one, not the automatic 23:59:59 stand-in, so the "Auto-closed"
+      // indicator no longer applies.
+      await client.query("update time_entries set ended_at = $1, auto_closed_at = null where id = $2", [
+        newEndedAt,
+        id,
+      ]);
       await client.query(
         `insert into time_entry_corrections
            (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
@@ -760,7 +796,12 @@ router.patch(
         }
       }
 
-      await client.query(`update time_entries set started_at = $1, ended_at = $2 where id = $3`, [
+      // Clears auto_closed_at unconditionally on the break's own row (see
+      // the same reasoning on the end-time correction route above) — even
+      // when only started_at actually changed, the row is being touched by
+      // a real correction now, so any stale cutoff-placeholder marker no
+      // longer applies.
+      await client.query(`update time_entries set started_at = $1, ended_at = $2, auto_closed_at = null where id = $3`, [
         newStart,
         newEnd,
         id,
@@ -783,7 +824,10 @@ router.patch(
       if (newStart.getTime() !== oldStart.getTime()) {
         await auditInsert(id, "started_at", oldStart, newStart);
         if (preceding) {
-          await client.query(`update time_entries set ended_at = $1 where id = $2`, [newStart, preceding.id]);
+          await client.query(`update time_entries set ended_at = $1, auto_closed_at = null where id = $2`, [
+            newStart,
+            preceding.id,
+          ]);
           await auditInsert(preceding.id, "ended_at", new Date(preceding.ended_at), newStart);
         }
       }
@@ -921,7 +965,7 @@ router.post(
         // holds (same precision reasoning as the lookups above) instead of
         // a millisecond-truncated copy of it.
         await client.query(
-          `update time_entries set ended_at = (select ended_at from time_entries where id = $1) where id = $2`,
+          `update time_entries set ended_at = (select ended_at from time_entries where id = $1), auto_closed_at = null where id = $2`,
           [id, preceding.id]
         );
         await client.query(
