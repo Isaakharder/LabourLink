@@ -20,6 +20,7 @@ interface OpenEntry {
   activity_id: string | null;
   started_at: string;
   greenhouse_row_id: string | null;
+  carrier_id: string | null;
 }
 
 interface OpenEntryOverrides {
@@ -42,11 +43,16 @@ interface OpenEntryOverrides {
   // chk_time_entries_row_only_on_work constraint, 015_time_entries_
   // greenhouse_row.sql).
   greenhouseRowId?: string | null;
+  // Carrier this work entry is attached to, if the activity's configured
+  // question supplied/permits one. Same "work only" shape as
+  // greenhouseRowId (see chk_time_entries_carrier_only_on_work,
+  // 019_carriers.sql).
+  carrierId?: string | null;
 }
 
 async function getOpenEntry(employeeId: string): Promise<OpenEntry | null> {
   const { rows } = await pool.query(
-    `select id, entry_type, activity_id, started_at, greenhouse_row_id
+    `select id, entry_type, activity_id, started_at, greenhouse_row_id, carrier_id
      from time_entries where employee_id = $1 and ended_at is null and deleted_at is null`,
     [employeeId]
   );
@@ -87,10 +93,10 @@ async function openEntry(
       `insert into time_entries
          (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at,
           actual_started_at, break_profile_item_id, scheduled_break_date, source, is_paid,
-          greenhouse_row_id)
-       values ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8, $9, coalesce($10, 'manual'), $11, $12)
+          greenhouse_row_id, carrier_id)
+       values ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8, $9, coalesce($10, 'manual'), $11, $12, $13)
        on conflict (idempotency_key) do nothing
-       returning id, entry_type, activity_id, started_at, greenhouse_row_id`,
+       returning id, entry_type, activity_id, started_at, greenhouse_row_id, carrier_id`,
       [
         employeeId,
         deviceId,
@@ -104,13 +110,15 @@ async function openEntry(
         overrides.source ?? null,
         overrides.isPaid ?? null,
         overrides.greenhouseRowId ?? null,
+        overrides.carrierId ?? null,
       ]
     );
 
     let row = insert.rows[0];
     if (!row) {
       const existing = await client.query(
-        `select id, entry_type, activity_id, started_at, greenhouse_row_id from time_entries where idempotency_key = $1`,
+        `select id, entry_type, activity_id, started_at, greenhouse_row_id, carrier_id
+         from time_entries where idempotency_key = $1`,
         [idempotencyKey]
       );
       row = existing.rows[0];
@@ -139,35 +147,38 @@ interface ChainEntry {
   started_at: Date;
   ended_at: Date | null;
   greenhouse_row_id: string | null;
+  carrier_id: string | null;
 }
 
 // Walks backward from `boundary` through the employee's recent entries,
-// summing completed work-entry durations for `activityId`/`rowId`, treating
-// breaks as transparent (skipped, not counted) as long as the chain stays
-// unbroken. A step only continues if the previous entry's ended_at exactly
-// equals the timestamp being walked back from — openEntry() always closes
-// the prior row and inserts the next one inside a single transaction, and
-// Postgres resolves every now() call within one transaction to the same
-// value, so two entries that are genuinely contiguous (no end-day/idle gap
-// between them) always share a bit-identical timestamp there. A real gap
-// (end-day, or a fresh start after being fully idle) naturally has no entry
-// matching that exact boundary, which is what ends the chain. All entries
-// here come from one query result compared only against each other in
-// memory — never round-tripped back into a new SQL parameter — so the
-// millisecond precision node-postgres applies when parsing timestamptz into
-// a JS Date is applied identically on both sides and can't cause the kind
-// of false mismatch a fresh round trip would.
+// summing completed work-entry durations for `activityId`/`rowId`/
+// `carrierId`, treating breaks as transparent (skipped, not counted) as
+// long as the chain stays unbroken. A step only continues if the previous
+// entry's ended_at exactly equals the timestamp being walked back from —
+// openEntry() always closes the prior row and inserts the next one inside a
+// single transaction, and Postgres resolves every now() call within one
+// transaction to the same value, so two entries that are genuinely
+// contiguous (no end-day/idle gap between them) always share a
+// bit-identical timestamp there. A real gap (end-day, or a fresh start
+// after being fully idle) naturally has no entry matching that exact
+// boundary, which is what ends the chain. All entries here come from one
+// query result compared only against each other in memory — never
+// round-tripped back into a new SQL parameter — so the millisecond
+// precision node-postgres applies when parsing timestamptz into a JS Date
+// is applied identically on both sides and can't cause the kind of false
+// mismatch a fresh round trip would.
 //
-// The row-equality check exists alongside the activity check because a row
-// change (same activity, different location) already produces a fresh
-// time_entries row the same way an activity change does (same openEntry()
-// close+insert transaction) — a changed row is a new logical job segment,
-// so the accumulated timer must reset there too, not just on activity
-// change.
+// The row/carrier equality checks exist alongside the activity check
+// because a row or carrier change (same activity, different location/
+// carrier) already produces a fresh time_entries row the same way an
+// activity change does (see openEntry() close+insert transaction) — a
+// changed row or carrier is a new logical job segment, so the accumulated
+// timer must reset there too, not just on activity change.
 function accumulateChainSeconds(
   entries: ChainEntry[],
   activityId: string,
   rowId: string | null,
+  carrierId: string | null,
   boundary: Date
 ): number {
   const byEndedAt = new Map<number, ChainEntry>();
@@ -184,7 +195,7 @@ function accumulateChainSeconds(
       cursor = prev.started_at.getTime();
       continue;
     }
-    if (prev.activity_id !== activityId || prev.greenhouse_row_id !== rowId) break;
+    if (prev.activity_id !== activityId || prev.greenhouse_row_id !== rowId || prev.carrier_id !== carrierId) break;
     totalSeconds += (prev.ended_at!.getTime() - prev.started_at.getTime()) / 1000;
     cursor = prev.started_at.getTime();
   }
@@ -230,7 +241,7 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
   // segments are short-lived, so a day's worth of history is always enough;
   // this is a cheap indexed scan, not an unbounded per-employee history read.
   const { rows: chainRows } = await pool.query<ChainEntry>(
-    `select entry_type, activity_id, started_at, ended_at, greenhouse_row_id
+    `select entry_type, activity_id, started_at, ended_at, greenhouse_row_id, carrier_id
      from time_entries
      where employee_id = $1 and started_at >= now() - interval '24 hours' and deleted_at is null`,
     [employeeId]
@@ -243,6 +254,7 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
         startedAt: string;
         accumulatedWorkedSecondsBeforeCurrentEntry: number;
         row: { id: string; label: string } | null;
+        carrier: { id: string; name: string } | null;
       }
     | null = null;
   if (open?.entry_type === "work" && open.activity_id) {
@@ -255,6 +267,7 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
         chainRows,
         open.activity_id,
         open.greenhouse_row_id,
+        open.carrier_id,
         new Date(open.started_at)
       );
       // Deliberately not filtered on the row/phase's active state — this
@@ -271,12 +284,21 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
         const r = rowRows[0];
         if (r) row = { id: open.greenhouse_row_id, label: `${r.phase_name} · Row ${r.row_number}` };
       }
+      // Same "resolve even if deactivated since" convention as the row
+      // lookup above.
+      let carrier: { id: string; name: string } | null = null;
+      if (open.carrier_id) {
+        const { rows: carrierRows } = await pool.query(`select name from carriers where id = $1`, [open.carrier_id]);
+        const c = carrierRows[0];
+        if (c) carrier = { id: open.carrier_id, name: c.name };
+      }
       currentActivity = {
         id: a.id,
         name: a.name,
         startedAt: open.started_at,
         accumulatedWorkedSecondsBeforeCurrentEntry: accumulated,
         row,
+        carrier,
       };
     }
   }
@@ -298,7 +320,7 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
   let previousActivity: { id: string; name: string; accumulatedWorkedSeconds: number } | null = null;
   if (open?.entry_type === "break") {
     const { rows } = await pool.query(
-      `select te.activity_id as id, a.name, te.greenhouse_row_id
+      `select te.activity_id as id, a.name, te.greenhouse_row_id, te.carrier_id
        from time_entries te
        join activities a on a.id = te.activity_id
        where te.employee_id = $1
@@ -315,7 +337,13 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
       // segment that just closed (its ended_at equals the break's
       // started_at) plus everything earlier in the same chain — this is
       // the running total "worked so far," not just the last segment.
-      const accumulated = accumulateChainSeconds(chainRows, row.id, row.greenhouse_row_id, new Date(open.started_at));
+      const accumulated = accumulateChainSeconds(
+        chainRows,
+        row.id,
+        row.greenhouse_row_id,
+        row.carrier_id,
+        new Date(open.started_at)
+      );
       previousActivity = { id: row.id, name: row.name, accumulatedWorkedSeconds: accumulated };
     }
   }
@@ -324,15 +352,17 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
   // today. is_active is deliberately not checked on the activity join —
   // activities are never hard-deleted, only deactivated, so history always
   // resolves; the name shown is whatever it's currently named (no
-  // at-the-time snapshot exists).
+  // at-the-time snapshot exists). Same for the carrier left join.
   const { rows: recentRows } = await pool.query(
     `select te.id, te.activity_id, a.name, te.started_at, te.ended_at,
             extract(epoch from (te.ended_at - te.started_at))::int as duration_seconds,
-            gr.row_number, gp.name as row_phase_name
+            gr.row_number, gp.name as row_phase_name,
+            c.id as carrier_id, c.name as carrier_name
      from time_entries te
      join activities a on a.id = te.activity_id
      left join greenhouse_rows gr on gr.id = te.greenhouse_row_id
      left join greenhouse_phases gp on gp.id = gr.phase_id
+     left join carriers c on c.id = te.carrier_id
      where te.employee_id = $1
        and te.entry_type = 'work'
        and te.ended_at is not null
@@ -350,6 +380,7 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
     endedAt: r.ended_at,
     durationSeconds: r.duration_seconds,
     row: r.row_number != null ? { label: `${r.row_phase_name} · Row ${r.row_number}` } : null,
+    carrier: r.carrier_id ? { label: r.carrier_name as string } : null,
   }));
 
   return {
@@ -395,16 +426,31 @@ router.get(
       return res.json({ activities: [], activityGroups: [] });
     }
 
-    // Deduplicated union of every assigned group's active activities — an
-    // activity belonging to more than one of the employee's groups is
-    // returned once, via select distinct rather than per-group queries.
+    // Deduplicated (an activity belonging to more than one of the
+    // employee's groups is returned once) via an inner "distinct
+    // activity_id" set, joined to activities and then to each activity's
+    // own ordered question list via LATERAL — the same shape
+    // server/src/routes/activities.ts uses, and for the same reason: a
+    // plain LEFT JOIN to activity_questions (now zero-to-many per activity)
+    // would fan out and require reintroducing the exact "distinct" problem
+    // this dedup step already exists to solve.
     const { rows } = await pool.query(
-      `select distinct a.id, a.name, a.normal_speed, a.speed_unit, a.sort_order,
-              aq.question_type, aq.label as question_label, aq.is_required as question_required
-       from activity_group_activities aga
-       join activities a on a.id = aga.activity_id and a.is_active = true
-       left join activity_questions aq on aq.activity_id = a.id
-       where aga.activity_group_id = any($1::uuid[])
+      `select a.id, a.name, a.normal_speed, a.speed_unit, a.sort_order,
+              coalesce(q.questions, '[]'::json) as questions
+       from (
+         select distinct aga.activity_id
+         from activity_group_activities aga
+         where aga.activity_group_id = any($1::uuid[])
+       ) x
+       join activities a on a.id = x.activity_id and a.is_active = true
+       left join lateral (
+         select json_agg(json_build_object(
+                  'id', aq.id, 'questionType', aq.question_type,
+                  'label', aq.label, 'isRequired', aq.is_required
+                ) order by aq.sort_order) as questions
+         from activity_questions aq
+         where aq.activity_id = a.id and aq.is_active = true
+       ) q on true
        order by a.sort_order, a.name`,
       [groups.map((g) => g.id)]
     );
@@ -416,9 +462,13 @@ router.get(
         name: r.name,
         normalSpeed: r.normal_speed !== null ? Number(r.normal_speed) : null,
         speedUnit: r.speed_unit,
-        question: r.question_type
-          ? { type: r.question_type as "greenhouse_row", label: r.question_label, isRequired: r.question_required }
-          : null,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        questions: (r.questions as any[]).map((q) => ({
+          id: q.id,
+          questionType: q.questionType as "greenhouse_row" | "carrier",
+          label: q.label as string,
+          isRequired: q.isRequired as boolean,
+        })),
       })),
       activityGroups: groups.map((g) => ({ id: g.id, name: g.name })),
     });
@@ -429,10 +479,10 @@ router.post(
   "/time-entries/work",
   asyncHandler(async (req, res) => {
     const d = req.device!;
-    const { activityId, idempotencyKey, greenhouseRowId } = req.body as {
+    const { activityId, idempotencyKey, answers } = req.body as {
       activityId?: string;
       idempotencyKey?: string;
-      greenhouseRowId?: string;
+      answers?: { questionId?: string; greenhouseRowId?: string; carrierId?: string }[];
     };
     if (!activityId || !UUID_RE.test(activityId) || !isValidIdempotencyKey(idempotencyKey)) {
       return res.status(400).json({ error: "activityId and a valid idempotencyKey are required" });
@@ -457,23 +507,40 @@ router.post(
       return res.status(400).json({ error: "activityId is not available to this employee" });
     }
 
-    // A client-supplied greenhouseRowId is never trusted either — it must
-    // both (a) be permitted/required by this activity's own configured
-    // question, and (b) resolve to a real, currently active row in an
-    // active phase. Both checks happen here, not just in the mobile UI.
-    const questionCheck = await pool.query(
-      `select label, is_required from activity_questions
-       where activity_id = $1 and question_type = 'greenhouse_row'`,
+    // Server-authoritative question list: the client's job is only to
+    // supply an answer per questionId, never to assert what type a
+    // question is or whether it's required — both come from the DB here,
+    // ordered the same way the mobile question flow asked them.
+    const questionsRes = await pool.query(
+      `select id, question_type, is_required from activity_questions
+       where activity_id = $1 and is_active = true
+       order by sort_order`,
       [activityId]
     );
-    const question = questionCheck.rows[0];
-    let validatedRowId: string | null = null;
-    if (question) {
-      if (question.is_required && !greenhouseRowId) {
-        return res.status(400).json({ error: "greenhouseRowId is required for this activity" });
+    const questions = questionsRes.rows as { id: string; question_type: "greenhouse_row" | "carrier"; is_required: boolean }[];
+
+    const answersArray = Array.isArray(answers) ? answers : [];
+    const validQuestionIds = new Set(questions.map((q) => q.id));
+    for (const a of answersArray) {
+      if (!a || typeof a.questionId !== "string" || !validQuestionIds.has(a.questionId)) {
+        return res.status(400).json({ error: "One or more answers do not match a configured question for this activity" });
       }
-      if (greenhouseRowId) {
-        if (!UUID_RE.test(greenhouseRowId)) {
+    }
+    const answersByQuestionId = new Map(answersArray.map((a) => [a.questionId as string, a]));
+
+    let validatedRowId: string | null = null;
+    let validatedCarrierId: string | null = null;
+
+    for (const q of questions) {
+      const answer = answersByQuestionId.get(q.id);
+
+      if (q.question_type === "greenhouse_row") {
+        const rowId = answer?.greenhouseRowId;
+        if (!rowId) {
+          if (q.is_required) return res.status(400).json({ error: "greenhouseRowId is required for this activity" });
+          continue;
+        }
+        if (typeof rowId !== "string" || !UUID_RE.test(rowId)) {
           return res.status(400).json({ error: "Invalid or inactive greenhouseRowId" });
         }
         const rowCheck = await pool.query(
@@ -481,20 +548,29 @@ router.post(
            from greenhouse_rows gr
            join greenhouse_phases gp on gp.id = gr.phase_id and gp.is_active = true
            where gr.id = $1 and gr.deleted_at is null`,
-          [greenhouseRowId]
+          [rowId]
         );
-        if (!rowCheck.rows[0]) {
-          return res.status(400).json({ error: "Invalid or inactive greenhouseRowId" });
+        if (!rowCheck.rows[0]) return res.status(400).json({ error: "Invalid or inactive greenhouseRowId" });
+        validatedRowId = rowId;
+      } else if (q.question_type === "carrier") {
+        const carrierId = answer?.carrierId;
+        if (!carrierId) {
+          if (q.is_required) return res.status(400).json({ error: "carrierId is required for this activity" });
+          continue;
         }
-        validatedRowId = greenhouseRowId;
+        if (typeof carrierId !== "string" || !UUID_RE.test(carrierId)) {
+          return res.status(400).json({ error: "Invalid or inactive carrierId" });
+        }
+        const carrierCheck = await pool.query(`select id from carriers where id = $1 and is_active = true`, [carrierId]);
+        if (!carrierCheck.rows[0]) return res.status(400).json({ error: "Invalid or inactive carrierId" });
+        validatedCarrierId = carrierId;
       }
-    } else if (greenhouseRowId) {
-      // This activity has no greenhouse-row question at all — a client
-      // can never attach a row to an unrelated activity.
-      return res.status(400).json({ error: "This activity does not accept a greenhouseRowId" });
     }
 
-    await openEntry(d.employeeId, d.id, "work", activityId, idempotencyKey, { greenhouseRowId: validatedRowId });
+    await openEntry(d.employeeId, d.id, "work", activityId, idempotencyKey, {
+      greenhouseRowId: validatedRowId,
+      carrierId: validatedCarrierId,
+    });
     res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName));
   })
 );
@@ -571,25 +647,30 @@ router.post(
       return res.status(400).json({ error: "a valid idempotencyKey is required" });
     }
 
-    // Resume whatever activity — and greenhouse row, if any — was active
-    // before the break. Reattaching the same row here, with no client input
-    // at all, is what makes "resume the same activity and same row
-    // automatically, no re-asking" work: the mobile app never needs to
-    // send (or re-collect) a greenhouseRowId on break/end.
+    // Resume whatever activity — and greenhouse row/carrier, if any — was
+    // active before the break. Reattaching the same answers here, with no
+    // client input at all, is what makes "resume the same activity, row,
+    // and carrier automatically, no re-asking" work: the mobile app never
+    // needs to send (or re-collect) an answer on break/end.
     const { rows } = await pool.query(
-      `select activity_id, greenhouse_row_id from time_entries
+      `select activity_id, greenhouse_row_id, carrier_id from time_entries
        where employee_id = $1 and entry_type = 'work' and deleted_at is null
        order by started_at desc limit 1`,
       [d.employeeId]
     );
     const resumeActivityId = rows[0]?.activity_id ?? null;
     const resumeRowId = rows[0]?.greenhouse_row_id ?? null;
+    const resumeCarrierId = rows[0]?.carrier_id ?? null;
     if (!resumeActivityId) {
       return res.status(409).json({ error: "No prior activity to resume" });
     }
 
     const now = new Date();
-    const overrides: OpenEntryOverrides = { actualEndedAt: now, greenhouseRowId: resumeRowId };
+    const overrides: OpenEntryOverrides = {
+      actualEndedAt: now,
+      greenhouseRowId: resumeRowId,
+      carrierId: resumeCarrierId,
+    };
 
     // Only round the end if the currently open break was itself matched to
     // a fixed item at start time (never retroactively match on end alone).
@@ -671,6 +752,16 @@ router.get(
         phases: Array.from(l.phases.values()),
       })),
     });
+  })
+);
+
+// Carrier options for the mobile carrier picker — same device-only auth and
+// active-only scope as /greenhouse-rows above.
+router.get(
+  "/carriers",
+  asyncHandler(async (_req, res) => {
+    const { rows } = await pool.query(`select id, name from carriers where is_active = true order by name`);
+    res.json({ carriers: rows.map((r) => ({ id: r.id, name: r.name })) });
   })
 );
 

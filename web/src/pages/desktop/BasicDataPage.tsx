@@ -4,7 +4,7 @@ import { BreaksTab } from "./basic-data/BreaksTab";
 import { RowsTab } from "./basic-data/RowsTab";
 import { EmployeeBlocksTab } from "./basic-data/EmployeeBlocksTab";
 import { VarietiesTab } from "./basic-data/VarietiesTab";
-import { CarriesTab } from "./basic-data/CarriesTab";
+import { CarriersTab } from "./basic-data/CarriersTab";
 
 // Add future Basic Data sections here (Holidays, Pay Codes, Departments,
 // Teams, Nationalities, Languages, ...) as their tabs land. Each entry
@@ -14,7 +14,7 @@ const TABS = [
   { path: "rows", label: "Rows", element: <RowsTab /> },
   { path: "employee-blocks", label: "Employee Blocks", element: <EmployeeBlocksTab /> },
   { path: "varieties", label: "Varieties", element: <VarietiesTab /> },
-  { path: "carries", label: "Carries", element: <CarriesTab /> },
+  { path: "carriers", label: "Carriers", element: <CarriersTab /> },
 ];
 
 export function BasicDataPage() {

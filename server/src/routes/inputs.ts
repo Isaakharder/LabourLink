@@ -99,15 +99,17 @@ router.get(
     // unfiltered activities join above.
     const { rows: entryRows } = await pool.query(
       `select te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
-              te.break_profile_item_id, te.source, te.is_paid, te.greenhouse_row_id,
+              te.break_profile_item_id, te.source, te.is_paid, te.greenhouse_row_id, te.carrier_id,
               a.name as activity_name, a.normal_speed, a.speed_unit,
               bpi.name as break_item_name,
-              gr.row_number, gphase.name as row_phase_name
+              gr.row_number, gphase.name as row_phase_name,
+              c.name as carrier_name
        from time_entries te
        left join activities a on a.id = te.activity_id
        left join break_profile_items bpi on bpi.id = te.break_profile_item_id
        left join greenhouse_rows gr on gr.id = te.greenhouse_row_id
        left join greenhouse_phases gphase on gphase.id = gr.phase_id
+       left join carriers c on c.id = te.carrier_id
        where te.employee_id = $1 and te.started_at >= $2 and te.started_at < $3 and te.deleted_at is null
        order by te.started_at asc`,
       [employeeId, start, end]
@@ -120,11 +122,13 @@ router.get(
       started_at: r.started_at,
       ended_at: r.ended_at,
       greenhouse_row_id: r.greenhouse_row_id,
+      carrier_id: r.carrier_id,
     }));
     const { runs, breaks } = groupIntoActivityRuns(segments);
 
     const activityMeta = new Map<string, { name: string; normalSpeed: string | null; speedUnit: string | null }>();
     const rowMeta = new Map<string, { rowNumber: number; phaseName: string }>();
+    const carrierMeta = new Map<string, string>();
     // Unclassified/legacy breaks (is_paid null, recorded before this column
     // existed) are bucketed as unpaid — a break must be explicitly marked
     // paid to count as paid, nothing is inferred from duration or time.
@@ -138,6 +142,9 @@ router.get(
       }
       if (r.greenhouse_row_id && !rowMeta.has(r.greenhouse_row_id)) {
         rowMeta.set(r.greenhouse_row_id, { rowNumber: r.row_number, phaseName: r.row_phase_name });
+      }
+      if (r.carrier_id && !carrierMeta.has(r.carrier_id)) {
+        carrierMeta.set(r.carrier_id, r.carrier_name);
       }
       if (r.entry_type === "break") {
         breakMeta.set(r.id, {
@@ -178,6 +185,7 @@ router.get(
       runs: runs.map((r) => {
         const meta = activityMeta.get(r.activityId);
         const row = r.greenhouseRowId ? rowMeta.get(r.greenhouseRowId) : undefined;
+        const carrierName = r.carrierId ? carrierMeta.get(r.carrierId) : undefined;
         return {
           id: r.id,
           activityId: r.activityId,
@@ -193,6 +201,7 @@ router.get(
           isOpen: r.isOpen,
           canEdit: canEditRole && !r.isOpen,
           row: row ? { id: r.greenhouseRowId, label: `${row.phaseName} · Row ${row.rowNumber}` } : null,
+          carrier: carrierName ? { id: r.carrierId, name: carrierName } : null,
         };
       }),
       breaks: breaks.map((b) => {
@@ -360,7 +369,7 @@ router.post(
     const dateStr = calendarDateInAppTimezone(new Date(peekRow.started_at));
     const { start, end } = getDayBoundsUtc(dateStr);
     const dayRows = await pool.query(
-      `select id, entry_type, activity_id, started_at, ended_at, greenhouse_row_id
+      `select id, entry_type, activity_id, started_at, ended_at, greenhouse_row_id, carrier_id
        from time_entries
        where employee_id = $1 and started_at >= $2 and started_at < $3 and deleted_at is null
        order by started_at asc`,
@@ -373,6 +382,7 @@ router.post(
       started_at: r.started_at,
       ended_at: r.ended_at,
       greenhouse_row_id: r.greenhouse_row_id,
+      carrier_id: r.carrier_id,
     }));
     const { runs } = groupIntoActivityRuns(segments);
     const run = runs.find((r) => r.id === id);

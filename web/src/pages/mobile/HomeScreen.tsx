@@ -3,8 +3,10 @@ import { useDevicePairing } from "../../context/DevicePairingContext";
 import { api, ApiError, isPermanentDeviceAuthError, isServerUnreachableError } from "../../lib/api";
 import { enqueue, flushQueue, getPendingCount, isNetworkError } from "../../lib/offlineQueue";
 import { uuid } from "../../lib/uuid";
+import { ActivityQuestion, QuestionAnswer } from "../../lib/activityQuestionTypes";
 import { ActivityPicker, NO_ACTIVITIES_MESSAGE, PickerActivity } from "../../components/mobile/ActivityPicker";
 import { RowPickerSheet, RowPickerLand } from "../../components/mobile/RowPickerSheet";
+import { CarrierPickerSheet, PickerCarrier } from "../../components/mobile/CarrierPickerSheet";
 import { ActivityTimer, formatElapsed } from "../../components/mobile/ActivityTimer";
 import { RecentJobsCard, RecentJob } from "../../components/mobile/RecentJobsCard";
 import { ConfirmEndDayModal } from "../../components/mobile/ConfirmEndDayModal";
@@ -20,6 +22,24 @@ interface CurrentActivity {
   // the live elapsed time since startedAt is added on top by ActivityTimer.
   accumulatedWorkedSecondsBeforeCurrentEntry: number;
   row: { id: string; label: string } | null;
+  carrier: { id: string; name: string } | null;
+}
+
+// State for an in-progress multi-question flow — built up one answer at a
+// time as the employee steps through `questions` in order, then submitted
+// as a single batch once the last question is answered (or skipped). Used
+// both for a brand-new activity start/switch and for "Change job details"
+// (same activity, re-answering to open a new segment) — the two differ
+// only in what activityId/activityName/questions get passed in, never in
+// how the flow itself advances.
+interface PendingQuestionFlow {
+  activityId: string;
+  activityName: string;
+  questions: ActivityQuestion[];
+  stepIndex: number;
+  // Keyed by questionId so a Back navigation can look up "was this question
+  // already answered" without caring about array position.
+  answers: Record<string, QuestionAnswer>;
 }
 
 interface PreviousActivity {
@@ -59,13 +79,11 @@ export function HomeScreen() {
   const [activitiesLoaded, setActivitiesLoaded] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [rowLands, setRowLands] = useState<RowPickerLand[] | null>(null);
-  const [rowPickerOpen, setRowPickerOpen] = useState(false);
-  // The activity a row is being picked for — either a brand-new
-  // start/switch (from chooseActivity) or a same-activity "Change Row"
-  // (from the current-activity affordance). Only id/name are needed here;
-  // RowPickerSheet itself only needs a name to display and reports back a
-  // chosen rowId, the caller already knows which activityId it's for.
-  const [pendingRowActivity, setPendingRowActivity] = useState<{ id: string; name: string } | null>(null);
+  const [carriers, setCarriers] = useState<PickerCarrier[] | null>(null);
+  // The single in-progress multi-question flow, whether it's for a
+  // brand-new activity start/switch or a same-activity "Change job
+  // details" — see PendingQuestionFlow's own comment.
+  const [questionFlow, setQuestionFlow] = useState<PendingQuestionFlow | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [online, setOnline] = useState(navigator.onLine);
@@ -145,11 +163,22 @@ export function HomeScreen() {
       });
   }, [handleApiError]);
 
+  // Same event-driven wiring again — the phone never has its own notion of
+  // which carriers exist either.
+  const loadCarriers = useCallback(() => {
+    api<{ carriers: PickerCarrier[] }>("/api/mobile/carriers")
+      .then((res) => setCarriers(res.carriers))
+      .catch((err) => {
+        handleApiError(err);
+      });
+  }, [handleApiError]);
+
   useEffect(() => {
     loadMe();
     loadActivities();
     loadGreenhouseRows();
-  }, [loadMe, loadActivities, loadGreenhouseRows]);
+    loadCarriers();
+  }, [loadMe, loadActivities, loadGreenhouseRows, loadCarriers]);
 
   // Runs only while the server hasn't been reached — an app left open on
   // screen through a server restart/deploy must reconnect on its own, not
@@ -212,6 +241,7 @@ export function HomeScreen() {
         loadMe();
         loadActivities();
         loadGreenhouseRows();
+        loadCarriers();
       }
     }
     window.addEventListener("online", goOnline);
@@ -223,7 +253,7 @@ export function HomeScreen() {
       window.removeEventListener("offline", goOffline);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [flush, loadMe, loadActivities, loadGreenhouseRows]);
+  }, [flush, loadMe, loadActivities, loadGreenhouseRows, loadCarriers]);
 
   async function perform(path: string, body: Record<string, unknown>, pendingLabel?: string) {
     setBusy(true);
@@ -241,8 +271,7 @@ export function HomeScreen() {
       });
       setPendingActivityName(null);
       setPickerOpen(false);
-      setRowPickerOpen(false);
-      setPendingRowActivity(null);
+      setQuestionFlow(null);
     } catch (err) {
       if (isPermanentDeviceAuthError(err)) {
         markUnpaired();
@@ -257,14 +286,14 @@ export function HomeScreen() {
         // successful flush. This just tells the employee what's queued.
         if (pendingLabel) setPendingActivityName(pendingLabel);
         setPickerOpen(false);
-        setRowPickerOpen(false);
-        setPendingRowActivity(null);
+        setQuestionFlow(null);
       } else if (err instanceof ApiError && err.status >= 500) {
         setServerReachable(false);
       } else {
-        // Stays open (whichever sheet — ActivityPicker or RowPickerSheet —
-        // triggered this) so the employee sees the error and can retry
-        // without losing their place; both sheets render `error` inline.
+        // Stays open (whichever sheet — ActivityPicker, RowPickerSheet, or
+        // CarrierPickerSheet — triggered this) so the employee sees the
+        // error and can retry without losing their place; every sheet
+        // renders `error` inline.
         setServerReachable(true);
         setError(err instanceof ApiError ? err.message : "Something went wrong");
       }
@@ -278,60 +307,172 @@ export function HomeScreen() {
     setPickerOpen(true);
   }
 
+  // Shared by a brand-new activity start/switch (chooseActivity) and
+  // same-activity "Change job details" (openChangeJobDetails) — both just
+  // need to know which activity, which ordered questions to ask, and what
+  // (if anything) each question should start out already answered with;
+  // everything about *advancing* through them is identical either way.
+  // initialAnswers defaults to empty for a brand-new start/switch — Change
+  // job details is the only caller that ever passes a non-empty one.
+  function startQuestionFlow(
+    activityId: string,
+    activityName: string,
+    questions: ActivityQuestion[],
+    initialAnswers: Record<string, QuestionAnswer> = {}
+  ) {
+    loadGreenhouseRows();
+    loadCarriers();
+    setError(null);
+    setQuestionFlow({ activityId, activityName, questions, stepIndex: 0, answers: initialAnswers });
+    setPickerOpen(false);
+  }
+
   function chooseActivity(activityId: string) {
     const activity = activities.find((a) => a.id === activityId);
-    // Any configured question — required or optional — opens the row
-    // picker so its label and Skip/Confirm choice are always shown. Only
-    // an activity with no question at all starts immediately.
-    if (activity?.question) {
-      loadGreenhouseRows();
-      setPendingRowActivity({ id: activity.id, name: activity.name });
-      setPickerOpen(false);
-      setRowPickerOpen(true);
+    // Any configured question — required or optional — opens the
+    // multi-question flow so every label and Skip/Confirm choice is always
+    // shown, even for a single question. Only an activity with an empty
+    // question list starts immediately.
+    if (activity && activity.questions.length > 0) {
+      startQuestionFlow(activity.id, activity.name, activity.questions);
       return;
     }
     perform("/api/mobile/time-entries/work", { activityId, idempotencyKey: uuid() }, activity?.name);
   }
 
-  function confirmRow(rowId: string) {
-    if (!pendingRowActivity) return;
+  // Submits the complete answer set collected so far as one work-start
+  // request — called once the flow's last question is answered or
+  // skipped, never mid-flow. answers is passed explicitly (rather than
+  // read from `questionFlow` state) because the caller that just answered
+  // the final question hasn't necessarily re-rendered with that answer
+  // committed to state yet.
+  //
+  // Change job details' "do not start a new segment unless something
+  // actually changed" requirement is enforced here, generically, rather
+  // than as a special mode: if the target activity is the one already
+  // running and every submitted answer matches what's already recorded on
+  // it, there's nothing to change — the flow just closes with no API call
+  // (no new segment, no fresh idempotencyKey, no timer reset). This can
+  // only actually trigger for Change job details; a brand-new
+  // start/switch's activityId is never the currently-open one (the
+  // ActivityPicker already short-circuits re-picking the current activity
+  // before any question flow opens at all).
+  function submitQuestionFlow(
+    activityId: string,
+    activityName: string,
+    answers: Record<string, QuestionAnswer>
+  ) {
+    if (me?.status === "work" && me.currentActivity?.id === activityId) {
+      const rowAnswer = Object.values(answers).find(
+        (a): a is Extract<QuestionAnswer, { questionType: "greenhouse_row" }> => a.questionType === "greenhouse_row"
+      );
+      const carrierAnswer = Object.values(answers).find(
+        (a): a is Extract<QuestionAnswer, { questionType: "carrier" }> => a.questionType === "carrier"
+      );
+      const newRowId = rowAnswer?.greenhouseRowId ?? null;
+      const newCarrierId = carrierAnswer?.carrierId ?? null;
+      const currentRowId = me.currentActivity.row?.id ?? null;
+      const currentCarrierId = me.currentActivity.carrier?.id ?? null;
+      if (newRowId === currentRowId && newCarrierId === currentCarrierId) {
+        setQuestionFlow(null);
+        return;
+      }
+    }
+
+    const answersPayload = Object.values(answers).map((a) =>
+      a.questionType === "greenhouse_row"
+        ? { questionId: a.questionId, greenhouseRowId: a.greenhouseRowId }
+        : { questionId: a.questionId, carrierId: a.carrierId }
+    );
     perform(
       "/api/mobile/time-entries/work",
-      { activityId: pendingRowActivity.id, greenhouseRowId: rowId, idempotencyKey: uuid() },
-      pendingRowActivity.name
+      { activityId, answers: answersPayload, idempotencyKey: uuid() },
+      activityName
     );
   }
 
-  // Only reachable when the pending activity's question is optional (see
-  // RowPickerSheet's allowSkip prop) — starts the activity with no row
-  // rather than forcing a selection.
-  function skipRow() {
-    if (!pendingRowActivity) return;
-    perform(
-      "/api/mobile/time-entries/work",
-      { activityId: pendingRowActivity.id, idempotencyKey: uuid() },
-      pendingRowActivity.name
-    );
+  // Records the current step's answer and either advances to the next
+  // question or — on the last one — submits the whole batch. Preserving
+  // prior answers across Back is automatic here: they're never removed
+  // from `answers`, only ever added to or overwritten for the current
+  // step's own questionId.
+  function answerQuestionStep(answer: QuestionAnswer) {
+    if (!questionFlow) return;
+    const nextAnswers = { ...questionFlow.answers, [answer.questionId]: answer };
+    const nextIndex = questionFlow.stepIndex + 1;
+    if (nextIndex >= questionFlow.questions.length) {
+      submitQuestionFlow(questionFlow.activityId, questionFlow.activityName, nextAnswers);
+      return;
+    }
+    setQuestionFlow({ ...questionFlow, stepIndex: nextIndex, answers: nextAnswers });
   }
 
-  function cancelRowPicker() {
+  // Only reachable when the current step's question is optional (see each
+  // picker sheet's allowSkip prop) — advances without recording an answer
+  // for this questionId at all (the server treats an absent answer as "not
+  // provided," never as an explicit null). Explicitly *removes* any answer
+  // already present for this questionId rather than just leaving it
+  // untouched — Change job details can open this step pre-filled from the
+  // current segment, and skipping it must mean "no carrier," not "silently
+  // keep submitting the old one."
+  function skipQuestionStep() {
+    if (!questionFlow) return;
+    const currentQuestion = questionFlow.questions[questionFlow.stepIndex];
+    const nextAnswers = { ...questionFlow.answers };
+    delete nextAnswers[currentQuestion.id];
+    const nextIndex = questionFlow.stepIndex + 1;
+    if (nextIndex >= questionFlow.questions.length) {
+      submitQuestionFlow(questionFlow.activityId, questionFlow.activityName, nextAnswers);
+      return;
+    }
+    setQuestionFlow({ ...questionFlow, stepIndex: nextIndex, answers: nextAnswers });
+  }
+
+  // Goes back one question without losing that earlier question's answer
+  // — `answers` is untouched, only stepIndex moves; the picker sheet for
+  // that step reads its own prior answer back out of `questionFlow.answers`
+  // (see the render below) to restore its selection.
+  function backQuestionStep() {
+    if (!questionFlow || questionFlow.stepIndex === 0) return;
+    setQuestionFlow((prev) => (prev ? { ...prev, stepIndex: prev.stepIndex - 1 } : prev));
+  }
+
+  function cancelQuestionFlow() {
     if (busy) return;
-    setRowPickerOpen(false);
-    setPendingRowActivity(null);
+    setQuestionFlow(null);
   }
 
-  // "Change Row" — the only UI path for requirement 8's "same activity,
-  // different row." Reuses the exact same perform() call the initial
-  // required-question start does, just with the current activity's id
-  // instead of a newly-picked one; a fresh idempotencyKey is what makes the
-  // server open a new row/close the old one (see openEntry in
-  // mobileTime.ts), and accumulateChainSeconds' row-equality check is what
-  // makes the timer correctly reset for it.
-  function openChangeRow() {
+  // "Change job details" — the only UI path for requirement 10's "same
+  // activity, different row or carrier." Re-runs the full question
+  // sequence, pre-filled with whatever the current segment is already
+  // answered with (each picker sheet reads its own question's entry out of
+  // questionFlow.answers as `initialSelectedRowId`/`initialSelectedCarrierId`
+  // — see the render below), so the employee can keep an answer with a
+  // plain Confirm, change just one, or Skip an optional one back to "none."
+  // Submitting reuses the exact same perform() call the initial
+  // required-question start does, just with the current activity's id; a
+  // fresh idempotencyKey is what makes the server open a new row/carrier
+  // segment and close the old one (see openEntry in mobileTime.ts), and
+  // accumulateChainSeconds' row/carrier-equality check is what makes the
+  // timer correctly reset for it — but only when something actually
+  // changed, see submitQuestionFlow's own no-op check.
+  function openChangeJobDetails() {
     if (!me?.currentActivity) return;
-    loadGreenhouseRows();
-    setPendingRowActivity({ id: me.currentActivity.id, name: me.currentActivity.name });
-    setRowPickerOpen(true);
+    const activity = activities.find((a) => a.id === me.currentActivity!.id);
+    if (!activity || activity.questions.length === 0) return;
+
+    const currentRowId = me.currentActivity.row?.id ?? null;
+    const currentCarrierId = me.currentActivity.carrier?.id ?? null;
+    const initialAnswers: Record<string, QuestionAnswer> = {};
+    for (const q of activity.questions) {
+      if (q.questionType === "greenhouse_row" && currentRowId) {
+        initialAnswers[q.id] = { questionId: q.id, questionType: "greenhouse_row", greenhouseRowId: currentRowId };
+      } else if (q.questionType === "carrier" && currentCarrierId) {
+        initialAnswers[q.id] = { questionId: q.id, questionType: "carrier", carrierId: currentCarrierId };
+      }
+    }
+
+    startQuestionFlow(activity.id, activity.name, activity.questions, initialAnswers);
   }
 
   function startBreak() {
@@ -453,7 +594,7 @@ export function HomeScreen() {
         {me!.status === "break" && <p>On break</p>}
       </div>
 
-      {error && !pickerOpen && !rowPickerOpen && !endDayConfirmOpen && <p className="error-text">{error}</p>}
+      {error && !pickerOpen && !questionFlow && !endDayConfirmOpen && <p className="error-text">{error}</p>}
 
       {/* 3. Primary activity button */}
       {me!.status === "idle" && (
@@ -471,9 +612,9 @@ export function HomeScreen() {
           {me!.currentActivity.name}
         </button>
       )}
-      {me!.status === "work" && me!.currentActivity?.row && (
-        <button type="button" className="mobile-change-row" disabled={actionsLocked} onClick={openChangeRow}>
-          {me!.currentActivity.row.label} · Change
+      {me!.status === "work" && (me!.currentActivity?.row || me!.currentActivity?.carrier) && (
+        <button type="button" className="mobile-change-row" disabled={actionsLocked} onClick={openChangeJobDetails}>
+          {[me!.currentActivity?.row?.label, me!.currentActivity?.carrier?.name].filter(Boolean).join(" · ")} · Change
         </button>
       )}
       {me!.status === "break" && (
@@ -543,19 +684,58 @@ export function HomeScreen() {
         />
       )}
 
-      {rowPickerOpen && pendingRowActivity && (
-        <RowPickerSheet
-          activityName={pendingRowActivity.name}
-          questionLabel={activities.find((a) => a.id === pendingRowActivity.id)?.question?.label ?? "Where?"}
-          allowSkip={activities.find((a) => a.id === pendingRowActivity.id)?.question?.isRequired === false}
-          lands={rowLands}
-          error={error}
-          busy={busy}
-          onConfirm={confirmRow}
-          onSkip={skipRow}
-          onCancel={cancelRowPicker}
-        />
-      )}
+      {questionFlow &&
+        (() => {
+          const currentQuestion = questionFlow.questions[questionFlow.stepIndex];
+          const stepLabel =
+            questionFlow.questions.length > 1
+              ? `Step ${questionFlow.stepIndex + 1} of ${questionFlow.questions.length}`
+              : undefined;
+          const priorAnswer = questionFlow.answers[currentQuestion.id];
+          const onBack = questionFlow.stepIndex > 0 ? backQuestionStep : undefined;
+
+          if (currentQuestion.questionType === "greenhouse_row") {
+            const priorRowId = priorAnswer?.questionType === "greenhouse_row" ? priorAnswer.greenhouseRowId : null;
+            return (
+              <RowPickerSheet
+                activityName={questionFlow.activityName}
+                questionLabel={currentQuestion.label}
+                stepLabel={stepLabel}
+                allowSkip={!currentQuestion.isRequired}
+                initialSelectedRowId={priorRowId}
+                lands={rowLands}
+                error={error}
+                busy={busy}
+                onConfirm={(rowId) =>
+                  answerQuestionStep({ questionId: currentQuestion.id, questionType: "greenhouse_row", greenhouseRowId: rowId })
+                }
+                onSkip={skipQuestionStep}
+                onBack={onBack}
+                onCancel={cancelQuestionFlow}
+              />
+            );
+          }
+
+          const priorCarrierId = priorAnswer?.questionType === "carrier" ? priorAnswer.carrierId : null;
+          return (
+            <CarrierPickerSheet
+              activityName={questionFlow.activityName}
+              questionLabel={currentQuestion.label}
+              stepLabel={stepLabel}
+              allowSkip={!currentQuestion.isRequired}
+              initialSelectedCarrierId={priorCarrierId}
+              carriers={carriers}
+              error={error}
+              busy={busy}
+              onConfirm={(carrierId) =>
+                answerQuestionStep({ questionId: currentQuestion.id, questionType: "carrier", carrierId })
+              }
+              onSkip={skipQuestionStep}
+              onBack={onBack}
+              onCancel={cancelQuestionFlow}
+            />
+          );
+        })()}
 
       {endDayConfirmOpen && (
         <ConfirmEndDayModal

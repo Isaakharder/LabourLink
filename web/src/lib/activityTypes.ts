@@ -1,5 +1,43 @@
+export type QuestionType = "greenhouse_row" | "carrier";
+
+// Every question type this app currently supports, in the order offered to
+// an admin adding a new question — not hardcoded to one entry; a third type
+// added later just needs an entry here plus in the two label maps below.
+export const QUESTION_TYPES: QuestionType[] = ["greenhouse_row", "carrier"];
+
+// Human-readable type name — surfaced in the question type <select> and
+// wherever a question's type needs a label distinct from its own
+// (admin-editable) display label.
+export const QUESTION_TYPE_LABELS: Record<QuestionType, string> = {
+  greenhouse_row: "Greenhouse Row",
+  carrier: "Carrier",
+};
+
+// Seeded into a question's label the moment its type is chosen (on Add, or
+// on switching an existing row's type) — still a plain editable text field
+// after that, never locked to this value.
+export const QUESTION_TYPE_DEFAULT_LABEL: Record<QuestionType, string> = {
+  greenhouse_row: "Where?",
+  carrier: "Which Carrier?",
+};
+
 export interface ActivityQuestion {
-  type: "greenhouse_row";
+  id: string;
+  questionType: QuestionType;
+  label: string;
+  isRequired: boolean;
+  sortOrder: number;
+}
+
+// Client-side editing shape used by QuestionsEditor — `key` is a stable
+// React key that survives reordering (id is null for a not-yet-saved
+// question, so it can't serve as the key on its own); `id`/questionType/
+// label/isRequired map 1:1 to ActivityQuestion and to the server's
+// QuestionInput shape (server/src/routes/activities.ts).
+export interface ActivityQuestionDraft {
+  key: string;
+  id: string | null;
+  questionType: QuestionType;
   label: string;
   isRequired: boolean;
 }
@@ -13,15 +51,10 @@ export interface Activity {
   isActive: boolean;
   assignedGroupCount: number;
   updatedAt: string;
-  question: ActivityQuestion | null;
+  // Ordered by sortOrder — zero, one, or many. Replaces v1's single
+  // `question: ActivityQuestion | null` field.
+  questions: ActivityQuestion[];
 }
-
-// Only question type v1 supports — surfaced wherever a human-readable
-// question-type name is shown (Activities table summary, question config
-// modal). A second type, when it exists, gets its own label here too.
-export const QUESTION_TYPE_LABELS: Record<ActivityQuestion["type"], string> = {
-  greenhouse_row: "Greenhouse Row",
-};
 
 export interface ActivityGroupMember {
   id: string;

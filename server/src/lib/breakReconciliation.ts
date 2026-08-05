@@ -104,7 +104,7 @@ export async function reconcileEmployeeBreaks(employeeId: string, dateStr: strin
       // coverage (started mid-window, or ended before the window closed) is
       // deliberately not auto-added; see plan decision on partial coverage.
       const workRes = await client.query(
-        `select id, device_id, activity_id, started_at, ended_at, greenhouse_row_id
+        `select id, device_id, activity_id, started_at, ended_at, greenhouse_row_id, carrier_id
          from time_entries
          where employee_id = $1 and entry_type = 'work' and deleted_at is null
            and started_at <= $2 and (ended_at is null or ended_at >= $3)
@@ -141,18 +141,19 @@ export async function reconcileEmployeeBreaks(employeeId: string, dateStr: strin
         // Reopen/continue work after the break only if there's actually
         // time left to account for — an "after" row exactly at
         // scheduledEnd with nothing following would be zero-length. Carries
-        // the same greenhouse_row_id forward — the employee never actually
-        // moved, this is only an automatic break carve-out, so the "after"
-        // segment must stay attached to the same row the "before" segment
-        // was (which itself keeps its original row for free, since only
-        // ended_at is updated on it above).
+        // the same greenhouse_row_id and carrier_id forward — the employee
+        // never actually moved or changed carriers, this is only an
+        // automatic break carve-out, so the "after" segment must stay
+        // attached to the same row/carrier the "before" segment was (which
+        // itself keeps its originals for free, since only ended_at is
+        // updated on it above).
         if (!workEnd || workEnd.getTime() > scheduledEnd.getTime()) {
           await client.query(
             `insert into time_entries
                (employee_id, device_id, entry_type, activity_id, started_at, ended_at, idempotency_key,
-                greenhouse_row_id)
-             values ($1, $2, 'work', $3, $4, $5, $6, $7)`,
-            [employeeId, w.device_id, w.activity_id, scheduledEnd, workEnd, randomUUID(), w.greenhouse_row_id]
+                greenhouse_row_id, carrier_id)
+             values ($1, $2, 'work', $3, $4, $5, $6, $7, $8)`,
+            [employeeId, w.device_id, w.activity_id, scheduledEnd, workEnd, randomUUID(), w.greenhouse_row_id, w.carrier_id]
           );
         }
 

@@ -27,12 +27,14 @@ function rowTooltip(row: LiveRow, phaseName: string): string {
   if (row.state === "blue") {
     for (const e of row.employees) {
       const started = e.startedAt ? ` — started ${formatTimeInAppTimezone(e.startedAt)}` : "";
-      lines.push(`${e.firstName} ${e.lastName} · ${e.activityName ?? "Working"}${started}`);
+      const carrier = e.carrierName ? ` [${e.carrierName}]` : "";
+      lines.push(`${e.firstName} ${e.lastName} · ${e.activityName ?? "Working"}${carrier}${started}`);
     }
   } else if (row.state === "green") {
     for (const e of row.employees) {
       const ended = e.endedAt ? ` (completed ${formatTimeInAppTimezone(e.endedAt)})` : "";
-      lines.push(`${e.firstName} ${e.lastName} · ${e.activityName ?? "Completed"}${ended}`);
+      const carrier = e.carrierName ? ` [${e.carrierName}]` : "";
+      lines.push(`${e.firstName} ${e.lastName} · ${e.activityName ?? "Completed"}${carrier}${ended}`);
     }
   }
   return lines.join("\n");

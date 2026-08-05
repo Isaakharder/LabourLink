@@ -1,7 +1,8 @@
 import { FormEvent, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { api, ApiError } from "../../lib/api";
-import { Activity, QUESTION_TYPE_LABELS } from "../../lib/activityTypes";
+import { Activity, ActivityQuestionDraft } from "../../lib/activityTypes";
+import { QuestionsEditor, serializeQuestionDrafts, toQuestionDrafts } from "./QuestionsEditor";
 
 interface ActivityQuestionsModalProps {
   activity: Activity;
@@ -9,15 +10,14 @@ interface ActivityQuestionsModalProps {
   onSaved: () => void;
 }
 
-// v1 supports exactly one question, of exactly one type (Greenhouse Row) —
-// so this is a toggle + label + required checkbox, not a generic
-// form-builder. question_type is still a real field end-to-end (see
-// 014_activity_questions.sql), so a second type can be added here later
-// without a schema change.
+// The standalone "Activity Questions" button's editor — same ordered-list
+// UI (QuestionsEditor) as the create/edit modal's own Questions section,
+// just scoped to saving only the question list via PUT /:id/questions
+// rather than the whole activity. One editor component, two save paths;
+// see QuestionsEditor's own comment for why this isn't a second
+// implementation.
 export function ActivityQuestionsModal({ activity, onClose, onSaved }: ActivityQuestionsModalProps) {
-  const [enabled, setEnabled] = useState(activity.question !== null);
-  const [label, setLabel] = useState(activity.question?.label ?? "Where?");
-  const [isRequired, setIsRequired] = useState(activity.question?.isRequired ?? true);
+  const [questions, setQuestions] = useState<ActivityQuestionDraft[]>(() => toQuestionDrafts(activity.questions));
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -29,15 +29,11 @@ export function ActivityQuestionsModal({ activity, onClose, onSaved }: ActivityQ
     try {
       await api(`/api/activities/${activity.id}/questions`, {
         method: "PUT",
-        body: JSON.stringify({
-          enabled,
-          label: label.trim() || "Where?",
-          isRequired,
-        }),
+        body: JSON.stringify({ questions: serializeQuestionDrafts(questions) }),
       });
       onSaved();
     } catch (err) {
-      setSubmitError(err instanceof ApiError ? err.message : "Could not save this question");
+      setSubmitError(err instanceof ApiError ? err.message : "Could not save these questions");
       setSubmitting(false);
     }
   }
@@ -45,36 +41,9 @@ export function ActivityQuestionsModal({ activity, onClose, onSaved }: ActivityQ
   return (
     <Modal title={`Activity Questions — ${activity.name}`} onClose={onClose}>
       <form onSubmit={handleSubmit} className="employee-form" noValidate>
+        <QuestionsEditor questions={questions} onChange={setQuestions} />
+
         {submitError && <p className="error-text">{submitError}</p>}
-
-        <label className="employee-form-checkbox">
-          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-          Ask a question when this activity is selected
-        </label>
-
-        {enabled && (
-          <section className="employee-form-section">
-            <div className="employee-form-grid">
-              <label>
-                Question type
-                <input type="text" value={QUESTION_TYPE_LABELS.greenhouse_row} disabled />
-              </label>
-              <label>
-                Question label
-                <input
-                  type="text"
-                  value={label}
-                  onChange={(e) => setLabel(e.target.value)}
-                  placeholder="Where?"
-                />
-              </label>
-              <label className="employee-form-checkbox">
-                <input type="checkbox" checked={isRequired} onChange={(e) => setIsRequired(e.target.checked)} />
-                Required
-              </label>
-            </div>
-          </section>
-        )}
 
         <div className="employee-form-actions">
           <button type="button" onClick={onClose} disabled={submitting}>

@@ -25,6 +25,11 @@ export interface RunSegment {
   // two segments on different rows would get silently merged into one
   // displayed run.
   greenhouse_row_id: string | null;
+  // Carrier this segment is attached to, if any (see 019_carriers.sql) —
+  // same "changing it produces a new time_entries row" property as
+  // greenhouse_row_id above, and for the same reason must also break run
+  // contiguity.
+  carrier_id: string | null;
 }
 
 export interface ActivityRun {
@@ -39,6 +44,9 @@ export interface ActivityRun {
   // Single, unambiguous value for the whole run — the contiguity check
   // below guarantees a run can never internally span two different rows.
   greenhouseRowId: string | null;
+  // Same "single, unambiguous value" guarantee as greenhouseRowId, for
+  // carrier.
+  carrierId: string | null;
 }
 
 export interface BreakSegment {
@@ -69,7 +77,8 @@ export function groupIntoActivityRuns(entries: RunSegment[]): {
       lastEndedAt !== null &&
       e.started_at.getTime() === lastEndedAt &&
       e.activity_id === current.activityId &&
-      e.greenhouse_row_id === current.greenhouseRowId;
+      e.greenhouse_row_id === current.greenhouseRowId &&
+      e.carrier_id === current.carrierId;
 
     if (contiguous && current) {
       current.id = e.id;
@@ -89,6 +98,7 @@ export function groupIntoActivityRuns(entries: RunSegment[]): {
         isOpen: e.ended_at === null,
         segmentIds: [e.id],
         greenhouseRowId: e.greenhouse_row_id,
+        carrierId: e.carrier_id,
       };
       runs.push(current);
     }

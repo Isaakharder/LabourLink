@@ -1,11 +1,15 @@
 import { useEffect } from "react";
+import { ActivityQuestion } from "../../lib/activityQuestionTypes";
 
 export interface PickerActivity {
   id: string;
   name: string;
   normalSpeed: number | null;
   speedUnit: string | null;
-  question: { type: "greenhouse_row"; label: string; isRequired: boolean } | null;
+  // Ordered — zero, one, or many. An activity with an empty list starts
+  // immediately (see HomeScreen's chooseActivity); any non-empty list opens
+  // the multi-question flow, even if it's only one question long.
+  questions: ActivityQuestion[];
 }
 
 interface ActivityPickerProps {

@@ -73,11 +73,13 @@ export function buildLiveLandQuery(params: LiveStateParams): { sql: string; valu
       left join lateral (
         select json_agg(json_build_object(
           'id', e.id, 'firstName', e.first_name, 'lastName', e.last_name,
-          'activityName', a.name, 'startedAt', te.started_at
+          'activityName', a.name, 'startedAt', te.started_at,
+          'carrierName', c.name
         )) as employees
         from time_entries te
         join employees e on e.id = te.employee_id
         join activities a on a.id = te.activity_id
+        left join carriers c on c.id = te.carrier_id
         where te.greenhouse_row_id = gr.id and te.entry_type = 'work' and te.deleted_at is null
           and te.ended_at is null and te.started_at < $2
           ${activityFilter}
@@ -88,14 +90,16 @@ export function buildLiveLandQuery(params: LiveStateParams): { sql: string; valu
       left join lateral (
         select json_agg(json_build_object(
           'id', x.employee_id, 'firstName', x.first_name, 'lastName', x.last_name,
-          'activityName', x.activity_name, 'endedAt', x.ended_at
+          'activityName', x.activity_name, 'endedAt', x.ended_at,
+          'carrierName', x.carrier_name
         )) as employees
         from (
           select distinct on (te.employee_id)
-            te.employee_id, e.first_name, e.last_name, a.name as activity_name, te.ended_at
+            te.employee_id, e.first_name, e.last_name, a.name as activity_name, te.ended_at, c.name as carrier_name
           from time_entries te
           join employees e on e.id = te.employee_id
           join activities a on a.id = te.activity_id
+          left join carriers c on c.id = te.carrier_id
           where te.greenhouse_row_id = gr.id and te.entry_type = 'work' and te.deleted_at is null
             and te.ended_at is not null and te.started_at >= $1 and te.started_at < $2
             ${activityFilter}

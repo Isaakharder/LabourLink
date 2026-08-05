@@ -6,6 +6,7 @@ export interface RecentJob {
   endedAt: string;
   durationSeconds: number;
   row: { label: string } | null;
+  carrier: { label: string } | null;
 }
 
 interface RecentJobsCardProps {
@@ -35,6 +36,7 @@ export function RecentJobsCard({ jobs }: RecentJobsCardProps) {
             <li key={job.id} className="recent-jobs-item">
               <span className="recent-jobs-item-name">{job.name}</span>
               {job.row && <span className="recent-jobs-item-row">{job.row.label}</span>}
+              {job.carrier && <span className="recent-jobs-item-row">{job.carrier.label}</span>}
               <span className="recent-jobs-item-meta">
                 {formatTime(job.startedAt)} – {formatTime(job.endedAt)} · {formatDuration(job.durationSeconds)}
               </span>

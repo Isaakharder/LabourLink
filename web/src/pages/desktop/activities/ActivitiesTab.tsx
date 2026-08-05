@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../../../lib/api";
-import { Activity, QUESTION_TYPE_LABELS } from "../../../lib/activityTypes";
+import { Activity } from "../../../lib/activityTypes";
 import { useAuth } from "../../../context/AuthContext";
 import { ActivityFormModal } from "../../../components/activities/ActivityFormModal";
 import { ActivityQuestionsModal } from "../../../components/activities/ActivityQuestionsModal";
@@ -13,10 +13,22 @@ function formatSpeed(activity: Activity): string {
   return activity.speedUnit ? `${speed} ${activity.speedUnit}` : String(speed);
 }
 
+// Compact, ordered summary — "Where? → Which Carrier? · Both required" for
+// a uniform list, per-question "Where? · Required → Which Carrier? ·
+// Optional" once required-ness differs between them. A single question
+// collapses to "Where? · Required" (no arrow, nothing to chain).
 function formatQuestion(activity: Activity): string {
-  if (!activity.question) return "No questions";
-  const { label, type, isRequired } = activity.question;
-  return `${label} · ${QUESTION_TYPE_LABELS[type]}${isRequired ? " · Required" : ""}`;
+  const qs = activity.questions;
+  if (qs.length === 0) return "No questions";
+  const chain = qs.map((q) => q.label).join(" → ");
+  if (qs.length === 1) {
+    return `${chain} · ${qs[0].isRequired ? "Required" : "Optional"}`;
+  }
+  const allRequired = qs.every((q) => q.isRequired);
+  const allOptional = qs.every((q) => !q.isRequired);
+  if (allRequired) return `${chain} · ${qs.length === 2 ? "Both required" : "All required"}`;
+  if (allOptional) return `${chain} · ${qs.length === 2 ? "Both optional" : "All optional"}`;
+  return qs.map((q) => `${q.label} · ${q.isRequired ? "Required" : "Optional"}`).join(" → ");
 }
 
 export function ActivitiesTab() {

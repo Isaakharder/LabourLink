@@ -12,6 +12,8 @@ export interface LiveEmployee {
   // Present when this is the employee's most recent completed segment on
   // the row for the viewed date (green state).
   endedAt?: string;
+  // Present when the activity's carrier question was answered for this segment.
+  carrierName?: string;
 }
 
 export type LiveRowState = "blue" | "green" | "neutral";

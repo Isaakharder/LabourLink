@@ -17,6 +17,7 @@ export interface ActivityRunDto {
   isOpen: boolean;
   canEdit: boolean;
   row: { id: string; label: string } | null;
+  carrier: { id: string; name: string } | null;
 }
 
 export interface BreakDto {

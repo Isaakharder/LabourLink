@@ -1,7 +1,8 @@
 import { FormEvent, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { api, ApiError } from "../../lib/api";
-import { Activity, SPEED_UNIT_SUGGESTIONS } from "../../lib/activityTypes";
+import { Activity, ActivityQuestionDraft, SPEED_UNIT_SUGGESTIONS } from "../../lib/activityTypes";
+import { QuestionsEditor, serializeQuestionDrafts, toQuestionDrafts } from "./QuestionsEditor";
 
 interface ActivityFormModalProps {
   activity: Activity | null; // null = create mode
@@ -30,6 +31,7 @@ function toFormState(activity: Activity | null): FormState {
 export function ActivityFormModal({ activity, onClose, onSaved }: ActivityFormModalProps) {
   const isEdit = Boolean(activity);
   const [form, setForm] = useState<FormState>(() => toFormState(activity));
+  const [questions, setQuestions] = useState<ActivityQuestionDraft[]>(() => toQuestionDrafts(activity?.questions ?? []));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -67,6 +69,12 @@ export function ActivityFormModal({ activity, onClose, onSaved }: ActivityFormMo
         speedUnit: form.speedUnit.trim() || null,
         minimumDurationMinutes: Number(form.minimumDurationMinutes),
         isActive: form.isActive,
+        // Sent as a complete list every save (create or edit), including
+        // when empty — the server treats an empty array as "no questions,"
+        // distinct from the field being absent (see PATCH /api/activities/
+        // :id, which leaves the question list untouched if omitted
+        // entirely; this modal always has an opinion, so it's always sent).
+        questions: serializeQuestionDrafts(questions),
       };
 
       if (isEdit) {
@@ -146,6 +154,8 @@ export function ActivityFormModal({ activity, onClose, onSaved }: ActivityFormMo
             </label>
           </div>
         </section>
+
+        <QuestionsEditor questions={questions} onChange={setQuestions} error={errors.questions} />
 
         <div className="employee-form-actions">
           <button type="button" onClick={onClose} disabled={submitting}>
