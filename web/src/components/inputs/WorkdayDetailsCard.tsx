@@ -20,6 +20,18 @@ interface WorkdayDetailsCardProps {
   onSaveEditBreak: () => void;
   onCancelEditBreak: () => void;
   onDeleteBreak: (brk: BreakDto) => void;
+  // Work start time editing is a single click-to-edit cell (no separate
+  // "select, then click again to edit" step like the break rows below) —
+  // there's no delete action or other row state that a select step would
+  // otherwise be gating, so the row and its time cell both open the editor
+  // directly. Only ever editable when workStartTime is non-null: an empty
+  // day (no work entry to correct) renders "—" and stays non-interactive.
+  editingWorkStart: boolean;
+  editWorkStartTimeValue: string;
+  onStartEditWorkStart: () => void;
+  onEditWorkStartTimeChange: (value: string) => void;
+  onSaveEditWorkStart: () => void;
+  onCancelEditWorkStart: () => void;
 }
 
 export function WorkdayDetailsCard({
@@ -36,7 +48,16 @@ export function WorkdayDetailsCard({
   onSaveEditBreak,
   onCancelEditBreak,
   onDeleteBreak,
+  editingWorkStart,
+  editWorkStartTimeValue,
+  onStartEditWorkStart,
+  onEditWorkStartTimeChange,
+  onSaveEditWorkStart,
+  onCancelEditWorkStart,
 }: WorkdayDetailsCardProps) {
+  function handleWorkStartClick() {
+    if (workStartTime && !editingWorkStart) onStartEditWorkStart();
+  }
   function handleTimeCellClick(brk: BreakDto, field: "start" | "end", isSelected: boolean) {
     const alreadyEditingThisCell = editingBreak?.id === brk.id && editingBreak.field === field;
     if (isSelected && brk.canEdit && !alreadyEditingThisCell && (field === "start" || brk.endedAt)) {
@@ -61,16 +82,51 @@ export function WorkdayDetailsCard({
           </tr>
         </thead>
         <tbody>
-          {workStartTime && (
-            <tr className="inputs-workday-readonly-row">
-              <td>Work start time</td>
-              <td>{formatTimeInAppTimezone(workStartTime)}</td>
-              <td>—</td>
-              <td>—</td>
-              <td>—</td>
-              <td></td>
-            </tr>
-          )}
+          <tr
+            className={`inputs-break-row${!workStartTime ? " inputs-break-row-disabled" : ""}${
+              editingWorkStart ? " inputs-break-row-selected" : ""
+            }`}
+            onClick={handleWorkStartClick}
+          >
+            <td>Work start time</td>
+            <td
+              className={`inputs-time-cell${workStartTime ? " inputs-time-cell-editable" : ""}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleWorkStartClick();
+              }}
+            >
+              {editingWorkStart ? (
+                <div className="inputs-time-editor" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    type="time"
+                    step={1}
+                    value={editWorkStartTimeValue}
+                    onChange={(e) => onEditWorkStartTimeChange(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") onSaveEditWorkStart();
+                      if (e.key === "Escape") onCancelEditWorkStart();
+                    }}
+                    autoFocus
+                  />
+                  <button type="button" onClick={onSaveEditWorkStart}>
+                    Save
+                  </button>
+                  <button type="button" onClick={onCancelEditWorkStart}>
+                    Cancel
+                  </button>
+                </div>
+              ) : workStartTime ? (
+                formatTimeInAppTimezone(workStartTime)
+              ) : (
+                "—"
+              )}
+            </td>
+            <td>—</td>
+            <td>—</td>
+            <td>—</td>
+            <td></td>
+          </tr>
           {breaks.map((b) => {
             const durationDisplay = b.endedAt ? formatDurationHMS(b.durationSeconds) : "In progress";
             const isSelected = b.id === selectedBreakId;
@@ -171,13 +227,6 @@ export function WorkdayDetailsCard({
               </tr>
             );
           })}
-          {!workStartTime && breaks.length === 0 && (
-            <tr>
-              <td colSpan={6} className="placeholder-page">
-                No work start time or breaks recorded for this day.
-              </td>
-            </tr>
-          )}
         </tbody>
         {breaks.length > 0 && (
           <tfoot>

@@ -13,6 +13,16 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const EDIT_ROLES = ["Administrator", "Manager", "Supervisor"];
 
+// Corrections (end-time, break start/end, work-start below) no longer
+// collect a typed reason from the caller — the Inputs page's "Reason for
+// correction" modal was removed. The audit trail requirement (schema and
+// downstream reporting both still expect a non-empty reason on every
+// time_entry_corrections row) is preserved by always writing this fixed,
+// server-generated string instead of trusting client-supplied text.
+// Deletions are a separate, unrelated flow (POST .../delete below) and
+// still require and store a real typed reason.
+const AUTO_CORRECTION_REASON = "Time corrected from Inputs page";
+
 function trimOrNull(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const t = v.trim();
@@ -232,6 +242,132 @@ router.get(
 );
 
 router.patch(
+  "/work-start",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const { employeeId, date, newStartTime } = req.body as {
+      employeeId?: string;
+      date?: string;
+      newStartTime?: string;
+    };
+    if (!employeeId || !UUID_RE.test(employeeId)) {
+      return res.status(400).json({ error: "A valid employeeId is required" });
+    }
+    if (!isValidDate(date)) {
+      return res.status(400).json({ error: "A valid date (YYYY-MM-DD) is required" });
+    }
+    if (!newStartTime || isNaN(Date.parse(newStartTime))) {
+      return res.status(400).json({ error: "A valid newStartTime is required" });
+    }
+    const newStart = new Date(newStartTime);
+
+    if (calendarDateInAppTimezone(newStart) !== date) {
+      return res.status(422).json({ error: "The corrected start time must be on the selected date" });
+    }
+
+    const { start, end } = getDayBoundsUtc(date);
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+
+      // Server-derived, never a client-supplied entry id: "Work start time"
+      // means the start of the employee's earliest non-deleted work entry
+      // for the selected day, re-found and locked here the same way GET
+      // /daily itself would identify it — the request only ever carries
+      // employeeId/date/newStartTime.
+      const targetRes = await client.query(
+        `select id, employee_id, started_at, ended_at from time_entries
+         where employee_id = $1 and entry_type = 'work' and deleted_at is null
+           and started_at >= $2 and started_at < $3
+         order by started_at asc
+         limit 1
+         for update`,
+        [employeeId, start, end]
+      );
+      const target = targetRes.rows[0];
+      if (!target) {
+        await client.query("rollback");
+        return res.status(404).json({ error: "No work entry found for this employee on this date" });
+      }
+
+      const oldStart = new Date(target.started_at);
+      if (newStart.getTime() === oldStart.getTime()) {
+        // No-op: nothing changed, nothing to validate further or audit.
+        await client.query("commit");
+        return res.json({ ok: true });
+      }
+
+      const targetEndedAt = target.ended_at !== null ? new Date(target.ended_at) : null;
+      if (targetEndedAt && newStart.getTime() >= targetEndedAt.getTime()) {
+        await client.query("rollback");
+        return res.status(422).json({ error: "Start time must be before the activity's end time" });
+      }
+      // The entry is still open (in progress) — there's no ended_at to
+      // bound the correction against above, but pushing its started_at
+      // into the future would still corrupt it: an in-progress entry whose
+      // clock hasn't started yet breaks its own live timer and every
+      // duration computed from it. Same protection the break correction
+      // route above already applies to a still-open following entry.
+      if (!targetEndedAt && newStart.getTime() > Date.now()) {
+        await client.query("rollback");
+        return res
+          .status(422)
+          .json({ error: "Start time cannot be in the future while the activity is still in progress" });
+      }
+
+      // No overlap with any other entry (work or break) for this employee.
+      // target is by construction the earliest entry of the selected day,
+      // so in a well-formed timeline the only entry that could realistically
+      // overlap the new, earlier window is a preceding one from just before
+      // it — but this checks the target's whole [newStart, end-or-now)
+      // window generically, the same defensive "safety net beyond the
+      // specific case" the break correction route above also keeps.
+      // Deliberately does NOT touch or even look at any entry *after*
+      // target — moving the first entry's start must never move or modify
+      // whatever follows it.
+      const overlap = await client.query(
+        `select id from time_entries
+         where employee_id = $1 and deleted_at is null and id <> $2
+           and started_at < coalesce((select ended_at from time_entries where id = $2), now())
+           and (ended_at is null or ended_at > $3)
+         limit 1`,
+        [employeeId, target.id, newStart]
+      );
+      if (overlap.rows[0]) {
+        await client.query("rollback");
+        return res.status(409).json({ error: "Corrected start time overlaps a previous entry" });
+      }
+
+      await client.query("update time_entries set started_at = $1 where id = $2", [newStart, target.id]);
+      await client.query(
+        `insert into time_entry_corrections
+           (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+         values ($1, $2, $3, 'started_at', $4, $5, $6)`,
+        [
+          target.id,
+          target.employee_id,
+          req.employee!.id,
+          oldStart.toISOString(),
+          newStart.toISOString(),
+          AUTO_CORRECTION_REASON,
+        ]
+      );
+
+      await client.query("commit");
+    } catch (err) {
+      await client.query("rollback");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    res.json({ ok: true });
+  })
+);
+
+router.patch(
   "/activity-runs/:id/end-time",
   requireAuth,
   requireRole(...EDIT_ROLES),
@@ -239,11 +375,7 @@ router.patch(
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid activity run id" });
 
-    const { endTime, reason } = req.body as { endTime?: string; reason?: string };
-    const trimmedReason = typeof reason === "string" ? reason.trim() : "";
-    if (trimmedReason.length < 3) {
-      return res.status(400).json({ error: "A correction reason of at least 3 characters is required" });
-    }
+    const { endTime } = req.body as { endTime?: string };
     if (!endTime || isNaN(Date.parse(endTime))) {
       return res.status(400).json({ error: "A valid endTime is required" });
     }
@@ -317,7 +449,7 @@ router.patch(
         `insert into time_entry_corrections
            (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
          values ($1, $2, $3, 'ended_at', $4, $5, $6)`,
-        [id, target.employee_id, req.employee!.id, targetEndedAt.toISOString(), newEndedAt.toISOString(), trimmedReason]
+        [id, target.employee_id, req.employee!.id, targetEndedAt.toISOString(), newEndedAt.toISOString(), AUTO_CORRECTION_REASON]
       );
 
       await client.query("commit");
@@ -450,11 +582,7 @@ router.patch(
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid break id" });
 
-    const { startTime, endTime, reason } = req.body as { startTime?: string; endTime?: string; reason?: string };
-    const trimmedReason = typeof reason === "string" ? reason.trim() : "";
-    if (trimmedReason.length < 3) {
-      return res.status(400).json({ error: "A correction reason of at least 3 characters is required" });
-    }
+    const { startTime, endTime } = req.body as { startTime?: string; endTime?: string };
     if (startTime === undefined && endTime === undefined) {
       return res.status(400).json({ error: "startTime and/or endTime is required" });
     }
@@ -649,7 +777,7 @@ router.patch(
           `insert into time_entry_corrections
              (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
            values ($1, $2, $3, $4, $5, $6, $7)`,
-          [entryId, target.employee_id, req.employee!.id, field, oldVal.toISOString(), newVal.toISOString(), trimmedReason]
+          [entryId, target.employee_id, req.employee!.id, field, oldVal.toISOString(), newVal.toISOString(), AUTO_CORRECTION_REASON]
         );
 
       if (newStart.getTime() !== oldStart.getTime()) {

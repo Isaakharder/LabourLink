@@ -1,34 +1,38 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { DateNav } from "../../components/inputs/DateNav";
 import { EmployeeListPanel } from "../../components/inputs/EmployeeListPanel";
 import { ActivityLogsCard } from "../../components/inputs/ActivityLogsCard";
 import { WorkdayDetailsCard, EditingBreakField } from "../../components/inputs/WorkdayDetailsCard";
-import { TimeCorrectionModal } from "../../components/inputs/TimeCorrectionModal";
 import { DeleteTimeEntryModal } from "../../components/inputs/DeleteTimeEntryModal";
 import { api, ApiError } from "../../lib/api";
 import { useAuth } from "../../context/AuthContext";
 import { ActivityRunDto, BreakDto, DailyInputsResponse, InputsEmployee } from "../../lib/inputsTypes";
 import {
+  APP_TIMEZONE,
   combineDateAndTimeToUtcIso,
-  formatTimeInAppTimezone,
   todayInAppTimezone,
   toTimeInputValue,
 } from "../../lib/timezone";
 
-// Covers all three correctable timestamps this page supports — an activity
-// run's end time, and a break's start or end time — through the one
-// TimeCorrectionModal, rather than a separate pending-state shape (and
-// separate modal) per field.
-interface PendingCorrection {
-  kind: "run-end" | "break-start" | "break-end";
-  id: string;
-  subjectLabel: string;
-  fieldLabel: string;
-  oldDisplay: string;
-  newDisplay: string;
-  payload: { startTime?: string; endTime?: string };
+// Background refresh cadence for the selected employee/day while the page
+// is open — reconciles with server truth without a manual reload. Kept in
+// sync with GreenhouseDisplayPage's POLL_INTERVAL_MS for the same cadence
+// convention elsewhere in the app; the two aren't shared because they poll
+// unrelated endpoints for unrelated reasons.
+const POLL_INTERVAL_MS = 10000;
+
+// "12:56 PM" — a client-clock event (when this browser last successfully
+// fetched), not a server timestamp, so it's formatted directly rather than
+// through formatTimeInAppTimezone (which converts a server ISO instant).
+function formatClockTime(d: Date): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: APP_TIMEZONE,
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(d);
 }
 
 interface PendingDeletion {
@@ -61,13 +65,60 @@ export function InputsPage() {
   const [editingBreak, setEditingBreak] = useState<EditingBreakField | null>(null);
   const [editBreakTimeValue, setEditBreakTimeValue] = useState("");
 
-  const [pendingCorrection, setPendingCorrection] = useState<PendingCorrection | null>(null);
-  const [correctionSubmitting, setCorrectionSubmitting] = useState(false);
-  const [correctionError, setCorrectionError] = useState<string | null>(null);
+  const [editingWorkStart, setEditingWorkStart] = useState(false);
+  const [editWorkStartTimeValue, setEditWorkStartTimeValue] = useState("");
+
+  // Corrections (end time, break start/end, work start) now save directly
+  // on Save/Enter — no reason prompt, no confirmation modal (see the
+  // removed TimeCorrectionModal). This just covers the brief window a
+  // direct save's own request is in flight, for the pause-gate effect
+  // below; per-field errors surface through the page's existing `error`
+  // banner rather than a modal-local one.
+  const [actionInFlight, setActionInFlight] = useState(false);
 
   const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion | null>(null);
   const [deletionSubmitting, setDeletionSubmitting] = useState(false);
   const [deletionError, setDeletionError] = useState<string | null>(null);
+
+  // Background live-refresh state — distinct from `error`/`daily` above,
+  // which are only ever touched by a foreground (initial/employee/date)
+  // load so a failed background poll can never blank an already-loaded
+  // page or show the big error banner (see loadDaily's `background` branch).
+  const [refreshing, setRefreshing] = useState(false);
+  const [stale, setStale] = useState(false);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
+
+  // Read by the interval/visibility/focus/online handlers below, of "is the
+  // employee mid-edit or mid-submit right now" — a ref rather than a
+  // dependency those effects re-subscribe on, so the 10s interval timer
+  // itself doesn't reset every keystroke while still always seeing the
+  // current value at the moment it fires. Synced, and used to trigger an
+  // immediate resume-refresh on the falling edge, in the effect just below
+  // loadDaily's own declaration (it needs to call loadDaily on that edge).
+  const pausedRef = useRef(false);
+
+  // Race protection (requirement 8): every loadDaily call aborts whatever
+  // it superseded and stamps a new sequence number; a response only gets
+  // applied if it's still the most recent request in flight when it
+  // resolves. Covers fast employee/date switches and overlapping triggers
+  // (poll tick + focus + correction success, etc.) landing out of order.
+  const requestSeqRef = useRef(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    // Reset (not just initialize via useRef's default) on every effect run,
+    // not only the cleanup below — React.StrictMode's dev-only double-invoke
+    // simulates an unmount+remount on first mount, running this cleanup once
+    // before the "real" mount. Without re-arming it here, isMountedRef would
+    // latch permanently false after that simulated cycle and every future
+    // loadDaily response would be silently discarded as "unmounted" even
+    // though the component is genuinely still on screen.
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      abortControllerRef.current?.abort();
+    };
+  }, []);
 
   function updateParams(next: { date?: string; employee?: string }) {
     const params = new URLSearchParams(searchParams);
@@ -106,28 +157,101 @@ export function InputsPage() {
     updateParams({ employee: (signedIn ?? employees[0]).id, date });
   }, [employees, selectedEmployeeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const loadDaily = useCallback(() => {
-    if (!selectedEmployeeId) return Promise.resolve();
-    return api<DailyInputsResponse>(
-      `/api/inputs/daily?employeeId=${encodeURIComponent(selectedEmployeeId)}&date=${encodeURIComponent(date)}`
-    )
-      .then((res) => {
-        setDaily(res);
-        setError(null);
-        // Server truth just replaced everything derived — never keep a
-        // selection or in-flight edit pointed at a row that may have moved,
-        // merged, or disappeared as a result of the change that triggered
-        // this reload.
-        setSelectedRunId(null);
-        setEditingRunId(null);
-        setSelectedBreakId(null);
-        setEditingBreak(null);
-      })
-      .catch((err) => {
-        setDaily(null);
-        setError(err instanceof ApiError ? err.message : "Could not load activity logs");
-      });
-  }, [selectedEmployeeId, date]);
+  // `background: true` marks a poll/visibility/focus/online-triggered
+  // refresh — every other caller (initial/employee/date load, and the
+  // post-correction/post-deletion reloads) is a real navigation/mutation
+  // and keeps the original "reset every selection, show the big error
+  // banner on failure" behavior. A background refresh instead: never shows
+  // the error banner or blanks `daily` on failure (just flags `stale`), and
+  // only clears a selected (not actively-edited — see pausedRef, which
+  // already keeps a background call from ever running while one is open)
+  // run/break if that same row no longer exists in the new response,
+  // rather than unconditionally clearing every selection.
+  const loadDaily = useCallback(
+    (opts: { background?: boolean } = {}) => {
+      if (!selectedEmployeeId) return Promise.resolve();
+      const background = opts.background ?? false;
+
+      abortControllerRef.current?.abort();
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      const requestId = ++requestSeqRef.current;
+      const isCurrent = () => isMountedRef.current && requestId === requestSeqRef.current;
+
+      if (background) setRefreshing(true);
+
+      return api<DailyInputsResponse>(
+        `/api/inputs/daily?employeeId=${encodeURIComponent(selectedEmployeeId)}&date=${encodeURIComponent(date)}`,
+        { signal: controller.signal }
+      )
+        .then((res) => {
+          if (!isCurrent()) return;
+          setDaily(res);
+          setError(null);
+          setStale(false);
+          setLastUpdatedAt(new Date());
+          if (background) {
+            setSelectedRunId((prev) => (prev && res.runs.some((r) => r.id === prev) ? prev : null));
+            setSelectedBreakId((prev) => (prev && res.breaks.some((b) => b.id === prev) ? prev : null));
+          } else {
+            // Server truth just replaced everything derived — never keep a
+            // selection or in-flight edit pointed at a row that may have
+            // moved, merged, or disappeared as a result of the change that
+            // triggered this reload.
+            setSelectedRunId(null);
+            setEditingRunId(null);
+            setSelectedBreakId(null);
+            setEditingBreak(null);
+            setEditingWorkStart(false);
+          }
+        })
+        .catch((err) => {
+          if (!isCurrent()) return;
+          if (err instanceof DOMException && err.name === "AbortError") return;
+          if (background) {
+            setStale(true);
+          } else {
+            setDaily(null);
+            setError(err instanceof ApiError ? err.message : "Could not load activity logs");
+          }
+        })
+        .finally(() => {
+          if (isCurrent()) setRefreshing(false);
+        });
+    },
+    [selectedEmployeeId, date]
+  );
+
+  // Keeps pausedRef current every render, and fires one immediate
+  // background refresh on the falling edge (was paused, now isn't) — the
+  // moment an edit is cancelled/saved or a modal closes, rather than
+  // waiting up to POLL_INTERVAL_MS for the next natural trigger. A
+  // successful direct save already triggers its own explicit reload in the
+  // handler that made it, so this mainly covers a plain Cancel out of an
+  // edit (or a save that failed validation, which never reaches its own
+  // reload).
+  useEffect(() => {
+    const nowPaused =
+      editingRunId !== null ||
+      editingBreak !== null ||
+      editingWorkStart ||
+      actionInFlight ||
+      pendingDeletion !== null ||
+      deletionSubmitting;
+    const wasPaused = pausedRef.current;
+    pausedRef.current = nowPaused;
+    if (wasPaused && !nowPaused) {
+      loadDaily({ background: true });
+    }
+  }, [
+    editingRunId,
+    editingBreak,
+    editingWorkStart,
+    actionInFlight,
+    pendingDeletion,
+    deletionSubmitting,
+    loadDaily,
+  ]);
 
   useEffect(() => {
     // A fresh load triggered by an employee/date navigation change (this
@@ -137,6 +261,42 @@ export function InputsPage() {
     setSuccessMessage(null);
     loadDaily();
   }, [loadDaily]);
+
+  // Requirement 2's remaining "refresh immediately" triggers: tab becomes
+  // visible, window regains focus, network reconnects. The employee/date
+  // triggers are already covered by the effect above (loadDaily's own
+  // deps), and the correction/deletion triggers by their own handlers
+  // calling loadDaily() directly. Each background tick is skipped while
+  // pausedRef is set — never interrupts an active edit or open modal — and
+  // resumes on its own on the very next interval/visibility/focus/online
+  // event once that clears, with no separate "resume" call needed.
+  useEffect(() => {
+    if (!selectedEmployeeId) return;
+
+    function backgroundRefresh() {
+      if (pausedRef.current) return;
+      loadDaily({ background: true });
+    }
+    function handleVisibility() {
+      if (document.visibilityState === "visible") backgroundRefresh();
+    }
+    function handleOffline() {
+      setStale(true);
+    }
+
+    const interval = window.setInterval(backgroundRefresh, POLL_INTERVAL_MS);
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("focus", backgroundRefresh);
+    window.addEventListener("online", backgroundRefresh);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("focus", backgroundRefresh);
+      window.removeEventListener("online", backgroundRefresh);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, [selectedEmployeeId, loadDaily]);
 
   function handleSelectRun(id: string) {
     setSelectedRunId(id);
@@ -153,22 +313,26 @@ export function InputsPage() {
     setEditingRunId(null);
   }
 
-  function handleSaveEdit() {
+  async function handleSaveEdit() {
     if (!editingRunId || !daily || !editTimeValue) return;
     const run = daily.runs.find((r) => r.id === editingRunId);
     if (!run) return;
     const newEndTimeIso = combineDateAndTimeToUtcIso(date, editTimeValue);
     setEditingRunId(null);
-    setCorrectionError(null);
-    setPendingCorrection({
-      kind: "run-end",
-      id: run.id,
-      subjectLabel: run.activityName,
-      fieldLabel: "End Time",
-      oldDisplay: run.endedAt ? formatTimeInAppTimezone(run.endedAt) : "—",
-      newDisplay: formatTimeInAppTimezone(newEndTimeIso),
-      payload: { endTime: newEndTimeIso },
-    });
+    setActionInFlight(true);
+    setError(null);
+    try {
+      await api(`/api/inputs/activity-runs/${run.id}/end-time`, {
+        method: "PATCH",
+        body: JSON.stringify({ endTime: newEndTimeIso }),
+      });
+      await loadDaily();
+      setSuccessMessage("End time updated.");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not save the correction");
+    } finally {
+      setActionInFlight(false);
+    }
   }
 
   function handleSelectBreak(id: string) {
@@ -187,57 +351,61 @@ export function InputsPage() {
     setEditingBreak(null);
   }
 
-  function handleSaveEditBreak() {
+  async function handleSaveEditBreak() {
     if (!editingBreak || !daily || !editBreakTimeValue) return;
     const brk = daily.breaks.find((b) => b.id === editingBreak.id);
     if (!brk) return;
     const { field } = editingBreak;
     const newTimeIso = combineDateAndTimeToUtcIso(date, editBreakTimeValue);
     setEditingBreak(null);
-    setCorrectionError(null);
-    setPendingCorrection({
-      kind: field === "start" ? "break-start" : "break-end",
-      id: brk.id,
-      subjectLabel: brk.name ?? "Break",
-      fieldLabel: field === "start" ? "Start Time" : "End Time",
-      oldDisplay:
-        field === "start"
-          ? formatTimeInAppTimezone(brk.startedAt)
-          : brk.endedAt
-          ? formatTimeInAppTimezone(brk.endedAt)
-          : "—",
-      newDisplay: formatTimeInAppTimezone(newTimeIso),
-      payload: field === "start" ? { startTime: newTimeIso } : { endTime: newTimeIso },
-    });
-  }
-
-  async function handleConfirmCorrection(reason: string) {
-    if (!pendingCorrection) return;
-    setCorrectionSubmitting(true);
-    setCorrectionError(null);
+    setActionInFlight(true);
+    setError(null);
     try {
-      const path =
-        pendingCorrection.kind === "run-end"
-          ? `/api/inputs/activity-runs/${pendingCorrection.id}/end-time`
-          : `/api/inputs/breaks/${pendingCorrection.id}`;
-      await api(path, {
+      await api(`/api/inputs/breaks/${brk.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ ...pendingCorrection.payload, reason }),
+        body: JSON.stringify(field === "start" ? { startTime: newTimeIso } : { endTime: newTimeIso }),
       });
-      setPendingCorrection(null);
       await loadDaily();
-      setSuccessMessage("Correction saved.");
+      setSuccessMessage("Break updated.");
     } catch (err) {
-      setCorrectionError(err instanceof ApiError ? err.message : "Could not save correction");
+      setError(err instanceof ApiError ? err.message : "Could not save the correction");
     } finally {
-      setCorrectionSubmitting(false);
+      setActionInFlight(false);
     }
   }
 
-  function handleCancelCorrection() {
-    if (correctionSubmitting) return;
-    setPendingCorrection(null);
-    setCorrectionError(null);
+  function handleStartEditWorkStart() {
+    if (!daily || !daily.workStartTime || !daily.canEdit) return;
+    setEditingWorkStart(true);
+    setEditWorkStartTimeValue(toTimeInputValue(daily.workStartTime));
+  }
+
+  function handleCancelEditWorkStart() {
+    setEditingWorkStart(false);
+  }
+
+  async function handleSaveEditWorkStart() {
+    if (!editingWorkStart || !daily || !editWorkStartTimeValue || !selectedEmployeeId) return;
+    const newStartIso = combineDateAndTimeToUtcIso(date, editWorkStartTimeValue);
+    setEditingWorkStart(false);
+    setActionInFlight(true);
+    setError(null);
+    try {
+      // Identifies the correction by employeeId/date only — the server
+      // independently finds and locks the day's earliest eligible work
+      // entry itself rather than trusting a client-supplied entry id (see
+      // PATCH /api/inputs/work-start).
+      await api("/api/inputs/work-start", {
+        method: "PATCH",
+        body: JSON.stringify({ employeeId: selectedEmployeeId, date, newStartTime: newStartIso }),
+      });
+      await loadDaily();
+      setSuccessMessage("Work start time updated.");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not save the correction");
+    } finally {
+      setActionInFlight(false);
+    }
   }
 
   function handleDeleteRun(run: ActivityRunDto) {
@@ -311,6 +479,17 @@ export function InputsPage() {
         <div className="inputs-workspace-main">
           <div className="inputs-workspace-datenav">
             <DateNav date={date} onChange={(d) => updateParams({ date: d })} />
+            {selectedEmployeeId && (
+              <span className={`inputs-live-status${stale ? " inputs-live-status-stale" : ""}`}>
+                {stale
+                  ? "Reconnecting…"
+                  : refreshing
+                  ? "Updating…"
+                  : lastUpdatedAt
+                  ? `Last updated ${formatClockTime(lastUpdatedAt)}`
+                  : "Live"}
+              </span>
+            )}
           </div>
 
           {error && <p className="error-text inputs-workspace-placeholder">{error}</p>}
@@ -355,24 +534,17 @@ export function InputsPage() {
                 onSaveEditBreak={handleSaveEditBreak}
                 onCancelEditBreak={handleCancelEditBreak}
                 onDeleteBreak={handleDeleteBreak}
+                editingWorkStart={editingWorkStart}
+                editWorkStartTimeValue={editWorkStartTimeValue}
+                onStartEditWorkStart={handleStartEditWorkStart}
+                onEditWorkStartTimeChange={setEditWorkStartTimeValue}
+                onSaveEditWorkStart={handleSaveEditWorkStart}
+                onCancelEditWorkStart={handleCancelEditWorkStart}
               />
             </>
           )}
         </div>
       </div>
-
-      {pendingCorrection && (
-        <TimeCorrectionModal
-          subjectLabel={pendingCorrection.subjectLabel}
-          fieldLabel={pendingCorrection.fieldLabel}
-          oldDisplay={pendingCorrection.oldDisplay}
-          newDisplay={pendingCorrection.newDisplay}
-          submitting={correctionSubmitting}
-          error={correctionError}
-          onConfirm={handleConfirmCorrection}
-          onCancel={handleCancelCorrection}
-        />
-      )}
 
       {pendingDeletion && (
         <DeleteTimeEntryModal
