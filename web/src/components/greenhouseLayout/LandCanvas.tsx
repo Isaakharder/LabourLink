@@ -2,7 +2,7 @@ import { PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "
 import { GreenhouseLand, GreenhousePhase, GreenhouseRow } from "../../lib/greenhouseLayoutTypes";
 import { CanvasTransform, clampPan, zoomAtPoint } from "../../lib/canvasTransform";
 import { isTypingIntoFormField } from "../../lib/isTypingTarget";
-import { RowRect } from "../../lib/rowLayout";
+import { RowRect, rowScreenRect } from "../../lib/rowLayout";
 
 interface LandCanvasProps {
   land: GreenhouseLand;
@@ -52,12 +52,6 @@ interface LandCanvasProps {
 // Below this many screen px-per-foot, row number labels are hidden rather
 // than rendered as illegible/overlapping text.
 const ROW_LABEL_MIN_SCALE = 3;
-
-function rowScreenRect(row: { xFt: number; yFt: number; widthFt: number; lengthFt: number; orientation: string }) {
-  const w = row.orientation === "horizontal" ? row.lengthFt : row.widthFt;
-  const h = row.orientation === "horizontal" ? row.widthFt : row.lengthFt;
-  return { width: w, height: h };
-}
 
 // A plain left press doesn't capture the pointer (and so isn't yet treated
 // as panning) until it's moved this many screen pixels — see
