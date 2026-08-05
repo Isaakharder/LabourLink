@@ -48,21 +48,27 @@ export function ConfirmEndDayModal({ submitting, error, onConfirm, onCancel }: C
         {error && <p className="error-text">{error}</p>}
 
         <div className="mobile-confirm-actions">
+          {/* "Finish Work" (the action this modal exists to confirm) must carry
+              the visually prominent/primary treatment, and "Keep Working"
+              (cancel) must not — every other confirm sheet in this app
+              (RowPickerSheet, ActivityQuestionsModal) gives primary styling
+              to the button that performs the flow's action, never to
+              Cancel. This modal previously had it backwards: "Keep Working"
+              was styled as the solid primary button and "Finish Work" as a
+              plain outline, making it easy to tap the wrong one and walk
+              away believing the day had ended when the request was never
+              sent — see the root-cause investigation for a real incident
+              this caused. */}
           <button
             type="button"
-            className="mobile-action-button mobile-action-primary"
-            disabled={submitting}
-            onClick={onCancel}
-          >
-            Keep Working
-          </button>
-          <button
-            type="button"
-            className="mobile-action-button mobile-action-danger"
+            className="mobile-action-button mobile-action-danger-solid"
             disabled={submitting}
             onClick={onConfirm}
           >
             {submitting ? "Finishing…" : "Finish Work"}
+          </button>
+          <button type="button" className="mobile-action-button" disabled={submitting} onClick={onCancel}>
+            Keep Working
           </button>
         </div>
       </div>
