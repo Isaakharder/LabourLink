@@ -55,6 +55,17 @@ export function InputsPage() {
   const [employeeSearch, setEmployeeSearch] = useState("");
   const [daily, setDaily] = useState<DailyInputsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Separate from `error` above on purpose: `error` is only ever touched by
+  // loadDaily (foreground load failure / background success clearing a
+  // prior one). A save's own failure used to reuse `error` too, but the
+  // "resume polling immediately" effect fires a background refresh the
+  // moment the save's actionInFlight flag clears — success or failure —
+  // and that refresh's own success handler unconditionally clears `error`,
+  // wiping the just-set message within a few hundred ms, far too fast to
+  // read. actionError is never touched by loadDaily in any path, so a
+  // background refresh landing right after a failed save can no longer
+  // race it away.
+  const [actionError, setActionError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
@@ -256,9 +267,10 @@ export function InputsPage() {
   useEffect(() => {
     // A fresh load triggered by an employee/date navigation change (this
     // effect's only trigger, since loadDaily's identity only changes with
-    // those two deps) — any success banner left over from a previous
-    // action no longer applies to what's about to be shown.
+    // those two deps) — any success banner or action-error left over from a
+    // previous action no longer applies to what's about to be shown.
     setSuccessMessage(null);
+    setActionError(null);
     loadDaily();
   }, [loadDaily]);
 
@@ -320,7 +332,7 @@ export function InputsPage() {
     const newEndTimeIso = combineDateAndTimeToUtcIso(date, editTimeValue);
     setEditingRunId(null);
     setActionInFlight(true);
-    setError(null);
+    setActionError(null);
     try {
       await api(`/api/inputs/activity-runs/${run.id}/end-time`, {
         method: "PATCH",
@@ -329,7 +341,7 @@ export function InputsPage() {
       await loadDaily();
       setSuccessMessage("End time updated.");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not save the correction");
+      setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
     } finally {
       setActionInFlight(false);
     }
@@ -359,7 +371,7 @@ export function InputsPage() {
     const newTimeIso = combineDateAndTimeToUtcIso(date, editBreakTimeValue);
     setEditingBreak(null);
     setActionInFlight(true);
-    setError(null);
+    setActionError(null);
     try {
       await api(`/api/inputs/breaks/${brk.id}`, {
         method: "PATCH",
@@ -368,7 +380,7 @@ export function InputsPage() {
       await loadDaily();
       setSuccessMessage("Break updated.");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not save the correction");
+      setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
     } finally {
       setActionInFlight(false);
     }
@@ -389,7 +401,7 @@ export function InputsPage() {
     const newStartIso = combineDateAndTimeToUtcIso(date, editWorkStartTimeValue);
     setEditingWorkStart(false);
     setActionInFlight(true);
-    setError(null);
+    setActionError(null);
     try {
       // Identifies the correction by employeeId/date only — the server
       // independently finds and locks the day's earliest eligible work
@@ -402,7 +414,7 @@ export function InputsPage() {
       await loadDaily();
       setSuccessMessage("Work start time updated.");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not save the correction");
+      setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
     } finally {
       setActionInFlight(false);
     }
@@ -493,6 +505,7 @@ export function InputsPage() {
           </div>
 
           {error && <p className="error-text inputs-workspace-placeholder">{error}</p>}
+          {actionError && <p className="error-text inputs-workspace-placeholder">{actionError}</p>}
           {successMessage && <p className="success-text inputs-workspace-placeholder">{successMessage}</p>}
 
           {!selectedEmployeeId ? (
