@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PageHeader } from "../../components/layout/PageHeader";
+import { Check, Copy, Link2, MonitorUp, Plus } from "lucide-react";
 import { GreenhouseLiveCanvas } from "../../components/greenhouseLive/GreenhouseLiveCanvas";
 import { GreenhouseLiveToolbar } from "../../components/greenhouseLive/GreenhouseLiveToolbar";
 import { DateRangeCalendar } from "../../components/greenhouseLive/DateRangeCalendar";
 import { useAuth } from "../../context/AuthContext";
 import { useUnsavedChangesGuard } from "../../context/UnsavedChangesContext";
 import { api, ApiError } from "../../lib/api";
-import { CanvasTransform, computeFitTransform, zoomAtPoint } from "../../lib/canvasTransform";
+import { CanvasTransform, RotationDegrees, computeFitTransform, nextRotation, zoomAtPoint } from "../../lib/canvasTransform";
 import {
   AvailableActivity,
   GreenhouseDisplayCreateResponse,
+  GreenhouseDisplayRegenerateResponse,
   GreenhouseDisplaySummary,
   LiveGreenhouseResponse,
 } from "../../lib/greenhouseLiveTypes";
@@ -55,6 +56,9 @@ export function GreenhousePage() {
   const [creatingDisplay, setCreatingDisplay] = useState(false);
   const [createDisplayError, setCreateDisplayError] = useState<string | null>(null);
   const [createdToken, setCreatedToken] = useState<string | null>(null);
+  const [generatingLink, setGeneratingLink] = useState(false);
+  const [generateLinkError, setGenerateLinkError] = useState<string | null>(null);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   // --- Draft state (the office's own preview — nothing here reaches the
   // TV until Save/Publish) ---
@@ -66,6 +70,7 @@ export function GreenhousePage() {
   const [availableActivities, setAvailableActivities] = useState<AvailableActivity[] | null>(null);
   const [activityResetMessage, setActivityResetMessage] = useState<string | null>(null);
   const [phaseFilterId, setPhaseFilterId] = useState<string | null>(null); // view-only canvas convenience, never published
+  const [rotationDegrees, setRotationDegrees] = useState<RotationDegrees>(0);
   const initializedFromDisplayRef = useRef<string | null>(null);
 
   // --- Live preview data ---
@@ -89,7 +94,8 @@ export function GreenhousePage() {
       (selectedDisplay.landId !== landId ||
         (selectedDisplay.activityId ?? null) !== activityFilterId ||
         selectedDisplay.dateStart !== dateRange.start ||
-        selectedDisplay.dateEnd !== dateRange.end)
+        selectedDisplay.dateEnd !== dateRange.end ||
+        selectedDisplay.rotationDegrees !== rotationDegrees)
   );
 
   // Lands reuse the existing editor-facing endpoint — read-only here.
@@ -143,6 +149,7 @@ export function GreenhousePage() {
     setLandId(selectedDisplay.landId);
     setDateRange({ start: selectedDisplay.dateStart, end: selectedDisplay.dateEnd });
     setActivityFilterId(selectedDisplay.activityId);
+    setRotationDegrees(selectedDisplay.rotationDegrees);
     setPreset("custom");
   }, [selectedDisplay]);
 
@@ -290,6 +297,7 @@ export function GreenhousePage() {
           activityId: activityFilterId,
           dateStart: dateRange.start,
           dateEnd: dateRange.end,
+          rotationDegrees,
         }),
       });
       setDisplays((prev) => prev?.map((d) => (d.id === res.display.id ? res.display : d)) ?? [res.display]);
@@ -324,13 +332,59 @@ export function GreenhousePage() {
     }
   }
 
+  function tvUrlFor(token: string): string {
+    return `${window.location.origin}/greenhouse/display/${token}`;
+  }
+
+  // Clipboard access can silently fail (insecure context, missing
+  // permission, an older/kiosk browser) — this is never the only way to
+  // get the URL, just a convenience on top of the always-visible reveal
+  // box + its own Copy button below.
+  async function copyTvUrl(token: string) {
+    try {
+      await navigator.clipboard.writeText(tvUrlFor(token));
+      setLinkCopied(true);
+      window.setTimeout(() => setLinkCopied(false), 3000);
+    } catch {
+      setLinkCopied(false);
+    }
+  }
+
+  // The raw token is never recoverable once its one-time reveal is gone
+  // (only its hash is stored — see displayToken.ts) — regenerating is the
+  // only way to get a usable TV URL for a display that already exists.
+  // That's also exactly why this needs an explicit, informed confirmation:
+  // it immediately invalidates whatever URL is currently open on a TV.
+  async function handleGenerateTvLink() {
+    if (!selectedDisplay) return;
+    const proceed = window.confirm(
+      `Generate a new TV link for "${selectedDisplay.name}"?\n\nThe current link will stop working immediately — any TV still showing it will go blank until it's reopened with the new link.`
+    );
+    if (!proceed) return;
+
+    setGeneratingLink(true);
+    setGenerateLinkError(null);
+    try {
+      const res = await api<GreenhouseDisplayRegenerateResponse>(
+        `/api/greenhouse/displays/${selectedDisplay.id}/regenerate-key`,
+        { method: "POST" }
+      );
+      setCreatedToken(res.token);
+      await copyTvUrl(res.token);
+    } catch (err) {
+      setGenerateLinkError(err instanceof ApiError ? err.message : "Could not generate a new TV link");
+    } finally {
+      setGeneratingLink(false);
+    }
+  }
+
   const minScale = fitScale * 0.15;
   const maxScale = fitScale * 6;
   const zoomPercent = fitScale > 0 ? Math.round((transform.scale / fitScale) * 100) : 100;
 
   function fitToScreen(width = viewportSize.width, height = viewportSize.height) {
     if (!data || width <= 0 || height <= 0) return;
-    const fit = computeFitTransform(data.land, width, height);
+    const fit = computeFitTransform(data.land, width, height, rotationDegrees);
     setFitScale(fit.scale);
     setTransform(fit);
   }
@@ -340,7 +394,7 @@ export function GreenhousePage() {
     const key = data ? `${data.land.id}:${dateRange.start}:${dateRange.end}:${activityFilterId ?? "all"}` : null;
     if (data && key && autoFitKeyRef.current !== key && size.width > 0 && size.height > 0) {
       autoFitKeyRef.current = key;
-      const fit = computeFitTransform(data.land, size.width, size.height);
+      const fit = computeFitTransform(data.land, size.width, size.height, rotationDegrees);
       setFitScale(fit.scale);
       setTransform(fit);
     }
@@ -351,41 +405,73 @@ export function GreenhousePage() {
     setTransform(zoomAtPoint(transform, newScale, viewportSize.width / 2, viewportSize.height / 2));
   }
 
-  return (
-    <>
-      <PageHeader title="Greenhouse" description="Live view of where crews are currently working." />
+  // Draft-only — never reaches the TV until Publish. Rotates 90° clockwise
+  // per click (0 -> 90 -> 180 -> 270 -> 0) and immediately refits using the
+  // *new* rotation, computed directly rather than read back from state
+  // (which wouldn't have committed yet within this same handler).
+  function handleRotate() {
+    if (!data) return;
+    const next = nextRotation(rotationDegrees);
+    setRotationDegrees(next);
+    const fit = computeFitTransform(data.land, viewportSize.width, viewportSize.height, next);
+    setFitScale(fit.scale);
+    setTransform(fit);
+  }
 
+  return (
+    <div className="greenhouse-office-page">
       <div className="greenhouse-office-layout">
         <div className="greenhouse-office-sidebar">
           <div className="greenhouse-office-section">
-            <label>
+            <label className="greenhouse-office-field">
               Display
-              <select
-                value={selectedDisplayId ?? ""}
-                onChange={(e) => {
-                  setSelectedDisplayId(e.target.value || null);
-                  initializedFromDisplayRef.current = null;
-                }}
-                disabled={!displays || displays.length === 0}
-              >
-                {(!displays || displays.length === 0) && <option value="">No displays yet</option>}
-                {displays?.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
+              <span className="greenhouse-office-select-wrap">
+                <select
+                  className="greenhouse-office-select"
+                  value={selectedDisplayId ?? ""}
+                  onChange={(e) => {
+                    setSelectedDisplayId(e.target.value || null);
+                    initializedFromDisplayRef.current = null;
+                  }}
+                  disabled={!displays || displays.length === 0}
+                >
+                  {(!displays || displays.length === 0) && <option value="">No displays yet</option>}
+                  {displays?.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}
+                    </option>
+                  ))}
+                </select>
+              </span>
             </label>
             {isAdmin && (
-              <button type="button" onClick={() => setShowNewDisplayForm((v) => !v)}>
-                New Display
+              <button
+                type="button"
+                className="greenhouse-office-secondary-button"
+                onClick={() => setShowNewDisplayForm((v) => !v)}
+              >
+                <Plus size={16} aria-hidden="true" />
+                <span>New Display</span>
               </button>
             )}
+            {isAdmin && (
+              <button
+                type="button"
+                className="greenhouse-office-secondary-button"
+                onClick={handleGenerateTvLink}
+                disabled={!selectedDisplay || generatingLink}
+              >
+                <Link2 size={16} aria-hidden="true" />
+                <span>{generatingLink ? "Generating..." : "Generate TV Link"}</span>
+              </button>
+            )}
+            {generateLinkError && <p className="error-text">{generateLinkError}</p>}
           </div>
 
           {showNewDisplayForm && (
             <div className="greenhouse-office-section greenhouse-office-new-display">
               <input
+                className="greenhouse-office-text-input"
                 type="text"
                 placeholder="e.g. Break Area TV"
                 value={newDisplayName}
@@ -411,10 +497,32 @@ export function GreenhousePage() {
           {createdToken && (
             <div className="greenhouse-office-token-reveal">
               <p>Copy this URL to the TV now — it will not be shown again:</p>
-              <code>{`${window.location.origin}/greenhouse/display/${createdToken}`}</code>
-              <button type="button" onClick={() => setCreatedToken(null)}>
-                Done
-              </button>
+              <code>{tvUrlFor(createdToken)}</code>
+              <div className="employee-form-actions">
+                <button type="button" onClick={() => copyTvUrl(createdToken)}>
+                  {linkCopied ? (
+                    <>
+                      <Check size={16} aria-hidden="true" />
+                      <span>Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy size={16} aria-hidden="true" />
+                      <span>Copy</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className="employee-form-save"
+                  onClick={() => {
+                    setCreatedToken(null);
+                    setLinkCopied(false);
+                  }}
+                >
+                  Done
+                </button>
+              </div>
             </div>
           )}
 
@@ -429,18 +537,20 @@ export function GreenhousePage() {
           ) : (
             <>
               <div className="greenhouse-office-section">
-                <label>
+                <label className="greenhouse-office-field">
                   Quick range
-                  <select value={preset} onChange={(e) => applyPreset(e.target.value)}>
-                    <option value="today">Today</option>
-                    <option value="yesterday">Yesterday</option>
-                    <option value="thisWeek">This week</option>
-                    <option value="lastWeek">Last week</option>
-                    <option value="last7">Last 7 days</option>
-                    <option value="thisMonth">This month</option>
-                    <option value="lastMonth">Last month</option>
-                    <option value="custom">Custom range</option>
-                  </select>
+                  <span className="greenhouse-office-select-wrap">
+                    <select className="greenhouse-office-select" value={preset} onChange={(e) => applyPreset(e.target.value)}>
+                      <option value="today">Today</option>
+                      <option value="yesterday">Yesterday</option>
+                      <option value="thisWeek">This week</option>
+                      <option value="lastWeek">Last week</option>
+                      <option value="last7">Last 7 days</option>
+                      <option value="thisMonth">This month</option>
+                      <option value="lastMonth">Last month</option>
+                      <option value="custom">Custom range</option>
+                    </select>
+                  </span>
                 </label>
 
                 <DateRangeCalendar value={dateRange} onChange={handleCalendarChange} />
@@ -455,6 +565,7 @@ export function GreenhousePage() {
                   disabled={!selectedDisplay || !isDirty || saving}
                   onClick={handleSave}
                 >
+                  <MonitorUp size={16} aria-hidden="true" />
                   {saving ? "Publishing..." : "Publish to TV"}
                 </button>
                 {saveError && <p className="error-text">{saveError}</p>}
@@ -469,16 +580,22 @@ export function GreenhousePage() {
 
         <div className="greenhouse-office-main">
           <div className="greenhouse-office-toprow">
-            <label>
+            <label className="greenhouse-office-field greenhouse-office-toprow-field">
               Activity
-              <select value={activityFilterId ?? ""} onChange={(e) => setActivityFilterId(e.target.value || null)}>
-                <option value="">All activities currently in use</option>
-                {availableActivities?.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
+              <span className="greenhouse-office-select-wrap greenhouse-office-select-wide">
+                <select
+                  className="greenhouse-office-select"
+                  value={activityFilterId ?? ""}
+                  onChange={(e) => setActivityFilterId(e.target.value || null)}
+                >
+                  <option value="">All activities currently in use</option>
+                  {availableActivities?.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+              </span>
             </label>
             {availableActivities?.length === 0 && (
               <p className="greenhouse-office-activity-note">No activities have recorded work in this range.</p>
@@ -497,15 +614,17 @@ export function GreenhousePage() {
 
           {lands && lands.length > 1 && (
             <div className="greenhouse-live-land-bar">
-              <label>
+              <label className="greenhouse-office-field greenhouse-office-land-field">
                 Land
-                <select value={landId ?? ""} onChange={(e) => setLandId(e.target.value)}>
-                  {lands.map((l) => (
-                    <option key={l.id} value={l.id}>
-                      {l.name}
-                    </option>
-                  ))}
-                </select>
+                <span className="greenhouse-office-select-wrap">
+                  <select className="greenhouse-office-select" value={landId ?? ""} onChange={(e) => setLandId(e.target.value)}>
+                    {lands.map((l) => (
+                      <option key={l.id} value={l.id}>
+                        {l.name}
+                      </option>
+                    ))}
+                  </select>
+                </span>
               </label>
             </div>
           )}
@@ -526,6 +645,7 @@ export function GreenhousePage() {
                 onZoomIn={() => zoomByFactor(ZOOM_BUTTON_FACTOR)}
                 onZoomOut={() => zoomByFactor(1 / ZOOM_BUTTON_FACTOR)}
                 onFitToScreen={() => fitToScreen()}
+                onRotate={handleRotate}
                 generatedAt={data.generatedAt}
                 refreshing={refreshing}
                 onRefresh={() => loadPreview(true)}
@@ -541,6 +661,7 @@ export function GreenhousePage() {
                   onViewportSize={handleViewportSize}
                   minScale={minScale}
                   maxScale={maxScale}
+                  rotationDegrees={rotationDegrees}
                 />
               </div>
 
@@ -559,6 +680,6 @@ export function GreenhousePage() {
           )}
         </div>
       </div>
-    </>
+    </div>
   );
 }

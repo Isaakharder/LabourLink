@@ -67,19 +67,19 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
   // control-free display worth preserving across a resize.
   useEffect(() => {
     if (!data || viewportSize.width <= 0 || viewportSize.height <= 0) return;
-    const fit = computeFitTransform(data.land, viewportSize.width, viewportSize.height);
+    const fit = computeFitTransform(data.land, viewportSize.width, viewportSize.height, data.rotationDegrees);
     setFitScale(fit.scale);
     setTransform(fit);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewportSize.width, viewportSize.height]);
 
   // Also refit whenever a fresh publish changes the config (land/date/
-  // activity scope may have changed) — but not on every routine poll where
-  // nothing actually changed, which would otherwise flash/reset the view
-  // roughly every 10 seconds for no reason.
+  // activity/rotation scope may have changed) — but not on every routine
+  // poll where nothing actually changed, which would otherwise flash/reset
+  // the view roughly every 10 seconds for no reason.
   useEffect(() => {
     if (!data || viewportSize.width <= 0 || viewportSize.height <= 0) return;
-    const fit = computeFitTransform(data.land, viewportSize.width, viewportSize.height);
+    const fit = computeFitTransform(data.land, viewportSize.width, viewportSize.height, data.rotationDegrees);
     setFitScale(fit.scale);
     setTransform(fit);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -133,6 +133,7 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
             onViewportSize={handleViewportSize}
             minScale={fitScale * 0.15}
             maxScale={fitScale * 6}
+            rotationDegrees={data.rotationDegrees}
           />
         ) : (
           <p className="placeholder-page greenhouse-tv-loading">Loading…</p>

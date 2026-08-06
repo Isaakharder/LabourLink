@@ -2,6 +2,8 @@
 // Live row state is derived server-side from time_entries, never stored;
 // see that route's LIVE_LAND_SELECT comment for the blue/green/neutral rules.
 
+import { RotationDegrees } from "./canvasTransform";
+
 export interface LiveEmployee {
   id: string;
   firstName: string;
@@ -80,6 +82,7 @@ export interface GreenhouseDisplaySummary {
   dateEnd: string;
   isActive: boolean;
   updatedAt: string;
+  rotationDegrees: RotationDegrees;
 }
 
 export interface GreenhouseDisplayCreateResponse {
@@ -97,6 +100,7 @@ export interface GreenhouseDisplayStateResponse {
   activityName: string | null;
   dateStart: string;
   dateEnd: string;
+  rotationDegrees: RotationDegrees;
   configVersion: string;
   generatedAt: string;
   land: LiveLand;

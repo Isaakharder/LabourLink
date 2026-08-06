@@ -159,6 +159,7 @@ router.get(
       activityName,
       dateStart: d.dateStart,
       dateEnd: d.dateEnd,
+      rotationDegrees: d.rotationDegrees,
       configVersion: d.updatedAt,
       generatedAt: new Date().toISOString(),
       land: redactEmployeeNamesForDisplay(serializeLiveLand(row)),

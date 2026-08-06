@@ -10,6 +10,7 @@ const router = Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const ALLOWED_ROTATIONS = new Set([0, 90, 180, 270]);
 
 function trimOrNull(v: unknown): string | null {
   if (typeof v !== "string") return null;
@@ -29,7 +30,7 @@ const DISPLAY_SELECT = `
          gd.activity_id, a.name as activity_name,
          to_char(gd.date_start, 'YYYY-MM-DD') as date_start,
          to_char(gd.date_end, 'YYYY-MM-DD') as date_end,
-         gd.is_active, gd.updated_at
+         gd.is_active, gd.updated_at, gd.rotation_degrees
   from greenhouse_displays gd
   join greenhouse_lands gl on gl.id = gd.land_id
   left join activities a on a.id = gd.activity_id
@@ -48,6 +49,7 @@ function serializeDisplay(row: any) {
     dateEnd: row.date_end,
     isActive: row.is_active,
     updatedAt: row.updated_at,
+    rotationDegrees: row.rotation_degrees,
   };
 }
 
@@ -120,11 +122,12 @@ router.put(
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid display id" });
 
-    const { landId, activityId, dateStart, dateEnd } = req.body as {
+    const { landId, activityId, dateStart, dateEnd, rotationDegrees } = req.body as {
       landId?: string;
       activityId?: string | null;
       dateStart?: string;
       dateEnd?: string;
+      rotationDegrees?: number;
     };
 
     if (!landId || !UUID_RE.test(landId)) return res.status(400).json({ error: "landId is required" });
@@ -140,6 +143,10 @@ router.put(
     if (inclusiveDayCount(dateStart, dateEnd) > MAX_DATE_RANGE_DAYS) {
       return res.status(400).json({ error: `Date range cannot exceed ${MAX_DATE_RANGE_DAYS} days` });
     }
+    const resolvedRotation = rotationDegrees ?? 0;
+    if (!ALLOWED_ROTATIONS.has(resolvedRotation)) {
+      return res.status(400).json({ error: "rotationDegrees must be 0, 90, 180, or 270" });
+    }
 
     const land = await pool.query("select id from greenhouse_lands where id = $1", [landId]);
     if (!land.rows[0]) return res.status(400).json({ error: "Land not found" });
@@ -151,10 +158,10 @@ router.put(
     const { rows } = await pool.query(
       `update greenhouse_displays
        set land_id = $1, activity_id = $2, date_start = $3, date_end = $4,
-           updated_by_employee_id = $5, updated_at = now()
-       where id = $6
+           rotation_degrees = $5, updated_by_employee_id = $6, updated_at = now()
+       where id = $7
        returning id`,
-      [landId, activityId ?? null, dateStart, dateEnd, req.employee!.id, id]
+      [landId, activityId ?? null, dateStart, dateEnd, resolvedRotation, req.employee!.id, id]
     );
     if (!rows[0]) return res.status(404).json({ error: "Display not found" });
 

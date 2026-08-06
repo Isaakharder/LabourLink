@@ -10,6 +10,7 @@ export interface AuthedDisplay {
   dateEnd: string;
   name: string;
   updatedAt: string;
+  rotationDegrees: number;
 }
 
 declare global {
@@ -40,7 +41,7 @@ export async function requireDisplayKey(req: Request, res: Response, next: NextF
     // date-range helper in this app expects (see scheduled_break_date's
     // identical to_char cast in mobileTime.ts/breakReconciliation.ts).
     `select id, land_id, activity_id, to_char(date_start, 'YYYY-MM-DD') as date_start,
-            to_char(date_end, 'YYYY-MM-DD') as date_end, name, updated_at
+            to_char(date_end, 'YYYY-MM-DD') as date_end, name, updated_at, rotation_degrees
      from greenhouse_displays
      where display_key_hash = $1 and is_active = true`,
     [tokenHash]
@@ -59,6 +60,7 @@ export async function requireDisplayKey(req: Request, res: Response, next: NextF
     dateEnd: row.date_end,
     name: row.name,
     updatedAt: row.updated_at,
+    rotationDegrees: row.rotation_degrees,
   };
   next();
 }

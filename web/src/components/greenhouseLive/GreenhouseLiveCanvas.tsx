@@ -1,6 +1,7 @@
 import { PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
+import { Navigation2 } from "lucide-react";
 import { LivePhase, LiveRow } from "../../lib/greenhouseLiveTypes";
-import { CanvasTransform, clampPan, zoomAtPoint } from "../../lib/canvasTransform";
+import { CanvasTransform, RotationDegrees, clampPan, zoomAtPoint } from "../../lib/canvasTransform";
 import { rowScreenRect } from "../../lib/rowLayout";
 import { formatTimeInAppTimezone } from "../../lib/timezone";
 
@@ -13,6 +14,12 @@ interface GreenhouseLiveCanvasProps {
   onViewportSize: (size: { width: number; height: number }) => void;
   minScale: number;
   maxScale: number;
+  // 0 = normal. Rotates only the phases/rows group below, around the
+  // land's own center — pan/zoom, hit-testing, and tooltips all keep
+  // working unmodified since this is just one more nested SVG transform,
+  // handled natively by the browser. Defaults to 0 so callers that don't
+  // (yet) care about rotation need no change.
+  rotationDegrees?: RotationDegrees;
 }
 
 // Same threshold LandCanvas uses — below this many screen px-per-foot, row
@@ -54,6 +61,7 @@ export function GreenhouseLiveCanvas({
   onViewportSize,
   minScale,
   maxScale,
+  rotationDegrees = 0,
 }: GreenhouseLiveCanvasProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -138,7 +146,8 @@ export function GreenhouseLiveCanvas({
           transform.scale,
           land,
           viewport.clientWidth,
-          viewport.clientHeight
+          viewport.clientHeight,
+          rotationDegrees
         )
       : { x: pan.startPan.x + dx, y: pan.startPan.y + dy };
     onTransformChange({ pan: nextPan, scale: transform.scale });
@@ -150,6 +159,10 @@ export function GreenhouseLiveCanvas({
   }
 
   const visiblePhases = phaseFilterId ? phases.filter((p) => p.id === phaseFilterId) : phases;
+  // Rotation pivots around the land's own center, in world feet — the same
+  // center computeFitTransform's rotation-aware scale calculation assumes.
+  const rotateCx = land.eastWestFeet / 2;
+  const rotateCy = land.northSouthFeet / 2;
 
   return (
     <div
@@ -162,6 +175,12 @@ export function GreenhouseLiveCanvas({
     >
       <svg ref={svgRef} className="greenhouse-canvas-svg">
         <g ref={gRef} transform={`translate(${transform.pan.x} ${transform.pan.y}) scale(${transform.scale})`}>
+          {/* Rotation lives on its own nested group, inside the pan/zoom
+              group above — the browser handles hit-testing, tooltips, and
+              row highlighting correctly for the combined transform with no
+              extra math needed here. Phase/row x/y/width/height below are
+              always the original, un-rotated world-feet coordinates. */}
+          <g transform={rotationDegrees ? `rotate(${rotationDegrees} ${rotateCx} ${rotateCy})` : undefined}>
           {visiblePhases.map((phase) => {
             const fontSize = Math.max(8, Math.min(phase.eastWestFeet, phase.northSouthFeet) * 0.12);
             return (
@@ -223,8 +242,24 @@ export function GreenhouseLiveCanvas({
               </g>
             );
           })}
+          </g>
         </g>
       </svg>
+
+      {/* Compass/North indicator — the needle rotates with the map (same
+          degrees, same clockwise direction) so it keeps pointing at true
+          north exactly as it now renders on screen, making the current
+          orientation clear even on the TV, which has no Rotate control of
+          its own. Positioned outside the SVG's transform stack entirely
+          (a plain HTML overlay), so it's unaffected by pan/zoom. */}
+      <div className="greenhouse-compass" aria-hidden="true">
+        <Navigation2
+          className="greenhouse-compass-arrow"
+          size={18}
+          style={{ transform: `rotate(${rotationDegrees}deg)` }}
+        />
+        <span className="greenhouse-compass-label">N</span>
+      </div>
     </div>
   );
 }
