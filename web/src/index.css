@@ -320,25 +320,35 @@ input {
 
 .mobile-nav {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   justify-content: space-between;
-  padding: 0.6rem 1rem calc(0.6rem + env(safe-area-inset-bottom));
+  padding: 0.3rem 0.25rem calc(0.3rem + env(safe-area-inset-bottom));
   background: var(--color-surface);
   border-top: 1px solid var(--color-border);
+  /* Never scrolls out of view — a normal flex sibling of .mobile-content
+     inside .mobile-shell's 100dvh column, so the content pane is what
+     scrolls, not the page; the nav always stays pinned at the bottom of
+     the viewport above the safe area. */
+  flex-shrink: 0;
 }
 
-.mobile-nav-right {
-  display: flex;
-  gap: 1.5rem;
-}
-
+/* Four equal-width items (Home/End Work, Break, Sync, Settings), icon
+   stacked above label, large touch target. */
 .mobile-nav-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
   background: none;
   border: none;
   color: var(--color-muted);
-  font-size: 0.85rem;
+  font-size: 0.72rem;
+  font-weight: 500;
   text-decoration: none;
-  padding: 0;
+  padding: 0.4rem 0.2rem;
+  min-height: 56px;
 }
 
 .mobile-nav-item.active {
@@ -347,7 +357,7 @@ input {
 }
 
 .mobile-nav-item:disabled {
-  opacity: 0.4;
+  opacity: 0.35;
   cursor: default;
 }
 
@@ -426,11 +436,11 @@ input {
 
 .mobile-home-active {
   justify-content: flex-start;
-  /* Moved up slightly and tightened from 1.5rem/1rem — an activity with
-     several configured questions now stacks a button per question beneath
-     the activity button, so the whole column needs to sit a bit higher and
-     a bit more compact to keep the timer comfortably on-screen below them. */
-  padding-top: 1rem;
+  /* Moved up further now that Start Break/End Day no longer sit in the
+     middle of the screen (they moved into the bottom nav) — the freed
+     space lets the job buttons/timer/Recent Jobs sit higher, matching the
+     approved mockup, without the timer ever crowding the bottom nav. */
+  padding-top: 0.5rem;
   gap: 0.7rem;
 }
 

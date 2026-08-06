@@ -1,29 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import { useDevicePairing } from "../../context/DevicePairingContext";
-import { api, ApiError, isPermanentDeviceAuthError, isServerUnreachableError } from "../../lib/api";
-import { enqueue, flushQueue, getPendingCount, isNetworkError } from "../../lib/offlineQueue";
+import { useWorkSession } from "../../context/WorkSessionContext";
+import { api } from "../../lib/api";
 import { uuid } from "../../lib/uuid";
 import { ActivityQuestion, QuestionAnswer } from "../../lib/activityQuestionTypes";
 import { ActivityPicker, NO_ACTIVITIES_MESSAGE, PickerActivity } from "../../components/mobile/ActivityPicker";
 import { RowPickerSheet, RowPickerLand } from "../../components/mobile/RowPickerSheet";
 import { CarrierPickerSheet, PickerCarrier } from "../../components/mobile/CarrierPickerSheet";
 import { ActivityTimer, formatElapsed } from "../../components/mobile/ActivityTimer";
-import { RecentJobsCard, RecentJob } from "../../components/mobile/RecentJobsCard";
-import { ConfirmEndDayModal } from "../../components/mobile/ConfirmEndDayModal";
+import { RecentJobsCard } from "../../components/mobile/RecentJobsCard";
 
 type Activity = PickerActivity;
-
-interface CurrentActivity {
-  id: string;
-  name: string;
-  startedAt: string;
-  // Seconds accumulated across earlier segments of the same continuous job
-  // chain (same activity, separated only by breaks) before this entry —
-  // the live elapsed time since startedAt is added on top by ActivityTimer.
-  accumulatedWorkedSecondsBeforeCurrentEntry: number;
-  row: { id: string; label: string } | null;
-  carrier: { id: string; name: string } | null;
-}
 
 // State for an in-progress multi-question flow — built up one answer at a
 // time as the employee steps through `questions` in order, then submitted
@@ -55,39 +42,10 @@ interface SingleQuestionEdit {
   question: ActivityQuestion;
 }
 
-interface PreviousActivity {
-  id: string;
-  name: string;
-  // Running total for the whole chain up through the segment that just
-  // closed when this break started — not just that one segment's length.
-  accumulatedWorkedSeconds: number;
-}
-
-interface MeResponse {
-  employee: { id: string; firstName: string; lastName: string };
-  status: "idle" | "work" | "break";
-  currentActivity: CurrentActivity | null;
-  since: string | null;
-  previousActivity: PreviousActivity | null;
-  recentJobs: RecentJob[];
-}
-
-// While the server hasn't yet been reached this poll cycle, retry this
-// often — only runs while serverReachable is false (see the effect below),
-// so a healthy app never has a background timer running at all.
-const RECONNECT_POLL_INTERVAL_MS = 15000;
-
 export function HomeScreen() {
-  const { markUnpaired, cachedEmployee, serverReachable, setServerReachable, refreshCachedEmployee } =
-    useDevicePairing();
-  const [me, setMe] = useState<MeResponse | null>(null);
-  // True once a real /api/mobile/me response has been received this
-  // session — gates every server-dependent action button. Before that (the
-  // "just launched, still offline" window), the last-known employee name is
-  // shown from the pairing context's cache, but nothing that assumes we
-  // know the employee's true current status is offered, since we don't
-  // actually know it yet.
-  const [verified, setVerified] = useState(false);
+  const { cachedEmployee, serverReachable } = useDevicePairing();
+  const { me, verified, busy, online, error, setError, pending, pendingActivityName, handleApiError, perform } =
+    useWorkSession();
   const [activities, setActivities] = useState<Activity[]>([]);
   const [activitiesLoaded, setActivitiesLoaded] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -98,62 +56,13 @@ export function HomeScreen() {
   // details" — see PendingQuestionFlow's own comment.
   const [questionFlow, setQuestionFlow] = useState<PendingQuestionFlow | null>(null);
   const [singleQuestionEdit, setSingleQuestionEdit] = useState<SingleQuestionEdit | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [online, setOnline] = useState(navigator.onLine);
-  const [pending, setPending] = useState(getPendingCount());
-  const [pendingActivityName, setPendingActivityName] = useState<string | null>(null);
-  const [endDayConfirmOpen, setEndDayConfirmOpen] = useState(false);
-  const [endDaySubmitting, setEndDaySubmitting] = useState(false);
-  const [endDayError, setEndDayError] = useState<string | null>(null);
-  const [endDayIdempotencyKey, setEndDayIdempotencyKey] = useState<string | null>(null);
 
-  // The one place every mobile screen decides what a caught error actually
-  // means: a confirmed permanent device-auth code clears pairing; a network
-  // failure or 5xx means the server just wasn't reached (never touches
-  // pairing, never overwrites `me`/the cached employee); anything else is a
-  // real, specific rejection the caller should surface. Returns true when
-  // the error was fully handled (pairing cleared or marked unreachable) so
-  // callers know not to also show a generic error for it.
-  const handleApiError = useCallback(
-    (err: unknown): boolean => {
-      if (isPermanentDeviceAuthError(err)) {
-        markUnpaired();
-        return true;
-      }
-      if (isServerUnreachableError(err)) {
-        setServerReachable(false);
-        return true;
-      }
-      setServerReachable(true); // a real response came back — the server is up
-      return false;
-    },
-    [markUnpaired, setServerReachable]
-  );
-
-  const loadMe = useCallback(() => {
-    api<MeResponse>("/api/mobile/me")
-      .then((res) => {
-        setMe(res);
-        setVerified(true);
-        setServerReachable(true);
-        refreshCachedEmployee({
-          employeeId: res.employee.id,
-          firstName: res.employee.firstName,
-          lastName: res.employee.lastName,
-          lastVerifiedAt: new Date().toISOString(),
-        });
-      })
-      .catch((err) => {
-        if (!handleApiError(err)) setError("Could not load status");
-      });
-  }, [handleApiError, refreshCachedEmployee, setServerReachable]);
-
-  // Same event-driven wiring as loadActivities — the phone never has its
-  // own notion of which activities exist. Re-run on mount, when connectivity
-  // returns, when the tab/app comes back to the foreground, and right
-  // before opening the picker so the choice offered is as fresh as
-  // possible. Deliberately event-driven rather than polling on a timer.
+  // Same event-driven wiring as loadGreenhouseRows/loadCarriers below — the
+  // phone never has its own notion of which activities exist. Re-run on
+  // mount, when connectivity returns, when the tab/app comes back to the
+  // foreground, and right before opening the picker so the choice offered
+  // is as fresh as possible. Deliberately event-driven rather than polling
+  // on a timer.
   const loadActivities = useCallback(() => {
     api<{ activities: Activity[]; activityGroups: { id: string; name: string }[] }>(
       "/api/mobile/activities"
@@ -188,133 +97,33 @@ export function HomeScreen() {
   }, [handleApiError]);
 
   useEffect(() => {
-    loadMe();
     loadActivities();
     loadGreenhouseRows();
     loadCarriers();
-  }, [loadMe, loadActivities, loadGreenhouseRows, loadCarriers]);
+  }, [loadActivities, loadGreenhouseRows, loadCarriers]);
 
-  // Runs only while the server hasn't been reached — an app left open on
-  // screen through a server restart/deploy must reconnect on its own, not
-  // only when the tab happens to regain focus or the browser's own
-  // online/offline events happen to fire (neither necessarily happens for
-  // "Wi-Fi was fine the whole time, the API process itself was down").
-  // Stops itself the moment loadMe succeeds and serverReachable flips back.
-  useEffect(() => {
-    if (serverReachable) return;
-    const interval = window.setInterval(loadMe, RECONNECT_POLL_INTERVAL_MS);
-    return () => window.clearInterval(interval);
-  }, [serverReachable, loadMe]);
-
-  const flush = useCallback(() => {
-    // flushQueue's own retry/drop logic only knows "network error" (keep
-    // queued) vs "anything else" (drop, report as rejected) — it has no
-    // notion of device-auth codes. A queued action replayed after the
-    // device was deactivated/unassigned while offline would otherwise just
-    // get silently dropped and reported as an ordinary "activity no longer
-    // available" rejection, never actually returning the app to Pairing.
-    // This flag, set from inside the send wrapper, is how that specific
-    // case still gets caught once the whole queue has drained.
-    let permanentFailure = false;
-    flushQueue((path, body) =>
-      api(path, { method: "POST", body: JSON.stringify(body) }).catch((err) => {
-        if (isPermanentDeviceAuthError(err)) permanentFailure = true;
-        throw err;
-      })
-    )
-      .then(({ rejected }) => {
-        setPending(getPendingCount());
-        if (permanentFailure) {
-          markUnpaired();
-          return;
-        }
-        if (rejected.length > 0) {
-          setError(
-            "One or more queued activity changes could not be completed because the activity is no longer available. Your status has been refreshed — please choose again."
-          );
-        }
-        if (getPendingCount() === 0) {
-          setPendingActivityName(null);
-        }
-        loadMe();
-        loadActivities();
-      })
-      .catch(() => {});
-  }, [loadMe, loadActivities, markUnpaired]);
-
+  // me/online/pairing reconnection is handled centrally by
+  // WorkSessionProvider (mounted once in MobileLayout, so it survives tab
+  // changes) — this screen only needs to refresh its own activities/rows/
+  // carriers lists when connectivity returns or the app regains focus.
   useEffect(() => {
     function goOnline() {
-      setOnline(true);
-      flush();
-    }
-    function goOffline() {
-      setOnline(false);
+      loadActivities();
     }
     function onVisibilityChange() {
       if (document.visibilityState === "visible") {
-        loadMe();
         loadActivities();
         loadGreenhouseRows();
         loadCarriers();
       }
     }
     window.addEventListener("online", goOnline);
-    window.addEventListener("offline", goOffline);
     document.addEventListener("visibilitychange", onVisibilityChange);
-    if (navigator.onLine) flush();
     return () => {
       window.removeEventListener("online", goOnline);
-      window.removeEventListener("offline", goOffline);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [flush, loadMe, loadActivities, loadGreenhouseRows, loadCarriers]);
-
-  async function perform(path: string, body: Record<string, unknown>, pendingLabel?: string) {
-    setBusy(true);
-    setError(null);
-    try {
-      const result = await api<MeResponse>(path, { method: "POST", body: JSON.stringify(body) });
-      setMe(result);
-      setVerified(true);
-      setServerReachable(true);
-      refreshCachedEmployee({
-        employeeId: result.employee.id,
-        firstName: result.employee.firstName,
-        lastName: result.employee.lastName,
-        lastVerifiedAt: new Date().toISOString(),
-      });
-      setPendingActivityName(null);
-      setPickerOpen(false);
-      setQuestionFlow(null);
-    } catch (err) {
-      if (isPermanentDeviceAuthError(err)) {
-        markUnpaired();
-        return;
-      }
-      if (isNetworkError(err)) {
-        enqueue({ id: body.idempotencyKey as string, path, body });
-        setPending(getPendingCount());
-        setServerReachable(false);
-        // Visible-but-honest: no timer starts locally for this — it only
-        // starts once a real server startedAt comes back after a
-        // successful flush. This just tells the employee what's queued.
-        if (pendingLabel) setPendingActivityName(pendingLabel);
-        setPickerOpen(false);
-        setQuestionFlow(null);
-      } else if (err instanceof ApiError && err.status >= 500) {
-        setServerReachable(false);
-      } else {
-        // Stays open (whichever sheet — ActivityPicker, RowPickerSheet, or
-        // CarrierPickerSheet — triggered this) so the employee sees the
-        // error and can retry without losing their place; every sheet
-        // renders `error` inline.
-        setServerReachable(true);
-        setError(err instanceof ApiError ? err.message : "Something went wrong");
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
+  }, [loadActivities, loadGreenhouseRows, loadCarriers]);
 
   function openPicker() {
     loadActivities();
@@ -343,7 +152,11 @@ export function HomeScreen() {
       startQuestionFlow(activity.id, activity.name, activity.questions);
       return;
     }
-    perform("/api/mobile/time-entries/work", { activityId, idempotencyKey: uuid() }, activity?.name);
+    perform(
+      "/api/mobile/time-entries/work",
+      { activityId, idempotencyKey: uuid() },
+      { pendingLabel: activity?.name, onResolved: () => setPickerOpen(false) }
+    );
   }
 
   // Submits the complete answer set collected so far as one work-start
@@ -394,7 +207,7 @@ export function HomeScreen() {
     perform(
       "/api/mobile/time-entries/work",
       { activityId, answers: answersPayload, idempotencyKey: uuid() },
-      activityName
+      { pendingLabel: activityName, onResolved: () => setQuestionFlow(null) }
     );
   }
 
@@ -534,68 +347,6 @@ export function HomeScreen() {
     submitQuestionFlow(singleQuestionEdit.activityId, singleQuestionEdit.activityName, answers);
   }
 
-  function startBreak() {
-    perform("/api/mobile/time-entries/break/start", { idempotencyKey: uuid() });
-  }
-
-  function endBreak() {
-    perform("/api/mobile/time-entries/break/end", { idempotencyKey: uuid() });
-  }
-
-  function openEndDayConfirm() {
-    setEndDayError(null);
-    setEndDayIdempotencyKey(uuid());
-    setEndDayConfirmOpen(true);
-  }
-
-  function closeEndDayConfirm() {
-    if (endDaySubmitting) return; // block dismissal while a request is in flight
-    setEndDayConfirmOpen(false);
-    setEndDayError(null);
-  }
-
-  // Deliberately bypasses perform(): ending the day must never be silently
-  // queued for later (per requirement — it's the one action that should
-  // require a live connection), whereas perform()'s network-error branch
-  // exists specifically to queue everything else for offline replay.
-  async function confirmEndDay() {
-    if (!online) {
-      setEndDayError("You must be online to finish work.");
-      return;
-    }
-    if (!endDayIdempotencyKey) return;
-
-    setEndDaySubmitting(true);
-    setEndDayError(null);
-    try {
-      const result = await api<MeResponse>("/api/mobile/time-entries/end-day", {
-        method: "POST",
-        body: JSON.stringify({ idempotencyKey: endDayIdempotencyKey }),
-      });
-      setMe(result);
-      setVerified(true);
-      setServerReachable(true);
-      setEndDayConfirmOpen(false);
-    } catch (err) {
-      if (isPermanentDeviceAuthError(err)) {
-        markUnpaired();
-        return;
-      }
-      // Stay open, reusing the same idempotency key on retry — if the
-      // first attempt actually succeeded server-side but the response was
-      // lost, a retry with the same key returns that same result instead
-      // of ending the day twice.
-      if (isServerUnreachableError(err)) {
-        setServerReachable(false);
-        setEndDayError("Could not reach the server. Please try again.");
-      } else {
-        setEndDayError(err instanceof ApiError ? err.message : "Could not finish work. Please try again.");
-      }
-    } finally {
-      setEndDaySubmitting(false);
-    }
-  }
-
   // Nothing at all yet — never paired on this device before, or paired but
   // no cached employee has ever been written (shouldn't happen once paired,
   // but a first-ever pairing with no connectivity before the first /me
@@ -653,9 +404,7 @@ export function HomeScreen() {
         {me!.status === "break" && <p>On break</p>}
       </div>
 
-      {error && !pickerOpen && !questionFlow && !singleQuestionEdit && !endDayConfirmOpen && (
-        <p className="error-text">{error}</p>
-      )}
+      {error && !pickerOpen && !questionFlow && !singleQuestionEdit && <p className="error-text">{error}</p>}
 
       {/* 3. Primary activity button */}
       {me!.status === "idle" && (
@@ -726,29 +475,10 @@ export function HomeScreen() {
         </p>
       )}
 
-      {/* 5. Break button */}
-      {me!.status === "work" && (
-        <button className="mobile-action-button" disabled={actionsLocked} onClick={startBreak}>
-          Start Break
-        </button>
-      )}
-      {me!.status === "break" && (
-        <button className="mobile-action-button mobile-action-primary" disabled={actionsLocked} onClick={endBreak}>
-          End Break
-        </button>
-      )}
-
-      {/* 6. End Day */}
-      {me!.status !== "idle" && (
-        <button className="mobile-action-button mobile-action-danger" disabled={actionsLocked} onClick={openEndDayConfirm}>
-          End Day
-        </button>
-      )}
-
-      {/* 7. Recent jobs */}
+      {/* 5. Recent jobs */}
       <RecentJobsCard jobs={me!.recentJobs} />
 
-      {/* 8. Sync/offline status */}
+      {/* 6. Sync/offline status */}
       <div className="connection-bar">
         <span className={`connection-dot ${online ? "online" : "offline"}`} />
         {online ? "Online" : "Offline"}
@@ -864,15 +594,6 @@ export function HomeScreen() {
             />
           );
         })()}
-
-      {endDayConfirmOpen && (
-        <ConfirmEndDayModal
-          submitting={endDaySubmitting}
-          error={endDayError}
-          onConfirm={confirmEndDay}
-          onCancel={closeEndDayConfirm}
-        />
-      )}
     </div>
   );
 }
