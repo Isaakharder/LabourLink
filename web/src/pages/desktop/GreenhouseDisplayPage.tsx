@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { GreenhouseLiveCanvas } from "../../components/greenhouseLive/GreenhouseLiveCanvas";
 import { api } from "../../lib/api";
-import { CanvasTransform, computeFitTransform } from "../../lib/canvasTransform";
+import { CanvasTransform, computeFitTransformToPhases } from "../../lib/canvasTransform";
 import { GreenhouseDisplayStateResponse } from "../../lib/greenhouseLiveTypes";
 import { formatDateLong, formatTimeInAppTimezone } from "../../lib/timezone";
 
@@ -67,7 +67,13 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
   // control-free display worth preserving across a resize.
   useEffect(() => {
     if (!data || viewportSize.width <= 0 || viewportSize.height <= 0) return;
-    const fit = computeFitTransform(data.land, viewportSize.width, viewportSize.height, data.rotationDegrees);
+    const fit = computeFitTransformToPhases(
+      data.land,
+      data.land.phases,
+      viewportSize.width,
+      viewportSize.height,
+      data.rotationDegrees
+    );
     setFitScale(fit.scale);
     setTransform(fit);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -79,7 +85,13 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
   // the view roughly every 10 seconds for no reason.
   useEffect(() => {
     if (!data || viewportSize.width <= 0 || viewportSize.height <= 0) return;
-    const fit = computeFitTransform(data.land, viewportSize.width, viewportSize.height, data.rotationDegrees);
+    const fit = computeFitTransformToPhases(
+      data.land,
+      data.land.phases,
+      viewportSize.width,
+      viewportSize.height,
+      data.rotationDegrees
+    );
     setFitScale(fit.scale);
     setTransform(fit);
     // eslint-disable-next-line react-hooks/exhaustive-deps
