@@ -108,10 +108,13 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
       <div className="greenhouse-tv-header">
         <div className="greenhouse-tv-title">
           <h1>{data?.name ?? "Greenhouse"}</h1>
+        </div>
+        <div className="greenhouse-tv-header-center">
           {data && (
-            <p className="greenhouse-tv-subtitle">
-              {data.activityName ?? "All activities"} · {rangeLabel}
-            </p>
+            <>
+              <p className="greenhouse-tv-activity">{data.activityName ?? "All activities"}</p>
+              <p className="greenhouse-tv-daterange">{rangeLabel}</p>
+            </>
           )}
         </div>
         <div className="greenhouse-tv-status">
@@ -134,6 +137,7 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
             minScale={fitScale * 0.15}
             maxScale={fitScale * 6}
             rotationDegrees={data.rotationDegrees}
+            interactive={false}
           />
         ) : (
           <p className="placeholder-page greenhouse-tv-loading">Loading…</p>
@@ -145,10 +149,7 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
           <span className="greenhouse-live-legend-swatch greenhouse-live-row-blue" /> Currently working
         </span>
         <span>
-          <span className="greenhouse-live-legend-swatch greenhouse-live-row-green" /> Completed in selected range
-        </span>
-        <span>
-          <span className="greenhouse-live-legend-swatch greenhouse-live-row-neutral" /> No matching work
+          <span className="greenhouse-live-legend-swatch greenhouse-live-row-green" /> Completed Row
         </span>
       </div>
     </div>

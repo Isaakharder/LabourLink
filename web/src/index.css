@@ -3768,6 +3768,81 @@ input {
   stroke: #94a3b8;
 }
 
+/* Employee Blocks' Link Rows selection mode (GreenhouseLiveCanvas's
+   onRowClick prop) — a separate three-state palette from the live blue/
+   green/neutral states above, since selection mode never shows work
+   status. */
+.greenhouse-live-row-available {
+  fill: #cbd5e1;
+  stroke: #94a3b8;
+}
+
+.greenhouse-live-row-selected {
+  fill: #f59e0b;
+  stroke: #b45309;
+}
+
+.greenhouse-live-row-taken {
+  fill: #ef4444;
+  stroke: #b91c1c;
+}
+
+.greenhouse-live-row-selectable {
+  cursor: pointer;
+}
+
+/* ---------- Employee Blocks: Link Rows step (EmployeeBlockFormModal) ---------- */
+
+.employee-block-linked-rows-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.employee-block-linked-rows-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.employee-block-linked-rows-list {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+  max-height: 160px;
+  overflow-y: auto;
+  font-size: 0.88rem;
+}
+
+.employee-block-linkrows-toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.employee-block-linkrows-canvas-wrapper {
+  display: flex;
+  flex-direction: column;
+  height: min(60vh, 520px);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 0.75rem;
+}
+
+.employee-block-linkrows-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.employee-block-linkrows-count {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
 /* ---------- Greenhouse office control page layout ---------- */
 
 .greenhouse-office-page {
@@ -3865,6 +3940,18 @@ input {
   justify-content: center;
   gap: 0.45rem;
   min-height: 40px;
+}
+
+/* .employees-add-button (the shared base class) has no :disabled styling of
+   its own, so without this override the Publish button looked exactly the
+   same whether it was clickable or not — with no unpublished changes (e.g.
+   right after opening the page, or right after a successful publish), a
+   click silently did nothing and looked indistinguishable from a genuinely
+   broken button. Scoped to this one button, not the shared base class, so
+   every other page reusing .employees-add-button is unaffected. */
+.greenhouse-office-publish-button:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .greenhouse-office-unsaved-note {
@@ -4149,14 +4236,24 @@ input {
   font-size: 1.5rem;
 }
 
+/* Three-column grid (not flex space-between) so the center column is
+   genuinely centered on the header's own midpoint regardless of how wide
+   the left (name) and right (updated time) columns are — flex
+   space-between only centers a middle child when its neighbors are equal
+   width, which the display name and "Updated ..." text never reliably are. */
 .greenhouse-tv-header {
   flex-shrink: 0;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  padding: 1.25rem 2rem;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  column-gap: 1rem;
+  padding: 0.5rem 1.5rem;
   background: var(--color-surface);
   border-bottom: 1px solid var(--color-border);
+}
+
+.greenhouse-tv-title {
+  justify-self: start;
 }
 
 .greenhouse-tv-title h1 {
@@ -4164,13 +4261,29 @@ input {
   font-size: 2.75rem;
 }
 
-.greenhouse-tv-subtitle {
-  margin: 0.4rem 0 0;
-  font-size: 1.5rem;
+.greenhouse-tv-header-center {
+  justify-self: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.greenhouse-tv-activity {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.greenhouse-tv-daterange {
+  margin: 0.15rem 0 0;
+  font-size: 1.05rem;
   color: var(--color-muted);
 }
 
 .greenhouse-tv-status {
+  justify-self: end;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
@@ -4204,21 +4317,34 @@ input {
   flex-shrink: 0;
   display: flex;
   justify-content: center;
-  gap: 3rem;
-  padding: 1.25rem;
+  gap: 2rem;
+  padding: 0.5rem 1.25rem;
   background: var(--color-surface);
   border-top: 1px solid var(--color-border);
-  font-size: 1.75rem;
+  font-size: 1.1rem;
 }
 
 .greenhouse-tv-legend span {
   display: inline-flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.5rem;
 }
 
 .greenhouse-tv-legend .greenhouse-live-legend-swatch {
-  width: 32px;
-  height: 32px;
-  border-radius: 6px;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+}
+
+/* .greenhouse-live-row-blue/-green only set the SVG fill/stroke properties
+   used on the map's own <rect> elements — meaningless on this legend's
+   plain HTML <span> swatches, which render with no background at all
+   without this. Scoped to the TV legend only, matching this task's scope
+   (the office page's legend has the same pre-existing gap, untouched here). */
+.greenhouse-tv-legend .greenhouse-live-row-blue {
+  background: #2563eb;
+}
+
+.greenhouse-tv-legend .greenhouse-live-row-green {
+  background: #16a34a;
 }

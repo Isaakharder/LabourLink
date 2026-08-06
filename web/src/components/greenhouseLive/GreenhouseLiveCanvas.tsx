@@ -20,6 +20,25 @@ interface GreenhouseLiveCanvasProps {
   // handled natively by the browser. Defaults to 0 so callers that don't
   // (yet) care about rotation need no change.
   rotationDegrees?: RotationDegrees;
+  // Row-selection mode (used by Employee Blocks' Link Rows step) — entirely
+  // optional and additive: when onRowClick is omitted, every row renders
+  // exactly as before (colored by row.state, no click handler). When
+  // provided, rows render by selection state instead and become clickable;
+  // row.state itself is ignored in that case (callers in selection mode
+  // have no live work-status to show, only which rows are selected/taken).
+  onRowClick?: (row: LiveRow) => void;
+  selectedRowIds?: Set<string>;
+  // Rows already linked to a *different* block/owner, keyed by row id to
+  // that owner's display name — highlighted as "taken" (unless also
+  // selected) and named in the tooltip, so a reassignment is visible
+  // before the caller's own onRowClick confirm logic runs.
+  unavailableRowIds?: Map<string, string>;
+  // false = display-only: no wheel/pointer pan-zoom handlers are attached
+  // at all (not just visually disabled — the listeners themselves never
+  // get wired up). Defaults to true so every existing caller (the office
+  // page, Employee Blocks' Link Rows step) keeps its current pan/zoom
+  // behavior with no change. Used by the read-only TV display.
+  interactive?: boolean;
 }
 
 // Same threshold LandCanvas uses — below this many screen px-per-foot, row
@@ -28,6 +47,12 @@ interface GreenhouseLiveCanvasProps {
 const ROW_LABEL_MIN_SCALE = 3;
 
 const PAN_DRAG_THRESHOLD_PX = 4;
+
+function selectionTooltip(row: LiveRow, phaseName: string, unavailableBy?: string): string {
+  const lines = [`Row ${row.rowNumber}`, phaseName];
+  if (unavailableBy) lines.push(`Currently in block: ${unavailableBy}`);
+  return lines.join("\n");
+}
 
 function rowTooltip(row: LiveRow, phaseName: string): string {
   const lines = [`Row ${row.rowNumber}`, phaseName];
@@ -51,7 +76,8 @@ function rowTooltip(row: LiveRow, phaseName: string): string {
 // math (canvasTransform.ts, unmodified), same phase/row rect+label
 // conventions and CSS class names, but no land background/border/grid, and
 // no drag/select/edit state or handlers of any kind — pan and zoom are the
-// only interactions.
+// only interactions, and even those are opt-out via `interactive={false}`
+// (see the TV display, the one caller that needs a fully display-only map).
 export function GreenhouseLiveCanvas({
   land,
   phases,
@@ -62,6 +88,10 @@ export function GreenhouseLiveCanvas({
   minScale,
   maxScale,
   rotationDegrees = 0,
+  onRowClick,
+  selectedRowIds,
+  unavailableRowIds,
+  interactive = true,
 }: GreenhouseLiveCanvasProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -89,6 +119,7 @@ export function GreenhouseLiveCanvas({
   }, []);
 
   useEffect(() => {
+    if (!interactive) return;
     const el = viewportRef.current;
     if (!el) return;
     function handleWheel(e: WheelEvent) {
@@ -102,7 +133,7 @@ export function GreenhouseLiveCanvas({
     }
     el.addEventListener("wheel", handleWheel, { passive: false });
     return () => el.removeEventListener("wheel", handleWheel);
-  }, [transform, minScale, maxScale, onTransformChange]);
+  }, [interactive, transform, minScale, maxScale, onTransformChange]);
 
   function handleViewportPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
     const isMiddle = e.button === 1;
@@ -168,10 +199,10 @@ export function GreenhouseLiveCanvas({
     <div
       ref={viewportRef}
       className={`greenhouse-canvas-viewport${isPanning ? " greenhouse-canvas-viewport-panning" : ""}`}
-      onPointerDown={handleViewportPointerDown}
-      onPointerMove={handleViewportPointerMove}
-      onPointerUp={handleViewportPointerUp}
-      onPointerCancel={handleViewportPointerUp}
+      onPointerDown={interactive ? handleViewportPointerDown : undefined}
+      onPointerMove={interactive ? handleViewportPointerMove : undefined}
+      onPointerUp={interactive ? handleViewportPointerUp : undefined}
+      onPointerCancel={interactive ? handleViewportPointerUp : undefined}
     >
       <svg ref={svgRef} className="greenhouse-canvas-svg">
         <g ref={gRef} transform={`translate(${transform.pan.x} ${transform.pan.y}) scale(${transform.scale})`}>
@@ -211,6 +242,18 @@ export function GreenhouseLiveCanvas({
                   const rowY = phase.yFeetFromNorth + row.yFt;
                   const showLabel = transform.scale >= ROW_LABEL_MIN_SCALE;
                   const rowFontSize = Math.max(6, Math.min(width, height) * 0.5);
+
+                  const selectable = Boolean(onRowClick);
+                  const isSelected = selectedRowIds?.has(row.id);
+                  const unavailableBy = unavailableRowIds?.get(row.id);
+                  const visualState = selectable
+                    ? isSelected
+                      ? "selected"
+                      : unavailableBy
+                        ? "taken"
+                        : "available"
+                    : row.state;
+
                   return (
                     <g key={row.id} className="greenhouse-row-group">
                       <rect
@@ -218,10 +261,13 @@ export function GreenhouseLiveCanvas({
                         y={rowY}
                         width={width}
                         height={height}
-                        className={`greenhouse-live-row-rect greenhouse-live-row-${row.state}`}
+                        className={`greenhouse-live-row-rect greenhouse-live-row-${visualState}${
+                          selectable ? " greenhouse-live-row-selectable" : ""
+                        }`}
                         vectorEffect="non-scaling-stroke"
+                        onClick={selectable ? () => onRowClick!(row) : undefined}
                       >
-                        <title>{rowTooltip(row, phase.name)}</title>
+                        <title>{selectable ? selectionTooltip(row, phase.name, unavailableBy) : rowTooltip(row, phase.name)}</title>
                       </rect>
                       {showLabel && (
                         <text
