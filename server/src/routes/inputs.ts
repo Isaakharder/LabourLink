@@ -6,6 +6,8 @@ import { getSignedPhotoUrl, getSignedPhotoUrls } from "../lib/storage";
 import { calendarDateInAppTimezone, getDayBoundsUtc } from "../lib/timezone";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
+import { aggregateDensitySpeed, DensityContribution } from "../lib/densitySpeed";
+import { getUnresolvedRunsForRow } from "../lib/rowCompletionCandidates";
 
 const router = Router();
 
@@ -110,8 +112,8 @@ router.get(
     const { rows: entryRows } = await pool.query(
       `select te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
               te.break_profile_item_id, te.source, te.is_paid, te.greenhouse_row_id, te.carrier_id,
-              te.auto_closed_at,
-              a.name as activity_name, a.normal_speed, a.speed_unit,
+              te.auto_closed_at, te.density_type, te.density_count_per_row,
+              a.name as activity_name, a.normal_speed, a.speed_unit, a.density_source,
               bpi.name as break_item_name,
               gr.row_number, gphase.name as row_phase_name,
               c.name as carrier_name
@@ -134,10 +136,15 @@ router.get(
       ended_at: r.ended_at,
       greenhouse_row_id: r.greenhouse_row_id,
       carrier_id: r.carrier_id,
+      density_type: r.density_type,
+      density_count_per_row: r.density_count_per_row,
     }));
     const { runs, breaks } = groupIntoActivityRuns(segments);
 
-    const activityMeta = new Map<string, { name: string; normalSpeed: string | null; speedUnit: string | null }>();
+    const activityMeta = new Map<
+      string,
+      { name: string; normalSpeed: string | null; speedUnit: string | null; densitySource: "plants" | "stems" | null }
+    >();
     const rowMeta = new Map<string, { rowNumber: number; phaseName: string }>();
     const carrierMeta = new Map<string, string>();
     // Keyed by the individual time_entries row id (not a grouped run id) —
@@ -155,7 +162,12 @@ router.get(
     for (const r of entryRows) {
       autoClosedMeta.set(r.id, r.auto_closed_at !== null);
       if (r.activity_id && !activityMeta.has(r.activity_id)) {
-        activityMeta.set(r.activity_id, { name: r.activity_name, normalSpeed: r.normal_speed, speedUnit: r.speed_unit });
+        activityMeta.set(r.activity_id, {
+          name: r.activity_name,
+          normalSpeed: r.normal_speed,
+          speedUnit: r.speed_unit,
+          densitySource: r.density_source,
+        });
       }
       if (r.greenhouse_row_id && !rowMeta.has(r.greenhouse_row_id)) {
         rowMeta.set(r.greenhouse_row_id, { rowNumber: r.row_number, phaseName: r.row_phase_name });
@@ -171,6 +183,114 @@ router.get(
           breakProfileItemId: r.break_profile_item_id,
         });
       }
+    }
+
+    // Density-based speed (see 025_activity_density_speed.sql /
+    // 026_row_completions.sql). A run's row quantity only ever counts
+    // toward speed in one of two ways:
+    //
+    //  1. Its segments already belong to a confirmed row_completions record
+    //     — the completion's own frozen quantity_per_row counts exactly
+    //     once, and its duration is the sum of *every* linked segment
+    //     across every day/employee it spans, not just today's. The same
+    //     resulting speed is shown on every run belonging to that
+    //     completion, on every day it touches.
+    //  2. It's the *only* not-yet-completed run anywhere for that row+type
+    //     (checked via getUnresolvedRunsForRow) — unambiguous, so it
+    //     auto-counts exactly like the original (pre-row-completions)
+    //     behavior, no admin action required.
+    //
+    // Anything else — 2+ not-yet-completed runs sharing a row+type — is
+    // "unresolved": excluded from both sides of the ratio (never counted as
+    // zero-quantity time) until an admin combines them via
+    // POST /api/row-completions, since blindly counting every visit would
+    // inflate quantity the moment a row is revisited (the bug this
+    // migration fixes). This never affects non-density activities or
+    // density-eligible runs whose row simply has no matching density at
+    // all (those stay blank exactly as before, unrelated to ambiguity).
+    const densityEligibleRuns = runs.filter((r) => r.densityCountPerRow != null);
+
+    const allSegmentIds = densityEligibleRuns.flatMap((r) => r.segmentIds);
+    const segmentCompletionMap = new Map<string, string>();
+    if (allSegmentIds.length > 0) {
+      const { rows: segRows } = await pool.query(
+        `select time_entry_id, row_completion_id from row_completion_segments where time_entry_id = any($1::uuid[])`,
+        [allSegmentIds]
+      );
+      for (const s of segRows) segmentCompletionMap.set(s.time_entry_id, s.row_completion_id);
+    }
+
+    const runCompletionId = new Map<string, string>();
+    const completionIdsNeeded = new Set<string>();
+    for (const r of densityEligibleRuns) {
+      const completionId = r.segmentIds.map((id) => segmentCompletionMap.get(id)).find((id) => id !== undefined);
+      if (completionId) {
+        runCompletionId.set(r.id, completionId);
+        completionIdsNeeded.add(completionId);
+      }
+    }
+
+    const completionTotals = new Map<string, { quantity: number; durationSeconds: number; segmentCount: number }>();
+    if (completionIdsNeeded.size > 0) {
+      const { rows: compRows } = await pool.query(
+        `select rc.id, rc.quantity_per_row, count(*) as segment_count,
+                sum(extract(epoch from (te.ended_at - te.started_at))) as total_duration_seconds
+         from row_completions rc
+         join row_completion_segments rcs on rcs.row_completion_id = rc.id
+         join time_entries te on te.id = rcs.time_entry_id
+         where rc.id = any($1::uuid[])
+         group by rc.id, rc.quantity_per_row`,
+        [[...completionIdsNeeded]]
+      );
+      for (const c of compRows) {
+        completionTotals.set(c.id, {
+          quantity: Number(c.quantity_per_row),
+          durationSeconds: Number(c.total_duration_seconds),
+          segmentCount: Number(c.segment_count),
+        });
+      }
+    }
+    const speedByCompletionId = new Map<string, number | null>();
+    for (const [id, totals] of completionTotals) {
+      speedByCompletionId.set(
+        id,
+        aggregateDensitySpeed([{ quantityPerRow: totals.quantity, durationSeconds: totals.durationSeconds }])
+      );
+    }
+
+    const unresolvedPairs = new Map<string, { greenhouseRowId: string; densityType: "plants" | "stems" }>();
+    for (const r of densityEligibleRuns) {
+      if (runCompletionId.has(r.id)) continue;
+      const key = `${r.greenhouseRowId}:${r.densityType}`;
+      if (!unresolvedPairs.has(key)) {
+        unresolvedPairs.set(key, {
+          greenhouseRowId: r.greenhouseRowId!,
+          densityType: r.densityType as "plants" | "stems",
+        });
+      }
+    }
+    const ambiguousPairKeys = new Set<string>();
+    for (const [key, pair] of unresolvedPairs) {
+      const candidates = await getUnresolvedRunsForRow(pair.greenhouseRowId, pair.densityType);
+      if (candidates.length > 1) ambiguousPairKeys.add(key);
+    }
+
+    const isUnresolvedByRunId = new Map<string, boolean>();
+    const densityContributionsByActivity = new Map<string, DensityContribution[]>();
+    for (const r of densityEligibleRuns) {
+      if (runCompletionId.has(r.id)) continue;
+      const key = `${r.greenhouseRowId}:${r.densityType}`;
+      if (ambiguousPairKeys.has(key)) {
+        isUnresolvedByRunId.set(r.id, true);
+        continue;
+      }
+      const list = densityContributionsByActivity.get(r.activityId) ?? [];
+      list.push({ quantityPerRow: r.densityCountPerRow!, durationSeconds: r.durationSeconds });
+      densityContributionsByActivity.set(r.activityId, list);
+    }
+    const calculatedSpeedByActivity = new Map<string, number | null>();
+    for (const [activityId, contributions] of densityContributionsByActivity) {
+      calculatedSpeedByActivity.set(activityId, aggregateDensitySpeed(contributions));
     }
 
     const canEditRole = EDIT_ROLES.includes(req.employee!.securityRole);
@@ -203,6 +323,21 @@ router.get(
         const meta = activityMeta.get(r.activityId);
         const row = r.greenhouseRowId ? rowMeta.get(r.greenhouseRowId) : undefined;
         const carrierName = r.carrierId ? carrierMeta.get(r.carrierId) : undefined;
+
+        const completionId = runCompletionId.get(r.id);
+        const isUnresolved = isUnresolvedByRunId.get(r.id) ?? false;
+        let calculatedSpeed: number | null = null;
+        let rowCompletion: { id: string; quantityPerRow: number; segmentCount: number } | null = null;
+        if (completionId) {
+          const totals = completionTotals.get(completionId);
+          calculatedSpeed = speedByCompletionId.get(completionId) ?? null;
+          if (totals) {
+            rowCompletion = { id: completionId, quantityPerRow: totals.quantity, segmentCount: totals.segmentCount };
+          }
+        } else if (meta?.densitySource && !isUnresolved) {
+          calculatedSpeed = calculatedSpeedByActivity.get(r.activityId) ?? null;
+        }
+
         return {
           id: r.id,
           activityId: r.activityId,
@@ -211,6 +346,12 @@ router.get(
           activityName: meta?.name ?? "Unknown activity",
           normalSpeedPerHour:
             meta?.normalSpeed != null ? { value: Number(meta.normalSpeed), unit: meta.speedUnit } : null,
+          activityDensitySource: meta?.densitySource ?? null,
+          calculatedSpeedPerHour:
+            calculatedSpeed != null ? { value: calculatedSpeed, unit: meta?.speedUnit ?? null } : null,
+          isUnresolvedRowCompletion: isUnresolved,
+          rowCompletion,
+          segmentIds: r.segmentIds,
           durationSeconds: Math.round(r.durationSeconds),
           startedAt: r.startedAt,
           currentSegmentStartedAt: r.currentSegmentStartedAt,
@@ -551,6 +692,10 @@ router.post(
       ended_at: r.ended_at,
       greenhouse_row_id: r.greenhouse_row_id,
       carrier_id: r.carrier_id,
+      // Not selected above — this endpoint only needs run boundaries/ids to
+      // locate and delete the right segments, never density figures.
+      density_type: null,
+      density_count_per_row: null,
     }));
     const { runs } = groupIntoActivityRuns(segments);
     const run = runs.find((r) => r.id === id);

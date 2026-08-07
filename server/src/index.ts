@@ -20,6 +20,8 @@ import inputsRoutes from "./routes/inputs";
 import mobileTimeRoutes from "./routes/mobileTime";
 import pairingRoutes from "./routes/pairing";
 import passwordResetRoutes from "./routes/passwordReset";
+import plantDensitiesRoutes from "./routes/plantDensities";
+import rowCompletionsRoutes from "./routes/rowCompletions";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -37,6 +39,8 @@ app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/diagnostics", diagnosticsRoutes);
 app.use("/api/employees", employeesRoutes);
 app.use("/api/employee-blocks", employeeBlocksRoutes);
+app.use("/api/plant-densities", plantDensitiesRoutes);
+app.use("/api/row-completions", rowCompletionsRoutes);
 app.use("/api/activities", activitiesRoutes);
 app.use("/api/activity-groups", activityGroupsRoutes);
 app.use("/api/break-profiles", breakProfilesRoutes);

@@ -3,6 +3,7 @@ import { PageHeader } from "../../components/layout/PageHeader";
 import { BreaksTab } from "./basic-data/BreaksTab";
 import { RowsTab } from "./basic-data/RowsTab";
 import { EmployeeBlocksTab } from "./basic-data/EmployeeBlocksTab";
+import { DensityTab } from "./basic-data/DensityTab";
 import { VarietiesTab } from "./basic-data/VarietiesTab";
 import { CarriersTab } from "./basic-data/CarriersTab";
 
@@ -13,6 +14,7 @@ const TABS = [
   { path: "breaks", label: "Breaks", element: <BreaksTab /> },
   { path: "rows", label: "Rows", element: <RowsTab /> },
   { path: "employee-blocks", label: "Employee Blocks", element: <EmployeeBlocksTab /> },
+  { path: "density", label: "Density", element: <DensityTab /> },
   { path: "varieties", label: "Varieties", element: <VarietiesTab /> },
   { path: "carriers", label: "Carriers", element: <CarriersTab /> },
 ];

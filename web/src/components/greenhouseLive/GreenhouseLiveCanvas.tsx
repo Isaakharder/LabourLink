@@ -1,4 +1,4 @@
-import { PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
+import { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { Navigation2 } from "lucide-react";
 import { LivePhase, LiveRow } from "../../lib/greenhouseLiveTypes";
 import { CanvasTransform, RotationDegrees, clampPan, zoomAtPoint } from "../../lib/canvasTransform";
@@ -20,13 +20,22 @@ interface GreenhouseLiveCanvasProps {
   // handled natively by the browser. Defaults to 0 so callers that don't
   // (yet) care about rotation need no change.
   rotationDegrees?: RotationDegrees;
-  // Row-selection mode (used by Employee Blocks' Link Rows step) — entirely
-  // optional and additive: when onRowClick is omitted, every row renders
-  // exactly as before (colored by row.state, no click handler). When
-  // provided, rows render by selection state instead and become clickable;
-  // row.state itself is ignored in that case (callers in selection mode
-  // have no live work-status to show, only which rows are selected/taken).
-  onRowClick?: (row: LiveRow) => void;
+  // Row-selection mode (used by Employee Blocks' and Plant Density's Link
+  // Rows steps) — entirely optional and additive: when onRowClick is
+  // omitted, every row renders exactly as before (colored by row.state, no
+  // click handler). When provided, rows render by selection state instead
+  // and become clickable; row.state itself is ignored in that case
+  // (callers in selection mode have no live work-status to show, only
+  // which rows are selected/taken).
+  //
+  // `opts.rangeRows` is populated on a shift+click that has a valid anchor
+  // (the previously-clicked row, tracked internally) — the full run of
+  // rows from that anchor to the one just clicked, inclusive, in the same
+  // order `phases` was given (flattened phase-by-phase, row-by-row —
+  // "logical" order, not screen position). Callers that don't care about
+  // range-select can just ignore `opts` entirely and keep toggling
+  // `row` one at a time; Employee Blocks does exactly this today.
+  onRowClick?: (row: LiveRow, opts?: { shiftKey?: boolean; rangeRows?: LiveRow[] }) => void;
   selectedRowIds?: Set<string>;
   // Rows already linked to a *different* block/owner, keyed by row id to
   // that owner's display name — highlighted as "taken" (unless also
@@ -104,6 +113,11 @@ export function GreenhouseLiveCanvas({
     captured: boolean;
   } | null>(null);
   const [isPanning, setIsPanning] = useState(false);
+  // Anchor for shift+click range-select — the id of the last row clicked
+  // in selection mode, regardless of whether that click was itself a
+  // shift+click (so a *second* shift+click extends/redefines the range
+  // from the row just added, not always from the very first click).
+  const lastClickedRowIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     const el = viewportRef.current;
@@ -195,6 +209,27 @@ export function GreenhouseLiveCanvas({
   const rotateCx = land.eastWestFeet / 2;
   const rotateCy = land.northSouthFeet / 2;
 
+  // The single flat "logical" row order shift+click ranges are computed
+  // against — every phase's rows, in the same order `phases` was given
+  // (already the deterministic order the caller's own data fetch produced,
+  // the same order rendered above), not screen/pixel position.
+  const flatSelectableRows = onRowClick ? visiblePhases.flatMap((p) => p.rows) : [];
+
+  function handleRowSelectionClick(row: LiveRow, e: ReactMouseEvent) {
+    const shiftKey = e.shiftKey;
+    let rangeRows: LiveRow[] | undefined;
+    if (shiftKey && lastClickedRowIdRef.current) {
+      const fromIdx = flatSelectableRows.findIndex((r) => r.id === lastClickedRowIdRef.current);
+      const toIdx = flatSelectableRows.findIndex((r) => r.id === row.id);
+      if (fromIdx !== -1 && toIdx !== -1) {
+        const [start, end] = fromIdx <= toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx];
+        rangeRows = flatSelectableRows.slice(start, end + 1);
+      }
+    }
+    lastClickedRowIdRef.current = row.id;
+    onRowClick!(row, { shiftKey, rangeRows });
+  }
+
   return (
     <div
       ref={viewportRef}
@@ -265,7 +300,7 @@ export function GreenhouseLiveCanvas({
                           selectable ? " greenhouse-live-row-selectable" : ""
                         }`}
                         vectorEffect="non-scaling-stroke"
-                        onClick={selectable ? () => onRowClick!(row) : undefined}
+                        onClick={selectable ? (e) => handleRowSelectionClick(row, e) : undefined}
                       >
                         <title>{selectable ? selectionTooltip(row, phase.name, unavailableBy) : rowTooltip(row, phase.name)}</title>
                       </rect>

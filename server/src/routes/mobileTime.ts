@@ -89,12 +89,38 @@ async function openEntry(
       [employeeId, idempotencyKey, overrides.startedAt ?? null, overrides.actualEndedAt ?? null]
     );
 
+    // Frozen at the moment this work entry is opened — resolved from the
+    // row's *current* density assignment of the activity's configured
+    // density_source, never re-read afterward (see
+    // 025_activity_density_speed.sql: editing a density later must not
+    // change an already-recorded run's calculated speed on Inputs). Breaks
+    // never reach here (entryType !== "work" short-circuits), matching the
+    // chk_time_entries_density_only_on_work constraint for free.
+    let densityType: "plants" | "stems" | null = null;
+    let densityCountPerRow: number | null = null;
+    if (entryType === "work" && activityId && overrides.greenhouseRowId) {
+      const densityRes = await client.query(
+        `select pd.type as density_type, pd.count_per_row as density_count_per_row
+         from activities a
+         left join plant_density_rows pdr
+           on pdr.greenhouse_row_id = $2 and pdr.density_type = a.density_source
+         left join plant_densities pd on pd.id = pdr.density_id
+         where a.id = $1`,
+        [activityId, overrides.greenhouseRowId]
+      );
+      const d = densityRes.rows[0];
+      if (d && d.density_type) {
+        densityType = d.density_type;
+        densityCountPerRow = Number(d.density_count_per_row);
+      }
+    }
+
     const insert = await client.query(
       `insert into time_entries
          (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at,
           actual_started_at, break_profile_item_id, scheduled_break_date, source, is_paid,
-          greenhouse_row_id, carrier_id)
-       values ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8, $9, coalesce($10, 'manual'), $11, $12, $13)
+          greenhouse_row_id, carrier_id, density_type, density_count_per_row)
+       values ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8, $9, coalesce($10, 'manual'), $11, $12, $13, $14, $15)
        on conflict (idempotency_key) do nothing
        returning id, entry_type, activity_id, started_at, greenhouse_row_id, carrier_id`,
       [
@@ -111,6 +137,8 @@ async function openEntry(
         overrides.isPaid ?? null,
         overrides.greenhouseRowId ?? null,
         overrides.carrierId ?? null,
+        densityType,
+        densityCountPerRow,
       ]
     );
 

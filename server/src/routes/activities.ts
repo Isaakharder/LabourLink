@@ -10,6 +10,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const QUESTION_TYPES = ["greenhouse_row", "carrier"] as const;
 type QuestionType = (typeof QUESTION_TYPES)[number];
+
+const DENSITY_SOURCES = ["plants", "stems"] as const;
+type DensitySource = (typeof DENSITY_SOURCES)[number];
 const DEFAULT_LABEL: Record<QuestionType, string> = {
   greenhouse_row: "Where?",
   carrier: "Which Carrier?",
@@ -34,6 +37,11 @@ interface ActivityFields {
   speedUnit: string | null;
   minimumDurationMinutes: number;
   isActive: boolean;
+  // Which row density (plant_densities.type, see 023/024) this activity's
+  // calculated speed is driven by — null means no calculated speed at all,
+  // just the configured normalSpeed above. Never linked to a specific
+  // density record: resolved per-row at work-entry time (mobileTime.ts).
+  densitySource: DensitySource | null;
 }
 
 function validateCreate(body: Record<string, unknown>):
@@ -56,6 +64,15 @@ function validateCreate(body: Record<string, unknown>):
 
   const speedUnit = trimOrNull(body.speedUnit as string);
 
+  let densitySource: DensitySource | null = null;
+  if (body.densitySource !== undefined && body.densitySource !== null && body.densitySource !== "") {
+    if (!DENSITY_SOURCES.includes(body.densitySource as DensitySource)) {
+      errors.densitySource = "Density source must be 'plants' or 'stems'";
+    } else {
+      densitySource = body.densitySource as DensitySource;
+    }
+  }
+
   let minimumDurationMinutes = 0;
   if (body.minimumDurationMinutes === undefined || body.minimumDurationMinutes === null || body.minimumDurationMinutes === "") {
     errors.minimumDurationMinutes = "Minimum duration is required";
@@ -77,6 +94,7 @@ function validateCreate(body: Record<string, unknown>):
       speedUnit,
       minimumDurationMinutes,
       isActive: body.isActive === undefined ? true : Boolean(body.isActive),
+      densitySource,
     },
   };
 }
@@ -107,6 +125,16 @@ function validateUpdate(body: Record<string, unknown>):
   }
 
   if ("speedUnit" in body) data.speedUnit = trimOrNull(body.speedUnit as string);
+
+  if ("densitySource" in body) {
+    if (body.densitySource === null || body.densitySource === "") {
+      data.densitySource = null;
+    } else if (!DENSITY_SOURCES.includes(body.densitySource as DensitySource)) {
+      errors.densitySource = "Density source must be 'plants' or 'stems'";
+    } else {
+      data.densitySource = body.densitySource as DensitySource;
+    }
+  }
 
   if ("minimumDurationMinutes" in body) {
     const n = Number(body.minimumDurationMinutes);
@@ -223,7 +251,7 @@ async function upsertQuestions(client: PoolClient, activityId: string, questions
 
 const SELECT_COLUMNS = `
   a.id, a.name, a.normal_speed, a.speed_unit, a.minimum_duration_minutes,
-  a.is_active, a.sort_order, a.updated_at,
+  a.is_active, a.sort_order, a.updated_at, a.density_source,
   coalesce(grp.assigned_group_count, 0) as assigned_group_count,
   coalesce(q.questions, '[]'::json) as questions
 `;
@@ -267,6 +295,7 @@ function serializeActivity(row: any) {
     speedUnit: row.speed_unit,
     minimumDurationMinutes: row.minimum_duration_minutes,
     isActive: row.is_active,
+    densitySource: row.density_source,
     assignedGroupCount: Number(row.assigned_group_count),
     updatedAt: row.updated_at,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -344,10 +373,10 @@ router.post(
       let activityId: string;
       try {
         const { rows } = await client.query(
-          `insert into activities (name, normal_speed, speed_unit, minimum_duration_minutes, is_active)
-           values ($1, $2, $3, $4, $5)
+          `insert into activities (name, normal_speed, speed_unit, minimum_duration_minutes, is_active, density_source)
+           values ($1, $2, $3, $4, $5, $6)
            returning id`,
-          [d.name, d.normalSpeed, d.speedUnit, d.minimumDurationMinutes, d.isActive]
+          [d.name, d.normalSpeed, d.speedUnit, d.minimumDurationMinutes, d.isActive, d.densitySource]
         );
         activityId = rows[0].id;
       } catch (err) {
@@ -402,6 +431,7 @@ router.patch(
       speedUnit: "speed_unit",
       minimumDurationMinutes: "minimum_duration_minutes",
       isActive: "is_active",
+      densitySource: "density_source",
     };
 
     const keys = Object.keys(d) as (keyof ActivityFields)[];

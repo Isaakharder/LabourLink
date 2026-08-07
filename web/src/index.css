@@ -1414,6 +1414,28 @@ input {
   border-bottom: none;
 }
 
+/* Basic Data > Density: Plants and Stems as two equal-width cards side by
+   side, each a self-contained bordered box (mirrors .employees-list-card's
+   surface/border/radius) with its own toolbar + table inside. */
+.density-cards-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+.density-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+
+.density-card h3 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+}
+
 .status-pill {
   display: inline-block;
   padding: 0.15rem 0.6rem;
@@ -1430,6 +1452,25 @@ input {
 .status-inactive {
   background: #f1f5f9;
   color: var(--color-muted);
+}
+
+/* Inputs > row-completion warning — a row worked across more than one
+   unresolved segment, needs an admin to review/combine before its density
+   speed can be shown. Same pill shape as .status-pill, clickable. */
+.inputs-row-completion-warning {
+  display: inline-block;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: #ffedd5;
+  color: #9a3412;
+  border: 1px solid #fb923c;
+  cursor: pointer;
+}
+
+.inputs-row-completion-warning:hover {
+  background: #fed7aa;
 }
 
 .employee-row-actions {
@@ -1737,6 +1778,10 @@ input {
 
   .employees-table {
     display: none;
+  }
+
+  .density-cards-grid {
+    grid-template-columns: 1fr;
   }
 
   .employee-cards {

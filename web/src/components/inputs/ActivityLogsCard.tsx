@@ -1,7 +1,13 @@
+import { MouseEvent, useState } from "react";
 import { Avatar } from "../employees/Avatar";
 import { ActivityTimer } from "../mobile/ActivityTimer";
 import { ActivityRunDto } from "../../lib/inputsTypes";
 import { formatDateLong, formatDurationHMS, formatTimeInAppTimezone } from "../../lib/timezone";
+import { RowCompletionReviewModal } from "./RowCompletionReviewModal";
+
+function formatSpeed(speed: { value: number; unit: string | null }): string {
+  return speed.unit ? `${speed.value.toFixed(1)} ${speed.unit}` : speed.value.toFixed(1);
+}
 
 interface ActivityLogsCardEmployee {
   id: string;
@@ -24,6 +30,9 @@ interface ActivityLogsCardProps {
   onSaveEdit: () => void;
   onCancelEdit: () => void;
   onDeleteRun: (run: ActivityRunDto) => void;
+  // Called after the admin combines segments in the row-completion review
+  // modal — the parent reloads the day so the newly-resolved speed shows up.
+  onRowCompletionChanged: () => void;
 }
 
 export function ActivityLogsCard({
@@ -40,13 +49,26 @@ export function ActivityLogsCard({
   onSaveEdit,
   onCancelEdit,
   onDeleteRun,
+  onRowCompletionChanged,
 }: ActivityLogsCardProps) {
+  const [reviewTarget, setReviewTarget] = useState<{
+    greenhouseRowId: string;
+    densityType: "plants" | "stems";
+    rowLabel: string;
+  } | null>(null);
+
   function handleEndTimeCellClick(run: ActivityRunDto) {
     if (run.id === selectedRunId && run.canEdit && editingRunId !== run.id) {
       onStartEdit(run);
     } else {
       onSelectRun(run.id);
     }
+  }
+
+  function openReview(run: ActivityRunDto, e: MouseEvent) {
+    e.stopPropagation();
+    if (!run.row || !run.activityDensitySource) return;
+    setReviewTarget({ greenhouseRowId: run.row.id, densityType: run.activityDensitySource, rowLabel: run.row.label });
   }
 
   return (
@@ -90,7 +112,7 @@ export function ActivityLogsCard({
                 <th>Activity</th>
                 <th>Row</th>
                 <th>Carrier</th>
-                <th>Normal Speed</th>
+                <th>Speed</th>
                 <th className="inputs-th-duration">Duration</th>
                 <th className="inputs-th-endtime">End Time</th>
                 <th className="inputs-th-actions">Actions</th>
@@ -107,10 +129,26 @@ export function ActivityLogsCard({
                   <td className="inputs-log-row-cell">{run.row?.label ?? "—"}</td>
                   <td className="inputs-log-carrier-cell">{run.carrier?.name ?? "—"}</td>
                   <td className="inputs-log-speed">
-                    {run.normalSpeedPerHour ? (
+                    {run.activityDensitySource ? (
+                      run.isUnresolvedRowCompletion ? (
+                        <button
+                          type="button"
+                          className="inputs-row-completion-warning"
+                          title="This row has work logged in more than one segment — review and combine before it can count toward speed"
+                          onClick={(e) => openReview(run, e)}
+                        >
+                          Needs review
+                        </button>
+                      ) : run.calculatedSpeedPerHour ? (
+                        <span title="Calculated actual speed for this activity, based on row density and hours worked">
+                          {formatSpeed(run.calculatedSpeedPerHour)}
+                        </span>
+                      ) : (
+                        "—"
+                      )
+                    ) : run.normalSpeedPerHour ? (
                       <span title="Configured normal speed for this activity — not measured actual output">
-                        {run.normalSpeedPerHour.value.toFixed(1)}
-                        {run.normalSpeedPerHour.unit ? ` ${run.normalSpeedPerHour.unit}` : ""}
+                        {formatSpeed(run.normalSpeedPerHour)}
                       </span>
                     ) : (
                       "—"
@@ -187,6 +225,19 @@ export function ActivityLogsCard({
             </tbody>
           </table>
         </div>
+      )}
+
+      {reviewTarget && (
+        <RowCompletionReviewModal
+          greenhouseRowId={reviewTarget.greenhouseRowId}
+          densityType={reviewTarget.densityType}
+          rowLabel={reviewTarget.rowLabel}
+          onClose={() => setReviewTarget(null)}
+          onCombined={() => {
+            setReviewTarget(null);
+            onRowCompletionChanged();
+          }}
+        />
       )}
     </>
   );

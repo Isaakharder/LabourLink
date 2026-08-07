@@ -104,7 +104,8 @@ export async function reconcileEmployeeBreaks(employeeId: string, dateStr: strin
       // coverage (started mid-window, or ended before the window closed) is
       // deliberately not auto-added; see plan decision on partial coverage.
       const workRes = await client.query(
-        `select id, device_id, activity_id, started_at, ended_at, greenhouse_row_id, carrier_id
+        `select id, device_id, activity_id, started_at, ended_at, greenhouse_row_id, carrier_id,
+                density_type, density_count_per_row
          from time_entries
          where employee_id = $1 and entry_type = 'work' and deleted_at is null
            and started_at <= $2 and (ended_at is null or ended_at >= $3)
@@ -148,12 +149,29 @@ export async function reconcileEmployeeBreaks(employeeId: string, dateStr: strin
         // itself keeps its originals for free, since only ended_at is
         // updated on it above).
         if (!workEnd || workEnd.getTime() > scheduledEnd.getTime()) {
+          // Carries the same density_type/density_count_per_row snapshot
+          // forward from the row being split — it's the same row/activity,
+          // just interrupted by the break, so the "after" segment must
+          // report the identical resolved density, never re-resolved (see
+          // openEntry() in mobileTime.ts for where it was originally
+          // resolved).
           await client.query(
             `insert into time_entries
                (employee_id, device_id, entry_type, activity_id, started_at, ended_at, idempotency_key,
-                greenhouse_row_id, carrier_id)
-             values ($1, $2, 'work', $3, $4, $5, $6, $7, $8)`,
-            [employeeId, w.device_id, w.activity_id, scheduledEnd, workEnd, randomUUID(), w.greenhouse_row_id, w.carrier_id]
+                greenhouse_row_id, carrier_id, density_type, density_count_per_row)
+             values ($1, $2, 'work', $3, $4, $5, $6, $7, $8, $9, $10)`,
+            [
+              employeeId,
+              w.device_id,
+              w.activity_id,
+              scheduledEnd,
+              workEnd,
+              randomUUID(),
+              w.greenhouse_row_id,
+              w.carrier_id,
+              w.density_type,
+              w.density_count_per_row,
+            ]
           );
         }
 

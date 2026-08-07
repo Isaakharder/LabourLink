@@ -532,6 +532,7 @@ export function InputsPage() {
                 onSaveEdit={handleSaveEdit}
                 onCancelEdit={handleCancelEdit}
                 onDeleteRun={handleDeleteRun}
+                onRowCompletionChanged={() => loadDaily()}
               />
               <WorkdayDetailsCard
                 workStartTime={daily.workStartTime}

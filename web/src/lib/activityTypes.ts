@@ -42,6 +42,18 @@ export interface ActivityQuestionDraft {
   isRequired: boolean;
 }
 
+export type DensitySource = "plants" | "stems";
+
+// Every density source this app currently supports, in the order offered in
+// the Density source <select> — "None" (empty value) is handled separately
+// by the form, not listed here.
+export const DENSITY_SOURCES: DensitySource[] = ["plants", "stems"];
+
+export const DENSITY_SOURCE_LABELS: Record<DensitySource, string> = {
+  plants: "Plants",
+  stems: "Stems",
+};
+
 export interface Activity {
   id: string;
   name: string;
@@ -49,6 +61,10 @@ export interface Activity {
   speedUnit: string | null;
   minimumDurationMinutes: number;
   isActive: boolean;
+  // Which row density (see plantDensityTypes.ts) this activity's calculated
+  // speed on Inputs is driven by — null means no calculated speed, only the
+  // configured normalSpeed above.
+  densitySource: DensitySource | null;
   assignedGroupCount: number;
   updatedAt: string;
   // Ordered by sortOrder — zero, one, or many. Replaces v1's single

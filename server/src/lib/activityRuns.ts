@@ -30,6 +30,13 @@ export interface RunSegment {
   // greenhouse_row_id above, and for the same reason must also break run
   // contiguity.
   carrier_id: string | null;
+  // Frozen density snapshot from when this segment was opened (see
+  // 025_activity_density_speed.sql) — always null/null together, and only
+  // ever non-null on a work segment. Not part of the contiguity check: it's
+  // derived from activity_id + greenhouse_row_id, both of which are already
+  // checked, so it's always identical across segments that are contiguous.
+  density_type: "plants" | "stems" | null;
+  density_count_per_row: number | null;
 }
 
 export interface ActivityRun {
@@ -47,6 +54,11 @@ export interface ActivityRun {
   // Same "single, unambiguous value" guarantee as greenhouseRowId, for
   // carrier.
   carrierId: string | null;
+  // Set once from the run's first segment, same as greenhouseRowId/
+  // carrierId — safe because a run is always single-row, so every segment
+  // in it shares the same resolved snapshot.
+  densityType: "plants" | "stems" | null;
+  densityCountPerRow: number | null;
 }
 
 export interface BreakSegment {
@@ -99,6 +111,8 @@ export function groupIntoActivityRuns(entries: RunSegment[]): {
         segmentIds: [e.id],
         greenhouseRowId: e.greenhouse_row_id,
         carrierId: e.carrier_id,
+        densityType: e.density_type,
+        densityCountPerRow: e.density_count_per_row,
       };
       runs.push(current);
     }

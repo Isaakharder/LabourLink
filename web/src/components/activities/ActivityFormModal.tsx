@@ -1,7 +1,14 @@
 import { FormEvent, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { api, ApiError } from "../../lib/api";
-import { Activity, ActivityQuestionDraft, SPEED_UNIT_SUGGESTIONS } from "../../lib/activityTypes";
+import {
+  Activity,
+  ActivityQuestionDraft,
+  DENSITY_SOURCES,
+  DENSITY_SOURCE_LABELS,
+  DensitySource,
+  SPEED_UNIT_SUGGESTIONS,
+} from "../../lib/activityTypes";
 import { QuestionsEditor, serializeQuestionDrafts, toQuestionDrafts } from "./QuestionsEditor";
 
 interface ActivityFormModalProps {
@@ -16,6 +23,7 @@ interface FormState {
   speedUnit: string;
   minimumDurationMinutes: string;
   isActive: boolean;
+  densitySource: "" | DensitySource;
 }
 
 function toFormState(activity: Activity | null): FormState {
@@ -25,6 +33,7 @@ function toFormState(activity: Activity | null): FormState {
     speedUnit: activity?.speedUnit ?? "",
     minimumDurationMinutes: activity ? String(activity.minimumDurationMinutes) : "0",
     isActive: activity?.isActive ?? true,
+    densitySource: activity?.densitySource ?? "",
   };
 }
 
@@ -67,6 +76,7 @@ export function ActivityFormModal({ activity, onClose, onSaved }: ActivityFormMo
         name: form.name.trim(),
         normalSpeed: form.normalSpeed.trim() ? Number(form.normalSpeed) : null,
         speedUnit: form.speedUnit.trim() || null,
+        densitySource: form.densitySource || null,
         minimumDurationMinutes: Number(form.minimumDurationMinutes),
         isActive: form.isActive,
         // Sent as a complete list every save (create or edit), including
@@ -133,6 +143,20 @@ export function ActivityFormModal({ activity, onClose, onSaved }: ActivityFormMo
                   <option key={u} value={u} />
                 ))}
               </datalist>
+            </label>
+            <label>
+              Density source
+              <select
+                value={form.densitySource}
+                onChange={(e) => set("densitySource", e.target.value as "" | DensitySource)}
+              >
+                <option value="">None</option>
+                {DENSITY_SOURCES.map((d) => (
+                  <option key={d} value={d}>
+                    {DENSITY_SOURCE_LABELS[d]}
+                  </option>
+                ))}
+              </select>
             </label>
             <label>
               Minimum duration (minutes) *
