@@ -4,6 +4,7 @@ import { LivePhase, LiveRow } from "../../lib/greenhouseLiveTypes";
 import { CanvasTransform, RotationDegrees, clampPan, zoomAtPoint } from "../../lib/canvasTransform";
 import { rowScreenRect } from "../../lib/rowLayout";
 import { formatTimeInAppTimezone } from "../../lib/timezone";
+import { EmployeeLocationBubbles } from "./EmployeeLocationBubbles";
 
 interface GreenhouseLiveCanvasProps {
   land: { northSouthFeet: number; eastWestFeet: number };
@@ -204,6 +205,12 @@ export function GreenhouseLiveCanvas({
   }
 
   const visiblePhases = phaseFilterId ? phases.filter((p) => p.id === phaseFilterId) : phases;
+  // Employee location bubbles only make sense outside row-selection mode —
+  // Employee Blocks' and Plant Density's Link Rows steps pass onRowClick
+  // with placeholder land/employees data that has no real live work status
+  // to show (see their buildSelectionLand() comments), so bubbles must never
+  // render there.
+  const showEmployeeBubbles = !onRowClick;
   // Rotation pivots around the land's own center, in world feet — the same
   // center computeFitTransform's rotation-aware scale calculation assumes.
   const rotateCx = land.eastWestFeet / 2;
@@ -326,6 +333,15 @@ export function GreenhouseLiveCanvas({
           </g>
         </g>
       </svg>
+
+      {showEmployeeBubbles && (
+        <EmployeeLocationBubbles
+          phases={visiblePhases}
+          land={land}
+          transform={transform}
+          rotationDegrees={rotationDegrees}
+        />
+      )}
 
       {/* Compass/North indicator — the needle rotates with the map (same
           degrees, same clockwise direction) so it keeps pointing at true

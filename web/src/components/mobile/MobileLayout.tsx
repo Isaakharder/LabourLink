@@ -1,7 +1,10 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { Coffee, House, RefreshCw, Settings } from "lucide-react";
 import { WorkSessionProvider, useWorkSession } from "../../context/WorkSessionContext";
+import { MessagesProvider } from "../../context/MessagesContext";
 import { ConfirmEndDayModal } from "./ConfirmEndDayModal";
+import { PendingMessageOverlay } from "./PendingMessageOverlay";
+import { NativePushBridge } from "./NativePushBridge";
 
 function navItemClass({ isActive }: { isActive: boolean }): string {
   return `mobile-nav-item${isActive ? " active" : ""}`;
@@ -83,13 +86,20 @@ function MobileNav() {
 
 export function MobileLayout() {
   return (
-    <WorkSessionProvider>
-      <div className="mobile-shell">
-        <main className="mobile-content">
-          <Outlet />
-        </main>
-        <MobileNav />
-      </div>
-    </WorkSessionProvider>
+    <MessagesProvider>
+      <WorkSessionProvider>
+        <div className="mobile-shell">
+          <main className="mobile-content">
+            <Outlet />
+          </main>
+          <MobileNav />
+        </div>
+        {/* Rendered as a sibling of .mobile-shell, not inside it — a fixed,
+            full-viewport overlay (see its own CSS) that must cover the nav
+            bar too, not just .mobile-content. */}
+        <PendingMessageOverlay />
+        <NativePushBridge />
+      </WorkSessionProvider>
+    </MessagesProvider>
   );
 }

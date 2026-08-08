@@ -6,7 +6,10 @@
     "dev": "concurrently -n SERVER,WEB -c blue,green \"npm run dev:server\" \"npm run dev:web\"",
     "dev:server": "npm run dev --prefix server",
     "dev:web": "npm run dev --prefix web",
-    "install:all": "npm install && npm install --prefix server && npm install --prefix web"
+    "install:all": "npm install && npm install --prefix server && npm install --prefix web",
+    "android:sync": "npm run cap:sync --prefix web",
+    "android:open": "npm run cap:open --prefix web",
+    "android:apk": "npm run android:apk --prefix web"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

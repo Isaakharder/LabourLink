@@ -11,6 +11,11 @@ export interface LiveEmployee {
   // Present when this employee is currently working the row (blue state).
   activityName?: string;
   startedAt?: string;
+  // Signed Supabase Storage URL (short-lived), present only alongside the
+  // blue/currently-working fields above — see attachEmployeePhotoUrls in
+  // server/src/lib/greenhouseLiveState.ts. null/undefined uses Avatar's
+  // existing initials fallback, same as everywhere else in the app.
+  photoUrl?: string | null;
   // Present when this is the employee's most recent completed segment on
   // the row for the viewed date (green state).
   endedAt?: string;

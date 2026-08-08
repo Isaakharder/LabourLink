@@ -4,7 +4,12 @@ import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { requireDisplayKey } from "../middleware/displayAuth";
 import { calendarDateInAppTimezone, getRangeBoundsUtc, inclusiveDayCount } from "../lib/timezone";
-import { buildLiveLandQuery, redactEmployeeNamesForDisplay, serializeLiveLand } from "../lib/greenhouseLiveState";
+import {
+  attachEmployeePhotoUrls,
+  buildLiveLandQuery,
+  redactEmployeeNamesForDisplay,
+  serializeLiveLand,
+} from "../lib/greenhouseLiveState";
 
 const router = Router();
 
@@ -65,6 +70,8 @@ router.get(
     const row = rows[0];
     if (!row) return res.status(404).json({ error: "Land not found" });
 
+    const land = await attachEmployeePhotoUrls(serializeLiveLand(row));
+
     res.json({
       // Kept only when the range is a single day, for callers still reading
       // the original single-date field — dateStart/dateEnd are always
@@ -74,7 +81,7 @@ router.get(
       dateEnd,
       activityId: activityId ?? null,
       generatedAt: new Date().toISOString(),
-      land: serializeLiveLand(row),
+      land,
     });
   })
 );
@@ -153,6 +160,8 @@ router.get(
       activityName = a.rows[0]?.name ?? null;
     }
 
+    const land = await attachEmployeePhotoUrls(serializeLiveLand(row));
+
     res.json({
       name: d.name,
       activityId: d.activityId,
@@ -162,7 +171,7 @@ router.get(
       rotationDegrees: d.rotationDegrees,
       configVersion: d.updatedAt,
       generatedAt: new Date().toISOString(),
-      land: redactEmployeeNamesForDisplay(serializeLiveLand(row)),
+      land: redactEmployeeNamesForDisplay(land),
     });
   })
 );

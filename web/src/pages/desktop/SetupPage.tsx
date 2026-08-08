@@ -1,6 +1,7 @@
 import { Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { DevicesTab } from "./setup/DevicesTab";
+import { MessagesTab } from "./setup/MessagesTab";
 import { GreenhouseLayoutTab } from "./setup/GreenhouseLayoutTab";
 
 export function SetupPage() {
@@ -29,10 +30,14 @@ export function SetupPage() {
         <NavLink to="layout" className={({ isActive }) => `tab${isActive ? " tab-active" : ""}`}>
           Greenhouse Layout
         </NavLink>
+        <NavLink to="messages" className={({ isActive }) => `tab${isActive ? " tab-active" : ""}`}>
+          Messages
+        </NavLink>
       </nav>
 
       <Routes>
         <Route index element={<DevicesTab />} />
+        <Route path="messages" element={<MessagesTab />} />
         <Route path="*" element={<Navigate to="." replace />} />
       </Routes>
     </>

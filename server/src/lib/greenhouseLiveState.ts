@@ -32,6 +32,8 @@
 // against. A fresh database built only from this repo's committed
 // migrations up to this point would be missing that column until 012 lands
 // on its own.
+import { getSignedPhotoUrls } from "./storage";
+
 export interface LiveStateParams {
   landId: string;
   rangeStart: Date;
@@ -74,7 +76,7 @@ export function buildLiveLandQuery(params: LiveStateParams): { sql: string; valu
         select json_agg(json_build_object(
           'id', e.id, 'firstName', e.first_name, 'lastName', e.last_name,
           'activityName', a.name, 'startedAt', te.started_at,
-          'carrierName', c.name
+          'carrierName', c.name, 'profilePhotoPath', e.profile_photo_path
         )) as employees
         from time_entries te
         join employees e on e.id = te.employee_id
@@ -128,6 +130,42 @@ export function serializeLiveLand(row: any) {
     // same as greenhouseLayout.ts's serializeLandDetail.
     phases: row.phases,
   };
+}
+
+// Resolves each currently-working employee's profile_photo_path (added to
+// the "os"/blue query above) into a short-lived signed Storage URL, the
+// same batch-sign pattern GET /employees uses (see storage.ts's
+// getSignedPhotoUrls) — one Storage API call for every employee on the map,
+// not one per employee. Only blue-state employees ever carry
+// profilePhotoPath (the "cs"/green query never selects it), so this is a
+// no-op for completed segments. Mutates and returns the same object
+// serializeLiveLand produced, same convention as redactEmployeeNamesForDisplay.
+export async function attachEmployeePhotoUrls(
+  land: ReturnType<typeof serializeLiveLand>
+): Promise<ReturnType<typeof serializeLiveLand>> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const phases = land.phases as any[];
+  const paths = new Set<string>();
+  for (const phase of phases) {
+    for (const row of phase.rows) {
+      for (const employee of row.employees) {
+        if (employee.profilePhotoPath) paths.add(employee.profilePhotoPath);
+      }
+    }
+  }
+
+  const urlMap = paths.size > 0 ? await getSignedPhotoUrls(Array.from(paths)) : new Map<string, string>();
+  for (const phase of phases) {
+    for (const row of phase.rows) {
+      for (const employee of row.employees) {
+        if ("profilePhotoPath" in employee) {
+          employee.photoUrl = employee.profilePhotoPath ? urlMap.get(employee.profilePhotoPath) ?? null : null;
+          delete employee.profilePhotoPath;
+        }
+      }
+    }
+  }
+  return land;
 }
 
 // Applied only by the TV route (GET /display/:displayKey/state in

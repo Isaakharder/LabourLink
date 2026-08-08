@@ -8,9 +8,16 @@
     "build": "tsc -b && vite build",
     "start": "node serve-static.js",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:android": "tsc -b && vite build --mode android",
+    "cap:sync": "npm run build:android && npx cap sync android",
+    "cap:open": "npx cap open android",
+    "android:apk": "npm run cap:sync && cd android && ./gradlew assembleDebug"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/core": "^8.5.0",
+    "@capacitor/push-notifications": "^8.1.2",
     "lucide-react": "^1.27.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -18,6 +25,7 @@
     "serve-handler": "^6.1.7"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",

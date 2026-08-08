@@ -17,6 +17,9 @@ import greenhouseLayoutRoutes from "./routes/greenhouseLayout";
 import greenhouseLiveRoutes from "./routes/greenhouseLive";
 import healthRoutes from "./routes/health";
 import inputsRoutes from "./routes/inputs";
+import messagesRoutes from "./routes/messages";
+import mobileMessagesRoutes from "./routes/mobileMessages";
+import mobilePushRoutes from "./routes/mobilePush";
 import mobileTimeRoutes from "./routes/mobileTime";
 import pairingRoutes from "./routes/pairing";
 import passwordResetRoutes from "./routes/passwordReset";
@@ -52,6 +55,9 @@ app.use("/api/pairing", pairingRoutes);
 app.use("/api/password-reset", passwordResetRoutes);
 app.use("/api/devices", devicesRoutes);
 app.use("/api/mobile", mobileTimeRoutes);
+app.use("/api/mobile", mobileMessagesRoutes);
+app.use("/api/mobile", mobilePushRoutes);
+app.use("/api/messages", messagesRoutes);
 app.use("/api/inputs", inputsRoutes);
 
 // Safety net: any error forwarded via next(err) (see asyncHandler) lands

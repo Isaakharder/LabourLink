@@ -92,10 +92,11 @@ interface PhaseBounds {
 }
 
 // Same clockwise rotation the SVG `rotate(deg, cx, cy)` transform applies
-// to the phases/rows group (see GreenhouseLiveCanvas) — used here only to
-// find where a phase's corners land in screen-facing space, never to move
+// to the phases/rows group (see GreenhouseLiveCanvas) — used here to find
+// where a phase's corners land in screen-facing space, and by
+// EmployeeLocationBubbles to place a bubble's anchor point, never to move
 // any stored coordinate.
-function rotatePoint(x: number, y: number, cx: number, cy: number, rotationDegrees: RotationDegrees) {
+export function rotatePoint(x: number, y: number, cx: number, cy: number, rotationDegrees: RotationDegrees) {
   switch (rotationDegrees) {
     case 90:
       return { x: cx - (y - cy), y: cy + (x - cx) };
