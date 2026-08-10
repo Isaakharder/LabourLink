@@ -4651,19 +4651,27 @@ input {
   font-size: 0.9rem;
 }
 
+/* Matches the app's established secondary-button recipe
+   (.employee-form-actions button: border/surface/6px radius) rather than a
+   Reports-only pill shape — 999px radius is reserved for badges elsewhere
+   in this app (.pending-badge etc.), never buttons. */
 .report-date-preset {
   padding: 0.35rem 0.75rem;
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--color-surface);
   font-size: 0.85rem;
+  font-family: inherit;
 }
 
 .report-date-preset:hover {
   border-color: var(--color-primary);
 }
 
-.report-date-preset-active {
+/* Shared active/toggle-selected state — reused as-is for the print/PDF
+   preview's Portrait/Landscape toggle (see ReportPreviewModal), so both
+   controls read as the same kind of choice. */
+.report-toggle-active {
   background: var(--color-primary);
   border-color: var(--color-primary);
   color: #fff;
@@ -4698,8 +4706,34 @@ input {
   font-size: 1.3rem;
 }
 
-.report-back-button {
+/* Same secondary-button recipe as .employee-form-actions button (border,
+   surface background, 6px radius) — this app has no single global
+   `.btn-secondary` utility class, every context scopes its own buttons the
+   same way (.employee-row-actions button, .employee-form-actions button,
+   etc.), so this follows that established convention rather than reusing
+   an unrelated class name. */
+.report-back-button,
+.report-view-actions button {
+  padding: 0.55rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-size: 0.85rem;
+  font-family: inherit;
   white-space: nowrap;
+}
+
+.report-back-button:hover,
+.report-view-actions button:hover {
+  border-color: var(--color-primary);
+}
+
+.report-view-actions button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.report-back-button {
   align-self: flex-start;
 }
 
@@ -4769,15 +4803,6 @@ input {
 .report-date-clear-button {
   width: 100%;
   margin-top: 0.6rem;
-  padding: 0.4rem 0.75rem;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-surface);
-  font-size: 0.85rem;
-}
-
-.report-date-clear-button:hover {
-  border-color: var(--color-primary);
 }
 
 .report-view-main {
@@ -4909,6 +4934,62 @@ input {
   display: none;
 }
 
+/* ---------- Reports: Print/PDF preview modal ---------- */
+
+.report-preview-meta {
+  margin-bottom: 1rem;
+}
+
+.report-preview-meta h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+}
+
+.report-preview-meta p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 0.85rem;
+}
+
+/* Approximate page representation, not a pixel-accurate render — portrait
+   is deliberately narrower/taller and landscape wider/shorter so the shape
+   difference reads at a glance. The real table (ReportPivotTable, reused
+   as-is) scrolls inside via its own .report-pivot-wrap overflow-x, exactly
+   like the live report — a long date range's columns are never dropped
+   here either. */
+.report-preview-page {
+  margin: 0 auto;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  padding: 1rem;
+  overflow: auto;
+}
+
+.report-preview-page-portrait {
+  max-width: 620px;
+  max-height: 60vh;
+}
+
+.report-preview-page-landscape {
+  max-width: 920px;
+  max-height: 48vh;
+}
+
+.report-preview-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 1;
+  gap: 1rem;
+}
+
+.report-preview-orientation-toggle {
+  display: flex;
+  gap: 0.5rem;
+}
+
 /* Print: only the report itself (header, date range summary, table,
    sub-tables) — the sidebar, page header actions, and the date filter panel
    are all interactive controls with no meaning on paper. Scoped to the
@@ -4922,7 +5003,12 @@ input {
   .report-view-actions,
   .report-back-button,
   .report-filter-panel,
-  .report-pivot-metric-select {
+  .report-pivot-metric-select,
+  /* Defensive — the preview modal is always closed (setPreviewMode(null))
+     before printReport() calls window.print(), but this keeps a stray
+     re-render from ever bleeding the modal overlay/preview page into the
+     printed output. */
+  .modal-overlay {
     display: none !important;
   }
 

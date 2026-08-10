@@ -14,8 +14,9 @@ import {
 } from "../../lib/reportTypes";
 import { ReportDateFilterPanel } from "../../components/reports/ReportDateFilterPanel";
 import { ReportPivotTable } from "../../components/reports/ReportPivotTable";
+import { ReportPreviewModal } from "../../components/reports/ReportPreviewModal";
 import { buildActivityPivotGrid, buildPayrollPivotGrid, PivotGrid } from "../../lib/reportPivot";
-import { exportPivotCsv, exportPivotPdf } from "../../lib/reportExport";
+import { exportPivotCsv, exportPivotPdf, printReport, ReportOrientation } from "../../lib/reportExport";
 import { startOfWeekMonday, addCalendarDays, todayInAppTimezone } from "../../lib/timezone";
 
 // Payroll's extra sub-table metrics — a different grain than the matrix
@@ -41,6 +42,7 @@ export function ReportViewPage() {
   const [savingMetrics, setSavingMetrics] = useState(false);
   const [editingMetrics, setEditingMetrics] = useState(false);
   const [pivotMetric, setPivotMetric] = useState<string | null>(null);
+  const [previewMode, setPreviewMode] = useState<"print" | "pdf" | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -132,13 +134,20 @@ export function ReportViewPage() {
   const payrollData = !isActivity ? (data as PayrollReportData | null) : null;
 
   function handleExportCsv() {
+    // CSV has no page orientation, so it stays a direct action — no preview
+    // step, per the brief.
     if (!pivotGrid || !pivotMetric || !report) return;
     exportPivotCsv(report, pivotGrid, metricLabels[pivotMetric]);
   }
 
-  function handleExportPdf() {
+  function handlePreviewConfirm(orientation: ReportOrientation) {
     if (!pivotGrid || !pivotMetric || !report) return;
-    exportPivotPdf(report, dateRange, pivotGrid, metricLabels[pivotMetric]);
+    if (previewMode === "print") {
+      printReport(orientation);
+    } else if (previewMode === "pdf") {
+      exportPivotPdf(report, dateRange, pivotGrid, metricLabels[pivotMetric], orientation);
+    }
+    setPreviewMode(null);
   }
 
   return (
@@ -162,13 +171,13 @@ export function ReportViewPage() {
           <button type="button" onClick={() => setEditingMetrics((v) => !v)}>
             {editingMetrics ? "Close Metrics" : "Edit Metrics"}
           </button>
-          <button type="button" onClick={() => window.print()}>
+          <button type="button" disabled={!pivotGrid} onClick={() => setPreviewMode("print")}>
             Print
           </button>
           <button type="button" disabled={!pivotGrid} onClick={handleExportCsv}>
             Export CSV
           </button>
-          <button type="button" disabled={!pivotGrid} onClick={handleExportPdf}>
+          <button type="button" disabled={!pivotGrid} onClick={() => setPreviewMode("pdf")}>
             Export PDF
           </button>
         </div>
@@ -306,6 +315,18 @@ export function ReportViewPage() {
       </div>
 
       <p className="report-generated-at print-only">Generated {new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date())}</p>
+
+      {previewMode && pivotGrid && pivotMetric && (
+        <ReportPreviewModal
+          report={report}
+          dateRange={dateRange}
+          grid={pivotGrid}
+          metricLabel={metricLabels[pivotMetric]}
+          mode={previewMode}
+          onClose={() => setPreviewMode(null)}
+          onConfirm={handlePreviewConfirm}
+        />
+      )}
     </section>
   );
 }

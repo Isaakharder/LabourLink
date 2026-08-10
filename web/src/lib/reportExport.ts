@@ -41,8 +41,16 @@ export function exportPivotCsv(report: SavedReportDetail, grid: PivotGrid, metri
   triggerDownload(blob, `${report.name.replace(/[^\w\- ]+/g, "")} - ${metricLabel}.csv`);
 }
 
-export function exportPivotPdf(report: SavedReportDetail, dateRange: DateRange, grid: PivotGrid, metricLabel: string) {
-  const doc = new jsPDF({ orientation: "landscape" });
+export type ReportOrientation = "portrait" | "landscape";
+
+export function exportPivotPdf(
+  report: SavedReportDetail,
+  dateRange: DateRange,
+  grid: PivotGrid,
+  metricLabel: string,
+  orientation: ReportOrientation = "landscape"
+) {
+  const doc = new jsPDF({ orientation });
 
   doc.setFontSize(16);
   doc.text("LabourLink", 14, 16);
@@ -68,6 +76,15 @@ export function exportPivotPdf(report: SavedReportDetail, dateRange: DateRange, 
     body,
     styles: { fontSize: 7 },
     headStyles: { fillColor: [40, 90, 60] },
+    // Table always uses the page's own printable width (autoTable's
+    // default "auto" tableWidth) — a landscape page is simply wider, so
+    // more date columns fit before the same column-shrinking kicks in;
+    // no column is ever dropped to make room, only narrowed.
+    tableWidth: "auto",
+    // Explicit rather than relying on autoTable's own default — a long
+    // employee list spans multiple PDF pages, and the header must repeat
+    // on each one rather than only appearing once at the top.
+    showHead: "everyPage",
     // Bolds the DAY TOTAL row (last body row) and Employee Total column
     // (last cell of every row) — a visual cue only, the values themselves
     // come straight from PivotGrid either way.
@@ -81,4 +98,26 @@ export function exportPivotPdf(report: SavedReportDetail, dateRange: DateRange, 
   });
 
   doc.save(`${report.name.replace(/[^\w\- ]+/g, "")} - ${metricLabel}.pdf`);
+}
+
+// Injects an @page rule for the requested orientation immediately before
+// invoking the browser's print dialog, then removes it once printing is
+// done (or the dialog is dismissed) — @page has no class/selector-based
+// scoping mechanism, so a temporary <style> tag is the standard way to
+// control print orientation per-action rather than via a fixed stylesheet
+// rule. The actual print CONTENT still comes from the real page's existing
+// print CSS (index.css's @media print block) — this only controls the
+// page's paper orientation, it doesn't render anything itself.
+export function printReport(orientation: ReportOrientation) {
+  const style = document.createElement("style");
+  style.textContent = `@page { size: ${orientation}; margin: 12mm; }`;
+  document.head.appendChild(style);
+
+  function cleanup() {
+    style.remove();
+    window.removeEventListener("afterprint", cleanup);
+  }
+  window.addEventListener("afterprint", cleanup);
+
+  window.print();
 }

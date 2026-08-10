@@ -54,14 +54,14 @@ export function ReportDateFilterPanel({ value, onChange }: ReportDateFilterPanel
         <div className="report-date-presets-stack">
           <button
             type="button"
-            className={`report-date-preset${isThisWeek ? " report-date-preset-active" : ""}`}
+            className={`report-date-preset${isThisWeek ? " report-toggle-active" : ""}`}
             onClick={() => onChange(thisWeek)}
           >
             This Week
           </button>
           <button
             type="button"
-            className={`report-date-preset${isLastWeek ? " report-date-preset-active" : ""}`}
+            className={`report-date-preset${isLastWeek ? " report-toggle-active" : ""}`}
             onClick={() => onChange(lastWeek)}
           >
             Last Week
@@ -79,7 +79,7 @@ export function ReportDateFilterPanel({ value, onChange }: ReportDateFilterPanel
 
         <p className="report-date-range-label">{formatRangeLabel(value, isCustom)}</p>
 
-        <button type="button" className="report-date-clear-button" onClick={() => onChange(thisWeek)}>
+        <button type="button" className="report-date-preset report-date-clear-button" onClick={() => onChange(thisWeek)}>
           Clear
         </button>
       </div>
