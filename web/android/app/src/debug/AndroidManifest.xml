@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Merged into the debug build variant only (Gradle's standard src/debug
+  source-set override) — the release build uses main/AndroidManifest.xml
+  unchanged, with no cleartext exception, since it only ever talks HTTPS to
+  the production Railway API (see web/.env.android).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:networkSecurityConfig="@xml/network_security_config" />
+</manifest>

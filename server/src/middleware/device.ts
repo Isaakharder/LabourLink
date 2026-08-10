@@ -65,6 +65,9 @@ function rejectDevice(res: Response, code: DeviceAuthErrorCode, fingerprint: str
 // to one round trip while still being able to say exactly which condition
 // failed.
 export async function requireDevice(req: Request, res: Response, next: NextFunction) {
+  // TEMPORARY — End Work ~1min delay investigation. Elapsed-time-only,
+  // no secrets. Remove once the slow hop is identified.
+  const __t0 = Date.now();
   const deviceIdentifier = req.header("X-Device-Id");
   if (!deviceIdentifier) {
     return rejectDevice(res, "INVALID_DEVICE_IDENTIFIER", null);
@@ -101,6 +104,7 @@ export async function requireDevice(req: Request, res: Response, next: NextFunct
     .catch((err) => console.error("Failed to update device last_seen:", err.message));
 
   console.log(`[device-auth] ok device=${fingerprint}`);
+  console.log(`[timing] ${req.method} ${req.path} requireDevice: ${Date.now() - __t0}ms`);
 
   req.device = {
     id: row.device_id,

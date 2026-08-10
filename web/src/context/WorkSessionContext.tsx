@@ -280,15 +280,21 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
 
     setEndDaySubmitting(true);
     setEndDayError(null);
+    // TEMPORARY — End Work ~1min delay investigation. Elapsed-time-only, no
+    // secrets. Remove once the slow hop is identified.
+    const __t0 = performance.now();
+    console.log("[timing] confirmEndDay: tapped, request starting");
     try {
       const result = await api<MeResponse>("/api/mobile/time-entries/end-day", {
         method: "POST",
         body: JSON.stringify({ idempotencyKey: endDayIdempotencyKey }),
       });
+      console.log(`[timing] confirmEndDay: api() resolved at ${Math.round(performance.now() - __t0)}ms, updating UI state`);
       setMe(result);
       setVerified(true);
       setServerReachable(true);
       setEndDayConfirmOpen(false);
+      console.log(`[timing] confirmEndDay: UI state updated at ${Math.round(performance.now() - __t0)}ms`);
     } catch (err) {
       if (isPermanentDeviceAuthError(err)) {
         markUnpaired();

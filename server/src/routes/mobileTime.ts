@@ -257,13 +257,18 @@ async function loadActiveFixedItems(employeeId: string): Promise<FixedItem[]> {
 }
 
 async function serializeStatus(employeeId: string, employeeFirstName: string, employeeLastName: string) {
+  // TEMPORARY — End Work ~1min delay investigation. Elapsed-time-only, no
+  // secrets. Remove once the slow hop is identified.
+  const __t0 = Date.now();
   // Server-side reconciliation for scheduled breaks the employee worked
   // straight through — runs on every status fetch and every mutating
   // action (they all call this function), so it never depends on a
   // background worker. Idempotent: see breakReconciliation.ts.
   await reconcileEmployeeBreaks(employeeId, calendarDateInAppTimezone(new Date()));
+  console.log(`[timing] serializeStatus reconcileEmployeeBreaks: ${Date.now() - __t0}ms`);
 
   const open = await getOpenEntry(employeeId);
+  console.log(`[timing] serializeStatus getOpenEntry: ${Date.now() - __t0}ms`);
 
   // Bounded window used to walk the current job chain backward — work/break
   // segments are short-lived, so a day's worth of history is always enough;
@@ -415,6 +420,7 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
     autoClosed: r.auto_closed_at !== null,
   }));
 
+  console.log(`[timing] serializeStatus total: ${Date.now() - __t0}ms`);
   return {
     employee: { id: employeeId, firstName: employeeFirstName, lastName: employeeLastName },
     status: open ? open.entry_type : "idle",
@@ -736,12 +742,19 @@ router.post(
 router.post(
   "/time-entries/end-day",
   asyncHandler(async (req, res) => {
+    // TEMPORARY — End Work ~1min delay investigation. Elapsed-time-only, no
+    // secrets. Remove once the slow hop is identified.
+    const __t0 = Date.now();
+    console.log("[timing] end-day: route handler entered");
     const d = req.device!;
     await pool.query(
       `update time_entries set ended_at = now() where employee_id = $1 and ended_at is null and deleted_at is null`,
       [d.employeeId]
     );
-    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName));
+    console.log(`[timing] end-day: UPDATE done at ${Date.now() - __t0}ms`);
+    const body = await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName);
+    console.log(`[timing] end-day: serializeStatus done at ${Date.now() - __t0}ms, sending response`);
+    res.json(body);
   })
 );
 

@@ -21,7 +21,11 @@ interface AutoAddItem {
 }
 
 export async function reconcileEmployeeBreaks(employeeId: string, dateStr: string): Promise<void> {
+  // TEMPORARY — End Work ~1min delay investigation. Elapsed-time-only, no
+  // secrets. Remove once the slow hop is identified.
+  const __t0 = Date.now();
   const client = await pool.connect();
+  console.log(`[timing] reconcileEmployeeBreaks pool.connect(): ${Date.now() - __t0}ms`);
   try {
     await client.query("begin");
 
@@ -189,6 +193,7 @@ export async function reconcileEmployeeBreaks(employeeId: string, dateStr: strin
     }
 
     await client.query("commit");
+    console.log(`[timing] reconcileEmployeeBreaks total (${itemsRes.rows.length} auto-add items): ${Date.now() - __t0}ms`);
   } catch (err) {
     await client.query("rollback").catch(() => {});
     throw err;

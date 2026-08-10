@@ -4,12 +4,21 @@ import { isNetworkError } from "./offlineQueue";
 function resolveApiUrl(): string {
   const envUrl = import.meta.env.VITE_API_URL;
   if (envUrl) return envUrl;
-  // No explicit API URL configured — reuse whatever host this page was
-  // loaded from, on the API's port. Works for localhost dev and for a phone
-  // hitting the dev machine's LAN IP alike, with no address hardcoded here.
-  // Production deploys (frontend/backend on different domains) must set
-  // VITE_API_URL explicitly, which takes priority over this.
-  return `${window.location.protocol}//${window.location.hostname}:4000`;
+  // Local/LAN dev only: the API runs on the same host, port 4000, no proxy
+  // in front of it. Works for localhost and for a phone hitting the dev
+  // machine's LAN IP alike, with no address hardcoded here.
+  if (import.meta.env.DEV) {
+    return `${window.location.protocol}//${window.location.hostname}:4000`;
+  }
+  // Production browser/PWA build: deliberately no VITE_API_URL, so API calls
+  // stay relative and same-origin with the page. web/serve-static.js proxies
+  // /api/* to the real API service server-side. This keeps the session
+  // cookie same-site — see the cookie comment in server/src/routes/auth.ts —
+  // so Safari's cross-site cookie blocking (ITP) can't silently drop it, the
+  // way it does when the browser talks to the API's own cross-site domain.
+  // (The Android build is unaffected: it sets VITE_API_URL explicitly via
+  // .env.android and returns above.)
+  return "";
 }
 
 const API_URL = resolveApiUrl();
@@ -39,6 +48,11 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   // one itself (including the multipart boundary), which fetch can't do if
   // we've already set the header ourselves.
   const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+  // TEMPORARY — End Work ~1min delay investigation. Elapsed-time-only, no
+  // secrets (no token/PIN/body content logged). Remove once the slow hop is
+  // identified.
+  const __t0 = performance.now();
+  console.log(`[timing] fetch start: ${options.method ?? "GET"} ${path}`);
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
     credentials: "include",
@@ -48,6 +62,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
       ...options.headers,
     },
   });
+  console.log(`[timing] fetch response received: ${path} status=${res.status} elapsed=${Math.round(performance.now() - __t0)}ms`);
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));

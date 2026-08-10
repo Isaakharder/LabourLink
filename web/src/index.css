@@ -318,6 +318,18 @@ input {
   padding: 1.5rem;
 }
 
+/* Android only (see main.tsx) — the APK draws edge-to-edge behind the status
+   bar (Capacitor's SystemBars plugin, "css" insetsHandling mode), so without
+   this, page content starts underneath it instead of below it. The PWA/
+   desktop build never gets .platform-android, so this never applies there. */
+.platform-android .mobile-content {
+  padding-top: calc(1.5rem + env(safe-area-inset-top, 0px));
+}
+
+.platform-android .message-overlay {
+  padding-top: calc(1.5rem + env(safe-area-inset-top, 0px));
+}
+
 .mobile-nav {
   display: flex;
   align-items: stretch;
