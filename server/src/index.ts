@@ -24,6 +24,7 @@ import mobileTimeRoutes from "./routes/mobileTime";
 import pairingRoutes from "./routes/pairing";
 import passwordResetRoutes from "./routes/passwordReset";
 import plantDensitiesRoutes from "./routes/plantDensities";
+import reportsRoutes from "./routes/reports";
 import rowCompletionsRoutes from "./routes/rowCompletions";
 
 const app = express();
@@ -59,6 +60,7 @@ app.use("/api/mobile", mobileMessagesRoutes);
 app.use("/api/mobile", mobilePushRoutes);
 app.use("/api/messages", messagesRoutes);
 app.use("/api/inputs", inputsRoutes);
+app.use("/api/reports", reportsRoutes);
 
 // Safety net: any error forwarded via next(err) (see asyncHandler) lands
 // here instead of crashing the process. Logged server-side; the client only

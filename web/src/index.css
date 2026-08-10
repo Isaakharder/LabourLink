@@ -4584,3 +4584,365 @@ input {
 .greenhouse-tv-legend .greenhouse-live-row-green {
   background: #16a34a;
 }
+
+/* ---------- Reports ---------- */
+
+.report-type-options {
+  display: flex;
+  gap: 1rem;
+  margin: 0.5rem 0 1rem;
+}
+
+.report-type-option {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  align-items: flex-start;
+  text-align: left;
+  padding: 1rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.report-type-option:hover {
+  border-color: var(--color-primary);
+}
+
+.report-type-option span {
+  color: var(--color-muted);
+  font-size: 0.85rem;
+}
+
+.report-create-step-label {
+  margin: 0 0 0.75rem;
+  color: var(--color-muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.report-metrics-fieldset {
+  margin: 1rem 0 0;
+  padding: 0.75rem 1rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.report-metrics-fieldset legend {
+  padding: 0 0.4rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.report-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 0.5rem 1rem;
+}
+
+.report-metric-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 400;
+  font-size: 0.9rem;
+}
+
+.report-date-preset {
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  font-size: 0.85rem;
+}
+
+.report-date-preset:hover {
+  border-color: var(--color-primary);
+}
+
+.report-date-preset-active {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+
+.report-date-range-label {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+  font-weight: 600;
+}
+
+/* Compact header: back button + name/meta on the left, Print/Export/Edit
+   Metrics on the right — deliberately terse (no toolbar row above it like
+   the old layout had) so the table below gets most of the vertical space. */
+.report-view-header-compact {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.report-view-header-left {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.report-view-header-left h1 {
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+.report-back-button {
+  white-space: nowrap;
+  align-self: flex-start;
+}
+
+.report-view-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.report-view-meta {
+  margin: 0.15rem 0 0;
+  color: var(--color-muted);
+  font-size: 0.85rem;
+}
+
+/* Left date-filter panel + main table area, side by side. */
+.report-view-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.25rem;
+  flex: 1;
+  min-height: 0;
+}
+
+.report-filter-panel {
+  width: 240px;
+  flex-shrink: 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+}
+
+.report-filter-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 600;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 0.75rem;
+}
+
+.report-filter-section h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* This Week/Last Week stacked, each spanning the calendar's full width —
+   the panel's only two presets now, per the brief. */
+.report-date-presets-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+}
+
+.report-date-presets-stack .report-date-preset {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+}
+
+.report-date-clear-button {
+  width: 100%;
+  margin-top: 0.6rem;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-size: 0.85rem;
+}
+
+.report-date-clear-button:hover {
+  border-color: var(--color-primary);
+}
+
+.report-view-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.report-pivot-metric-select {
+  margin-bottom: 0.75rem;
+}
+
+.report-pivot-metric-select label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-muted);
+}
+
+.report-table-wrap,
+.report-pivot-wrap {
+  overflow-x: auto;
+}
+
+.report-table {
+  min-width: 100%;
+}
+
+.report-col-right {
+  text-align: right;
+}
+
+.report-totals-row {
+  font-weight: 700;
+  background: var(--color-bg);
+}
+
+.report-subtable {
+  margin-top: 1.5rem;
+}
+
+.report-subtable h2 {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+
+/* Spreadsheet-style matrix: employee names fixed on the left (sticky) while
+   the date columns scroll horizontally underneath — a long date range stays
+   usable by scrolling instead of shrinking every cell to illegibility. */
+.report-pivot-table {
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.report-pivot-table th,
+.report-pivot-table td {
+  border: 1px solid var(--color-border);
+  padding: 0.35rem 0.6rem;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.report-pivot-employee-col {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--color-surface);
+  text-align: left;
+  font-weight: 500;
+  min-width: 160px;
+}
+
+.report-pivot-table thead .report-pivot-employee-col {
+  z-index: 2;
+  font-weight: 600;
+}
+
+.report-pivot-table tfoot .report-pivot-employee-col {
+  font-weight: 700;
+}
+
+.report-pivot-date-col {
+  font-weight: 600;
+  color: var(--color-muted);
+}
+
+/* Weekday on top (e.g. "MON"), readable date below (e.g. "Aug 3"). */
+.report-pivot-date-top {
+  display: block;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+}
+
+.report-pivot-date-bottom {
+  display: block;
+  font-weight: 400;
+}
+
+.report-pivot-cell {
+  color: var(--color-text);
+}
+
+/* Employee Total column/DAY TOTAL row visually distinguished, per the
+   reference layout — a subtle tint using the app's existing background
+   token, not a new colour, so this stays consistent with LabourLink's
+   theme. Pinned to the right (in addition to the employee column pinned
+   left) so it stays reachable without scrolling all the way across a long
+   date range. */
+.report-pivot-grand-col {
+  background: var(--color-bg);
+  font-weight: 700;
+  position: sticky;
+  right: 0;
+  z-index: 1;
+}
+
+.report-pivot-table thead .report-pivot-grand-col {
+  z-index: 2;
+}
+
+.report-pivot-table tbody tr:hover .report-pivot-cell,
+.report-pivot-table tbody tr:hover .report-pivot-employee-col {
+  background: rgba(29, 78, 216, 0.05);
+}
+
+.report-generated-at {
+  display: none;
+}
+
+/* Print: only the report itself (header, date range summary, table,
+   sub-tables) — the sidebar, page header actions, and the date filter panel
+   are all interactive controls with no meaning on paper. Scoped to the
+   report view specifically (via :has()) rather than a bare `@media print`
+   — this app has no other print-styled page today, and printing from
+   anywhere else should keep behaving exactly as it already does, not
+   suddenly lose its sidebar just because this rule exists. */
+@media print {
+  body:has(.report-view) .sidebar,
+  body:has(.report-view) .sidebar-restore-tab,
+  .report-view-actions,
+  .report-back-button,
+  .report-filter-panel,
+  .report-pivot-metric-select {
+    display: none !important;
+  }
+
+  .report-view .report-generated-at {
+    display: block;
+    margin-top: 1rem;
+    color: var(--color-muted);
+    font-size: 0.8rem;
+  }
+
+  body:has(.report-view) .app-content {
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+
+  .employees-page.report-view {
+    gap: 0.5rem;
+  }
+
+  .report-view-body {
+    display: block;
+  }
+}

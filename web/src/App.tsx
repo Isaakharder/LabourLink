@@ -12,6 +12,8 @@ import { GreenhouseDisplayPage } from "./pages/desktop/GreenhouseDisplayPage";
 import { GreenhousePage } from "./pages/desktop/GreenhousePage";
 import { InputsPage } from "./pages/desktop/InputsPage";
 import { LoginPage } from "./pages/desktop/LoginPage";
+import { ReportsPage } from "./pages/desktop/ReportsPage";
+import { ReportViewPage } from "./pages/desktop/ReportViewPage";
 import { ResetPinPage } from "./pages/desktop/ResetPinPage";
 import { SettingsPage } from "./pages/desktop/SettingsPage";
 import { SetupPage } from "./pages/desktop/SetupPage";
@@ -63,6 +65,22 @@ function DesktopApp() {
           }
         />
         <Route path="inputs" element={<InputsPage />} />
+        <Route
+          path="reports"
+          element={
+            <RequireRole roles={["Administrator", "Manager"]}>
+              <ReportsPage />
+            </RequireRole>
+          }
+        />
+        <Route
+          path="reports/:id"
+          element={
+            <RequireRole roles={["Administrator", "Manager"]}>
+              <ReportViewPage />
+            </RequireRole>
+          }
+        />
         <Route path="employees" element={<EmployeesPage />} />
         <Route path="activities/*" element={<ActivitiesPage />} />
         <Route path="basic-data/*" element={<BasicDataPage />} />

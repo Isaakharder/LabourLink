@@ -70,6 +70,20 @@ export function addCalendarDays(dateStr: string, deltaDays: number): string {
   ).padStart(2, "0")}`;
 }
 
+// Every YYYY-MM-DD date from `startStr` through `endStr` inclusive — the
+// Reports pivot table's date columns. Bounded by the caller (a saved
+// report's date range), not unbounded — a full calendar year is ~365
+// entries, not a concern for a single array build.
+export function enumerateDates(startStr: string, endStr: string): string[] {
+  const dates: string[] = [];
+  let cursor = startStr;
+  while (cursor <= endStr) {
+    dates.push(cursor);
+    cursor = addCalendarDays(cursor, 1);
+  }
+  return dates;
+}
+
 // Monday of the calendar week containing `dateStr` — pure UTC Y/M/D
 // arithmetic via addCalendarDays, same approach as every other helper here
 // (never round-trips through a locally-parsed Date). Week start is Monday,
