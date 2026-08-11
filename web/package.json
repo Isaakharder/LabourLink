@@ -9,6 +9,7 @@
     "start": "node serve-static.js",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "build:android": "tsc -b && vite build --mode android",
     "cap:sync": "npm run build:android && npx cap sync android",
     "cap:open": "npx cap open android",
@@ -32,6 +33,7 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
     "typescript": "^5.5.2",
-    "vite": "^5.3.3"
+    "vite": "^5.3.3",
+    "vitest": "^2.1.9"
   }
 }
