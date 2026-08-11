@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Language, t } from "../../lib/i18n";
 
 export interface PickerCarrier {
   id: string;
@@ -27,9 +28,8 @@ interface CarrierPickerSheetProps {
   onSkip: () => void;
   onBack?: () => void;
   onCancel: () => void;
+  language: Language;
 }
-
-export const NO_CARRIERS_MESSAGE = "No carriers configured. Contact your supervisor.";
 
 // Same bottom-sheet visual pattern and select-then-confirm interaction as
 // RowPickerSheet (.mobile-sheet*/.mobile-row-grid* classes reused
@@ -49,6 +49,7 @@ export function CarrierPickerSheet({
   onSkip,
   onBack,
   onCancel,
+  language,
 }: CarrierPickerSheetProps) {
   const [search, setSearch] = useState("");
   const [selectedCarrierId, setSelectedCarrierId] = useState<string | null>(initialSelectedCarrierId ?? null);
@@ -88,7 +89,7 @@ export function CarrierPickerSheet({
             <p className="mobile-row-picker-subtitle">{activityName}</p>
           </div>
           {!busy && (
-            <button type="button" className="mobile-sheet-close" onClick={onCancel} aria-label="Close">
+            <button type="button" className="mobile-sheet-close" onClick={onCancel} aria-label={t(language, "close")}>
               ×
             </button>
           )}
@@ -97,15 +98,15 @@ export function CarrierPickerSheet({
         {error && <p className="error-text">{error}</p>}
 
         {!carriers ? (
-          <p className="mobile-sheet-empty">Loading carriers…</p>
+          <p className="mobile-sheet-empty">{t(language, "loadingCarriers")}</p>
         ) : carriers.length === 0 ? (
-          <p className="mobile-sheet-empty">{NO_CARRIERS_MESSAGE}</p>
+          <p className="mobile-sheet-empty">{t(language, "noCarriersMessage")}</p>
         ) : (
           <>
             <div className="mobile-row-search">
               <input
                 type="search"
-                placeholder="Search carrier"
+                placeholder={t(language, "searchCarrier")}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 disabled={busy}
@@ -113,7 +114,7 @@ export function CarrierPickerSheet({
             </div>
 
             {filtered && filtered.length === 0 ? (
-              <p className="mobile-sheet-empty">No matching carriers</p>
+              <p className="mobile-sheet-empty">{t(language, "noMatchingCarriers")}</p>
             ) : (
               <div className="mobile-row-grid">
                 {filtered?.map((c) => {
@@ -143,21 +144,21 @@ export function CarrierPickerSheet({
               disabled={busy || !selectedCarrierId}
               onClick={handleConfirm}
             >
-              {busy ? "Starting…" : "Confirm"}
+              {busy ? t(language, "starting") : t(language, "confirm")}
             </button>
           )}
           {allowSkip && (
             <button type="button" className="mobile-action-button" disabled={busy} onClick={onSkip}>
-              Skip — No carrier
+              {t(language, "skipNoCarrier")}
             </button>
           )}
           {onBack && (
             <button type="button" className="mobile-action-button" disabled={busy} onClick={onBack}>
-              Back
+              {t(language, "back")}
             </button>
           )}
           <button type="button" className="mobile-action-button" disabled={busy} onClick={onCancel}>
-            Cancel
+            {t(language, "cancel")}
           </button>
         </div>
       </div>

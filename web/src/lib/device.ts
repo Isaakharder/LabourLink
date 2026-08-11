@@ -60,6 +60,14 @@ export interface CachedEmployeeSummary {
   firstName: string;
   lastName: string;
   photoUrl?: string | null;
+  // The employee's desktop-configured Preferred language ('English' |
+  // 'Spanish' | null), cached alongside the rest of this identity so the
+  // mobile Home/Stats language (see lib/i18n.ts's resolveLanguage) survives
+  // exactly as durably as the employee's name does — offline, across app
+  // restarts, and through the iOS storage-eviction recovery path this file
+  // already exists for. Optional (not just nullable) so a summary cached by
+  // an older app version before this field existed still parses.
+  preferredLanguage?: string | null;
   lastVerifiedAt: string; // ISO instant of the last successful /api/mobile/me
 }
 

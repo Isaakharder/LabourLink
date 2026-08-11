@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Language, t } from "../../lib/i18n";
 
 export interface RowPickerRow {
   id: string;
@@ -44,9 +45,8 @@ interface RowPickerSheetProps {
   // state).
   onBack?: () => void;
   onCancel: () => void;
+  language: Language;
 }
-
-export const NO_ROWS_MESSAGE = "No greenhouse rows configured. Contact your supervisor.";
 
 // Same bottom-sheet visual pattern as ActivityPicker/ConfirmEndDayModal
 // (.mobile-sheet* classes) for consistency. Two-step select-then-confirm
@@ -65,6 +65,7 @@ export function RowPickerSheet({
   onSkip,
   onBack,
   onCancel,
+  language,
 }: RowPickerSheetProps) {
   const [selectedLandId, setSelectedLandId] = useState<string | null>(null);
   const [expandedPhaseId, setExpandedPhaseId] = useState<string | null>(null);
@@ -169,7 +170,7 @@ export function RowPickerSheet({
             <p className="mobile-row-picker-subtitle">{activityName}</p>
           </div>
           {!busy && (
-            <button type="button" className="mobile-sheet-close" onClick={onCancel} aria-label="Close">
+            <button type="button" className="mobile-sheet-close" onClick={onCancel} aria-label={t(language, "close")}>
               ×
             </button>
           )}
@@ -178,9 +179,9 @@ export function RowPickerSheet({
         {error && <p className="error-text">{error}</p>}
 
         {!lands ? (
-          <p className="mobile-sheet-empty">Loading rows…</p>
+          <p className="mobile-sheet-empty">{t(language, "loadingRows")}</p>
         ) : lands.length === 0 ? (
-          <p className="mobile-sheet-empty">{NO_ROWS_MESSAGE}</p>
+          <p className="mobile-sheet-empty">{t(language, "noRowsMessage")}</p>
         ) : !land ? (
           // Only reached when there's more than one land.
           <div className="mobile-sheet-list">
@@ -201,7 +202,7 @@ export function RowPickerSheet({
               <input
                 type="search"
                 inputMode="numeric"
-                placeholder="Search row number"
+                placeholder={t(language, "searchRowNumber")}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 disabled={busy}
@@ -210,13 +211,13 @@ export function RowPickerSheet({
 
             {showBack && !search && (
               <button type="button" className="mobile-row-back" onClick={handleBack} disabled={busy}>
-                ← Back
+                {t(language, "backDrillDown")}
               </button>
             )}
 
             {searchResults ? (
               searchResults.length === 0 ? (
-                <p className="mobile-sheet-empty">No matching rows</p>
+                <p className="mobile-sheet-empty">{t(language, "noMatchingRows")}</p>
               ) : (
                 <div className="mobile-row-grid">
                   {searchResults.map(({ row, phaseName }) => rowButton(row, phaseName))}
@@ -224,12 +225,12 @@ export function RowPickerSheet({
               )
             ) : expandedPhase ? (
               expandedPhase.rows.length === 0 ? (
-                <p className="mobile-sheet-empty">No rows in this phase</p>
+                <p className="mobile-sheet-empty">{t(language, "noRowsInPhase")}</p>
               ) : (
                 <div className="mobile-row-grid">{expandedPhase.rows.map((row) => rowButton(row))}</div>
               )
             ) : land.phases.length === 0 ? (
-              <p className="mobile-sheet-empty">{NO_ROWS_MESSAGE}</p>
+              <p className="mobile-sheet-empty">{t(language, "noRowsMessage")}</p>
             ) : (
               <div className="mobile-sheet-list">
                 {land.phases.map((phase) => (
@@ -241,7 +242,9 @@ export function RowPickerSheet({
                     onClick={() => setExpandedPhaseId(phase.id)}
                   >
                     <span className="mobile-sheet-item-name">{phase.name}</span>
-                    <span className="mobile-sheet-item-secondary">{phase.rows.length} rows</span>
+                    <span className="mobile-sheet-item-secondary">
+                      {t(language, "rowsCount", { count: phase.rows.length })}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -260,21 +263,21 @@ export function RowPickerSheet({
               disabled={busy || !selectedRowId}
               onClick={handleConfirm}
             >
-              {busy ? "Starting…" : "Confirm"}
+              {busy ? t(language, "starting") : t(language, "confirm")}
             </button>
           )}
           {allowSkip && (
             <button type="button" className="mobile-action-button" disabled={busy} onClick={onSkip}>
-              Skip — No row
+              {t(language, "skipNoRow")}
             </button>
           )}
           {onBack && (
             <button type="button" className="mobile-action-button" disabled={busy} onClick={onBack}>
-              Back
+              {t(language, "back")}
             </button>
           )}
           <button type="button" className="mobile-action-button" disabled={busy} onClick={onCancel}>
-            Cancel
+            {t(language, "cancel")}
           </button>
         </div>
       </div>

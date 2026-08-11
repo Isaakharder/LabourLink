@@ -1,16 +1,18 @@
 import { useEffect } from "react";
+import { Language, t } from "../../lib/i18n";
 
 interface ConfirmEndDayModalProps {
   submitting: boolean;
   error: string | null;
   onConfirm: () => void;
   onCancel: () => void;
+  language: Language;
 }
 
 // Reuses the same bottom-sheet visual pattern as ActivityPicker (backdrop +
 // slide-up panel, .mobile-sheet* classes) for consistency, but is its own
 // component since the content/interaction is a plain confirm, not a list.
-export function ConfirmEndDayModal({ submitting, error, onConfirm, onCancel }: ConfirmEndDayModalProps) {
+export function ConfirmEndDayModal({ submitting, error, onConfirm, onCancel, language }: ConfirmEndDayModalProps) {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       // Blocked while submitting — same rule as the backdrop/close button
@@ -30,20 +32,18 @@ export function ConfirmEndDayModal({ submitting, error, onConfirm, onCancel }: C
         onClick={(e) => e.stopPropagation()}
         role="alertdialog"
         aria-modal="true"
-        aria-label="Finish work?"
+        aria-label={t(language, "finishWorkQuestion")}
       >
         <div className="mobile-sheet-header">
-          <h2>Finish work?</h2>
+          <h2>{t(language, "finishWorkQuestion")}</h2>
           {!submitting && (
-            <button type="button" className="mobile-sheet-close" onClick={onCancel} aria-label="Close">
+            <button type="button" className="mobile-sheet-close" onClick={onCancel} aria-label={t(language, "close")}>
               ×
             </button>
           )}
         </div>
 
-        <p className="mobile-confirm-message">
-          Are you sure you want to finish work for today? This will end your current job and clock you out.
-        </p>
+        <p className="mobile-confirm-message">{t(language, "finishWorkConfirmMessage")}</p>
 
         {error && <p className="error-text">{error}</p>}
 
@@ -65,10 +65,10 @@ export function ConfirmEndDayModal({ submitting, error, onConfirm, onCancel }: C
             disabled={submitting}
             onClick={onConfirm}
           >
-            {submitting ? "Finishing…" : "Finish Work"}
+            {submitting ? t(language, "finishing") : t(language, "finishWork")}
           </button>
           <button type="button" className="mobile-action-button" disabled={submitting} onClick={onCancel}>
-            Keep Working
+            {t(language, "keepWorking")}
           </button>
         </div>
       </div>

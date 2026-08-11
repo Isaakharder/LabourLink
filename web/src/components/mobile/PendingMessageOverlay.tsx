@@ -1,5 +1,7 @@
 import { useEffect } from "react";
 import { useMessages } from "../../context/MessagesContext";
+import { useDevicePairing } from "../../context/DevicePairingContext";
+import { resolveLanguage, t } from "../../lib/i18n";
 
 // Full-screen, unclosable overlay for the oldest outstanding message — no
 // backdrop click handler, no Escape handler, no close button: there is
@@ -10,6 +12,13 @@ import { useMessages } from "../../context/MessagesContext";
 // tabs, can never lose it — the next fetch just returns it again.
 export function PendingMessageOverlay() {
   const { current, acknowledging, error, acknowledge } = useMessages();
+  // This overlay lives outside Home/Stats (it's mounted once in
+  // MobileLayout, shown over any mobile tab), so it reads the cached
+  // employee directly rather than through WorkSessionContext's `language`.
+  // Only this component's OWN Acknowledge control is ever translated — the
+  // administrator's message text/sender below is never touched, see the
+  // component's own header comment and the feature report.
+  const language = resolveLanguage(useDevicePairing().cachedEmployee?.preferredLanguage);
 
   // Traps the browser/hardware back gesture while a message is showing: an
   // extra history entry is pushed the moment an overlay appears, and
@@ -45,7 +54,7 @@ export function PendingMessageOverlay() {
           disabled={acknowledging}
           onClick={acknowledge}
         >
-          {acknowledging ? "Acknowledging..." : "Acknowledge"}
+          {acknowledging ? t(language, "acknowledging") : t(language, "acknowledge")}
         </button>
       </div>
     </div>

@@ -1,3 +1,5 @@
+import { Language, t } from "../../lib/i18n";
+
 export interface RecentJob {
   id: string;
   activityId: string;
@@ -14,6 +16,7 @@ export interface RecentJob {
 
 interface RecentJobsCardProps {
   jobs: RecentJob[];
+  language: Language;
 }
 
 function formatDuration(totalSeconds: number): string {
@@ -27,12 +30,12 @@ function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
-export function RecentJobsCard({ jobs }: RecentJobsCardProps) {
+export function RecentJobsCard({ jobs, language }: RecentJobsCardProps) {
   return (
     <div className="recent-jobs-card">
-      <h3 className="recent-jobs-title">Recent jobs</h3>
+      <h3 className="recent-jobs-title">{t(language, "recentJobs")}</h3>
       {jobs.length === 0 ? (
-        <p className="recent-jobs-empty">No recent jobs yet.</p>
+        <p className="recent-jobs-empty">{t(language, "noRecentJobs")}</p>
       ) : (
         <ul className="recent-jobs-list">
           {jobs.map((job) => (
@@ -42,7 +45,9 @@ export function RecentJobsCard({ jobs }: RecentJobsCardProps) {
               {job.carrier && <span className="recent-jobs-item-row">{job.carrier.label}</span>}
               <span className="recent-jobs-item-meta">
                 {formatTime(job.startedAt)} – {formatTime(job.endedAt)} · {formatDuration(job.durationSeconds)}
-                {job.autoClosed && <span className="recent-jobs-item-autoclosed"> · Auto-closed</span>}
+                {job.autoClosed && (
+                  <span className="recent-jobs-item-autoclosed"> · {t(language, "autoClosedSuffix")}</span>
+                )}
               </span>
             </li>
           ))}

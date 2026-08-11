@@ -2,6 +2,7 @@ import { NavLink, Outlet } from "react-router-dom";
 import { BarChart3, Coffee, House, Settings } from "lucide-react";
 import { WorkSessionProvider, useWorkSession } from "../../context/WorkSessionContext";
 import { MessagesProvider } from "../../context/MessagesContext";
+import { t } from "../../lib/i18n";
 import { ConfirmEndDayModal } from "./ConfirmEndDayModal";
 import { PendingMessageOverlay } from "./PendingMessageOverlay";
 import { ReassignmentOverlay } from "./ReassignmentOverlay";
@@ -18,6 +19,7 @@ function navItemClass({ isActive }: { isActive: boolean }): string {
 function MobileNav() {
   const {
     me,
+    language,
     busy,
     endDaySubmitting,
     endDayConfirmOpen,
@@ -42,31 +44,33 @@ function MobileNav() {
             onClick={openEndDayConfirm}
           >
             <House size={22} />
-            <span>End Work</span>
+            <span>{t(language, "navEndWork")}</span>
           </button>
         ) : (
           <NavLink to="/mobile/home" className={navItemClass}>
             <House size={22} />
-            <span>Home</span>
+            <span>{t(language, "navHome")}</span>
           </NavLink>
         )}
 
         {status === "break" ? (
           <button type="button" className="mobile-nav-item" disabled={busy} onClick={endBreak}>
             <Coffee size={22} />
-            <span>End Break</span>
+            <span>{t(language, "navEndBreak")}</span>
           </button>
         ) : (
           <button type="button" className="mobile-nav-item" disabled={status !== "work" || busy} onClick={startBreak}>
             <Coffee size={22} />
-            <span>Start Break</span>
+            <span>{t(language, "navStartBreak")}</span>
           </button>
         )}
 
         <NavLink to="/mobile/stats" className={navItemClass}>
           <BarChart3 size={22} />
-          <span>Stats</span>
+          <span>{t(language, "navStats")}</span>
         </NavLink>
+        {/* Settings is never translated, regardless of the employee's
+            preferred language — see the feature report. */}
         <NavLink to="/mobile/settings" className={navItemClass}>
           <Settings size={22} />
           <span>Settings</span>
@@ -79,6 +83,7 @@ function MobileNav() {
           error={endDayError}
           onConfirm={confirmEndDay}
           onCancel={closeEndDayConfirm}
+          language={language}
         />
       )}
     </>

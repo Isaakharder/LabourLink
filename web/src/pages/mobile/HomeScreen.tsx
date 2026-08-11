@@ -3,8 +3,9 @@ import { useDevicePairing } from "../../context/DevicePairingContext";
 import { useWorkSession } from "../../context/WorkSessionContext";
 import { api } from "../../lib/api";
 import { uuid } from "../../lib/uuid";
+import { t } from "../../lib/i18n";
 import { ActivityQuestion, QuestionAnswer } from "../../lib/activityQuestionTypes";
-import { ActivityPicker, NO_ACTIVITIES_MESSAGE, PickerActivity } from "../../components/mobile/ActivityPicker";
+import { ActivityPicker, PickerActivity } from "../../components/mobile/ActivityPicker";
 import { RowPickerSheet, RowPickerLand } from "../../components/mobile/RowPickerSheet";
 import { CarrierPickerSheet, PickerCarrier } from "../../components/mobile/CarrierPickerSheet";
 import { ActivityTimer, formatElapsed } from "../../components/mobile/ActivityTimer";
@@ -44,8 +45,19 @@ interface SingleQuestionEdit {
 
 export function HomeScreen() {
   const { cachedEmployee, serverReachable } = useDevicePairing();
-  const { me, verified, busy, online, error, setError, pending, pendingActivityName, handleApiError, perform } =
-    useWorkSession();
+  const {
+    me,
+    language,
+    verified,
+    busy,
+    online,
+    error,
+    setError,
+    pending,
+    pendingActivityName,
+    handleApiError,
+    perform,
+  } = useWorkSession();
   const [activities, setActivities] = useState<Activity[]>([]);
   const [activitiesLoaded, setActivitiesLoaded] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -365,7 +377,7 @@ export function HomeScreen() {
   if (!me && !cachedEmployee) {
     return (
       <div className="mobile-home">
-        <p>Loading...</p>
+        <p>{t(language, "loading")}</p>
       </div>
     );
   }
@@ -384,9 +396,9 @@ export function HomeScreen() {
             {cachedEmployee.firstName} {cachedEmployee.lastName}
           </h1>
         </div>
-        <div className="mobile-offline-banner">Offline — reconnecting…</div>
+        <div className="mobile-offline-banner">{t(language, "offlineReconnecting")}</div>
         <p className="mobile-cached-note">
-          Last confirmed {new Date(cachedEmployee.lastVerifiedAt).toLocaleString()}
+          {t(language, "lastConfirmed", { date: new Date(cachedEmployee.lastVerifiedAt).toLocaleString() })}
         </p>
         {error && <p className="error-text">{error}</p>}
       </div>
@@ -406,13 +418,13 @@ export function HomeScreen() {
         </h1>
       </div>
 
-      {!serverReachable && <div className="mobile-offline-banner">Offline — reconnecting…</div>}
+      {!serverReachable && <div className="mobile-offline-banner">{t(language, "offlineReconnecting")}</div>}
 
       {/* 2. Current state */}
       <div className="work-status">
-        {me!.status === "idle" && <p>Not working</p>}
-        {me!.status === "work" && <p>Working</p>}
-        {me!.status === "break" && <p>On break</p>}
+        {me!.status === "idle" && <p>{t(language, "statusIdle")}</p>}
+        {me!.status === "work" && <p>{t(language, "statusWorking")}</p>}
+        {me!.status === "break" && <p>{t(language, "statusOnBreak")}</p>}
       </div>
 
       {error && !pickerOpen && !questionFlow && !singleQuestionEdit && <p className="error-text">{error}</p>}
@@ -425,7 +437,7 @@ export function HomeScreen() {
           disabled={actionsLocked || noActivitiesAvailable}
           onClick={openPicker}
         >
-          Choose a job
+          {t(language, "chooseJob")}
         </button>
       )}
       {me!.status === "work" && me!.currentActivity && (
@@ -462,11 +474,13 @@ export function HomeScreen() {
         })()}
       {me!.status === "break" && (
         <div className="mobile-primary-activity mobile-primary-activity-static">
-          {me!.previousActivity?.name ?? "On break"}
+          {me!.previousActivity?.name ?? t(language, "statusOnBreak")}
         </div>
       )}
 
-      {noActivitiesAvailable && me!.status === "idle" && <p className="error-text">{NO_ACTIVITIES_MESSAGE}</p>}
+      {noActivitiesAvailable && me!.status === "idle" && (
+        <p className="error-text">{t(language, "noActivitiesMessage")}</p>
+      )}
 
       {/* 4. Activity timer — always directly below the last question
           button above (plain DOM order), or directly below the activity
@@ -481,22 +495,26 @@ export function HomeScreen() {
       {me!.status === "break" && me!.since && <ActivityTimer startedAt={me!.since} className="mobile-timer" />}
       {me!.status === "break" && me!.previousActivity && (
         <p className="mobile-timer-static">
-          Worked on {me!.previousActivity.name} for {formatElapsed(me!.previousActivity.accumulatedWorkedSeconds)}{" "}
-          before this break
+          {t(language, "workedBeforeBreak", {
+            activity: me!.previousActivity.name,
+            duration: formatElapsed(me!.previousActivity.accumulatedWorkedSeconds),
+          })}
         </p>
       )}
 
       {/* 5. Recent jobs */}
-      <RecentJobsCard jobs={me!.recentJobs} />
+      <RecentJobsCard jobs={me!.recentJobs} language={language} />
 
       {/* 6. Sync/offline status */}
       <div className="connection-bar">
         <span className={`connection-dot ${online ? "online" : "offline"}`} />
-        {online ? "Online" : "Offline"}
-        {pending > 0 && <span className="pending-badge">{pending} pending sync</span>}
+        {t(language, online ? "online" : "offline")}
+        {pending > 0 && <span className="pending-badge">{t(language, "pendingSync", { count: pending })}</span>}
       </div>
       {pendingActivityName && (
-        <p className="mobile-pending-banner">Switching to {pendingActivityName} — will sync when back online</p>
+        <p className="mobile-pending-banner">
+          {t(language, "switchingToPending", { name: pendingActivityName })}
+        </p>
       )}
 
       {pickerOpen && (
@@ -507,6 +525,7 @@ export function HomeScreen() {
           onClose={() => setPickerOpen(false)}
           busy={busy}
           error={error}
+          language={language}
         />
       )}
 
@@ -515,7 +534,7 @@ export function HomeScreen() {
           const currentQuestion = questionFlow.questions[questionFlow.stepIndex];
           const stepLabel =
             questionFlow.questions.length > 1
-              ? `Step ${questionFlow.stepIndex + 1} of ${questionFlow.questions.length}`
+              ? t(language, "stepXOfY", { step: questionFlow.stepIndex + 1, total: questionFlow.questions.length })
               : undefined;
           const priorAnswer = questionFlow.answers[currentQuestion.id];
           const onBack = questionFlow.stepIndex > 0 ? backQuestionStep : undefined;
@@ -532,6 +551,7 @@ export function HomeScreen() {
                 lands={rowLands}
                 error={error}
                 busy={busy}
+                language={language}
                 onConfirm={(rowId) =>
                   answerQuestionStep({ questionId: currentQuestion.id, questionType: "greenhouse_row", greenhouseRowId: rowId })
                 }
@@ -553,6 +573,7 @@ export function HomeScreen() {
               carriers={carriers}
               error={error}
               busy={busy}
+              language={language}
               onConfirm={(carrierId) =>
                 answerQuestionStep({ questionId: currentQuestion.id, questionType: "carrier", carrierId })
               }
@@ -581,6 +602,7 @@ export function HomeScreen() {
                 lands={rowLands}
                 error={error}
                 busy={busy}
+                language={language}
                 onConfirm={(rowId) =>
                   confirmSingleQuestionEdit({ questionId: q.id, questionType: "greenhouse_row", greenhouseRowId: rowId })
                 }
@@ -599,6 +621,7 @@ export function HomeScreen() {
               carriers={carriers}
               error={error}
               busy={busy}
+              language={language}
               onConfirm={(carrierId) => confirmSingleQuestionEdit({ questionId: q.id, questionType: "carrier", carrierId })}
               onSkip={skipSingleQuestionEdit}
               onCancel={cancelSingleQuestionEdit}

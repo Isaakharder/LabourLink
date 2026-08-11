@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { ActivityQuestion } from "../../lib/activityQuestionTypes";
+import { Language, t } from "../../lib/i18n";
 
 export interface PickerActivity {
   id: string;
@@ -19,12 +20,8 @@ interface ActivityPickerProps {
   onClose: () => void;
   busy: boolean;
   error: string | null;
+  language: Language;
 }
-
-// Same message whether the employee has no active group at all or their
-// group currently has zero active activities — both are "nothing to pick
-// from," and the app never falls back to showing all activities either way.
-export const NO_ACTIVITIES_MESSAGE = "No activities have been assigned to you. Please contact your supervisor.";
 
 export function ActivityPicker({
   activities,
@@ -33,6 +30,7 @@ export function ActivityPicker({
   onClose,
   busy,
   error,
+  language,
 }: ActivityPickerProps) {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -61,11 +59,11 @@ export function ActivityPicker({
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="Choose a job"
+        aria-label={t(language, "chooseJob")}
       >
         <div className="mobile-sheet-header">
-          <h2>Choose a job</h2>
-          <button type="button" className="mobile-sheet-close" onClick={onClose} aria-label="Close">
+          <h2>{t(language, "chooseJob")}</h2>
+          <button type="button" className="mobile-sheet-close" onClick={onClose} aria-label={t(language, "close")}>
             ×
           </button>
         </div>
@@ -73,7 +71,7 @@ export function ActivityPicker({
         {error && <p className="error-text">{error}</p>}
 
         {activities.length === 0 ? (
-          <p className="mobile-sheet-empty">{NO_ACTIVITIES_MESSAGE}</p>
+          <p className="mobile-sheet-empty">{t(language, "noActivitiesMessage")}</p>
         ) : (
           <div className="mobile-sheet-list">
             {activities.map((a) => {
@@ -90,7 +88,7 @@ export function ActivityPicker({
                 >
                   <span className="mobile-sheet-item-name">
                     {a.name}
-                    {isCurrent && <span className="mobile-sheet-item-badge">Current</span>}
+                    {isCurrent && <span className="mobile-sheet-item-badge">{t(language, "current")}</span>}
                   </span>
                   {a.normalSpeed != null && (
                     <span className="mobile-sheet-item-secondary">

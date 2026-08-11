@@ -2,6 +2,7 @@ import { createContext, ReactNode, useCallback, useContext, useEffect, useState 
 import { useDevicePairing } from "./DevicePairingContext";
 import { api, ApiError, getPermanentDeviceAuthErrorCode, isServerUnreachableError } from "../lib/api";
 import { getCachedEmployeeSummary } from "../lib/device";
+import { Language, resolveLanguage, t, translateServerMessage } from "../lib/i18n";
 import { enqueue, flushQueue, getPendingCount, isNetworkError } from "../lib/offlineQueue";
 import { detectReassignment } from "../lib/reassignment";
 import { uuid } from "../lib/uuid";
@@ -28,7 +29,7 @@ export interface PreviousActivity {
 }
 
 export interface MeResponse {
-  employee: { id: string; firstName: string; lastName: string };
+  employee: { id: string; firstName: string; lastName: string; preferredLanguage: string | null };
   status: "idle" | "work" | "break";
   currentActivity: CurrentActivity | null;
   since: string | null;
@@ -51,6 +52,11 @@ interface PerformOptions {
 
 interface WorkSessionContextValue {
   me: MeResponse | null;
+  // Resolved from the currently-cached employee's Preferred language (see
+  // lib/i18n.ts's resolveLanguage) — the single source every mobile Home/
+  // Stats component reads instead of each re-deriving it from
+  // DevicePairingContext itself.
+  language: Language;
   // True once a real /api/mobile/me response has been received this
   // session — gates every server-dependent action.
   verified: boolean;
@@ -91,7 +97,17 @@ const WorkSessionContext = createContext<WorkSessionContextValue | undefined>(un
 // across mobile route changes, so switching tabs never interrupts a poll or
 // resets status.
 export function WorkSessionProvider({ children }: { children: ReactNode }) {
-  const { markUnpaired, serverReachable, setServerReachable, refreshCachedEmployee } = useDevicePairing();
+  const { cachedEmployee, markUnpaired, serverReachable, setServerReachable, refreshCachedEmployee } =
+    useDevicePairing();
+  // The single source of truth for "what language is Home/Stats in right
+  // now" — cachedEmployee (not `me`) so this stays correct even before the
+  // first /me response of a session lands, exactly the same offline-safe
+  // guarantee cachedEmployee already gives the employee's name (see
+  // HomeScreen's `!me && cachedEmployee` render branch). refreshCachedEmployee
+  // is called synchronously from applyMeResponse/acknowledgeReassignment
+  // below every time `me` changes, so the two are never observably out of
+  // sync.
+  const language = resolveLanguage(cachedEmployee?.preferredLanguage);
   const [me, setMe] = useState<MeResponse | null>(null);
   const [verified, setVerified] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -139,6 +155,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         employeeId: result.employee.id,
         firstName: result.employee.firstName,
         lastName: result.employee.lastName,
+        preferredLanguage: result.employee.preferredLanguage,
         lastVerifiedAt: new Date().toISOString(),
       });
       return true;
@@ -153,10 +170,16 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     setMe(result);
     setVerified(true);
     setServerReachable(true);
+    // Includes the new employee's preferredLanguage — this is the one place
+    // a reassignment actually takes local effect (see ReassignmentOverlay:
+    // the overlay is shown, not applied, until this runs), so it's also the
+    // one place the mobile Home/Stats language switches to match whoever is
+    // now holding the phone, immediately, not on the next /me poll.
     refreshCachedEmployee({
       employeeId: result.employee.id,
       firstName: result.employee.firstName,
       lastName: result.employee.lastName,
+      preferredLanguage: result.employee.preferredLanguage,
       lastVerifiedAt: new Date().toISOString(),
     });
   }, [pendingReassignment, refreshCachedEmployee, setServerReachable]);
@@ -189,9 +212,9 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     api<MeResponse>("/api/mobile/me")
       .then((res) => applyMeResponse(res))
       .catch((err) => {
-        if (!handleApiError(err)) setError("Could not load status");
+        if (!handleApiError(err)) setError(t(language, "couldNotLoadStatus"));
       });
-  }, [applyMeResponse, handleApiError]);
+  }, [applyMeResponse, handleApiError, language]);
 
   useEffect(() => {
     loadMe();
@@ -232,9 +255,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
           return;
         }
         if (rejected.length > 0) {
-          setError(
-            "One or more queued activity changes could not be completed because the activity is no longer available. Your status has been refreshed — please choose again."
-          );
+          setError(t(language, "queuedChangesFailed"));
         }
         if (getPendingCount() === 0) {
           setPendingActivityName(null);
@@ -242,7 +263,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         loadMe();
       })
       .catch(() => {});
-  }, [loadMe, markUnpaired]);
+  }, [loadMe, markUnpaired, language]);
 
   useEffect(() => {
     function goOnline() {
@@ -291,13 +312,15 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
           setServerReachable(false);
         } else {
           setServerReachable(true);
-          setError(err instanceof ApiError ? err.message : "Something went wrong");
+          setError(
+            err instanceof ApiError ? translateServerMessage(language, err.message) : t(language, "somethingWentWrong")
+          );
         }
       } finally {
         setBusy(false);
       }
     },
-    [applyMeResponse, markUnpaired, setServerReachable]
+    [applyMeResponse, markUnpaired, setServerReachable, language]
   );
 
   const startBreak = useCallback(() => {
@@ -326,7 +349,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
   // exists specifically to queue everything else for offline replay.
   const confirmEndDay = useCallback(async () => {
     if (!online) {
-      setEndDayError("You must be online to finish work.");
+      setEndDayError(t(language, "mustBeOnlineToFinish"));
       return;
     }
     if (!endDayIdempotencyKey) return;
@@ -358,19 +381,22 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
       // the day twice.
       if (isServerUnreachableError(err)) {
         setServerReachable(false);
-        setEndDayError("Could not reach the server. Please try again.");
+        setEndDayError(t(language, "couldNotReachServer"));
       } else {
-        setEndDayError(err instanceof ApiError ? err.message : "Could not finish work. Please try again.");
+        setEndDayError(
+          err instanceof ApiError ? translateServerMessage(language, err.message) : t(language, "couldNotFinishWork")
+        );
       }
     } finally {
       setEndDaySubmitting(false);
     }
-  }, [online, endDayIdempotencyKey, applyMeResponse, markUnpaired, setServerReachable]);
+  }, [online, endDayIdempotencyKey, applyMeResponse, markUnpaired, setServerReachable, language]);
 
   return (
     <WorkSessionContext.Provider
       value={{
         me,
+        language,
         verified,
         busy,
         online,
