@@ -192,19 +192,42 @@ router.get(
       return res.status(400).json({ error: "A valid date (YYYY-MM-DD) is required" });
     }
 
+    // is_active/break_profile_id are selected here (not just the fields
+    // this response itself needs) so reconcileEmployeeBreaks below can
+    // reuse this same row instead of re-querying the employee a few
+    // milliseconds later for the identical two columns — see its own
+    // KnownEmployeeBreakInfo comment.
     const empRes = await pool.query(
-      "select id, first_name, last_name, profile_photo_path from employees where id = $1",
+      "select id, first_name, last_name, profile_photo_path, is_active, break_profile_id from employees where id = $1",
       [employeeId]
     );
     const employee = empRes.rows[0];
     if (!employee) return res.status(404).json({ error: "Employee not found" });
 
+    // Signing the employee's photo URL is a real external Supabase Storage
+    // API call (getSignedPhotoUrl — cached, but still a real request on a
+    // cache miss) with no dependency on anything below: kicked off now, in
+    // parallel with reconciliation and every query that follows, and only
+    // awaited once when the response is finally assembled. Previously this
+    // ran strictly after everything else, adding its full latency on top
+    // instead of overlapping it — see the Inputs employee-switch
+    // performance investigation.
+    const photoUrlPromise = employee.profile_photo_path ? getSignedPhotoUrl(employee.profile_photo_path) : null;
+
     // Reconcile scheduled breaks the employee worked straight through before
     // reading the day back — never for a future date (nothing to reconcile
     // yet, and reconcileEmployeeBreaks would just no-op on future-dated
-    // items anyway, but skipping avoids the wasted round trip).
+    // items anyway, but skipping avoids the wasted round trip). Must
+    // complete (and its own commit land) strictly BEFORE the main
+    // time_entries query below runs — reconciliation can itself insert/split
+    // time_entries rows, and this response has to reflect whatever it just
+    // created, so this is deliberately awaited here rather than run
+    // concurrently with the query that follows it.
     if (date <= calendarDateInAppTimezone(new Date())) {
-      await reconcileEmployeeBreaks(employeeId, date);
+      await reconcileEmployeeBreaks(employeeId, date, {
+        isActive: employee.is_active,
+        breakProfileId: employee.break_profile_id,
+      });
     }
 
     const { start, end } = getDayBoundsUtc(date);
@@ -354,34 +377,12 @@ router.get(
       }
     }
 
-    const completionTotals = new Map<string, { quantity: number; durationSeconds: number; segmentCount: number }>();
-    if (completionIdsNeeded.size > 0) {
-      const { rows: compRows } = await pool.query(
-        `select rc.id, rc.quantity_per_row, count(*) as segment_count,
-                sum(extract(epoch from (te.ended_at - te.started_at))) as total_duration_seconds
-         from row_completions rc
-         join row_completion_segments rcs on rcs.row_completion_id = rc.id
-         join time_entries te on te.id = rcs.time_entry_id
-         where rc.id = any($1::uuid[])
-         group by rc.id, rc.quantity_per_row`,
-        [[...completionIdsNeeded]]
-      );
-      for (const c of compRows) {
-        completionTotals.set(c.id, {
-          quantity: Number(c.quantity_per_row),
-          durationSeconds: Number(c.total_duration_seconds),
-          segmentCount: Number(c.segment_count),
-        });
-      }
-    }
-    const speedByCompletionId = new Map<string, number | null>();
-    for (const [id, totals] of completionTotals) {
-      speedByCompletionId.set(
-        id,
-        aggregateDensitySpeed([{ quantityPerRow: totals.quantity, durationSeconds: totals.durationSeconds }])
-      );
-    }
-
+    // unresolvedPairs only needs runCompletionId (already known above), so
+    // it's built up front rather than after completionTotals — nothing
+    // below it depends on completionTotals at all (see the Promise.all
+    // just below: the two queries this section needs are independent of
+    // each other, both only depending on runCompletionId/densityEligibleRuns
+    // computed above, never on one another's result).
     const unresolvedPairs = new Map<string, { greenhouseRowId: string; densityType: "plants" | "stems" }>();
     for (const r of densityEligibleRuns) {
       if (runCompletionId.has(r.id)) continue;
@@ -393,10 +394,54 @@ router.get(
         });
       }
     }
-    const ambiguousPairKeys = new Set<string>();
-    for (const [key, pair] of unresolvedPairs) {
-      const candidates = await getUnresolvedRunsForRow(pair.greenhouseRowId, pair.densityType);
-      if (candidates.length > 1) ambiguousPairKeys.add(key);
+
+    // Proven independent (see comment above) — run concurrently rather
+    // than one after the other. The ambiguity check itself is still one
+    // sequential getUnresolvedRunsForRow call per unresolved pair, exactly
+    // as before: only *when* this whole loop runs relative to the
+    // completion-totals query changed, not how it works internally. See
+    // rowCompletionCandidates.ts for the documented future-batching
+    // concern with that per-pair query, left unchanged here.
+    const [completionTotals, ambiguousPairKeys] = await Promise.all([
+      (async () => {
+        const map = new Map<string, { quantity: number; durationSeconds: number; segmentCount: number }>();
+        if (completionIdsNeeded.size > 0) {
+          const { rows: compRows } = await pool.query(
+            `select rc.id, rc.quantity_per_row, count(*) as segment_count,
+                    sum(extract(epoch from (te.ended_at - te.started_at))) as total_duration_seconds
+             from row_completions rc
+             join row_completion_segments rcs on rcs.row_completion_id = rc.id
+             join time_entries te on te.id = rcs.time_entry_id
+             where rc.id = any($1::uuid[])
+             group by rc.id, rc.quantity_per_row`,
+            [[...completionIdsNeeded]]
+          );
+          for (const c of compRows) {
+            map.set(c.id, {
+              quantity: Number(c.quantity_per_row),
+              durationSeconds: Number(c.total_duration_seconds),
+              segmentCount: Number(c.segment_count),
+            });
+          }
+        }
+        return map;
+      })(),
+      (async () => {
+        const keys = new Set<string>();
+        for (const [key, pair] of unresolvedPairs) {
+          const candidates = await getUnresolvedRunsForRow(pair.greenhouseRowId, pair.densityType);
+          if (candidates.length > 1) keys.add(key);
+        }
+        return keys;
+      })(),
+    ]);
+
+    const speedByCompletionId = new Map<string, number | null>();
+    for (const [id, totals] of completionTotals) {
+      speedByCompletionId.set(
+        id,
+        aggregateDensitySpeed([{ quantityPerRow: totals.quantity, durationSeconds: totals.durationSeconds }])
+      );
     }
 
     const isUnresolvedByRunId = new Map<string, boolean>();
@@ -432,7 +477,7 @@ router.get(
       else totalUnpaidBreakSeconds += dur;
     }
 
-    const photoUrl = employee.profile_photo_path ? await getSignedPhotoUrl(employee.profile_photo_path) : null;
+    const photoUrl = await photoUrlPromise;
 
     res.json({
       employee: {
