@@ -1,6 +1,6 @@
 import { createContext, ReactNode, useCallback, useContext, useEffect, useState } from "react";
 import { useDevicePairing } from "./DevicePairingContext";
-import { api, ApiError, isPermanentDeviceAuthError } from "../lib/api";
+import { api, ApiError, getPermanentDeviceAuthErrorCode } from "../lib/api";
 import { OutstandingMessage } from "../lib/messageTypes";
 
 interface MessagesContextValue {
@@ -41,8 +41,9 @@ export function MessagesProvider({ children }: { children: ReactNode }) {
         setServerReachable(true);
       })
       .catch((err) => {
-        if (isPermanentDeviceAuthError(err)) {
-          markUnpaired();
+        const permanentCode = getPermanentDeviceAuthErrorCode(err);
+        if (permanentCode) {
+          markUnpaired(permanentCode);
           return;
         }
         // A network/server failure leaves `pending` exactly as it was —
@@ -84,8 +85,9 @@ export function MessagesProvider({ children }: { children: ReactNode }) {
         setPending((prev) => prev.filter((m) => m.recipientId !== current.recipientId));
       })
       .catch((err) => {
-        if (isPermanentDeviceAuthError(err)) {
-          markUnpaired();
+        const permanentCode = getPermanentDeviceAuthErrorCode(err);
+        if (permanentCode) {
+          markUnpaired(permanentCode);
           return;
         }
         setError(err instanceof ApiError ? err.message : "Could not acknowledge this message. Please try again.");

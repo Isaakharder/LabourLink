@@ -4,6 +4,7 @@ import { WorkSessionProvider, useWorkSession } from "../../context/WorkSessionCo
 import { MessagesProvider } from "../../context/MessagesContext";
 import { ConfirmEndDayModal } from "./ConfirmEndDayModal";
 import { PendingMessageOverlay } from "./PendingMessageOverlay";
+import { ReassignmentOverlay } from "./ReassignmentOverlay";
 import { NativePushBridge } from "./NativePushBridge";
 
 function navItemClass({ isActive }: { isActive: boolean }): string {
@@ -94,10 +95,14 @@ export function MobileLayout() {
           </main>
           <MobileNav />
         </div>
-        {/* Rendered as a sibling of .mobile-shell, not inside it — a fixed,
-            full-viewport overlay (see its own CSS) that must cover the nav
-            bar too, not just .mobile-content. */}
+        {/* Rendered as siblings of .mobile-shell, not inside it — fixed,
+            full-viewport overlays (see their shared .message-overlay CSS)
+            that must cover the nav bar too, not just .mobile-content.
+            ReassignmentOverlay is mounted after PendingMessageOverlay so it
+            paints on top in the (unlikely) case both are pending at once —
+            a reassignment is the more fundamental change of the two. */}
         <PendingMessageOverlay />
+        <ReassignmentOverlay />
         <NativePushBridge />
       </WorkSessionProvider>
     </MessagesProvider>

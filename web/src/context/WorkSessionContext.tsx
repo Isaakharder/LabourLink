@@ -1,7 +1,9 @@
 import { createContext, ReactNode, useCallback, useContext, useEffect, useState } from "react";
 import { useDevicePairing } from "./DevicePairingContext";
-import { api, ApiError, isPermanentDeviceAuthError, isServerUnreachableError } from "../lib/api";
+import { api, ApiError, getPermanentDeviceAuthErrorCode, isServerUnreachableError } from "../lib/api";
+import { getCachedEmployeeSummary } from "../lib/device";
 import { enqueue, flushQueue, getPendingCount, isNetworkError } from "../lib/offlineQueue";
+import { detectReassignment } from "../lib/reassignment";
 import { uuid } from "../lib/uuid";
 import { RecentJob } from "../components/mobile/RecentJobsCard";
 
@@ -58,6 +60,13 @@ interface WorkSessionContextValue {
   setError: (error: string | null) => void;
   pending: number;
   pendingActivityName: string | null;
+  // Set whenever a server response's employee id differs from the locally
+  // cached one — an admin reassigned this physical device to someone else
+  // since the last time it checked in. Holds the *new* MeResponse, not yet
+  // applied to `me`/the cached employee summary (see acknowledgeReassignment
+  // and ReassignmentOverlay, which is what actually renders this).
+  pendingReassignment: MeResponse | null;
+  acknowledgeReassignment: () => void;
   loadMe: () => void;
   handleApiError: (err: unknown) => boolean;
   perform: (path: string, body: Record<string, unknown>, options?: PerformOptions) => Promise<void>;
@@ -94,6 +103,63 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
   const [endDaySubmitting, setEndDaySubmitting] = useState(false);
   const [endDayError, setEndDayError] = useState<string | null>(null);
   const [endDayIdempotencyKey, setEndDayIdempotencyKey] = useState<string | null>(null);
+  const [pendingReassignment, setPendingReassignment] = useState<MeResponse | null>(null);
+
+  // The single place every server response carrying an `employee` gets
+  // applied — loadMe, perform, and confirmEndDay all funnel through this
+  // rather than each setting me/verified/the cached employee directly, so
+  // reassignment can never be missed from one of those call sites just
+  // because it was added to another. Compares against the *persisted*
+  // cached employee (device.ts), not React state, so this can't miss a
+  // reassignment that happened before this tab of WorkSessionProvider ever
+  // mounted. When a reassignment is detected, `result` is held in
+  // `pendingReassignment` instead of applied — me/verified/the cached
+  // employee summary stay exactly as they were until acknowledgeReassignment
+  // runs. Deliberately does not touch the offline queue (offlineQueue.ts) in
+  // either branch: that queue lives in its own localStorage key untouched by
+  // anything here, so legitimate queued offline work survives a pending
+  // reassignment exactly as it would survive any other screen transition,
+  // and replays normally via flush() once the new employee's session
+  // resumes. Returns whether it applied immediately, so a caller with its
+  // own post-response cleanup (perform's onResolved, its picker-closing
+  // sheets) can skip that cleanup while a reassignment is pending — there's
+  // no point closing a sheet for an activity that belonged to whoever used
+  // to be paired here.
+  const applyMeResponse = useCallback(
+    (result: MeResponse): boolean => {
+      const cachedEmployeeId = getCachedEmployeeSummary()?.employeeId ?? null;
+      if (detectReassignment(cachedEmployeeId, result.employee.id)) {
+        setPendingReassignment(result);
+        return false;
+      }
+      setMe(result);
+      setVerified(true);
+      setServerReachable(true);
+      refreshCachedEmployee({
+        employeeId: result.employee.id,
+        firstName: result.employee.firstName,
+        lastName: result.employee.lastName,
+        lastVerifiedAt: new Date().toISOString(),
+      });
+      return true;
+    },
+    [refreshCachedEmployee, setServerReachable]
+  );
+
+  const acknowledgeReassignment = useCallback(() => {
+    if (!pendingReassignment) return;
+    const result = pendingReassignment;
+    setPendingReassignment(null);
+    setMe(result);
+    setVerified(true);
+    setServerReachable(true);
+    refreshCachedEmployee({
+      employeeId: result.employee.id,
+      firstName: result.employee.firstName,
+      lastName: result.employee.lastName,
+      lastVerifiedAt: new Date().toISOString(),
+    });
+  }, [pendingReassignment, refreshCachedEmployee, setServerReachable]);
 
   // The one place every mobile screen decides what a caught error actually
   // means: a confirmed permanent device-auth code clears pairing; a network
@@ -104,8 +170,9 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
   // error for it.
   const handleApiError = useCallback(
     (err: unknown): boolean => {
-      if (isPermanentDeviceAuthError(err)) {
-        markUnpaired();
+      const permanentCode = getPermanentDeviceAuthErrorCode(err);
+      if (permanentCode) {
+        markUnpaired(permanentCode);
         return true;
       }
       if (isServerUnreachableError(err)) {
@@ -120,21 +187,11 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
 
   const loadMe = useCallback(() => {
     api<MeResponse>("/api/mobile/me")
-      .then((res) => {
-        setMe(res);
-        setVerified(true);
-        setServerReachable(true);
-        refreshCachedEmployee({
-          employeeId: res.employee.id,
-          firstName: res.employee.firstName,
-          lastName: res.employee.lastName,
-          lastVerifiedAt: new Date().toISOString(),
-        });
-      })
+      .then((res) => applyMeResponse(res))
       .catch((err) => {
         if (!handleApiError(err)) setError("Could not load status");
       });
-  }, [handleApiError, refreshCachedEmployee, setServerReachable]);
+  }, [applyMeResponse, handleApiError]);
 
   useEffect(() => {
     loadMe();
@@ -160,17 +217,18 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     // available" rejection, never actually returning the app to Pairing.
     // This flag, set from inside the send wrapper, is how that specific
     // case still gets caught once the whole queue has drained.
-    let permanentFailure = false;
+    let permanentFailureCode: string | null = null;
     return flushQueue((path, body) =>
       api(path, { method: "POST", body: JSON.stringify(body) }).catch((err) => {
-        if (isPermanentDeviceAuthError(err)) permanentFailure = true;
+        const code = getPermanentDeviceAuthErrorCode(err);
+        if (code) permanentFailureCode = code;
         throw err;
       })
     )
       .then(({ rejected }) => {
         setPending(getPendingCount());
-        if (permanentFailure) {
-          markUnpaired();
+        if (permanentFailureCode) {
+          markUnpaired(permanentFailureCode);
           return;
         }
         if (rejected.length > 0) {
@@ -210,20 +268,14 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
       setError(null);
       try {
         const result = await api<MeResponse>(path, { method: "POST", body: JSON.stringify(body) });
-        setMe(result);
-        setVerified(true);
-        setServerReachable(true);
-        refreshCachedEmployee({
-          employeeId: result.employee.id,
-          firstName: result.employee.firstName,
-          lastName: result.employee.lastName,
-          lastVerifiedAt: new Date().toISOString(),
-        });
-        setPendingActivityName(null);
-        options?.onResolved?.();
+        if (applyMeResponse(result)) {
+          setPendingActivityName(null);
+          options?.onResolved?.();
+        }
       } catch (err) {
-        if (isPermanentDeviceAuthError(err)) {
-          markUnpaired();
+        const permanentCode = getPermanentDeviceAuthErrorCode(err);
+        if (permanentCode) {
+          markUnpaired(permanentCode);
           return;
         }
         if (isNetworkError(err)) {
@@ -245,7 +297,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         setBusy(false);
       }
     },
-    [markUnpaired, refreshCachedEmployee, setServerReachable]
+    [applyMeResponse, markUnpaired, setServerReachable]
   );
 
   const startBreak = useCallback(() => {
@@ -291,14 +343,13 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         body: JSON.stringify({ idempotencyKey: endDayIdempotencyKey }),
       });
       console.log(`[timing] confirmEndDay: api() resolved at ${Math.round(performance.now() - __t0)}ms, updating UI state`);
-      setMe(result);
-      setVerified(true);
-      setServerReachable(true);
+      applyMeResponse(result);
       setEndDayConfirmOpen(false);
       console.log(`[timing] confirmEndDay: UI state updated at ${Math.round(performance.now() - __t0)}ms`);
     } catch (err) {
-      if (isPermanentDeviceAuthError(err)) {
-        markUnpaired();
+      const permanentCode = getPermanentDeviceAuthErrorCode(err);
+      if (permanentCode) {
+        markUnpaired(permanentCode);
         return;
       }
       // Stay open, reusing the same idempotency key on retry — if the first
@@ -314,7 +365,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     } finally {
       setEndDaySubmitting(false);
     }
-  }, [online, endDayIdempotencyKey, markUnpaired, setServerReachable]);
+  }, [online, endDayIdempotencyKey, applyMeResponse, markUnpaired, setServerReachable]);
 
   return (
     <WorkSessionContext.Provider
@@ -327,6 +378,8 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         setError,
         pending,
         pendingActivityName,
+        pendingReassignment,
+        acknowledgeReassignment,
         loadMe,
         handleApiError,
         perform,

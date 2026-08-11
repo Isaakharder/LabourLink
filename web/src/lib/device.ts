@@ -13,6 +13,38 @@ export const PERMANENT_DEVICE_ERROR_CODES = [
   "EMPLOYEE_INACTIVE",
 ] as const;
 
+// Of the permanent codes above, these three mean "this device WAS validly
+// paired, and an administrator has since deactivated it, ended its
+// assignment, or deactivated the employee" — see server/src/routes/
+// devices.ts's deactivate route and pairing-requests approve route, both
+// admin-only (desktop Setup > Devices). A phone that hits one of these
+// should show a clear, specific "contact an administrator" message and wait
+// for a deliberate "start pairing again" tap (DevicePairingContext's
+// `deactivated` status), never silently jump back into requesting a fresh
+// pairing code as if it had never been paired at all.
+//
+// The other two codes (DEVICE_NOT_FOUND, INVALID_DEVICE_IDENTIFIER) mean
+// "this identifier was never a recognized paired device to begin with" —
+// there's no prior pairing to explain the loss of, so those still fall
+// straight through to the ordinary pairing screen exactly as before.
+export const DEACTIVATION_ERROR_CODES = ["DEVICE_INACTIVE", "DEVICE_UNASSIGNED", "EMPLOYEE_INACTIVE"] as const;
+export type DeactivationErrorCode = (typeof DEACTIVATION_ERROR_CODES)[number];
+
+export function isDeactivationErrorCode(code: string | undefined | null): code is DeactivationErrorCode {
+  return !!code && (DEACTIVATION_ERROR_CODES as readonly string[]).includes(code);
+}
+
+// User-facing copy for each deactivation reason — deliberately distinct per
+// code (rather than one generic "you were unpaired" message) so the
+// employee holding the phone knows whether this is about the phone itself,
+// the assignment, or their own account, and that an administrator — not a
+// re-pair attempt — is what resolves it.
+export const DEACTIVATION_MESSAGES: Record<DeactivationErrorCode, string> = {
+  DEVICE_INACTIVE: "This phone has been deactivated. Contact an administrator.",
+  DEVICE_UNASSIGNED: "This phone is no longer assigned to an employee. Contact an administrator.",
+  EMPLOYEE_INACTIVE: "This employee account is no longer active. Contact an administrator.",
+};
+
 export const DEVICE_ID_KEY = "labourlink_device_identifier";
 const PAIRED_KEY = "labourlink_device_paired";
 const EMPLOYEE_SUMMARY_KEY = "labourlink_paired_employee";
@@ -138,27 +170,67 @@ function removeMirrored(key: string): void {
 // immediately, whenever localStorage already has the identifier — the
 // common case on every launch after the first.
 export async function recoverDeviceIdentityFromBackup(): Promise<void> {
-  if (localStorage.getItem(DEVICE_ID_KEY)) return; // nothing to recover
+  if (localStorage.getItem(DEVICE_ID_KEY)) {
+    console.log("[device-identity] recovery skipped — localStorage already has an identifier");
+    return; // nothing to recover
+  }
   const [id, paired, employee] = await Promise.all([
     idbGet(DEVICE_ID_KEY),
     idbGet(PAIRED_KEY),
     idbGet(EMPLOYEE_SUMMARY_KEY),
   ]);
-  if (!id) return; // no backup either — genuinely never paired on this origin
+  if (!id) {
+    console.log("[device-identity] recovery found nothing in IndexedDB either — genuinely first launch");
+    return; // no backup either — genuinely never paired on this origin
+  }
+  console.log(`[device-identity] recovered identifier from IndexedDB fp=${shortFingerprint(id)}`);
   localStorage.setItem(DEVICE_ID_KEY, id);
   if (paired) localStorage.setItem(PAIRED_KEY, paired);
   if (employee) localStorage.setItem(EMPLOYEE_SUMMARY_KEY, employee);
 }
 
+// Short, non-reversible, non-cryptographic fingerprint for log correlation
+// only — same purpose and shape as server/src/middleware/device.ts's
+// fingerprintDeviceIdentifier (sha256, truncated), just synchronous, since
+// every caller here expects getOrCreateDeviceIdentifier to return a value
+// immediately rather than awaiting SubtleCrypto. Never log the identifier
+// itself; this is deliberately not reversible back to it.
+function shortFingerprint(value: string): string {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash * 31 + value.charCodeAt(i)) | 0;
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+// Monotonic per-session counter, purely for correlating log lines from a
+// single page/app load — resets on every reload, never persisted, never
+// sent anywhere.
+let identityCallCount = 0;
+
 // Persistent, random, generated once per install — this identifier is the
 // device's credential (see server/src/middleware/device.ts). It is never an
 // employee's admin email/PIN, and it is created only when none exists —
 // never regenerated on a later launch just because, say, a request failed.
+//
+// Logs every call (fingerprint only, never the identifier itself) — added
+// after a live QA session produced two different identifiers, twelve
+// seconds apart, from what was intended to be a single app install and a
+// single explicit launch (see the pairing-persistence hardening report).
+// This is what would catch it happening again: if two calls ever log
+// different "generated new identifier" fingerprints in the same session,
+// something upstream is calling this from two separate JS realms/page
+// loads, not just twice from the same one (a second call finding the first
+// call's write would log "reused", not "generated").
 export function getOrCreateDeviceIdentifier(): string {
+  const callId = ++identityCallCount;
   let id = localStorage.getItem(DEVICE_ID_KEY);
   if (!id) {
     id = uuid();
+    console.log(`[device-identity] call=${callId} generated new identifier fp=${shortFingerprint(id)}`);
     setMirrored(DEVICE_ID_KEY, id);
+  } else {
+    console.log(`[device-identity] call=${callId} reused existing identifier fp=${shortFingerprint(id)}`);
   }
   return id;
 }
@@ -198,11 +270,15 @@ export function setCachedEmployeeSummary(summary: CachedEmployeeSummary): void {
   setMirrored(EMPLOYEE_SUMMARY_KEY, JSON.stringify(summary));
 }
 
-// The "Reset this device" action (Settings screen) — clears local pairing
-// state and the cached employee summary, exactly like clearDevicePaired,
-// but is kept as its own named function since the two happen for different
-// reasons (a confirmed server-side permanent rejection vs. a deliberate
-// manual action) and may need to diverge again later.
+// "Start pairing again" (DeviceDeactivatedScreen, via DevicePairingContext's
+// beginRepairing) — clears local pairing state and the cached employee
+// summary, exactly like clearDevicePaired, but is kept as its own named
+// function since the two happen for different reasons (a confirmed
+// server-side permanent rejection vs. a deliberate action taken only after
+// an administrator has already deactivated/unassigned this device) and may
+// need to diverge again later. There is no longer any self-service path to
+// this from a normal paired state — it's only reachable after the server
+// has already said this device is deactivated/unassigned/employee-inactive.
 //
 // Deliberately does NOT drop DEVICE_ID_KEY. The physical phone is still the
 // same device — repurposing it to a new employee should go through pairing

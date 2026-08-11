@@ -82,19 +82,29 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   return res.json() as Promise<T>;
 }
 
-// True only for a confirmed permanent device-auth rejection — the sole
-// condition under which mobile pairing should ever be cleared (see
-// DevicePairingContext.markUnpaired and PERMANENT_DEVICE_ERROR_CODES for the
-// exact codes and why a 401 with no code, or an unrecognized code, does not
-// count). Every mobile screen that talks to the API funnels its error
-// handling through this one check instead of reimplementing it.
-export function isPermanentDeviceAuthError(err: unknown): boolean {
-  return (
+// The specific permanent-rejection code for a confirmed permanent device-auth
+// error, or null for anything else — the sole condition under which mobile
+// pairing should ever be cleared (see DevicePairingContext.markUnpaired and
+// PERMANENT_DEVICE_ERROR_CODES for the exact codes and why a 401 with no
+// code, or an unrecognized code, does not count). Every mobile screen that
+// talks to the API funnels its error handling through this one check instead
+// of reimplementing it. Returns the code (rather than just a boolean) so
+// markUnpaired can tell "genuinely deactivated/unassigned by an admin" apart
+// from "never a recognized paired device" and show the right message.
+export function getPermanentDeviceAuthErrorCode(err: unknown): string | null {
+  if (
     err instanceof ApiError &&
     err.status === 401 &&
     !!err.code &&
     (PERMANENT_DEVICE_ERROR_CODES as readonly string[]).includes(err.code)
-  );
+  ) {
+    return err.code;
+  }
+  return null;
+}
+
+export function isPermanentDeviceAuthError(err: unknown): boolean {
+  return getPermanentDeviceAuthErrorCode(err) !== null;
 }
 
 // True for "the server was not actually reached, or had a server-side

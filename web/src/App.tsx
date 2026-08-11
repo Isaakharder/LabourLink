@@ -18,6 +18,7 @@ import { ResetPinPage } from "./pages/desktop/ResetPinPage";
 import { SettingsPage } from "./pages/desktop/SettingsPage";
 import { SetupPage } from "./pages/desktop/SetupPage";
 import { RequireRole } from "./components/auth/RequireRole";
+import { DeviceDeactivatedScreen } from "./pages/mobile/DeviceDeactivatedScreen";
 import { HomeScreen } from "./pages/mobile/HomeScreen";
 import { PairingScreen } from "./pages/mobile/PairingScreen";
 import { SettingsScreen } from "./pages/mobile/SettingsScreen";
@@ -108,6 +109,10 @@ function MobileApp() {
 
   if (status === "unpaired") {
     return <PairingScreen />;
+  }
+
+  if (status === "deactivated") {
+    return <DeviceDeactivatedScreen />;
   }
 
   return (

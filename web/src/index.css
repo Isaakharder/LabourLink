@@ -375,7 +375,6 @@ input {
 
 .pairing-screen,
 .mobile-home,
-.mobile-pin-gate,
 .mobile-settings {
   display: flex;
   flex-direction: column;
@@ -422,24 +421,6 @@ input {
   height: 8px;
   border-radius: 50%;
   background: #22c55e;
-}
-
-.mobile-pin-gate input {
-  font-size: 1.5rem;
-  text-align: center;
-  padding: 0.5rem;
-  width: 140px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-}
-
-.mobile-pin-gate button {
-  margin-top: 0.5rem;
-  padding: 0.6rem 1.2rem;
-  border: none;
-  border-radius: 6px;
-  background: var(--color-primary);
-  color: white;
 }
 
 /* ---------- Mobile: employee home / activity picker / connection state ---------- */
@@ -626,19 +607,10 @@ input {
   margin: 0;
 }
 
-.mobile-settings-reset-confirm {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-  padding: 0.85rem;
-  border: 1px solid var(--color-danger);
-  border-radius: var(--radius);
-  background: var(--color-surface);
-}
-
-.mobile-settings-reset-confirm p {
-  font-size: 0.85rem;
-  margin: 0;
+.device-deactivated-message {
+  font-size: 1.1rem;
+  font-weight: 600;
+  max-width: 320px;
 }
 
 /* ---------- Mobile: activity picker bottom sheet ---------- */
