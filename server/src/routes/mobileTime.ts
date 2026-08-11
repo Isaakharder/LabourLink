@@ -301,7 +301,12 @@ async function loadWorkStartRoundingSettings(employeeId: string): Promise<WorkSt
   };
 }
 
-async function serializeStatus(employeeId: string, employeeFirstName: string, employeeLastName: string) {
+async function serializeStatus(
+  employeeId: string,
+  employeeFirstName: string,
+  employeeLastName: string,
+  employeePreferredLanguage: string | null
+) {
   // TEMPORARY — End Work ~1min delay investigation. Elapsed-time-only, no
   // secrets. Remove once the slow hop is identified.
   const __t0 = Date.now();
@@ -467,7 +472,12 @@ async function serializeStatus(employeeId: string, employeeFirstName: string, em
 
   console.log(`[timing] serializeStatus total: ${Date.now() - __t0}ms`);
   return {
-    employee: { id: employeeId, firstName: employeeFirstName, lastName: employeeLastName },
+    employee: {
+      id: employeeId,
+      firstName: employeeFirstName,
+      lastName: employeeLastName,
+      preferredLanguage: employeePreferredLanguage,
+    },
     status: open ? open.entry_type : "idle",
     currentActivity,
     since: open?.started_at ?? null,
@@ -480,7 +490,7 @@ router.get(
   "/me",
   asyncHandler(async (req, res) => {
     const d = req.device!;
-    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName));
+    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage));
   })
 );
 
@@ -570,7 +580,7 @@ router.post(
     }
 
     await openEntry(d.employeeId, d.id, "work", activityId, idempotencyKey, overrides);
-    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName));
+    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage));
   })
 );
 
@@ -633,7 +643,7 @@ router.post(
           }
         : {}
     );
-    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName));
+    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage));
   })
 );
 
@@ -696,7 +706,7 @@ router.post(
     }
 
     await openEntry(d.employeeId, d.id, "work", resumeActivityId, idempotencyKey, overrides);
-    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName));
+    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage));
   })
 );
 
@@ -713,7 +723,7 @@ router.post(
       [d.employeeId]
     );
     console.log(`[timing] end-day: UPDATE done at ${Date.now() - __t0}ms`);
-    const body = await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName);
+    const body = await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage);
     console.log(`[timing] end-day: serializeStatus done at ${Date.now() - __t0}ms, sending response`);
     res.json(body);
   })

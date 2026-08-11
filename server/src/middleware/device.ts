@@ -7,6 +7,13 @@ export interface AuthedDevice {
   employeeId: string;
   employeeFirstName: string;
   employeeLastName: string;
+  // 'English' | 'Spanish' | null (chk_employees_preferred_language,
+  // 005_employee_profile_fields.sql) — the employee's own desktop-configured
+  // preference, never inferred from nationality or anything else. Threaded
+  // through to every /api/mobile/me-shaped response (see mobileTime.ts's
+  // serializeStatus) so the mobile Home/Stats UI can pick a language; null
+  // means "not set," which the client treats the same as English.
+  employeePreferredLanguage: string | null;
 }
 
 declare global {
@@ -77,7 +84,7 @@ export async function requireDevice(req: Request, res: Response, next: NextFunct
   const { rows } = await pool.query(
     `select d.id as device_id, d.is_active as device_active,
             da.employee_id, e.is_active as employee_active,
-            e.first_name, e.last_name
+            e.first_name, e.last_name, e.preferred_language
      from devices d
      left join device_assignments da on da.device_id = d.id and da.unassigned_at is null
      left join employees e on e.id = da.employee_id
@@ -111,6 +118,7 @@ export async function requireDevice(req: Request, res: Response, next: NextFunct
     employeeId: row.employee_id,
     employeeFirstName: row.first_name,
     employeeLastName: row.last_name,
+    employeePreferredLanguage: row.preferred_language,
   };
   next();
 }
