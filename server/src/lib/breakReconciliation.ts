@@ -20,40 +20,61 @@ interface AutoAddItem {
   is_paid: boolean;
 }
 
-export async function reconcileEmployeeBreaks(employeeId: string, dateStr: string): Promise<void> {
-  // TEMPORARY — End Work ~1min delay investigation. Elapsed-time-only, no
-  // secrets. Remove once the slow hop is identified.
-  const __t0 = Date.now();
+// The two employee columns every caller needs before deciding whether
+// there's anything to reconcile at all — is_active and break_profile_id.
+// Callers that already fetched the employee row this same request (GET
+// /api/inputs/daily fetches id/first_name/last_name/profile_photo_path for
+// its own response and can select these two alongside them for free) should
+// pass it in directly rather than have this function ask again a few
+// milliseconds later; a caller with no such row on hand (mobileTime.ts's
+// serializeStatus, which only has requireDevice's employeeId/name/language)
+// omits it and this function fetches it itself, exactly as it always did.
+export interface KnownEmployeeBreakInfo {
+  isActive: boolean;
+  breakProfileId: string | null;
+}
+
+async function fetchEmployeeBreakInfo(employeeId: string): Promise<KnownEmployeeBreakInfo> {
+  const { rows } = await pool.query(`select is_active, break_profile_id from employees where id = $1`, [employeeId]);
+  const row = rows[0];
+  return { isActive: row?.is_active ?? false, breakProfileId: row?.break_profile_id ?? null };
+}
+
+export async function reconcileEmployeeBreaks(
+  employeeId: string,
+  dateStr: string,
+  knownEmployee?: KnownEmployeeBreakInfo
+): Promise<void> {
+  const emp = knownEmployee ?? (await fetchEmployeeBreakInfo(employeeId));
+  // No transaction, no connection ever opened for the (common) case where
+  // there's nothing this employee could have — an inactive employee or one
+  // with no assigned break profile can never have an auto-add item to
+  // reconcile, so there's nothing worth a round trip to confirm further.
+  if (!emp.isActive || !emp.breakProfileId) return;
+
+  // Combines the old two separate round trips ("is this break profile
+  // still active" then "which of its items are auto-add") into one — a
+  // profile that's since been deactivated simply joins to zero items,
+  // which is exactly the same "nothing to reconcile" outcome the old
+  // separate profileRes check produced, just without a second query to
+  // learn it.
+  const itemsRes = await pool.query<AutoAddItem>(
+    `select bpi.id, bpi.start_time, bpi.end_time, bpi.is_paid
+     from break_profiles bp
+     join break_profile_items bpi on bpi.break_profile_id = bp.id
+     where bp.id = $1 and bp.is_active = true and bpi.auto_add = true and bpi.is_active = true
+     order by bpi.start_time asc`,
+    [emp.breakProfileId]
+  );
+  // Nothing to reconcile — same early exit as before, just reached without
+  // ever opening a transaction (there was never anything for one to
+  // protect in this case; the old code opened begin/commit around zero
+  // writes here too, which offered no atomicity benefit).
+  if (itemsRes.rows.length === 0) return;
+
   const client = await pool.connect();
-  console.log(`[timing] reconcileEmployeeBreaks pool.connect(): ${Date.now() - __t0}ms`);
   try {
     await client.query("begin");
-
-    const empRes = await client.query(
-      `select is_active, break_profile_id from employees where id = $1`,
-      [employeeId]
-    );
-    const emp = empRes.rows[0];
-    if (!emp || !emp.is_active || !emp.break_profile_id) {
-      await client.query("commit");
-      return;
-    }
-
-    const profileRes = await client.query(`select id from break_profiles where id = $1 and is_active = true`, [
-      emp.break_profile_id,
-    ]);
-    if (!profileRes.rows[0]) {
-      await client.query("commit");
-      return;
-    }
-
-    const itemsRes = await client.query<AutoAddItem>(
-      `select id, start_time, end_time, is_paid
-       from break_profile_items
-       where break_profile_id = $1 and auto_add = true and is_active = true
-       order by start_time asc`,
-      [emp.break_profile_id]
-    );
 
     const [y, mo, d] = dateStr.split("-").map(Number);
     const now = Date.now();
@@ -193,7 +214,6 @@ export async function reconcileEmployeeBreaks(employeeId: string, dateStr: strin
     }
 
     await client.query("commit");
-    console.log(`[timing] reconcileEmployeeBreaks total (${itemsRes.rows.length} auto-add items): ${Date.now() - __t0}ms`);
   } catch (err) {
     await client.query("rollback").catch(() => {});
     throw err;
