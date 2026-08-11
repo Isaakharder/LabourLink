@@ -4,6 +4,7 @@ import { asyncHandler } from "../lib/asyncHandler";
 import { requireDevice } from "../middleware/device";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { calendarDateInAppTimezone, parseTimeParts, zonedWallTimeToUtc } from "../lib/timezone";
+import { resolveOriginalStartedAt, roundWorkStart, RoundingDirection } from "../lib/workStartRounding";
 
 const router = Router();
 router.use(asyncHandler(requireDevice));
@@ -55,6 +56,27 @@ async function getOpenEntry(employeeId: string): Promise<OpenEntry | null> {
     `select id, entry_type, activity_id, started_at, greenhouse_row_id, carrier_id
      from time_entries where employee_id = $1 and ended_at is null and deleted_at is null`,
     [employeeId]
+  );
+  return rows[0] ?? null;
+}
+
+// Same as getOpenEntry, but excludes rows already carrying `idempotencyKey`
+// — used only to decide whether a work-start request is a genuine idle ->
+// work transition (see the work-start-rounding block in POST
+// /time-entries/work). Without this exclusion, a *replay* of an already-
+// succeeded work-start (same idempotencyKey, offline retry or a lost
+// response) would see its own prior insert as "something's open" and
+// wrongly conclude this wasn't a workday start. It doesn't affect what
+// actually gets stored either way — openEntry()'s own idempotency_key
+// unique index makes the insert a true no-op on any replay regardless of
+// what overrides a replay computes — but getting `wasIdle` right keeps the
+// rounding decision (and its debug-ability) honest on every call, not just
+// the first.
+async function getOpenEntryExcluding(employeeId: string, idempotencyKey: string): Promise<OpenEntry | null> {
+  const { rows } = await pool.query(
+    `select id, entry_type, activity_id, started_at, greenhouse_row_id, carrier_id
+     from time_entries where employee_id = $1 and ended_at is null and deleted_at is null and idempotency_key <> $2`,
+    [employeeId, idempotencyKey]
   );
   return rows[0] ?? null;
 }
@@ -254,6 +276,38 @@ async function loadActiveFixedItems(employeeId: string): Promise<FixedItem[]> {
     [employeeId]
   );
   return rows;
+}
+
+interface WorkStartRoundingSettings {
+  enabled: boolean;
+  direction: RoundingDirection;
+  intervalMinutes: number;
+}
+
+// The employee's currently assigned (active profile, active employee)
+// work-start rounding configuration, read fresh on every call — there is no
+// historical/versioned config to look up "as of" some earlier moment. This
+// is deliberate (see resolveOriginalStartedAt's comment): whatever config
+// is live at the moment the server actually processes a work-start request
+// is the one that applies to it, including for a delayed offline sync.
+// Returns null for "no active profile assigned" — the caller treats that
+// the same as "rounding disabled."
+async function loadWorkStartRoundingSettings(employeeId: string): Promise<WorkStartRoundingSettings | null> {
+  const { rows } = await pool.query(
+    `select bp.work_start_rounding_enabled, bp.work_start_rounding_direction,
+            bp.work_start_rounding_interval_minutes
+     from employees e
+     join break_profiles bp on bp.id = e.break_profile_id and bp.is_active = true
+     where e.id = $1 and e.is_active = true`,
+    [employeeId]
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    enabled: row.work_start_rounding_enabled,
+    direction: row.work_start_rounding_direction,
+    intervalMinutes: row.work_start_rounding_interval_minutes,
+  };
 }
 
 async function serializeStatus(employeeId: string, employeeFirstName: string, employeeLastName: string) {
@@ -517,10 +571,17 @@ router.post(
   "/time-entries/work",
   asyncHandler(async (req, res) => {
     const d = req.device!;
-    const { activityId, idempotencyKey, answers } = req.body as {
+    const { activityId, idempotencyKey, answers, clientStartedAt } = req.body as {
       activityId?: string;
       idempotencyKey?: string;
       answers?: { questionId?: string; greenhouseRowId?: string; carrierId?: string }[];
+      // The phone's own clock reading of the moment this was tapped,
+      // captured client-side before the request was even attempted — see
+      // resolveOriginalStartedAt above. Only ever consulted below when this
+      // turns out to be a genuine workday start; ignored entirely for an
+      // activity change or a break/end resume, which always use server time
+      // exactly as before.
+      clientStartedAt?: string;
     };
     if (!activityId || !UUID_RE.test(activityId) || !isValidIdempotencyKey(idempotencyKey)) {
       return res.status(400).json({ error: "activityId and a valid idempotencyKey are required" });
@@ -605,10 +666,50 @@ router.post(
       }
     }
 
-    await openEntry(d.employeeId, d.id, "work", activityId, idempotencyKey, {
+    // Work-start rounding applies ONLY on a genuine idle -> work
+    // transition — never to an activity change (something is already
+    // open, entryType stays "work") and never to resuming work after a
+    // break (that's POST /time-entries/break/end below, a separate route
+    // that never reaches here at all). getOpenEntryExcluding rather than
+    // plain getOpenEntry so a *replay* of this exact request (same
+    // idempotencyKey) still correctly recognizes itself as "was idle" —
+    // see that function's own comment for why this doesn't actually change
+    // what ends up stored on a replay either way (openEntry's idempotency_key
+    // uniqueness already makes the insert a true no-op), it just keeps the
+    // rounding decision honest and debuggable on every call, not only the
+    // first.
+    const wasIdle = (await getOpenEntryExcluding(d.employeeId, idempotencyKey)) === null;
+
+    let overrides: OpenEntryOverrides = {
       greenhouseRowId: validatedRowId,
       carrierId: validatedCarrierId,
-    });
+    };
+
+    if (wasIdle) {
+      const settings = await loadWorkStartRoundingSettings(d.employeeId);
+      if (settings?.enabled) {
+        const now = new Date();
+        const original = resolveOriginalStartedAt(clientStartedAt, now);
+        const rounded = roundWorkStart(original, settings.intervalMinutes, settings.direction);
+        // actual_started_at (original tap) and started_at (rounded,
+        // effective — what paid-time calculations, Inputs, and reports all
+        // read) are both set here, once, at insert time. Whatever is
+        // computed and stored now is permanent: a later change to this
+        // profile's rounding settings only ever affects work starts
+        // recorded after that change (loadWorkStartRoundingSettings reads
+        // the *current* row on every call — there's no historical
+        // config to retroactively apply, and nothing here ever updates an
+        // already-stored started_at/actual_started_at).
+        overrides = { ...overrides, startedAt: rounded, actualStartedAt: original };
+      }
+      // rounding disabled (or no active profile assigned): deliberately no
+      // overrides.startedAt/actualStartedAt at all here — openEntry() falls
+      // back to server now() for started_at exactly as it did before this
+      // feature existed, and actual_started_at stays null on this row, same
+      // as every work entry recorded before this feature shipped.
+    }
+
+    await openEntry(d.employeeId, d.id, "work", activityId, idempotencyKey, overrides);
     res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName));
   })
 );

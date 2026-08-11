@@ -3,6 +3,13 @@ import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
+import {
+  isRoundingDirection,
+  isValidRoundingIntervalMinutes,
+  MAX_ROUNDING_INTERVAL_MINUTES,
+  MIN_ROUNDING_INTERVAL_MINUTES,
+  RoundingDirection,
+} from "../lib/workStartRounding";
 
 const router = Router();
 
@@ -184,6 +191,8 @@ async function upsertItems(client: PoolClient, breakProfileId: string, items: It
 
 const LIST_SELECT = `
   select bp.id, bp.name, bp.description, bp.is_active, bp.created_at, bp.updated_at,
+         bp.work_start_rounding_enabled, bp.work_start_rounding_direction,
+         bp.work_start_rounding_interval_minutes,
          coalesce(items.items, '[]'::json) as items,
          coalesce(items.item_count, 0) as item_count,
          coalesce(emp.employee_count, 0) as assigned_employee_count
@@ -220,6 +229,9 @@ function serializeBreakProfile(row: any) {
     name: row.name,
     description: row.description,
     isActive: row.is_active,
+    workStartRoundingEnabled: row.work_start_rounding_enabled,
+    workStartRoundingDirection: row.work_start_rounding_direction,
+    workStartRoundingIntervalMinutes: row.work_start_rounding_interval_minutes,
     items: row.items,
     itemCount: Number(row.item_count),
     assignedEmployeeCount: Number(row.assigned_employee_count),
@@ -281,11 +293,36 @@ router.post(
     const itemsResult = validateItems(req.body?.items);
     if ("error" in itemsResult) errors.items = itemsResult.error;
 
+    // Work-start rounding — optional on create, same "absent means use the
+    // column default" convention as isActive below. Whenever a direction or
+    // interval IS supplied, it's validated the same way regardless of
+    // whether rounding is actually enabled — an admin can save a chosen
+    // direction/interval before flipping the enabled switch on without
+    // losing them, so an invalid one is always rejected, not silently
+    // ignored just because rounding is currently off.
+    const rawDirection = req.body?.workStartRoundingDirection;
+    if (rawDirection !== undefined && !isRoundingDirection(rawDirection)) {
+      errors.workStartRoundingDirection = "Direction must be 'clockwise' or 'counter_clockwise'";
+    }
+    const workStartRoundingDirection: RoundingDirection = isRoundingDirection(rawDirection) ? rawDirection : "clockwise";
+
+    const rawInterval = req.body?.workStartRoundingIntervalMinutes;
+    let workStartRoundingIntervalMinutes = 5;
+    if (rawInterval !== undefined) {
+      const n = Number(rawInterval);
+      if (!isValidRoundingIntervalMinutes(n)) {
+        errors.workStartRoundingIntervalMinutes = `Interval must be a whole number of minutes between ${MIN_ROUNDING_INTERVAL_MINUTES} and ${MAX_ROUNDING_INTERVAL_MINUTES}`;
+      } else {
+        workStartRoundingIntervalMinutes = n;
+      }
+    }
+
     if (Object.keys(errors).length) return res.status(400).json({ errors });
     const items = (itemsResult as { items: ItemInput[] }).items;
 
     const description = trimOrNull(req.body?.description);
     const isActive = req.body?.isActive === undefined ? true : Boolean(req.body.isActive);
+    const workStartRoundingEnabled = Boolean(req.body?.workStartRoundingEnabled);
 
     const client = await pool.connect();
     try {
@@ -294,8 +331,18 @@ router.post(
       let profileId: string;
       try {
         const { rows } = await client.query(
-          `insert into break_profiles (name, description, is_active) values ($1, $2, $3) returning id`,
-          [name, description, isActive]
+          `insert into break_profiles
+             (name, description, is_active, work_start_rounding_enabled,
+              work_start_rounding_direction, work_start_rounding_interval_minutes)
+           values ($1, $2, $3, $4, $5, $6) returning id`,
+          [
+            name,
+            description,
+            isActive,
+            workStartRoundingEnabled,
+            workStartRoundingDirection,
+            workStartRoundingIntervalMinutes,
+          ]
         );
         profileId = rows[0].id;
       } catch (err) {
@@ -346,6 +393,29 @@ router.patch(
       else items = result.items;
     }
 
+    // Work-start rounding — each of the three fields is independently
+    // optional, same "if present in body, validate and apply; if absent,
+    // leave the existing column untouched" convention as description/
+    // isActive below (the desktop editor always sends all three together,
+    // but the route itself doesn't require that).
+    let workStartRoundingDirection: RoundingDirection | undefined;
+    if ("workStartRoundingDirection" in body) {
+      if (!isRoundingDirection(body.workStartRoundingDirection)) {
+        errors.workStartRoundingDirection = "Direction must be 'clockwise' or 'counter_clockwise'";
+      } else {
+        workStartRoundingDirection = body.workStartRoundingDirection;
+      }
+    }
+    let workStartRoundingIntervalMinutes: number | undefined;
+    if ("workStartRoundingIntervalMinutes" in body) {
+      const n = Number(body.workStartRoundingIntervalMinutes);
+      if (!isValidRoundingIntervalMinutes(n)) {
+        errors.workStartRoundingIntervalMinutes = `Interval must be a whole number of minutes between ${MIN_ROUNDING_INTERVAL_MINUTES} and ${MAX_ROUNDING_INTERVAL_MINUTES}`;
+      } else {
+        workStartRoundingIntervalMinutes = n;
+      }
+    }
+
     if (Object.keys(errors).length) return res.status(400).json({ errors });
 
     const columns: string[] = [];
@@ -353,6 +423,18 @@ router.patch(
     if (name !== undefined) {
       values.push(name);
       columns.push(`name = $${values.length}`);
+    }
+    if ("workStartRoundingEnabled" in body) {
+      values.push(Boolean(body.workStartRoundingEnabled));
+      columns.push(`work_start_rounding_enabled = $${values.length}`);
+    }
+    if (workStartRoundingDirection !== undefined) {
+      values.push(workStartRoundingDirection);
+      columns.push(`work_start_rounding_direction = $${values.length}`);
+    }
+    if (workStartRoundingIntervalMinutes !== undefined) {
+      values.push(workStartRoundingIntervalMinutes);
+      columns.push(`work_start_rounding_interval_minutes = $${values.length}`);
     }
     if ("description" in body) {
       values.push(trimOrNull(body.description));

@@ -152,9 +152,18 @@ export function HomeScreen() {
       startQuestionFlow(activity.id, activity.name, activity.questions);
       return;
     }
+    // clientStartedAt: the phone's own clock reading of this exact tap,
+    // captured now rather than whenever the request actually reaches the
+    // server — if this goes into the offline queue (offlineQueue.ts) and
+    // replays hours later, the server still rounds against the real tap
+    // moment instead of the delayed sync time (see mobileTime.ts's
+    // resolveOriginalStartedAt). Only meaningful to the server when this
+    // turns out to be a genuine workday start, not an activity change —
+    // sent unconditionally anyway since it's cheap and this same call site
+    // serves both cases.
     perform(
       "/api/mobile/time-entries/work",
-      { activityId, idempotencyKey: uuid() },
+      { activityId, idempotencyKey: uuid(), clientStartedAt: new Date().toISOString() },
       { pendingLabel: activity?.name, onResolved: () => setPickerOpen(false) }
     );
   }
@@ -204,9 +213,11 @@ export function HomeScreen() {
         ? { questionId: a.questionId, greenhouseRowId: a.greenhouseRowId }
         : { questionId: a.questionId, carrierId: a.carrierId }
     );
+    // See chooseActivity's identical clientStartedAt comment above — same
+    // reasoning, same call site shape, just reached via the question flow.
     perform(
       "/api/mobile/time-entries/work",
-      { activityId, answers: answersPayload, idempotencyKey: uuid() },
+      { activityId, answers: answersPayload, idempotencyKey: uuid(), clientStartedAt: new Date().toISOString() },
       { pendingLabel: activityName, onResolved: () => setQuestionFlow(null) }
     );
   }
