@@ -18,6 +18,12 @@ if ("serviceWorker" in navigator) {
   });
 }
 
+// Logged with a fresh random tag per page load — the cheapest possible
+// signal for "did this page/WebView actually load and run main.tsx more
+// than once," which a device-identity duplication bug would otherwise be
+// very hard to distinguish from a single page load calling something twice.
+console.log(`[device-identity] main.tsx executing, load=${Math.random().toString(36).slice(2, 8)}`);
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <BrowserRouter>

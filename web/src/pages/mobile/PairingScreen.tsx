@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useDevicePairing } from "../../context/DevicePairingContext";
 import { api } from "../../lib/api";
 import { getOrCreateDeviceIdentifier } from "../../lib/device";
+import { singleFlight } from "../../lib/singleFlight";
 
 interface RequestResponse {
   requestId: string;
@@ -21,22 +22,39 @@ export function PairingScreen() {
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
 
-  const startPairing = useCallback(async () => {
-    setError(null);
-    setCode(null);
-    try {
-      const deviceIdentifier = getOrCreateDeviceIdentifier();
-      const res = await api<RequestResponse>("/api/pairing/request", {
-        method: "POST",
-        body: JSON.stringify({ deviceIdentifier }),
-      });
-      setCode(res.pairingCode);
-    } catch {
-      setError("Could not start pairing. Check your connection and try again.");
-    }
-  }, []);
+  // Single-flight so the mount effect below and a rapid "Try again" tap (or
+  // any future caller) can never fire two overlapping POST
+  // /api/pairing/request calls — each would otherwise create its own
+  // pairing_requests row for an admin to sort out. Created once via useRef
+  // (not module-level) so a fresh PairingScreen mount — e.g. after
+  // DeviceDeactivatedScreen's "Start pairing again" — always starts with a
+  // clean slate rather than inheriting stale in-flight state from a
+  // previous mount. getOrCreateDeviceIdentifier() itself is already safe
+  // against concurrent calls (synchronous read-then-write, no await in
+  // between, so two calls in the same JS realm can never both see an empty
+  // localStorage) — this guards the async request that follows it, which
+  // does have a real concurrency window.
+  const startPairingRef = useRef(
+    singleFlight(async () => {
+      setError(null);
+      setCode(null);
+      try {
+        console.log("[device-identity] PairingScreen.startPairing invoked");
+        const deviceIdentifier = getOrCreateDeviceIdentifier();
+        const res = await api<RequestResponse>("/api/pairing/request", {
+          method: "POST",
+          body: JSON.stringify({ deviceIdentifier }),
+        });
+        setCode(res.pairingCode);
+      } catch {
+        setError("Could not start pairing. Check your connection and try again.");
+      }
+    })
+  );
+  const startPairing = startPairingRef.current;
 
   useEffect(() => {
+    console.log("[device-identity] PairingScreen mounted");
     startPairing();
   }, [startPairing]);
 
