@@ -5,6 +5,13 @@ import { requireDevice } from "../middleware/device";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { calendarDateInAppTimezone, parseTimeParts, zonedWallTimeToUtc } from "../lib/timezone";
 import { resolveOriginalStartedAt, roundWorkStart, RoundingDirection } from "../lib/workStartRounding";
+import {
+  loadCarrierOptions,
+  loadEmployeeActivitiesWithQuestions,
+  loadGreenhouseRowOptions,
+  resolveDensitySnapshot,
+  validateActivityAndAnswers,
+} from "../lib/activitySelection";
 
 const router = Router();
 router.use(asyncHandler(requireDevice));
@@ -111,31 +118,15 @@ async function openEntry(
       [employeeId, idempotencyKey, overrides.startedAt ?? null, overrides.actualEndedAt ?? null]
     );
 
-    // Frozen at the moment this work entry is opened — resolved from the
-    // row's *current* density assignment of the activity's configured
-    // density_source, never re-read afterward (see
-    // 025_activity_density_speed.sql: editing a density later must not
-    // change an already-recorded run's calculated speed on Inputs). Breaks
-    // never reach here (entryType !== "work" short-circuits), matching the
-    // chk_time_entries_density_only_on_work constraint for free.
-    let densityType: "plants" | "stems" | null = null;
-    let densityCountPerRow: number | null = null;
-    if (entryType === "work" && activityId && overrides.greenhouseRowId) {
-      const densityRes = await client.query(
-        `select pd.type as density_type, pd.count_per_row as density_count_per_row
-         from activities a
-         left join plant_density_rows pdr
-           on pdr.greenhouse_row_id = $2 and pdr.density_type = a.density_source
-         left join plant_densities pd on pd.id = pdr.density_id
-         where a.id = $1`,
-        [activityId, overrides.greenhouseRowId]
-      );
-      const d = densityRes.rows[0];
-      if (d && d.density_type) {
-        densityType = d.density_type;
-        densityCountPerRow = Number(d.density_count_per_row);
-      }
-    }
+    // Frozen at the moment this work entry is opened (see
+    // resolveDensitySnapshot's own comment for why it's never re-read
+    // afterward). Breaks never reach here (entryType !== "work"
+    // short-circuits), matching the chk_time_entries_density_only_on_work
+    // constraint for free.
+    const { densityType, densityCountPerRow } =
+      entryType === "work" && activityId
+        ? await resolveDensitySnapshot(client, activityId, overrides.greenhouseRowId ?? null)
+        : { densityType: null, densityCountPerRow: null };
 
     const insert = await client.query(
       `insert into time_entries
@@ -497,73 +488,8 @@ router.get(
   "/activities",
   asyncHandler(async (req, res) => {
     const d = req.device!;
-
-    // Resolve every active group the employee currently has an active
-    // assignment to — an assignment pointing at an inactive group can't
-    // actually happen (activityGroups.ts closes the row on deactivation),
-    // but the join filter is kept anyway as defense-in-depth, matching how
-    // requireDevice double-checks is_active even after already gating on
-    // assignment closure elsewhere.
-    const groupRows = await pool.query(
-      `select ag.id, ag.name
-       from employee_activity_group_assignments eaga
-       join activity_groups ag on ag.id = eaga.activity_group_id and ag.is_active = true
-       where eaga.employee_id = $1 and eaga.unassigned_at is null
-       order by ag.name`,
-      [d.employeeId]
-    );
-    const groups = groupRows.rows;
-    if (groups.length === 0) {
-      // No active group — never fall back to "all activities."
-      return res.json({ activities: [], activityGroups: [] });
-    }
-
-    // Deduplicated (an activity belonging to more than one of the
-    // employee's groups is returned once) via an inner "distinct
-    // activity_id" set, joined to activities and then to each activity's
-    // own ordered question list via LATERAL — the same shape
-    // server/src/routes/activities.ts uses, and for the same reason: a
-    // plain LEFT JOIN to activity_questions (now zero-to-many per activity)
-    // would fan out and require reintroducing the exact "distinct" problem
-    // this dedup step already exists to solve.
-    const { rows } = await pool.query(
-      `select a.id, a.name, a.normal_speed, a.speed_unit, a.sort_order,
-              coalesce(q.questions, '[]'::json) as questions
-       from (
-         select distinct aga.activity_id
-         from activity_group_activities aga
-         where aga.activity_group_id = any($1::uuid[])
-       ) x
-       join activities a on a.id = x.activity_id and a.is_active = true
-       left join lateral (
-         select json_agg(json_build_object(
-                  'id', aq.id, 'questionType', aq.question_type,
-                  'label', aq.label, 'isRequired', aq.is_required
-                ) order by aq.sort_order) as questions
-         from activity_questions aq
-         where aq.activity_id = a.id and aq.is_active = true
-       ) q on true
-       order by a.sort_order, a.name`,
-      [groups.map((g) => g.id)]
-    );
-    res.json({
-      // pg returns numeric columns as strings — cast explicitly, same as
-      // server/src/routes/activities.ts does for the desktop admin list.
-      activities: rows.map((r) => ({
-        id: r.id,
-        name: r.name,
-        normalSpeed: r.normal_speed !== null ? Number(r.normal_speed) : null,
-        speedUnit: r.speed_unit,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        questions: (r.questions as any[]).map((q) => ({
-          id: q.id,
-          questionType: q.questionType as "greenhouse_row" | "carrier",
-          label: q.label as string,
-          isRequired: q.isRequired as boolean,
-        })),
-      })),
-      activityGroups: groups.map((g) => ({ id: g.id, name: g.name })),
-    });
+    const result = await loadEmployeeActivitiesWithQuestions(pool, d.employeeId);
+    res.json(result);
   })
 );
 
@@ -586,85 +512,19 @@ router.post(
     if (!activityId || !UUID_RE.test(activityId) || !isValidIdempotencyKey(idempotencyKey)) {
       return res.status(400).json({ error: "activityId and a valid idempotencyKey are required" });
     }
+
     // activityId is client-supplied — confirm it's a real, active activity
-    // AND a member of the employee's currently active group before opening
-    // an entry against it. Picker restriction is a UI convenience only; this
-    // is the actual enforcement, since a client-supplied id is never trusted.
-    const activityCheck = await pool.query(
-      `select a.id
-       from activities a
-       join activity_group_activities aga on aga.activity_id = a.id
-       join employee_activity_group_assignments eaga
-         on eaga.activity_group_id = aga.activity_group_id
-        and eaga.employee_id = $2
-        and eaga.unassigned_at is null
-       join activity_groups ag on ag.id = aga.activity_group_id and ag.is_active = true
-       where a.id = $1 and a.is_active = true`,
-      [activityId, d.employeeId]
-    );
-    if (!activityCheck.rows[0]) {
-      return res.status(400).json({ error: "activityId is not available to this employee" });
+    // AND a member of the employee's currently active group, and every
+    // configured question fully/validly answered, before opening an entry
+    // against it. Picker restriction is a UI convenience only; this is the
+    // actual enforcement, since a client-supplied id is never trusted. Same
+    // validation the desktop admin manual-entry endpoints use (see
+    // activitySelection.ts) — one set of rules, not two.
+    const validation = await validateActivityAndAnswers(pool, activityId, d.employeeId, answers);
+    if (!validation.ok) {
+      return res.status(400).json({ error: validation.error });
     }
-
-    // Server-authoritative question list: the client's job is only to
-    // supply an answer per questionId, never to assert what type a
-    // question is or whether it's required — both come from the DB here,
-    // ordered the same way the mobile question flow asked them.
-    const questionsRes = await pool.query(
-      `select id, question_type, is_required from activity_questions
-       where activity_id = $1 and is_active = true
-       order by sort_order`,
-      [activityId]
-    );
-    const questions = questionsRes.rows as { id: string; question_type: "greenhouse_row" | "carrier"; is_required: boolean }[];
-
-    const answersArray = Array.isArray(answers) ? answers : [];
-    const validQuestionIds = new Set(questions.map((q) => q.id));
-    for (const a of answersArray) {
-      if (!a || typeof a.questionId !== "string" || !validQuestionIds.has(a.questionId)) {
-        return res.status(400).json({ error: "One or more answers do not match a configured question for this activity" });
-      }
-    }
-    const answersByQuestionId = new Map(answersArray.map((a) => [a.questionId as string, a]));
-
-    let validatedRowId: string | null = null;
-    let validatedCarrierId: string | null = null;
-
-    for (const q of questions) {
-      const answer = answersByQuestionId.get(q.id);
-
-      if (q.question_type === "greenhouse_row") {
-        const rowId = answer?.greenhouseRowId;
-        if (!rowId) {
-          if (q.is_required) return res.status(400).json({ error: "greenhouseRowId is required for this activity" });
-          continue;
-        }
-        if (typeof rowId !== "string" || !UUID_RE.test(rowId)) {
-          return res.status(400).json({ error: "Invalid or inactive greenhouseRowId" });
-        }
-        const rowCheck = await pool.query(
-          `select gr.id
-           from greenhouse_rows gr
-           join greenhouse_phases gp on gp.id = gr.phase_id and gp.is_active = true
-           where gr.id = $1 and gr.deleted_at is null`,
-          [rowId]
-        );
-        if (!rowCheck.rows[0]) return res.status(400).json({ error: "Invalid or inactive greenhouseRowId" });
-        validatedRowId = rowId;
-      } else if (q.question_type === "carrier") {
-        const carrierId = answer?.carrierId;
-        if (!carrierId) {
-          if (q.is_required) return res.status(400).json({ error: "carrierId is required for this activity" });
-          continue;
-        }
-        if (typeof carrierId !== "string" || !UUID_RE.test(carrierId)) {
-          return res.status(400).json({ error: "Invalid or inactive carrierId" });
-        }
-        const carrierCheck = await pool.query(`select id from carriers where id = $1 and is_active = true`, [carrierId]);
-        if (!carrierCheck.rows[0]) return res.status(400).json({ error: "Invalid or inactive carrierId" });
-        validatedCarrierId = carrierId;
-      }
-    }
+    const { validatedRowId, validatedCarrierId } = validation;
 
     // Work-start rounding applies ONLY on a genuine idle -> work
     // transition — never to an activity change (something is already
@@ -866,38 +726,7 @@ router.post(
 router.get(
   "/greenhouse-rows",
   asyncHandler(async (_req, res) => {
-    const { rows } = await pool.query(
-      `select gl.id as land_id, gl.name as land_name, gp.id as phase_id, gp.name as phase_name,
-              gp.sort_order, gr.id as row_id, gr.row_number
-       from greenhouse_rows gr
-       join greenhouse_phases gp on gp.id = gr.phase_id and gp.is_active = true
-       join greenhouse_lands gl on gl.id = gp.land_id and gl.is_active = true
-       where gr.deleted_at is null
-       order by gl.name, gp.sort_order, gp.name, gr.row_number`
-    );
-
-    const lands = new Map<string, { id: string; name: string; phases: Map<string, { id: string; name: string; rows: { id: string; rowNumber: number }[] }> }>();
-    for (const r of rows) {
-      let land = lands.get(r.land_id);
-      if (!land) {
-        land = { id: r.land_id, name: r.land_name, phases: new Map() };
-        lands.set(r.land_id, land);
-      }
-      let phase = land.phases.get(r.phase_id);
-      if (!phase) {
-        phase = { id: r.phase_id, name: r.phase_name, rows: [] };
-        land.phases.set(r.phase_id, phase);
-      }
-      phase.rows.push({ id: r.row_id, rowNumber: r.row_number });
-    }
-
-    res.json({
-      lands: Array.from(lands.values()).map((l) => ({
-        id: l.id,
-        name: l.name,
-        phases: Array.from(l.phases.values()),
-      })),
-    });
+    res.json({ lands: await loadGreenhouseRowOptions(pool) });
   })
 );
 
@@ -906,8 +735,7 @@ router.get(
 router.get(
   "/carriers",
   asyncHandler(async (_req, res) => {
-    const { rows } = await pool.query(`select id, name from carriers where is_active = true order by name`);
-    res.json({ carriers: rows.map((r) => ({ id: r.id, name: r.name })) });
+    res.json({ carriers: await loadCarrierOptions(pool) });
   })
 );
 

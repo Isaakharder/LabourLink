@@ -8,12 +8,29 @@ import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { aggregateDensitySpeed, DensityContribution } from "../lib/densitySpeed";
 import { getUnresolvedRunsForRow } from "../lib/rowCompletionCandidates";
+import {
+  loadCarrierOptions,
+  loadEmployeeActivitiesWithQuestions,
+  loadGreenhouseRowOptions,
+  resolveDensitySnapshot,
+  validateActivityAndAnswers,
+} from "../lib/activitySelection";
+import { describeConflict, findOverlappingEntry, lockEmployeeForManualEntry } from "../lib/manualTimeEntries";
 
 const router = Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const EDIT_ROLES = ["Administrator", "Manager", "Supervisor"];
+
+// Same minimum as the existing deletion-reason requirement (POST
+// .../delete below) — one consistent bar for "a real reason was typed,"
+// not a stricter one just because this is newer.
+const MIN_REASON_LENGTH = 3;
+
+function isValidReason(v: unknown): v is string {
+  return typeof v === "string" && v.trim().length >= MIN_REASON_LENGTH;
+}
 
 // Corrections (end-time, break start/end, work-start below) no longer
 // collect a typed reason from the caller — the Inputs page's "Reason for
@@ -34,6 +51,94 @@ function trimOrNull(v: unknown): string | null {
 function isValidDate(v: unknown): v is string {
   return typeof v === "string" && DATE_RE.test(v) && !isNaN(Date.parse(v));
 }
+
+// Picker data for the Add work start / Add activity modals — the exact
+// same employee-scoped activities+questions shape and rules the mobile app
+// itself uses (activitySelection.ts), just reached with admin auth instead
+// of a paired device. Deliberately scoped to the employee's own active
+// group assignments, not every activity that exists: an administrator can
+// still only manually log what that employee was actually authorized to
+// do, keeping a manually-added entry indistinguishable in meaning from one
+// the employee could have logged themselves.
+router.get(
+  "/employee-activities",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const employeeId = req.query.employeeId as string | undefined;
+    if (!employeeId || !UUID_RE.test(employeeId)) {
+      return res.status(400).json({ error: "A valid employeeId is required" });
+    }
+    res.json(await loadEmployeeActivitiesWithQuestions(pool, employeeId));
+  })
+);
+
+// Row/carrier picker data for the same modals — identical shape/scope to
+// the mobile pickers (activitySelection.ts), reached with admin auth.
+router.get(
+  "/greenhouse-rows",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (_req, res) => {
+    res.json({ lands: await loadGreenhouseRowOptions(pool) });
+  })
+);
+
+router.get(
+  "/carriers",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (_req, res) => {
+    res.json({ carriers: await loadCarrierOptions(pool) });
+  })
+);
+
+// Break-type picker data for the Add break modal — the employee's own
+// assigned break profile's active scheduled items, the same set a phone's
+// fixed-break match would consider (mobileTime.ts's loadActiveFixedItems).
+// A dedicated endpoint rather than reusing GET /api/break-profiles/:id:
+// that route is Administrator/Manager only, while a Supervisor can edit
+// Inputs (EDIT_ROLES) and still needs this picker.
+router.get(
+  "/employee-break-items",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const employeeId = req.query.employeeId as string | undefined;
+    if (!employeeId || !UUID_RE.test(employeeId)) {
+      return res.status(400).json({ error: "A valid employeeId is required" });
+    }
+    const empRes = await pool.query(
+      `select bp.id, bp.name
+       from employees e
+       join break_profiles bp on bp.id = e.break_profile_id and bp.is_active = true
+       where e.id = $1`,
+      [employeeId]
+    );
+    const profile = empRes.rows[0];
+    if (!profile) {
+      return res.json({ breakProfile: null, items: [] });
+    }
+    const { rows } = await pool.query(
+      `select id, name, to_char(start_time, 'HH24:MI:SS') as start_time,
+              to_char(end_time, 'HH24:MI:SS') as end_time, is_paid
+       from break_profile_items
+       where break_profile_id = $1 and is_active = true
+       order by sort_order`,
+      [profile.id]
+    );
+    res.json({
+      breakProfile: { id: profile.id, name: profile.name },
+      items: rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        startTime: r.start_time,
+        endTime: r.end_time,
+        isPaid: r.is_paid,
+      })),
+    });
+  })
+);
 
 // Supervisor can't call GET /api/employees (Administrator/Manager only,
 // and it returns far more PII than a picker needs) — this is a minimal,
@@ -113,6 +218,8 @@ router.get(
       `select te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
               te.break_profile_item_id, te.source, te.is_paid, te.greenhouse_row_id, te.carrier_id,
               te.auto_closed_at, te.density_type, te.density_count_per_row, te.actual_started_at,
+              te.created_by_employee_id, te.creation_reason,
+              cb.first_name as created_by_first_name, cb.last_name as created_by_last_name,
               a.name as activity_name, a.normal_speed, a.speed_unit, a.density_source,
               bpi.name as break_item_name,
               gr.row_number, gphase.name as row_phase_name,
@@ -123,6 +230,7 @@ router.get(
        left join greenhouse_rows gr on gr.id = te.greenhouse_row_id
        left join greenhouse_phases gphase on gphase.id = gr.phase_id
        left join carriers c on c.id = te.carrier_id
+       left join employees cb on cb.id = te.created_by_employee_id
        where te.employee_id = $1 and te.started_at >= $2 and te.started_at < $3 and te.deleted_at is null
        order by te.started_at asc`,
       [employeeId, start, end]
@@ -152,6 +260,15 @@ router.get(
     // activityRuns.ts), which is exactly what's looked up below, so this
     // needs no involvement from the grouping logic itself.
     const autoClosedMeta = new Map<string, boolean>();
+    // Same per-segment-id keying and the same accepted limitation as
+    // autoClosedMeta above: a multi-segment run only ever surfaces this for
+    // its *last* segment (the one run.id resolves to). A break is always a
+    // single segment (groupIntoActivityRuns never merges breaks), so this
+    // ambiguity never applies there.
+    const manualEntryMeta = new Map<
+      string,
+      { createdByEmployeeId: string; createdByName: string; creationReason: string }
+    >();
     // Unclassified/legacy breaks (is_paid null, recorded before this column
     // existed) are bucketed as unpaid — a break must be explicitly marked
     // paid to count as paid, nothing is inferred from duration or time.
@@ -161,6 +278,13 @@ router.get(
     >();
     for (const r of entryRows) {
       autoClosedMeta.set(r.id, r.auto_closed_at !== null);
+      if (r.created_by_employee_id) {
+        manualEntryMeta.set(r.id, {
+          createdByEmployeeId: r.created_by_employee_id,
+          createdByName: `${r.created_by_first_name} ${r.created_by_last_name}`,
+          creationReason: r.creation_reason,
+        });
+      }
       if (r.activity_id && !activityMeta.has(r.activity_id)) {
         activityMeta.set(r.activity_id, {
           name: r.activity_name,
@@ -331,6 +455,18 @@ router.get(
       // anything. The desktop Inputs UI only actually surfaces this when it
       // differs from workStartTime (see WorkdayDetailsCard).
       workStartOriginalTime: workStart?.actual_started_at ?? null,
+      // Direct from the work-start row itself, not derived through the
+      // runs array — a work-start that happens to be the first segment of
+      // a multi-segment run wouldn't reliably surface here otherwise (see
+      // manualEntryMeta's own "keyed by last segment" comment above).
+      workStartManualEntry:
+        workStart?.created_by_employee_id
+          ? {
+              createdByEmployeeId: workStart.created_by_employee_id,
+              createdByName: `${workStart.created_by_first_name} ${workStart.created_by_last_name}`,
+              creationReason: workStart.creation_reason,
+            }
+          : null,
       runs: runs.map((r) => {
         const meta = activityMeta.get(r.activityId);
         const row = r.greenhouseRowId ? rowMeta.get(r.greenhouseRowId) : undefined;
@@ -377,6 +513,11 @@ router.get(
           // direct lookup, not something groupIntoActivityRuns needs to
           // carry through itself.
           autoClosed: autoClosedMeta.get(r.id) ?? false,
+          // Non-null only for a run whose *last* segment was created via
+          // Add work start/Add activity (see manualEntryMeta's own comment
+          // for why only the last segment of a multi-segment run can ever
+          // carry this).
+          manualEntry: manualEntryMeta.get(r.id) ?? null,
         };
       }),
       breaks: breaks.map((b) => {
@@ -391,6 +532,9 @@ router.get(
           source: meta?.source ?? "manual",
           breakProfileItemId: meta?.breakProfileItemId ?? null,
           autoClosed: autoClosedMeta.get(b.id) ?? false,
+          // A break is always a single segment, so unlike a run's
+          // manualEntry above, this is never ambiguous.
+          manualEntry: manualEntryMeta.get(b.id) ?? null,
           // Same rule as an activity run: role-gated, and only once it's
           // closed — an open break can't be edited or deleted from here.
           canEdit: canEditRole && b.endedAt !== null,
@@ -404,6 +548,125 @@ router.get(
       },
       canEdit: canEditRole,
     });
+  })
+);
+
+// Creates a brand-new work-start entry for a day that doesn't have one yet
+// — distinct from PATCH /work-start below, which only ever corrects the
+// time of an *existing* one. Requires an activity (and its questions, row,
+// carrier — identical rules to a mobile work start, see
+// activitySelection.ts) even though the modal is framed as "just" a
+// start time: every work-type time_entries row needs one
+// (chk_time_entries_activity_matches_type), and every other place in this
+// app that reasons about "what did the employee do" — activity grouping,
+// speed, reports — depends on it being real. The created entry is always
+// open (no end time): this is a backfilled "the employee has been working
+// since this time," the same shape a phone tap produces, just entered by
+// an administrator instead. Work-start rounding (see workStartRounding.ts)
+// deliberately never applies here — the administrator's entered time is
+// the exact time recorded, matching every other manual Inputs correction.
+router.post(
+  "/work-start",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const { employeeId, date, activityId, answers, startTime, reason } = req.body as {
+      employeeId?: string;
+      date?: string;
+      activityId?: string;
+      answers?: { questionId?: string; greenhouseRowId?: string; carrierId?: string }[];
+      startTime?: string;
+      reason?: string;
+    };
+    if (!employeeId || !UUID_RE.test(employeeId)) {
+      return res.status(400).json({ error: "A valid employeeId is required" });
+    }
+    if (!isValidDate(date)) {
+      return res.status(400).json({ error: "A valid date (YYYY-MM-DD) is required" });
+    }
+    if (!isValidReason(reason)) {
+      return res.status(400).json({ error: `A reason of at least ${MIN_REASON_LENGTH} characters is required` });
+    }
+    if (!startTime || isNaN(Date.parse(startTime))) {
+      return res.status(400).json({ error: "A valid startTime is required" });
+    }
+    const start = new Date(startTime);
+    if (calendarDateInAppTimezone(start) !== date) {
+      return res.status(422).json({ error: "The work-start time must be on the selected date" });
+    }
+
+    const empCheck = await pool.query("select id from employees where id = $1 and is_active = true", [employeeId]);
+    if (!empCheck.rows[0]) return res.status(404).json({ error: "Employee not found or inactive" });
+
+    const validation = await validateActivityAndAnswers(pool, activityId ?? "", employeeId, answers);
+    if (!validation.ok) return res.status(400).json({ error: validation.error });
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await lockEmployeeForManualEntry(client, employeeId);
+
+      // Re-checked here, inside the per-employee lock, not just trusted
+      // from whatever GET /daily last showed the admin — "only one work
+      // start may exist" must hold even against a concurrent request.
+      const { start: dayStart, end: dayEnd } = getDayBoundsUtc(date);
+      const existing = await client.query(
+        `select id from time_entries
+         where employee_id = $1 and entry_type = 'work' and deleted_at is null
+           and started_at >= $2 and started_at < $3
+         limit 1`,
+        [employeeId, dayStart, dayEnd]
+      );
+      if (existing.rows[0]) {
+        await client.query("rollback");
+        return res.status(409).json({
+          error:
+            "A work start already exists for this day. Edit the existing work-start time instead of adding a new one.",
+        });
+      }
+
+      const conflict = await findOverlappingEntry(client, employeeId, start, null);
+      if (conflict) {
+        await client.query("rollback");
+        return res
+          .status(409)
+          .json({ error: `This start time conflicts with ${describeConflict(conflict)}. Resolve it first.` });
+      }
+
+      const { densityType, densityCountPerRow } = await resolveDensitySnapshot(
+        client,
+        activityId as string,
+        validation.validatedRowId
+      );
+
+      await client.query(
+        `insert into time_entries
+           (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, source,
+            greenhouse_row_id, carrier_id, density_type, density_count_per_row,
+            created_by_employee_id, creation_reason)
+         values ($1, null, 'work', $2, gen_random_uuid(), $3, 'manual', $4, $5, $6, $7, $8, $9)`,
+        [
+          employeeId,
+          activityId,
+          start,
+          validation.validatedRowId,
+          validation.validatedCarrierId,
+          densityType,
+          densityCountPerRow,
+          req.employee!.id,
+          reason.trim(),
+        ]
+      );
+
+      await client.query("commit");
+    } catch (err) {
+      await client.query("rollback");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    res.status(201).json({ ok: true });
   })
 );
 
@@ -764,6 +1027,239 @@ router.post(
     }
 
     res.json({ ok: true });
+  })
+);
+
+// Creates a new activity log anywhere in the day — before, between, or
+// after existing entries — unlike POST /work-start above, which only ever
+// applies to a currently-blank day. Reuses the identical activity/question/
+// row/carrier rules (activitySelection.ts) a mobile activity start or
+// change uses; the only genuinely new logic here is checking the new
+// entry's [startTime, endTime) doesn't overlap anything that already
+// exists. A conflict is always reported and left for the administrator to
+// resolve explicitly — this endpoint never shrinks, splits, or otherwise
+// silently adjusts another entry to make room.
+router.post(
+  "/activities",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const { employeeId, date, activityId, answers, startTime, endTime, reason } = req.body as {
+      employeeId?: string;
+      date?: string;
+      activityId?: string;
+      answers?: { questionId?: string; greenhouseRowId?: string; carrierId?: string }[];
+      startTime?: string;
+      // Absent/null creates a currently-in-progress (open) entry — allowed
+      // only when nothing else exists at or after startTime (checked
+      // below), the same "at most one open entry" invariant the mobile app
+      // maintains via its own single-open-row unique index.
+      endTime?: string | null;
+      reason?: string;
+    };
+    if (!employeeId || !UUID_RE.test(employeeId)) {
+      return res.status(400).json({ error: "A valid employeeId is required" });
+    }
+    if (!isValidDate(date)) {
+      return res.status(400).json({ error: "A valid date (YYYY-MM-DD) is required" });
+    }
+    if (!isValidReason(reason)) {
+      return res.status(400).json({ error: `A reason of at least ${MIN_REASON_LENGTH} characters is required` });
+    }
+    if (!startTime || isNaN(Date.parse(startTime))) {
+      return res.status(400).json({ error: "A valid startTime is required" });
+    }
+    const start = new Date(startTime);
+    if (calendarDateInAppTimezone(start) !== date) {
+      return res.status(422).json({ error: "The start time must be on the selected date" });
+    }
+
+    let end: Date | null = null;
+    if (endTime !== undefined && endTime !== null && endTime !== "") {
+      if (isNaN(Date.parse(endTime))) {
+        return res.status(400).json({ error: "A valid endTime is required, or leave it blank for an in-progress activity" });
+      }
+      end = new Date(endTime);
+      if (end.getTime() <= start.getTime()) {
+        return res.status(422).json({ error: "End time must be after start time" });
+      }
+      if (calendarDateInAppTimezone(end) !== date) {
+        return res.status(422).json({ error: "The end time must be on the same date as the start time" });
+      }
+    }
+
+    const empCheck = await pool.query("select id from employees where id = $1 and is_active = true", [employeeId]);
+    if (!empCheck.rows[0]) return res.status(404).json({ error: "Employee not found or inactive" });
+
+    const validation = await validateActivityAndAnswers(pool, activityId ?? "", employeeId, answers);
+    if (!validation.ok) return res.status(400).json({ error: validation.error });
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await lockEmployeeForManualEntry(client, employeeId);
+
+      const conflict = await findOverlappingEntry(client, employeeId, start, end);
+      if (conflict) {
+        await client.query("rollback");
+        const reason2 = end
+          ? `This time range conflicts with ${describeConflict(conflict)}`
+          : `An in-progress entry can't be created — it would conflict with ${describeConflict(conflict)}`;
+        return res.status(409).json({ error: `${reason2}. Resolve the existing entry first.` });
+      }
+
+      const { densityType, densityCountPerRow } = await resolveDensitySnapshot(
+        client,
+        activityId as string,
+        validation.validatedRowId
+      );
+
+      await client.query(
+        `insert into time_entries
+           (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source,
+            greenhouse_row_id, carrier_id, density_type, density_count_per_row,
+            created_by_employee_id, creation_reason)
+         values ($1, null, 'work', $2, gen_random_uuid(), $3, $4, 'manual', $5, $6, $7, $8, $9, $10)`,
+        [
+          employeeId,
+          activityId,
+          start,
+          end,
+          validation.validatedRowId,
+          validation.validatedCarrierId,
+          densityType,
+          densityCountPerRow,
+          req.employee!.id,
+          reason.trim(),
+        ]
+      );
+
+      await client.query("commit");
+    } catch (err) {
+      await client.query("rollback");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    res.status(201).json({ ok: true });
+  })
+);
+
+// Creates a new break, using the exact same model a phone-recorded break
+// uses (entry_type = 'break', activity_id null, is_paid/break_profile_item_id
+// set the same way — see mobileTime.ts's break/start) so it flows through
+// every existing calculation (paid/unpaid totals, reconciliation) with no
+// special-casing. `breakProfileItemId` ties it to one of the employee's
+// assigned break profile's scheduled items (is_paid is taken from that
+// item, never trusted from the client); omitting it creates a "Custom"
+// break not tied to any scheduled item, whose paid/unpaid status the
+// administrator sets directly.
+router.post(
+  "/breaks",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const { employeeId, date, breakProfileItemId, isPaid, startTime, endTime, reason } = req.body as {
+      employeeId?: string;
+      date?: string;
+      breakProfileItemId?: string | null;
+      isPaid?: boolean;
+      startTime?: string;
+      endTime?: string;
+      reason?: string;
+    };
+    if (!employeeId || !UUID_RE.test(employeeId)) {
+      return res.status(400).json({ error: "A valid employeeId is required" });
+    }
+    if (!isValidDate(date)) {
+      return res.status(400).json({ error: "A valid date (YYYY-MM-DD) is required" });
+    }
+    if (!isValidReason(reason)) {
+      return res.status(400).json({ error: `A reason of at least ${MIN_REASON_LENGTH} characters is required` });
+    }
+    if (!startTime || isNaN(Date.parse(startTime)) || !endTime || isNaN(Date.parse(endTime))) {
+      return res.status(400).json({ error: "A valid startTime and endTime are required" });
+    }
+    const start = new Date(startTime);
+    const end = new Date(endTime);
+    if (end.getTime() <= start.getTime()) {
+      return res.status(422).json({ error: "End time must be after start time" });
+    }
+    if (calendarDateInAppTimezone(start) !== date || calendarDateInAppTimezone(end) !== date) {
+      return res.status(422).json({ error: "The break's start and end time must be on the selected date" });
+    }
+
+    const empRes = await pool.query(
+      "select id, break_profile_id from employees where id = $1 and is_active = true",
+      [employeeId]
+    );
+    const employee = empRes.rows[0];
+    if (!employee) return res.status(404).json({ error: "Employee not found or inactive" });
+
+    // Resolved paid/unpaid status — from the chosen scheduled item when one
+    // is given (never trusting a client-supplied isPaid alongside it), or
+    // directly from the request for a Custom break.
+    let resolvedIsPaid: boolean;
+    let validatedItemId: string | null = null;
+    if (breakProfileItemId) {
+      if (!UUID_RE.test(breakProfileItemId)) {
+        return res.status(400).json({ error: "Invalid breakProfileItemId" });
+      }
+      // Must belong to the employee's own currently-assigned profile — not
+      // just any profile's item — same as how a mobile fixed-break match
+      // only ever considers the employee's own assigned profile
+      // (mobileTime.ts's loadActiveFixedItems).
+      const itemRes = await pool.query(
+        `select bpi.id, bpi.is_paid
+         from break_profile_items bpi
+         join break_profiles bp on bp.id = bpi.break_profile_id and bp.is_active = true
+         where bpi.id = $1 and bpi.is_active = true and bpi.break_profile_id = $2`,
+        [breakProfileItemId, employee.break_profile_id]
+      );
+      if (!itemRes.rows[0]) {
+        return res.status(400).json({ error: "This break type is not on the employee's assigned break profile" });
+      }
+      resolvedIsPaid = itemRes.rows[0].is_paid;
+      validatedItemId = breakProfileItemId;
+    } else {
+      if (typeof isPaid !== "boolean") {
+        return res.status(400).json({ error: "isPaid is required for a custom break" });
+      }
+      resolvedIsPaid = isPaid;
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await lockEmployeeForManualEntry(client, employeeId);
+
+      const conflict = await findOverlappingEntry(client, employeeId, start, end);
+      if (conflict) {
+        await client.query("rollback");
+        return res
+          .status(409)
+          .json({ error: `This break conflicts with ${describeConflict(conflict)}. Resolve the existing entry first.` });
+      }
+
+      await client.query(
+        `insert into time_entries
+           (employee_id, device_id, entry_type, idempotency_key, started_at, ended_at, source,
+            break_profile_item_id, scheduled_break_date, is_paid,
+            created_by_employee_id, creation_reason)
+         values ($1, null, 'break', gen_random_uuid(), $2, $3, 'manual', $4, $5, $6, $7, $8)`,
+        [employeeId, start, end, validatedItemId, date, resolvedIsPaid, req.employee!.id, reason.trim()]
+      );
+
+      await client.query("commit");
+    } catch (err) {
+      await client.query("rollback");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    res.status(201).json({ ok: true });
   })
 );
 
