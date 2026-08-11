@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { DateNav } from "../../components/inputs/DateNav";
 import { EmployeeListPanel } from "../../components/inputs/EmployeeListPanel";
+import { InputsSkeleton } from "../../components/inputs/InputsSkeleton";
 import { ActivityLogsCard } from "../../components/inputs/ActivityLogsCard";
 import { WorkdayDetailsCard, EditingBreakField } from "../../components/inputs/WorkdayDetailsCard";
 import { DeleteTimeEntryModal } from "../../components/inputs/DeleteTimeEntryModal";
@@ -282,6 +283,28 @@ export function InputsPage() {
     // previous action no longer applies to what's about to be shown.
     setSuccessMessage(null);
     setActionError(null);
+    // Immediately stop displaying the previous employee's data — `daily`
+    // is cleared synchronously, before loadDaily's request even starts, so
+    // the render below falls through to InputsSkeleton rather than
+    // continuing to show a switched-away-from employee's real (and, for a
+    // payroll-sensitive page, potentially misleading) numbers for however
+    // long the new request takes. Every in-progress edit/modal is closed
+    // for the same reason: each editing surface (AddWorkStartModal,
+    // AddBreakModal, AddActivityModal, the inline run/break/work-start
+    // editors) captures the employeeId it's acting on as of when it
+    // opened — leaving one open across a switch would let it keep acting
+    // on the employee the page just navigated away from. This is the same
+    // reset loadDaily's own non-background success handler already does
+    // once the response lands; doing it here too means it also covers the
+    // gap while the request is still in flight, not just after.
+    setDaily(null);
+    setSelectedRunId(null);
+    setEditingRunId(null);
+    setSelectedBreakId(null);
+    setEditingBreak(null);
+    setEditingWorkStart(false);
+    setAddModal(null);
+    setPendingDeletion(null);
     loadDaily();
   }, [loadDaily]);
 
@@ -532,7 +555,13 @@ export function InputsPage() {
               </p>
             )
           ) : !daily ? (
-            <p className="inputs-workspace-placeholder">Loading...</p>
+            // No skeleton once a foreground load has actually failed (the
+            // error banner above already covers that) — only while a
+            // request for the current employee/date is genuinely still in
+            // flight.
+            !error && (
+              <InputsSkeleton employee={employees?.find((e) => e.id === selectedEmployeeId) ?? null} />
+            )
           ) : (
             <>
               <ActivityLogsCard

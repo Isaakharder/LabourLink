@@ -2127,6 +2127,65 @@ input {
   padding: 1.5rem 1rem;
 }
 
+/* Shown immediately on an employee/date switch, in place of the real
+   ActivityLogsCard/WorkdayDetailsCard, while GET /daily for the newly
+   selected employee is still in flight — see InputsSkeleton.tsx. */
+.inputs-skeleton-status {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 0.85rem;
+}
+
+.inputs-skeleton-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem;
+}
+
+.inputs-skeleton-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.inputs-skeleton-bar {
+  height: 0.9rem;
+  border-radius: 4px;
+  flex: 1;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--color-border) 60%, transparent) 25%,
+    color-mix(in srgb, var(--color-border) 30%, transparent) 50%,
+    color-mix(in srgb, var(--color-border) 60%, transparent) 75%
+  );
+  background-size: 200% 100%;
+  animation: inputs-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+.inputs-skeleton-bar-wide {
+  flex: 2;
+}
+
+.inputs-skeleton-bar-narrow {
+  flex: 0.5;
+}
+
+@keyframes inputs-skeleton-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inputs-skeleton-bar {
+    animation: none;
+  }
+}
+
 /* Full-width light-blue bar above the activity table (Activity details)
    and replacing the plain "Workday details" heading (Workday details) —
    same subtle tint both places, kept short so it never competes with the
