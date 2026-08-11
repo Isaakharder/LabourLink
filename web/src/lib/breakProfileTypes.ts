@@ -13,6 +13,12 @@ export interface BreakProfileItem {
 }
 
 export type WorkStartRoundingDirection = "clockwise" | "counter_clockwise";
+// Generic alias — the same two directions apply identically to work-end
+// rounding (see BreakProfile.workEndRoundingDirection below); this is the
+// clearer name to reach for at a call site that isn't specifically about
+// work-start, matching the server's own RoundingDirection naming
+// (server/src/lib/workStartRounding.ts).
+export type RoundingDirection = WorkStartRoundingDirection;
 
 export interface BreakProfile {
   id: string;
@@ -22,6 +28,11 @@ export interface BreakProfile {
   workStartRoundingEnabled: boolean;
   workStartRoundingDirection: WorkStartRoundingDirection;
   workStartRoundingIntervalMinutes: number;
+  // Independent of the work-start settings above — its own enabled/
+  // direction/interval, never coupled (see BreakProfileEditor).
+  workEndRoundingEnabled: boolean;
+  workEndRoundingDirection: RoundingDirection;
+  workEndRoundingIntervalMinutes: number;
   items: BreakProfileItem[];
   itemCount: number;
   assignedEmployeeCount: number;

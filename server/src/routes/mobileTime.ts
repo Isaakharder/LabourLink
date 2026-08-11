@@ -4,7 +4,13 @@ import { asyncHandler } from "../lib/asyncHandler";
 import { requireDevice } from "../middleware/device";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { calendarDateInAppTimezone, parseTimeParts, zonedWallTimeToUtc } from "../lib/timezone";
-import { resolveOriginalStartedAt, roundWorkStart, RoundingDirection } from "../lib/workStartRounding";
+import {
+  resolveOriginalEndedAt,
+  resolveOriginalStartedAt,
+  roundWorkEnd,
+  roundWorkStart,
+  RoundingDirection,
+} from "../lib/workStartRounding";
 import {
   loadCarrierOptions,
   loadEmployeeActivitiesWithQuestions,
@@ -298,6 +304,29 @@ async function loadWorkStartRoundingSettings(employeeId: string): Promise<WorkSt
     enabled: row.work_start_rounding_enabled,
     direction: row.work_start_rounding_direction,
     intervalMinutes: row.work_start_rounding_interval_minutes,
+  };
+}
+
+// Same shape and same "read fresh on every call, no historical/versioned
+// lookup" reasoning as loadWorkStartRoundingSettings above, for the
+// employee's work-END rounding configuration — an independent setting on
+// the same break profile, never coupled to work-start rounding's own
+// enabled/direction/interval (see 032_work_end_rounding.sql).
+async function loadWorkEndRoundingSettings(employeeId: string): Promise<WorkStartRoundingSettings | null> {
+  const { rows } = await pool.query(
+    `select bp.work_end_rounding_enabled, bp.work_end_rounding_direction,
+            bp.work_end_rounding_interval_minutes
+     from employees e
+     join break_profiles bp on bp.id = e.break_profile_id and bp.is_active = true
+     where e.id = $1 and e.is_active = true`,
+    [employeeId]
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    enabled: row.work_end_rounding_enabled,
+    direction: row.work_end_rounding_direction,
+    intervalMinutes: row.work_end_rounding_interval_minutes,
   };
 }
 
@@ -713,19 +742,108 @@ router.post(
 router.post(
   "/time-entries/end-day",
   asyncHandler(async (req, res) => {
-    // TEMPORARY — End Work ~1min delay investigation. Elapsed-time-only, no
-    // secrets. Remove once the slow hop is identified.
-    const __t0 = Date.now();
-    console.log("[timing] end-day: route handler entered");
     const d = req.device!;
-    await pool.query(
-      `update time_entries set ended_at = now() where employee_id = $1 and ended_at is null and deleted_at is null`,
-      [d.employeeId]
-    );
-    console.log(`[timing] end-day: UPDATE done at ${Date.now() - __t0}ms`);
-    const body = await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage);
-    console.log(`[timing] end-day: serializeStatus done at ${Date.now() - __t0}ms, sending response`);
-    res.json(body);
+    const { idempotencyKey, clientEndedAt } = req.body as {
+      idempotencyKey?: string;
+      // The phone's own clock reading of the moment "Finish Work" was
+      // tapped, captured client-side before the request was even attempted
+      // and preserved across a retry with the same idempotencyKey — see
+      // resolveOriginalEndedAt's comment and WorkSessionContext.tsx's
+      // confirmEndDay. Only ever consulted below when there's actually an
+      // open entry to close and work-end rounding is enabled for this
+      // employee; ignored entirely otherwise, same as clientStartedAt on
+      // POST /time-entries/work.
+      clientEndedAt?: string;
+    };
+    if (!isValidIdempotencyKey(idempotencyKey)) {
+      return res.status(400).json({ error: "a valid idempotencyKey is required" });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+
+      // Whatever is open for this employee right now — at most one row, per
+      // the app's own one-open-entry invariant. A replay of this exact
+      // request (same idempotencyKey, retried after a network hiccup, or a
+      // duplicate tap) finds nothing here the second time: the first
+      // successful call already closed it, so ended_at is no longer null
+      // and this SELECT returns no row. That's the entire idempotency
+      // guarantee for this route — no separate "have I seen this key
+      // before" table needed, and it's what makes "replaying must not round
+      // twice or create another entry" true for free.
+      const openRes = await client.query(
+        `select id, started_at from time_entries
+         where employee_id = $1 and ended_at is null and deleted_at is null
+         for update`,
+        [d.employeeId]
+      );
+      const open = openRes.rows[0];
+
+      if (open) {
+        const now = new Date();
+        const original = resolveOriginalEndedAt(clientEndedAt, now);
+        const settings = await loadWorkEndRoundingSettings(d.employeeId);
+
+        // ended_at is set to a real, non-null value in every case below —
+        // including when rounding lands on a timestamp still in the
+        // future (a clockwise round-forward past `now`). That alone is
+        // what immediately closes the employee's active state: `status`
+        // is derived purely from "is there a row with ended_at is null"
+        // (getOpenEntry), never from comparing ended_at to the current
+        // time, so a future-dated ended_at still reads as fully idle the
+        // instant this commits — never "still active until the clock
+        // catches up."
+        let effectiveEnd = original;
+        // actual_ended_at stays null unless rounding is actually enabled
+        // for this employee — same "only set when enabled, regardless of
+        // whether it happened to change anything" convention
+        // actual_started_at uses for work-start rounding, so "rounding
+        // was active for this entry" stays a simple non-null check.
+        let actualEndedAt: Date | null = null;
+
+        if (settings?.enabled) {
+          let rounded = roundWorkEnd(original, settings.intervalMinutes, settings.direction);
+          const startedAt = new Date(open.started_at);
+          // Never let rounding push the effective end at or before this
+          // entry's own start — a counter-clockwise round on a very short
+          // workday could otherwise land before it even began. Falling
+          // back to the unrounded tap time is the safe degradation (it's
+          // still a real, employee-reported moment, just not rounded),
+          // not a silently zero/negative-duration row.
+          if (rounded.getTime() <= startedAt.getTime()) {
+            rounded = original;
+          }
+          // Only reachable if even the unrounded tap time doesn't clear
+          // the entry's own start — a pathological clock-skew edge case,
+          // not a real rounding outcome (resolveOriginalEndedAt already
+          // falls back to `now` for grossly invalid client timestamps,
+          // and `now` can't itself be before a start already recorded in
+          // the past). Guarantees a strictly positive duration is always
+          // recorded rather than ever risking zero or negative.
+          if (rounded.getTime() <= startedAt.getTime()) {
+            rounded = new Date(startedAt.getTime() + 1000);
+          }
+          effectiveEnd = rounded;
+          actualEndedAt = original;
+        }
+
+        await client.query(`update time_entries set ended_at = $2, actual_ended_at = $3 where id = $1`, [
+          open.id,
+          effectiveEnd,
+          actualEndedAt,
+        ]);
+      }
+
+      await client.query("commit");
+    } catch (err) {
+      await client.query("rollback");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage));
   })
 );
 

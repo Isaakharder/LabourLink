@@ -1,8 +1,11 @@
-// Configurable work-start rounding (Basic Data > Breaks > a break profile's
-// "Work start rounding" section). Applied only at the moment an employee's
-// workday genuinely starts (idle -> work) — server/src/routes/mobileTime.ts
-// is the only caller, and only on that one transition. Never applied to
-// breaks, activity changes, work-finish times, or manual Inputs
+// Configurable work-start AND work-end rounding (Basic Data > Breaks > a
+// break profile's "Work start rounding" / "Work end rounding" sections —
+// two independent settings, see breakProfiles.ts). Work-start rounding is
+// applied only at the moment an employee's workday genuinely starts (idle
+// -> work); work-end rounding only when they explicitly finish it (Finish
+// Work). server/src/routes/mobileTime.ts is the only caller of either, each
+// on exactly that one transition. Neither is ever applied to breaks,
+// activity changes, automatically-resumed activities, or manual Inputs
 // corrections.
 //
 // All arithmetic here happens in the greenhouse's local wall-clock reading
@@ -55,7 +58,7 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 // after local midnight is rare but not impossible, and the alternative
 // (clamping to the same calendar day) would silently produce a boundary
 // that isn't actually nearest in the requested direction.
-export function roundWorkStart(
+export function roundToInterval(
   instant: Date,
   intervalMinutes: number,
   direction: RoundingDirection,
@@ -119,31 +122,71 @@ export function roundWorkStart(
   );
 }
 
+// Named per call site for readability — both are the exact same rounding
+// math (roundToInterval above is direction-agnostic: "round forward/
+// backward to the nearest boundary" means the same thing whether the
+// instant being rounded is a work start or a work end), so neither
+// duplicates any logic, just gives mobileTime.ts's two call sites their own
+// self-documenting name.
+export function roundWorkStart(
+  instant: Date,
+  intervalMinutes: number,
+  direction: RoundingDirection,
+  tz: string = APP_TIMEZONE
+): Date {
+  return roundToInterval(instant, intervalMinutes, direction, tz);
+}
+
+export function roundWorkEnd(
+  instant: Date,
+  intervalMinutes: number,
+  direction: RoundingDirection,
+  tz: string = APP_TIMEZONE
+): Date {
+  return roundToInterval(instant, intervalMinutes, direction, tz);
+}
+
 // A work-start tap made offline can be replayed by the phone's own offline
 // queue (web/src/lib/offlineQueue.ts) long after it actually happened — the
 // client always sends its own clock's reading of the moment the employee
 // tapped (`clientStartedAt`), captured before the request is even
 // attempted, so a delayed sync still rounds against the real tap time
 // instead of whenever the sync happened to land (server/src/routes/
-// mobileTime.ts's POST /time-entries/work is the only caller). That
-// client-reported value is untrusted input feeding a paid-time calculation,
-// so it's bounded rather than accepted as-is: a small forward-skew
-// tolerance covers ordinary clock drift between the phone and the server,
-// while the backward bound is generous enough to cover a genuinely offline
-// shift (this mobile app is documented elsewhere, see mobileTime.ts's
-// fixed-break rounding, as not meant to survive an extended fully-offline
-// shift beyond that) without accepting an obviously broken clock (e.g. an
-// unset-clock epoch date). Missing, unparseable, or out-of-bounds values
-// all fall back to `now` — the same value used everywhere else in that file
-// when no client timestamp exists at all.
+// mobileTime.ts's POST /time-entries/work is the only caller). A Finish
+// Work tap is the same idea for the opposite end of the day —
+// `clientEndedAt`, captured client-side before the request is attempted
+// (WorkSessionContext.tsx's confirmEndDay) and preserved across a retry
+// with the same idempotencyKey, even though end-day deliberately never
+// goes through the generic offline queue itself (see that route's own
+// comment for why). Either way, this client-reported value is untrusted
+// input feeding a paid-time calculation, so it's bounded rather than
+// accepted as-is: a small forward-skew tolerance covers ordinary clock
+// drift between the phone and the server, while the backward bound is
+// generous enough to cover a genuinely offline shift (this mobile app is
+// documented elsewhere, see mobileTime.ts's fixed-break rounding, as not
+// meant to survive an extended fully-offline shift beyond that) without
+// accepting an obviously broken clock (e.g. an unset-clock epoch date).
+// Missing, unparseable, or out-of-bounds values all fall back to `now` —
+// the same value used everywhere else in that file when no client
+// timestamp exists at all.
 export const MAX_CLIENT_CLOCK_SKEW_FUTURE_MS = 5 * 60 * 1000;
 export const MAX_OFFLINE_REPLAY_DELAY_MS = 24 * 60 * 60 * 1000;
 
-export function resolveOriginalStartedAt(clientStartedAt: unknown, now: Date): Date {
-  if (typeof clientStartedAt !== "string") return now;
-  const parsed = new Date(clientStartedAt);
+export function resolveOriginalTimestamp(clientTimestamp: unknown, now: Date): Date {
+  if (typeof clientTimestamp !== "string") return now;
+  const parsed = new Date(clientTimestamp);
   if (isNaN(parsed.getTime())) return now;
   const delta = now.getTime() - parsed.getTime();
   if (delta < -MAX_CLIENT_CLOCK_SKEW_FUTURE_MS || delta > MAX_OFFLINE_REPLAY_DELAY_MS) return now;
   return parsed;
+}
+
+// Named per call site, same reasoning as roundWorkStart/roundWorkEnd above
+// — both are the exact same bounding logic.
+export function resolveOriginalStartedAt(clientStartedAt: unknown, now: Date): Date {
+  return resolveOriginalTimestamp(clientStartedAt, now);
+}
+
+export function resolveOriginalEndedAt(clientEndedAt: unknown, now: Date): Date {
+  return resolveOriginalTimestamp(clientEndedAt, now);
 }

@@ -230,6 +230,16 @@ export function ActivityLogsCard({
                     ) : run.endedAt ? (
                       <>
                         {formatTimeInAppTimezone(run.endedAt)}
+                        {run.endedAtOriginalTime && run.endedAtOriginalTime !== run.endedAt && (
+                          <span
+                            className="inputs-rounded-badge"
+                            title={`Actual tap time: ${formatTimeInAppTimezone(
+                              run.endedAtOriginalTime
+                            )} — adjusted by this employee's break profile's work-end rounding setting.`}
+                          >
+                            Rounded
+                          </span>
+                        )}
                         {run.autoClosed && <span className="inputs-autoclosed-badge">Auto-closed</span>}
                       </>
                     ) : (

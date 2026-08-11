@@ -99,6 +99,14 @@ export interface ActivityRunDto {
   startedAt: string;
   currentSegmentStartedAt: string;
   endedAt: string | null;
+  // Present only when work-end rounding actually applied to this run's
+  // last segment (a genuine Finish Work tap, with rounding enabled on the
+  // employee's break profile at the time) — the employee's original
+  // button-press timestamp, kept alongside the possibly-rounded endedAt
+  // for audit purposes. Same "still set even on an exact-boundary tap that
+  // rounding left unchanged" convention as workStartOriginalTime; only
+  // shown when it differs from endedAt (see ActivityLogsCard).
+  endedAtOriginalTime: string | null;
   isOpen: boolean;
   canEdit: boolean;
   row: { id: string; label: string } | null;

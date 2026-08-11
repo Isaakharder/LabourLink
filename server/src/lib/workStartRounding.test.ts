@@ -1,8 +1,11 @@
 import {
   roundWorkStart,
+  roundWorkEnd,
+  roundToInterval,
   isValidRoundingIntervalMinutes,
   isRoundingDirection,
   resolveOriginalStartedAt,
+  resolveOriginalEndedAt,
   MAX_CLIENT_CLOCK_SKEW_FUTURE_MS,
   MAX_OFFLINE_REPLAY_DELAY_MS,
 } from "./workStartRounding";
@@ -307,6 +310,127 @@ check(threw, "roundWorkStart throws for an out-of-range interval rather than sil
   check(
     resolveOriginalStartedAt(new Date(0).toISOString(), now).getTime() === now.getTime(),
     "resolveOriginalStartedAt: an epoch-zero clientStartedAt (broken clock) falls back to now"
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Work-end rounding (roundWorkEnd / resolveOriginalEndedAt) — both are thin
+// named wrappers around the exact same roundToInterval/resolveOriginalTimestamp
+// math roundWorkStart/resolveOriginalStartedAt already use (rounding is
+// direction-agnostic: "round forward/backward to the nearest boundary"
+// means the same thing for a start or an end). The exhaustive
+// direction/exact-boundary/arbitrary-interval/seconds/midnight/DST coverage
+// above already proves that shared math correct; these confirm roundWorkEnd
+// itself is genuinely wired to it (identical output for identical input,
+// not a subtly different reimplementation) plus a few standalone spot
+// checks for readability.
+// ---------------------------------------------------------------------------
+
+check(
+  roundWorkEnd(toronto(16, 47), 5, "clockwise", "America/Toronto").getTime() ===
+    roundToInterval(toronto(16, 47), 5, "clockwise", "America/Toronto").getTime(),
+  "roundWorkEnd delegates to the same roundToInterval math as roundWorkStart (clockwise)"
+);
+check(
+  roundWorkEnd(toronto(16, 47), 5, "counter_clockwise", "America/Toronto").getTime() ===
+    roundToInterval(toronto(16, 47), 5, "counter_clockwise", "America/Toronto").getTime(),
+  "roundWorkEnd delegates to the same roundToInterval math as roundWorkStart (counter-clockwise)"
+);
+
+// Both directions, exact boundary unchanged.
+check(
+  roundWorkEnd(toronto(16, 45), 5, "clockwise").getTime() === toronto(16, 45).getTime(),
+  "roundWorkEnd clockwise: an exact 5-minute boundary (4:45 PM) is unchanged"
+);
+check(
+  roundWorkEnd(toronto(16, 45), 5, "counter_clockwise").getTime() === toronto(16, 45).getTime(),
+  "roundWorkEnd counter-clockwise: an exact 5-minute boundary (4:45 PM) is unchanged"
+);
+check(
+  roundWorkEnd(toronto(16, 46), 5, "clockwise").getTime() === toronto(16, 50).getTime(),
+  "roundWorkEnd clockwise: 4:46 PM -> 4:50 PM"
+);
+check(
+  roundWorkEnd(toronto(16, 49), 5, "counter_clockwise").getTime() === toronto(16, 45).getTime(),
+  "roundWorkEnd counter-clockwise: 4:49 PM -> 4:45 PM"
+);
+
+// Sub-minute values count — 4:45:30 PM is not an exact 5-minute boundary
+// even though the minute value (45) is a multiple of 5.
+check(
+  roundWorkEnd(toronto(16, 45, 30), 5, "clockwise").getTime() === toronto(16, 50).getTime(),
+  "roundWorkEnd clockwise: 4:45:30 PM (not exact despite :45 being a multiple of 5) -> 4:50 PM"
+);
+check(
+  roundWorkEnd(toronto(16, 45, 30), 5, "counter_clockwise").getTime() === toronto(16, 45).getTime(),
+  "roundWorkEnd counter-clockwise: 4:45:30 PM -> 4:45 PM (rounds back to the boundary it's past)"
+);
+
+// Arbitrary interval (7 minutes) — 7:00 AM is itself a multiple of 7
+// minutes-since-midnight (420 / 7 = 60), the same reference point the
+// work-start 7-minute-interval examples above use, so the boundary math
+// below is easy to verify by hand.
+check(
+  roundWorkEnd(toronto(7, 1), 7, "clockwise").getTime() === toronto(7, 7).getTime(),
+  "roundWorkEnd clockwise, 7min interval: 7:01 AM -> 7:07 AM"
+);
+
+// Hour rollover.
+check(
+  roundWorkEnd(toronto(17, 58), 5, "clockwise").getTime() === toronto(18, 0).getTime(),
+  "roundWorkEnd clockwise 5min hour rollover: 5:58 PM -> 6:00 PM"
+);
+
+// Midnight rollover, both directions.
+check(
+  roundWorkEnd(toronto(23, 58), 5, "clockwise").getTime() ===
+    zonedWallTimeToUtc(2026, 8, 12, 0, 0, 0, "America/Toronto").getTime(),
+  "roundWorkEnd clockwise midnight rollover: Aug 11 11:58 PM -> Aug 12 12:00 AM"
+);
+check(
+  roundWorkEnd(toronto(0, 2), 5, "counter_clockwise").getTime() === toronto(0, 0).getTime(),
+  "roundWorkEnd counter-clockwise near midnight: Aug 11 12:02 AM -> Aug 11 12:00 AM"
+);
+
+// DST boundary — same convergence-loop delegation roundWorkStart already
+// relies on for a correct UTC instant across a transition day.
+check(
+  roundWorkEnd(
+    zonedWallTimeToUtc(2026, 3, 8, 19, 11, 0, "America/Toronto"),
+    5,
+    "clockwise",
+    "America/Toronto"
+  ).getTime() === zonedWallTimeToUtc(2026, 3, 8, 19, 15, 0, "America/Toronto").getTime(),
+  "roundWorkEnd on spring-forward day: clockwise 5min 7:11 PM -> 7:15 PM in the correct (post-transition EDT) offset"
+);
+check(
+  roundWorkEnd(
+    zonedWallTimeToUtc(2026, 11, 1, 19, 14, 0, "America/Toronto"),
+    5,
+    "counter_clockwise",
+    "America/Toronto"
+  ).getTime() === zonedWallTimeToUtc(2026, 11, 1, 19, 10, 0, "America/Toronto").getTime(),
+  "roundWorkEnd on fall-back day: counter-clockwise 5min 7:14 PM -> 7:10 PM in the correct (post-transition EST) offset"
+);
+
+// resolveOriginalEndedAt is the same bounding logic as
+// resolveOriginalStartedAt — spot-check its own name/entry point rather
+// than re-deriving every bound already covered above.
+{
+  const now = new Date("2026-08-11T23:00:00.000Z");
+  const recentTap = new Date(now.getTime() - 3000);
+  check(
+    resolveOriginalEndedAt(recentTap.toISOString(), now).getTime() === recentTap.getTime(),
+    "resolveOriginalEndedAt: a recent, plausible Finish Work tap timestamp is trusted as-is"
+  );
+  check(
+    resolveOriginalEndedAt(undefined, now).getTime() === now.getTime(),
+    "resolveOriginalEndedAt: missing clientEndedAt falls back to now"
+  );
+  const tooFarBack = new Date(now.getTime() - MAX_OFFLINE_REPLAY_DELAY_MS - 1);
+  check(
+    resolveOriginalEndedAt(tooFarBack.toISOString(), now).getTime() === now.getTime(),
+    "resolveOriginalEndedAt: a clientEndedAt further back than the offline-replay bound falls back to now"
   );
 }
 

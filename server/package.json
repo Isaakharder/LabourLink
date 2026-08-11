@@ -22,7 +22,8 @@
     "test:manual-entries": "ts-node src/routes/inputs.manualEntries.test.ts",
     "test:storage": "ts-node src/lib/storage.test.ts",
     "test:break-reconciliation": "ts-node src/lib/breakReconciliation.test.ts",
-    "test:inputs-performance": "ts-node src/routes/inputs.performance.test.ts"
+    "test:inputs-performance": "ts-node src/routes/inputs.performance.test.ts",
+    "test:work-end-rounding": "ts-node src/routes/workEndRounding.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",

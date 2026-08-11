@@ -119,6 +119,17 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
   const [endDaySubmitting, setEndDaySubmitting] = useState(false);
   const [endDayError, setEndDayError] = useState<string | null>(null);
   const [endDayIdempotencyKey, setEndDayIdempotencyKey] = useState<string | null>(null);
+  // The phone's own clock reading of the moment "Finish Work" was actually
+  // tapped (inside confirmEndDay, not when the confirmation dialog merely
+  // opened) — captured once and reused across a retry with the same
+  // endDayIdempotencyKey, the same "capture before the action is attempted,
+  // never re-capture on replay" principle work-start rounding's offline
+  // queue gets for free (the whole request body, including
+  // clientStartedAt, is queued once and replayed verbatim) but end-day has
+  // to do explicitly since it deliberately never goes through that queue
+  // (see confirmEndDay's own comment). Reset to null alongside a fresh
+  // idempotency key whenever the confirm dialog (re)opens.
+  const [endDayClientEndedAt, setEndDayClientEndedAt] = useState<string | null>(null);
   const [pendingReassignment, setPendingReassignment] = useState<MeResponse | null>(null);
 
   // The single place every server response carrying an `employee` gets
@@ -334,6 +345,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
   const openEndDayConfirm = useCallback(() => {
     setEndDayError(null);
     setEndDayIdempotencyKey(uuid());
+    setEndDayClientEndedAt(null);
     setEndDayConfirmOpen(true);
   }, []);
 
@@ -354,21 +366,26 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     }
     if (!endDayIdempotencyKey) return;
 
+    // Captured on the first attempt only — a retry (network hiccup, tapping
+    // Finish Work again after an error) reuses this same value rather than
+    // capturing a fresh "now," so work-end rounding on the server rounds
+    // against the moment Finish Work was actually tapped, not whenever the
+    // retry happened to land. React state updates inside this same
+    // callback aren't visible until the next render, so the value to send
+    // is resolved into a local first, and only written back to state if it
+    // didn't already exist.
+    const clientEndedAt = endDayClientEndedAt ?? new Date().toISOString();
+    if (!endDayClientEndedAt) setEndDayClientEndedAt(clientEndedAt);
+
     setEndDaySubmitting(true);
     setEndDayError(null);
-    // TEMPORARY — End Work ~1min delay investigation. Elapsed-time-only, no
-    // secrets. Remove once the slow hop is identified.
-    const __t0 = performance.now();
-    console.log("[timing] confirmEndDay: tapped, request starting");
     try {
       const result = await api<MeResponse>("/api/mobile/time-entries/end-day", {
         method: "POST",
-        body: JSON.stringify({ idempotencyKey: endDayIdempotencyKey }),
+        body: JSON.stringify({ idempotencyKey: endDayIdempotencyKey, clientEndedAt }),
       });
-      console.log(`[timing] confirmEndDay: api() resolved at ${Math.round(performance.now() - __t0)}ms, updating UI state`);
       applyMeResponse(result);
       setEndDayConfirmOpen(false);
-      console.log(`[timing] confirmEndDay: UI state updated at ${Math.round(performance.now() - __t0)}ms`);
     } catch (err) {
       const permanentCode = getPermanentDeviceAuthErrorCode(err);
       if (permanentCode) {
@@ -390,7 +407,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     } finally {
       setEndDaySubmitting(false);
     }
-  }, [online, endDayIdempotencyKey, applyMeResponse, markUnpaired, setServerReachable, language]);
+  }, [online, endDayIdempotencyKey, endDayClientEndedAt, applyMeResponse, markUnpaired, setServerReachable, language]);
 
   return (
     <WorkSessionContext.Provider

@@ -241,7 +241,7 @@ router.get(
       `select te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
               te.break_profile_item_id, te.source, te.is_paid, te.greenhouse_row_id, te.carrier_id,
               te.auto_closed_at, te.density_type, te.density_count_per_row, te.actual_started_at,
-              te.created_by_employee_id, te.creation_reason,
+              te.actual_ended_at, te.created_by_employee_id, te.creation_reason,
               cb.first_name as created_by_first_name, cb.last_name as created_by_last_name,
               a.name as activity_name, a.normal_speed, a.speed_unit, a.density_source,
               bpi.name as break_item_name,
@@ -285,6 +285,12 @@ router.get(
     const autoClosedMeta = new Map<string, boolean>();
     // Same per-segment-id keying and the same accepted limitation as
     // autoClosedMeta above: a multi-segment run only ever surfaces this for
+    // its *last* segment (the one run.id resolves to) — the only segment a
+    // Finish Work tap could ever have closed anyway, since only the
+    // currently-open entry is ever eligible for work-end rounding.
+    const endedAtOriginalMeta = new Map<string, string>();
+    // Same per-segment-id keying and the same accepted limitation as
+    // autoClosedMeta above: a multi-segment run only ever surfaces this for
     // its *last* segment (the one run.id resolves to). A break is always a
     // single segment (groupIntoActivityRuns never merges breaks), so this
     // ambiguity never applies there.
@@ -301,6 +307,9 @@ router.get(
     >();
     for (const r of entryRows) {
       autoClosedMeta.set(r.id, r.auto_closed_at !== null);
+      if (r.actual_ended_at) {
+        endedAtOriginalMeta.set(r.id, r.actual_ended_at);
+      }
       if (r.created_by_employee_id) {
         manualEntryMeta.set(r.id, {
           createdByEmployeeId: r.created_by_employee_id,
@@ -549,6 +558,19 @@ router.get(
           startedAt: r.startedAt,
           currentSegmentStartedAt: r.currentSegmentStartedAt,
           endedAt: r.endedAt,
+          // The employee's original Finish Work button-press timestamp,
+          // only present when work-end rounding actually applied to this
+          // run's last segment (see workStartRounding.ts's roundWorkEnd
+          // and mobileTime.ts's POST /time-entries/end-day) — null for
+          // every run not closed by a genuine Finish Work tap (an activity
+          // change, a break starting, or a manual Inputs correction all
+          // close a segment without ever touching actual_ended_at) and for
+          // any Finish Work tap where rounding was disabled. Same "still
+          // set even on an exact-boundary tap that rounding left
+          // unchanged" convention as workStartOriginalTime — the desktop
+          // Inputs UI only surfaces this when it differs from endedAt (see
+          // ActivityLogsCard).
+          endedAtOriginalTime: endedAtOriginalMeta.get(r.id) ?? null,
           isOpen: r.isOpen,
           canEdit: canEditRole && !r.isOpen,
           row: row ? { id: r.greenhouseRowId, label: `${row.phaseName} · Row ${row.rowNumber}` } : null,
@@ -937,11 +959,16 @@ router.patch(
       // A real correction supersedes any daily-cutoff placeholder this row
       // may have been left with — the displayed end time is now a genuine
       // one, not the automatic 23:59:59 stand-in, so the "Auto-closed"
-      // indicator no longer applies.
-      await client.query("update time_entries set ended_at = $1, auto_closed_at = null where id = $2", [
-        newEndedAt,
-        id,
-      ]);
+      // indicator no longer applies. Same reasoning for actual_ended_at: if
+      // this row was previously closed by a rounded Finish Work tap, that
+      // original tap time no longer describes anything about the new,
+      // administratively-set end time — leaving it would show a stale
+      // "Rounded" badge pointing at a timestamp unrelated to what's
+      // actually stored now (see ActivityLogsCard's own display logic).
+      await client.query(
+        "update time_entries set ended_at = $1, auto_closed_at = null, actual_ended_at = null where id = $2",
+        [newEndedAt, id]
+      );
       await client.query(
         `insert into time_entry_corrections
            (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
