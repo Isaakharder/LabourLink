@@ -70,6 +70,12 @@ export interface DailyInputsResponse {
   employee: { id: string; firstName: string; lastName: string; photoUrl: string | null };
   date: string;
   workStartTime: string | null;
+  // The employee's original (pre-rounding) button-press timestamp — only
+  // non-null when work-start rounding was active for this entry (see
+  // server/src/lib/workStartRounding.ts). Equal to workStartTime when
+  // rounding happened to land exactly on a boundary; the UI only shows an
+  // adjustment indicator when the two differ (see WorkdayDetailsCard).
+  workStartOriginalTime: string | null;
   runs: ActivityRunDto[];
   breaks: BreakDto[];
   totals: { workedSeconds: number; breakSeconds: number; paidBreakSeconds: number; unpaidBreakSeconds: number };

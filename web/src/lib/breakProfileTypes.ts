@@ -12,11 +12,16 @@ export interface BreakProfileItem {
   durationSeconds: number;
 }
 
+export type WorkStartRoundingDirection = "clockwise" | "counter_clockwise";
+
 export interface BreakProfile {
   id: string;
   name: string;
   description: string | null;
   isActive: boolean;
+  workStartRoundingEnabled: boolean;
+  workStartRoundingDirection: WorkStartRoundingDirection;
+  workStartRoundingIntervalMinutes: number;
   items: BreakProfileItem[];
   itemCount: number;
   assignedEmployeeCount: number;

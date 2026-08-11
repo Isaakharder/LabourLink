@@ -112,7 +112,7 @@ router.get(
     const { rows: entryRows } = await pool.query(
       `select te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
               te.break_profile_item_id, te.source, te.is_paid, te.greenhouse_row_id, te.carrier_id,
-              te.auto_closed_at, te.density_type, te.density_count_per_row,
+              te.auto_closed_at, te.density_type, te.density_count_per_row, te.actual_started_at,
               a.name as activity_name, a.normal_speed, a.speed_unit, a.density_source,
               bpi.name as break_item_name,
               gr.row_number, gphase.name as row_phase_name,
@@ -319,6 +319,18 @@ router.get(
       },
       date,
       workStartTime: workStart ? workStart.started_at : null,
+      // The employee's original button-press timestamp, only present when
+      // work-start rounding actually applied to this entry (see
+      // server/src/lib/workStartRounding.ts and mobileTime.ts's POST
+      // /time-entries/work) — null for every entry recorded before this
+      // feature existed, for any entry rounding was never enabled for, and
+      // for an exact-boundary tap that rounding left unchanged... except
+      // that last case still gets actual_started_at set (equal to
+      // workStartTime) so "rounding was active for this entry" stays a
+      // simple non-null check independent of whether it happened to change
+      // anything. The desktop Inputs UI only actually surfaces this when it
+      // differs from workStartTime (see WorkdayDetailsCard).
+      workStartOriginalTime: workStart?.actual_started_at ?? null,
       runs: runs.map((r) => {
         const meta = activityMeta.get(r.activityId);
         const row = r.greenhouseRowId ? rowMeta.get(r.greenhouseRowId) : undefined;

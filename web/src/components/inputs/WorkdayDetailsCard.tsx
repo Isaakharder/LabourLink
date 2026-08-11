@@ -8,6 +8,10 @@ export interface EditingBreakField {
 
 interface WorkdayDetailsCardProps {
   workStartTime: string | null;
+  // Present only when work-start rounding was active for this entry (see
+  // inputsTypes.ts) — used only to decide whether to show the "Rounded"
+  // badge/tooltip, never rendered as the primary time itself.
+  workStartOriginalTime: string | null;
   breaks: BreakDto[];
   paidBreakSeconds: number;
   unpaidBreakSeconds: number;
@@ -36,6 +40,7 @@ interface WorkdayDetailsCardProps {
 
 export function WorkdayDetailsCard({
   workStartTime,
+  workStartOriginalTime,
   breaks,
   paidBreakSeconds,
   unpaidBreakSeconds,
@@ -117,7 +122,17 @@ export function WorkdayDetailsCard({
                   </button>
                 </div>
               ) : workStartTime ? (
-                formatTimeInAppTimezone(workStartTime)
+                <>
+                  {formatTimeInAppTimezone(workStartTime)}
+                  {workStartOriginalTime && workStartOriginalTime !== workStartTime && (
+                    <span
+                      className="inputs-rounded-badge"
+                      title={`Actual tap time: ${formatTimeInAppTimezone(workStartOriginalTime)} — adjusted by this employee's break profile's work-start rounding setting.`}
+                    >
+                      Rounded
+                    </span>
+                  )}
+                </>
               ) : (
                 "—"
               )}

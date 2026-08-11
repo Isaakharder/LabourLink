@@ -536,6 +536,7 @@ export function InputsPage() {
               />
               <WorkdayDetailsCard
                 workStartTime={daily.workStartTime}
+                workStartOriginalTime={daily.workStartOriginalTime}
                 breaks={daily.breaks}
                 paidBreakSeconds={daily.totals.paidBreakSeconds}
                 unpaidBreakSeconds={daily.totals.unpaidBreakSeconds}
