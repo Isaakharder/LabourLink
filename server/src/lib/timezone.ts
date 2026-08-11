@@ -143,6 +143,41 @@ export function formatTimeInAppTimezone(instant: Date, tz: string = APP_TIMEZONE
   }).format(instant);
 }
 
+// The wall-clock date/time `instant` reads as inside `tz`, as plain numeric
+// parts — the read half of the zonedWallTimeToUtc/wallClockAsUtcMs pair
+// above, exposed for callers (workStartRounding.ts) that need to do
+// arithmetic on the wall-clock reading itself (e.g. "round this to the
+// nearest 5-minute mark") rather than just converting a known wall-clock
+// time to UTC or reading back a calendar date/formatted string.
+export function zonedWallTimeParts(
+  instant: Date,
+  tz: string = APP_TIMEZONE
+): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    })
+      .formatToParts(instant)
+      .filter((p) => p.type !== "literal")
+      .map((p) => [p.type, p.value])
+  );
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    second: Number(parts.second),
+  };
+}
+
 // Splits a Postgres `time` column value ("HH:MM:SS", as returned by pg) into
 // its numeric parts. Shared by break_profile_items consumers —
 // breakReconciliation.ts (auto-add) and mobileTime.ts (fixed-break

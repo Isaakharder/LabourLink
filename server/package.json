@@ -17,7 +17,8 @@
     "cutoff:repair": "ts-node src/cli/repairStaleEntries.ts",
     "typecheck": "tsc --noEmit",
     "test:row-layout": "ts-node src/lib/rowLayout.test.ts",
-    "test:daily-cutoff": "ts-node src/lib/dailyCutoff.test.ts"
+    "test:daily-cutoff": "ts-node src/lib/dailyCutoff.test.ts",
+    "test:work-start-rounding": "ts-node src/lib/workStartRounding.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",
