@@ -4,6 +4,18 @@ export function isNativePlatform(): boolean {
   return Capacitor.isNativePlatform();
 }
 
+// The one place App.tsx decides DesktopApp vs. MobileApp. A native Android
+// (or future iOS) build must always get the mobile app, full stop — no
+// viewport width, split-screen, rotation, or desktop-mode state can ever
+// route it to the desktop login instead. `isMobileViewport` (the existing
+// CSS-media-query heuristic from useIsMobile) only matters for the actual
+// browser/PWA case, where there's no Capacitor platform to ask and a
+// viewport check is the only signal available — that responsive behavior is
+// deliberately unchanged.
+export function shouldRenderMobileApp(isNative: boolean, isMobileViewport: boolean): boolean {
+  return isNative || isMobileViewport;
+}
+
 // True only when running as an installed PWA (Home Screen / standalone
 // window) — as opposed to a plain browser tab. Used to decide what the
 // "Enable notifications" step on SettingsScreen should try/explain: iOS

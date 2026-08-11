@@ -23,6 +23,7 @@ import { PairingScreen } from "./pages/mobile/PairingScreen";
 import { SettingsScreen } from "./pages/mobile/SettingsScreen";
 import { StatsScreen } from "./pages/mobile/StatsScreen";
 import { useIsMobile } from "./lib/useIsMobile";
+import { isNativePlatform, shouldRenderMobileApp } from "./lib/platform";
 
 function DesktopApp() {
   const { employee, loading } = useAuth();
@@ -124,7 +125,8 @@ function MobileApp() {
 }
 
 export default function App() {
-  const isMobile = useIsMobile();
+  const isMobileViewport = useIsMobile();
+  const isMobile = shouldRenderMobileApp(isNativePlatform(), isMobileViewport);
 
   if (isMobile) {
     return (
