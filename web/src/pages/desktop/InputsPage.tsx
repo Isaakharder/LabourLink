@@ -6,6 +6,9 @@ import { EmployeeListPanel } from "../../components/inputs/EmployeeListPanel";
 import { ActivityLogsCard } from "../../components/inputs/ActivityLogsCard";
 import { WorkdayDetailsCard, EditingBreakField } from "../../components/inputs/WorkdayDetailsCard";
 import { DeleteTimeEntryModal } from "../../components/inputs/DeleteTimeEntryModal";
+import { AddWorkStartModal } from "../../components/inputs/AddWorkStartModal";
+import { AddBreakModal } from "../../components/inputs/AddBreakModal";
+import { AddActivityModal } from "../../components/inputs/AddActivityModal";
 import { api, ApiError } from "../../lib/api";
 import { useAuth } from "../../context/AuthContext";
 import { ActivityRunDto, BreakDto, DailyInputsResponse, InputsEmployee } from "../../lib/inputsTypes";
@@ -90,6 +93,12 @@ export function InputsPage() {
   const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion | null>(null);
   const [deletionSubmitting, setDeletionSubmitting] = useState(false);
   const [deletionError, setDeletionError] = useState<string | null>(null);
+
+  // Which "Add …" modal (if any) is currently open — at most one at a time,
+  // opened from either section header bar. Included in the pause-gate
+  // effect below (same as pendingDeletion) so background polling can't
+  // yank the page out from under an admin mid-entry.
+  const [addModal, setAddModal] = useState<"work-start" | "break" | "activity" | null>(null);
 
   // Background live-refresh state — distinct from `error`/`daily` above,
   // which are only ever touched by a foreground (initial/employee/date)
@@ -248,7 +257,8 @@ export function InputsPage() {
       editingWorkStart ||
       actionInFlight ||
       pendingDeletion !== null ||
-      deletionSubmitting;
+      deletionSubmitting ||
+      addModal !== null;
     const wasPaused = pausedRef.current;
     pausedRef.current = nowPaused;
     if (wasPaused && !nowPaused) {
@@ -261,6 +271,7 @@ export function InputsPage() {
     actionInFlight,
     pendingDeletion,
     deletionSubmitting,
+    addModal,
     loadDaily,
   ]);
 
@@ -474,6 +485,12 @@ export function InputsPage() {
     setDeletionError(null);
   }
 
+  async function handleManualEntryCreated(message: string) {
+    setAddModal(null);
+    await loadDaily();
+    setSuccessMessage(message);
+  }
+
   return (
     <div className="inputs-page">
       <PageHeader title="Inputs" description="Review and correct daily employee activity logs." />
@@ -533,10 +550,12 @@ export function InputsPage() {
                 onCancelEdit={handleCancelEdit}
                 onDeleteRun={handleDeleteRun}
                 onRowCompletionChanged={() => loadDaily()}
+                onAddActivity={daily.canEdit ? () => setAddModal("activity") : undefined}
               />
               <WorkdayDetailsCard
                 workStartTime={daily.workStartTime}
                 workStartOriginalTime={daily.workStartOriginalTime}
+                workStartManualEntry={daily.workStartManualEntry}
                 breaks={daily.breaks}
                 paidBreakSeconds={daily.totals.paidBreakSeconds}
                 unpaidBreakSeconds={daily.totals.unpaidBreakSeconds}
@@ -555,6 +574,8 @@ export function InputsPage() {
                 onEditWorkStartTimeChange={setEditWorkStartTimeValue}
                 onSaveEditWorkStart={handleSaveEditWorkStart}
                 onCancelEditWorkStart={handleCancelEditWorkStart}
+                onAddWorkStart={daily.canEdit ? () => setAddModal("work-start") : undefined}
+                onAddBreak={daily.canEdit ? () => setAddModal("break") : undefined}
               />
             </>
           )}
@@ -570,6 +591,34 @@ export function InputsPage() {
           error={deletionError}
           onConfirm={handleConfirmDeletion}
           onCancel={handleCancelDeletion}
+        />
+      )}
+
+      {addModal === "work-start" && daily && selectedEmployeeId && (
+        <AddWorkStartModal
+          employeeId={selectedEmployeeId}
+          employeeName={`${daily.employee.firstName} ${daily.employee.lastName}`}
+          date={date}
+          onClose={() => setAddModal(null)}
+          onCreated={() => handleManualEntryCreated("Work start added.")}
+        />
+      )}
+      {addModal === "break" && daily && selectedEmployeeId && (
+        <AddBreakModal
+          employeeId={selectedEmployeeId}
+          employeeName={`${daily.employee.firstName} ${daily.employee.lastName}`}
+          date={date}
+          onClose={() => setAddModal(null)}
+          onCreated={() => handleManualEntryCreated("Break added.")}
+        />
+      )}
+      {addModal === "activity" && daily && selectedEmployeeId && (
+        <AddActivityModal
+          employeeId={selectedEmployeeId}
+          employeeName={`${daily.employee.firstName} ${daily.employee.lastName}`}
+          date={date}
+          onClose={() => setAddModal(null)}
+          onCreated={() => handleManualEntryCreated("Activity added.")}
         />
       )}
     </div>

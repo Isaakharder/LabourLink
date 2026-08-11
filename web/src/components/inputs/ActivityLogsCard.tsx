@@ -33,6 +33,21 @@ interface ActivityLogsCardProps {
   // Called after the admin combines segments in the row-completion review
   // modal — the parent reloads the day so the newly-resolved speed shows up.
   onRowCompletionChanged: () => void;
+  // Opens AddActivityModal — omitted entirely (rather than passed disabled)
+  // when the signed-in employee can't edit this day, so the button never
+  // renders instead of rendering inertly.
+  onAddActivity?: () => void;
+}
+
+function ManualBadge({ meta }: { meta: NonNullable<ActivityRunDto["manualEntry"]> }) {
+  return (
+    <span
+      className="inputs-manual-badge"
+      title={`Manually added by ${meta.createdByName}. Reason: ${meta.creationReason}`}
+    >
+      Manually added
+    </span>
+  );
 }
 
 export function ActivityLogsCard({
@@ -50,6 +65,7 @@ export function ActivityLogsCard({
   onCancelEdit,
   onDeleteRun,
   onRowCompletionChanged,
+  onAddActivity,
 }: ActivityLogsCardProps) {
   const [reviewTarget, setReviewTarget] = useState<{
     greenhouseRowId: string;
@@ -73,6 +89,17 @@ export function ActivityLogsCard({
 
   return (
     <>
+      <div className="inputs-section-header">
+        <h3>Activity details</h3>
+        <div className="inputs-section-header-actions">
+          {onAddActivity && (
+            <button type="button" className="inputs-section-header-button" onClick={onAddActivity}>
+              Add activity
+            </button>
+          )}
+        </div>
+      </div>
+
       <div className="inputs-logs-header">
         <Avatar photoUrl={employee.photoUrl} firstName={employee.firstName} lastName={employee.lastName} size="large" />
         <div className="inputs-logs-header-text">
@@ -125,7 +152,10 @@ export function ActivityLogsCard({
                   className={`inputs-log-row${run.id === selectedRunId ? " inputs-log-row-selected" : ""}`}
                   onClick={() => onSelectRun(run.id)}
                 >
-                  <td className="inputs-log-activity">{run.activityName}</td>
+                  <td className="inputs-log-activity">
+                    {run.activityName}
+                    {run.manualEntry && <ManualBadge meta={run.manualEntry} />}
+                  </td>
                   <td className="inputs-log-row-cell">{run.row?.label ?? "—"}</td>
                   <td className="inputs-log-carrier-cell">{run.carrier?.name ?? "—"}</td>
                   <td className="inputs-log-speed">

@@ -1,9 +1,24 @@
-import { BreakDto } from "../../lib/inputsTypes";
+import { BreakDto, ManualEntryMeta } from "../../lib/inputsTypes";
 import { formatDurationHMS, formatTimeInAppTimezone } from "../../lib/timezone";
 
 export interface EditingBreakField {
   id: string;
   field: "start" | "end";
+}
+
+// "Manually added" badge shared by the work-start row and every break row
+// below — one tooltip format (who/when/why) for every manually-created
+// entry on this card, matching the existing Auto-added/Auto-closed/Rounded
+// badge conventions already used here.
+function ManualBadge({ meta }: { meta: ManualEntryMeta }) {
+  return (
+    <span
+      className="inputs-manual-badge"
+      title={`Manually added by ${meta.createdByName}. Reason: ${meta.creationReason}`}
+    >
+      Manually added
+    </span>
+  );
 }
 
 interface WorkdayDetailsCardProps {
@@ -12,6 +27,7 @@ interface WorkdayDetailsCardProps {
   // inputsTypes.ts) — used only to decide whether to show the "Rounded"
   // badge/tooltip, never rendered as the primary time itself.
   workStartOriginalTime: string | null;
+  workStartManualEntry: ManualEntryMeta | null;
   breaks: BreakDto[];
   paidBreakSeconds: number;
   unpaidBreakSeconds: number;
@@ -36,11 +52,17 @@ interface WorkdayDetailsCardProps {
   onEditWorkStartTimeChange: (value: string) => void;
   onSaveEditWorkStart: () => void;
   onCancelEditWorkStart: () => void;
+  // Opens AddWorkStartModal/AddBreakModal — both omitted entirely (rather
+  // than passed disabled) when the signed-in employee can't edit this day,
+  // same convention as ActivityLogsCard's onAddActivity.
+  onAddWorkStart?: () => void;
+  onAddBreak?: () => void;
 }
 
 export function WorkdayDetailsCard({
   workStartTime,
   workStartOriginalTime,
+  workStartManualEntry,
   breaks,
   paidBreakSeconds,
   unpaidBreakSeconds,
@@ -59,6 +81,8 @@ export function WorkdayDetailsCard({
   onEditWorkStartTimeChange,
   onSaveEditWorkStart,
   onCancelEditWorkStart,
+  onAddWorkStart,
+  onAddBreak,
 }: WorkdayDetailsCardProps) {
   function handleWorkStartClick() {
     if (workStartTime && !editingWorkStart) onStartEditWorkStart();
@@ -74,7 +98,31 @@ export function WorkdayDetailsCard({
 
   return (
     <div className="inputs-workday-section">
-      <h3>Workday details</h3>
+      <div className="inputs-section-header">
+        <h3>Workday details</h3>
+        <div className="inputs-section-header-actions">
+          {onAddWorkStart && (
+            <button
+              type="button"
+              className="inputs-section-header-button"
+              disabled={Boolean(workStartTime)}
+              title={
+                workStartTime
+                  ? "A work start already exists for this day — edit the existing start time instead."
+                  : undefined
+              }
+              onClick={onAddWorkStart}
+            >
+              Add work start
+            </button>
+          )}
+          {onAddBreak && (
+            <button type="button" className="inputs-section-header-button" onClick={onAddBreak}>
+              Add break
+            </button>
+          )}
+        </div>
+      </div>
       <table className="employees-table inputs-workday-table">
         <thead>
           <tr>
@@ -132,6 +180,7 @@ export function WorkdayDetailsCard({
                       Rounded
                     </span>
                   )}
+                  {workStartManualEntry && <ManualBadge meta={workStartManualEntry} />}
                 </>
               ) : (
                 "—"
@@ -157,6 +206,7 @@ export function WorkdayDetailsCard({
                 <td>
                   {b.name ?? "Break"}
                   {b.source === "auto" && <span className="inputs-break-source-badge">Auto-added</span>}
+                  {b.manualEntry && <ManualBadge meta={b.manualEntry} />}
                 </td>
                 <td
                   className={`inputs-time-cell${b.canEdit ? " inputs-time-cell-editable" : ""}`}

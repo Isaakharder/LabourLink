@@ -5,6 +5,63 @@ export interface InputsEmployee {
   photoUrl: string | null;
 }
 
+// Present on a run/break/work-start when an administrator created it
+// directly from the Inputs page (POST /work-start, /activities, /breaks)
+// rather than it originating from the employee's own phone — surfaced so
+// the UI can show a "Manually added" badge with who/when/why.
+export interface ManualEntryMeta {
+  createdByEmployeeId: string;
+  createdByName: string;
+  creationReason: string;
+}
+
+// GET /api/inputs/employee-activities — identical shape/rules to the
+// mobile app's own activity picker (server/src/lib/activitySelection.ts),
+// reused as-is for the Add work start / Add activity modals.
+export interface ActivityQuestionOption {
+  id: string;
+  questionType: "greenhouse_row" | "carrier";
+  label: string;
+  isRequired: boolean;
+}
+
+export interface EmployeeActivityOption {
+  id: string;
+  name: string;
+  normalSpeed: number | null;
+  speedUnit: string | null;
+  questions: ActivityQuestionOption[];
+}
+
+// GET /api/inputs/greenhouse-rows
+export interface GreenhouseRowOption {
+  id: string;
+  name: string;
+  phases: {
+    id: string;
+    name: string;
+    rows: { id: string; rowNumber: number }[];
+  }[];
+}
+
+// GET /api/inputs/carriers
+export interface CarrierOption {
+  id: string;
+  name: string;
+}
+
+// GET /api/inputs/employee-break-items — the employee's own assigned break
+// profile's active scheduled items, for the Add break modal's break-type
+// dropdown. null breakProfile means the employee has no active assigned
+// profile (only a Custom break is offered in that case).
+export interface EmployeeBreakItemOption {
+  id: string;
+  name: string | null;
+  startTime: string;
+  endTime: string;
+  isPaid: boolean;
+}
+
 export interface ActivityRunDto {
   id: string;
   activityId: string;
@@ -50,6 +107,12 @@ export interface ActivityRunDto {
   // Work carried past local midnight), not a real end-time — cleared once
   // a supervisor corrects it via the normal Inputs tools.
   autoClosed: boolean;
+  // Keyed by this run's own id, which is its *last* underlying segment's id
+  // (see server/src/routes/inputs.ts's manualEntryMeta comment) — a run
+  // made of several segments (e.g. split by a reconciled scheduled break)
+  // only ever surfaces this when that last segment was itself the one
+  // manually created.
+  manualEntry: ManualEntryMeta | null;
 }
 
 export interface BreakDto {
@@ -64,6 +127,9 @@ export interface BreakDto {
   canEdit: boolean;
   // Same daily-cutoff meaning as ActivityRunDto.autoClosed above.
   autoClosed: boolean;
+  // Always unambiguous for a break — unlike a run, a break is never made
+  // of more than one segment.
+  manualEntry: ManualEntryMeta | null;
 }
 
 export interface DailyInputsResponse {
@@ -76,6 +142,10 @@ export interface DailyInputsResponse {
   // rounding happened to land exactly on a boundary; the UI only shows an
   // adjustment indicator when the two differ (see WorkdayDetailsCard).
   workStartOriginalTime: string | null;
+  // Present when the work-start entry itself (not necessarily any
+  // activity run built from it) was created directly from the Inputs page
+  // via Add work start, rather than a phone tap.
+  workStartManualEntry: ManualEntryMeta | null;
   runs: ActivityRunDto[];
   breaks: BreakDto[];
   totals: { workedSeconds: number; breakSeconds: number; paidBreakSeconds: number; unpaidBreakSeconds: number };

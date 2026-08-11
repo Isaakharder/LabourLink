@@ -2127,6 +2127,75 @@ input {
   padding: 1.5rem 1rem;
 }
 
+/* Full-width light-blue bar above the activity table (Activity details)
+   and replacing the plain "Workday details" heading (Workday details) —
+   same subtle tint both places, kept short so it never competes with the
+   real content below for height. */
+.inputs-section-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 1rem;
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-primary) 20%, transparent);
+}
+
+.inputs-workday-section .inputs-section-header {
+  margin: -0.85rem -1rem 0.75rem;
+  border-top: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-primary) 20%, transparent);
+}
+
+.inputs-section-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--color-primary);
+}
+
+.inputs-section-header-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.inputs-section-header-button {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid var(--color-primary);
+  background: var(--color-surface);
+  color: var(--color-primary);
+}
+
+.inputs-section-header-button:hover:not(:disabled) {
+  background: var(--color-primary);
+  color: white;
+}
+
+.inputs-section-header-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Same pill shape as inputs-break-source-badge/inputs-rounded-badge —
+   tinted distinctly so "created directly on Inputs, not from a phone" reads
+   at a glance next to those other provenance badges. */
+.inputs-manual-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  white-space: nowrap;
+}
+
 .inputs-logs-header {
   flex-shrink: 0;
   display: flex;
@@ -2346,11 +2415,6 @@ input {
   flex-shrink: 0;
   border-top: 1px solid var(--color-border);
   padding: 0.85rem 1rem;
-}
-
-.inputs-workday-section h3 {
-  margin: 0 0 0.35rem;
-  font-size: 1rem;
 }
 
 .inputs-workday-note {
