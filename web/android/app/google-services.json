@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "875697240632",
+    "project_id": "first-light-devices",
+    "storage_bucket": "first-light-devices.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:875697240632:android:089e882b661c0f35cfc4cd",
+        "android_client_info": {
+          "package_name": "com.labourlink.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCygsWurpdzrE3X2_M7DQZ-Qty8V9NGtLw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
