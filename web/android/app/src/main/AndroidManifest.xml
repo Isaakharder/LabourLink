@@ -1,8 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- allowBackup=false disables BOTH Android's cloud Auto Backup and
+         device-to-device transfer for this app's data — per Android's own
+         docs, setting it false means the app "never participates in
+         backups... even to allow app data restore from device-to-device
+         transfers." No separate dataExtractionRules/fullBackupContent is
+         needed on top of this; those only matter when allowBackup=true. This
+         is deliberate: the WebView's local storage holds this phone's
+         pairing credential (device_identifier, web/src/lib/device.ts) — a
+         factory reset + Google account restore, or setting up a second
+         phone under the same account, must never carry one physical
+         device's identity onto another. -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
