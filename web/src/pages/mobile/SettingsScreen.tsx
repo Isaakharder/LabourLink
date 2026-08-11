@@ -1,6 +1,7 @@
 import { FormEvent, useState } from "react";
 import { useDevicePairing } from "../../context/DevicePairingContext";
 import { useMessages } from "../../context/MessagesContext";
+import { useWorkSession } from "../../context/WorkSessionContext";
 import { isPushMarkedEnabled, initAndroidPush, subscribeWebPush } from "../../lib/push";
 import { isNativePlatform } from "../../lib/platform";
 
@@ -10,12 +11,20 @@ import { isNativePlatform } from "../../lib/platform";
 export function SettingsScreen() {
   const { cachedEmployee, resetDevice } = useDevicePairing();
   const { refresh } = useMessages();
+  const { online, pending, flush } = useWorkSession();
   const [unlocked, setUnlocked] = useState(false);
   const [pin, setPin] = useState("");
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [notifEnabled, setNotifEnabled] = useState(isPushMarkedEnabled());
   const [notifBusy, setNotifBusy] = useState(false);
   const [notifError, setNotifError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
+  async function handleSyncNow() {
+    setSyncing(true);
+    await flush();
+    setSyncing(false);
+  }
 
   async function handleEnableNotifications() {
     setNotifBusy(true);
@@ -82,6 +91,32 @@ export function SettingsScreen() {
             {notifError && <p className="error-text">{notifError}</p>}
           </>
         )}
+      </section>
+
+      {/* Automatic sync already runs on mount, on reconnect, and whenever
+          the offline queue changes (WorkSessionContext) — this is only a
+          manual fallback for the rare gap where a request fails on a
+          flaky connection without a real browser online/offline
+          transition to trigger a retry. Routed through the same flush()
+          WorkSessionContext itself uses, not a separate implementation, so
+          it gets the same rejected-item and device-unpair handling. */}
+      <section className="mobile-settings-device-section">
+        <h2>Sync</h2>
+        <div className="sync-status">
+          <span className={`connection-dot ${online ? "" : "offline"}`} />
+          {online ? "Online" : "Offline"}
+        </div>
+        <p className="mobile-settings-device-note">
+          {pending > 0 ? `${pending} action(s) pending sync` : "All actions synced"}
+        </p>
+        <button
+          type="button"
+          className="mobile-action-button mobile-action-secondary"
+          onClick={handleSyncNow}
+          disabled={syncing || pending === 0}
+        >
+          {syncing ? "Syncing..." : "Sync now"}
+        </button>
       </section>
 
       {/* Deliberately tucked away behind the PIN gate on its own screen,

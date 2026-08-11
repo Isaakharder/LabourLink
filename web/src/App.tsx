@@ -21,7 +21,7 @@ import { RequireRole } from "./components/auth/RequireRole";
 import { HomeScreen } from "./pages/mobile/HomeScreen";
 import { PairingScreen } from "./pages/mobile/PairingScreen";
 import { SettingsScreen } from "./pages/mobile/SettingsScreen";
-import { SyncScreen } from "./pages/mobile/SyncScreen";
+import { StatsScreen } from "./pages/mobile/StatsScreen";
 import { useIsMobile } from "./lib/useIsMobile";
 
 function DesktopApp() {
@@ -114,7 +114,7 @@ function MobileApp() {
       <Route path="/mobile" element={<MobileLayout />}>
         <Route index element={<Navigate to="/mobile/home" replace />} />
         <Route path="home" element={<HomeScreen />} />
-        <Route path="sync" element={<SyncScreen />} />
+        <Route path="stats" element={<StatsScreen />} />
         <Route path="settings" element={<SettingsScreen />} />
         <Route path="*" element={<Navigate to="/mobile/home" replace />} />
       </Route>

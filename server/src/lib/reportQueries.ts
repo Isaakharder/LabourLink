@@ -97,13 +97,13 @@ function toSeconds(v: unknown): number {
 //     candidate anywhere for that row+density type (checked via the same
 //     getUnresolvedRunsForRow Inputs uses) — reused directly rather than
 //     reimplemented, so this can never drift from Inputs' own resolution.
-interface DensityTotals {
+export interface DensityTotals {
   quantity: number;
   durationSeconds: number;
   completions: number;
 }
 
-interface DensityAttribution {
+export interface DensityAttribution {
   // Whole-range totals per employee — every qualifying contribution,
   // whether or not it could be pinned to one calendar day. This is what the
   // report's totals/footer uses for its ratio-of-sums speed: total quantity
@@ -119,7 +119,13 @@ interface DensityAttribution {
   byEmployeeDay: Map<string, DensityTotals>;
 }
 
-async function getActivityDensityAttribution(
+// Exported so callers outside this file's own range-report shape (e.g. the
+// mobile employee Stats page, server/src/routes/mobileStats.ts) can reuse
+// this exact selection/attribution logic for a narrower slice — never
+// reimplement it. See the file header: this is the only place quantity is
+// attributed to an employee; aggregateDensitySpeed (densitySpeed.ts) is the
+// only place a speed is ever divided.
+export async function getActivityDensityAttribution(
   activityId: string,
   rangeStart: Date,
   rangeEnd: Date

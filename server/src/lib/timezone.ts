@@ -107,6 +107,18 @@ export function inclusiveDayCount(dateStart: string, dateEnd: string): number {
   return Math.round((endMs - startMs) / 86400000) + 1;
 }
 
+// dateStr shifted by `days` (negative to go backward), as a YYYY-MM-DD
+// string — plain calendar-date arithmetic like inclusiveDayCount above, no
+// timezone conversion needed since it never leaves Y/M/D representation.
+// Used to derive prior week boundaries from a known week start (mobileStats.ts).
+export function addDaysToDateStr(dateStr: string, days: number): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const shifted = new Date(Date.UTC(y, m - 1, d + days));
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}-${String(
+    shifted.getUTCDate()
+  ).padStart(2, "0")}`;
+}
+
 // The YYYY-MM-DD calendar date `instant` falls on, as observed in
 // APP_TIMEZONE — used to confirm a correction's new end time stays on the
 // same calendar day as the run it belongs to.

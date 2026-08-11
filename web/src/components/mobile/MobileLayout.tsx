@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from "react-router-dom";
-import { Coffee, House, RefreshCw, Settings } from "lucide-react";
+import { BarChart3, Coffee, House, Settings } from "lucide-react";
 import { WorkSessionProvider, useWorkSession } from "../../context/WorkSessionContext";
 import { MessagesProvider } from "../../context/MessagesContext";
 import { ConfirmEndDayModal } from "./ConfirmEndDayModal";
@@ -62,9 +62,9 @@ function MobileNav() {
           </button>
         )}
 
-        <NavLink to="/mobile/sync" className={navItemClass}>
-          <RefreshCw size={22} />
-          <span>Sync</span>
+        <NavLink to="/mobile/stats" className={navItemClass}>
+          <BarChart3 size={22} />
+          <span>Stats</span>
         </NavLink>
         <NavLink to="/mobile/settings" className={navItemClass}>
           <Settings size={22} />

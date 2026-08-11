@@ -61,6 +61,7 @@ interface WorkSessionContextValue {
   loadMe: () => void;
   handleApiError: (err: unknown) => boolean;
   perform: (path: string, body: Record<string, unknown>, options?: PerformOptions) => Promise<void>;
+  flush: () => Promise<void>;
   startBreak: () => void;
   endBreak: () => void;
   endDayConfirmOpen: boolean;
@@ -160,7 +161,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     // This flag, set from inside the send wrapper, is how that specific
     // case still gets caught once the whole queue has drained.
     let permanentFailure = false;
-    flushQueue((path, body) =>
+    return flushQueue((path, body) =>
       api(path, { method: "POST", body: JSON.stringify(body) }).catch((err) => {
         if (isPermanentDeviceAuthError(err)) permanentFailure = true;
         throw err;
@@ -329,6 +330,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         loadMe,
         handleApiError,
         perform,
+        flush,
         startBreak,
         endBreak,
         endDayConfirmOpen,

@@ -344,7 +344,7 @@ input {
   flex-shrink: 0;
 }
 
-/* Four equal-width items (Home/End Work, Break, Sync, Settings), icon
+/* Four equal-width items (Home/End Work, Break, Stats, Settings), icon
    stacked above label, large touch target. */
 .mobile-nav-item {
   flex: 1;
@@ -376,8 +376,7 @@ input {
 .pairing-screen,
 .mobile-home,
 .mobile-pin-gate,
-.mobile-settings,
-.mobile-sync {
+.mobile-settings {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -434,8 +433,7 @@ input {
   border-radius: 6px;
 }
 
-.mobile-pin-gate button,
-.mobile-sync button {
+.mobile-pin-gate button {
   margin-top: 0.5rem;
   padding: 0.6rem 1.2rem;
   border: none;
@@ -883,6 +881,90 @@ input {
 
 .recent-jobs-item-autoclosed {
   font-style: italic;
+}
+
+/* ---------- Mobile: employee Stats tab ---------- */
+
+.mobile-stats {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.85rem;
+  padding-bottom: 1rem;
+}
+
+.mobile-stats h1 {
+  text-align: center;
+}
+
+.mobile-stats-loading {
+  text-align: center;
+  color: var(--color-muted);
+}
+
+.stats-week-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.stats-week-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem;
+}
+
+.stats-week-label {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--color-primary);
+}
+
+.stats-week-range {
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  margin-bottom: 0.6rem;
+}
+
+.stats-week-empty {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.stats-activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.stats-activity {
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.stats-activity:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+.stats-activity-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.stats-activity-speed {
+  font-size: 1.4rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.stats-activity-hours {
+  font-size: 0.8rem;
+  color: var(--color-muted);
 }
 
 .mobile-action-button {
