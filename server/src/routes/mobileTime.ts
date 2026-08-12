@@ -334,7 +334,8 @@ async function serializeStatus(
   employeeId: string,
   employeeFirstName: string,
   employeeLastName: string,
-  employeePreferredLanguage: string | null
+  employeePreferredLanguage: string | null,
+  employeeSecurityRole: string
 ) {
   // TEMPORARY — End Work ~1min delay investigation. Elapsed-time-only, no
   // secrets. Remove once the slow hop is identified.
@@ -506,6 +507,10 @@ async function serializeStatus(
       firstName: employeeFirstName,
       lastName: employeeLastName,
       preferredLanguage: employeePreferredLanguage,
+      // Display-only on the client (e.g. gating the mobile "Admin Mode"
+      // section) — never treated as proof by any server route, which each
+      // independently check req.device.employeeSecurityRole.
+      securityRole: employeeSecurityRole,
     },
     status: open ? open.entry_type : "idle",
     currentActivity,
@@ -519,7 +524,7 @@ router.get(
   "/me",
   asyncHandler(async (req, res) => {
     const d = req.device!;
-    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage));
+    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage, d.employeeSecurityRole));
   })
 );
 
@@ -609,7 +614,7 @@ router.post(
     }
 
     await openEntry(d.employeeId, d.id, "work", activityId, idempotencyKey, overrides);
-    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage));
+    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage, d.employeeSecurityRole));
   })
 );
 
@@ -672,7 +677,7 @@ router.post(
           }
         : {}
     );
-    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage));
+    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage, d.employeeSecurityRole));
   })
 );
 
@@ -735,7 +740,7 @@ router.post(
     }
 
     await openEntry(d.employeeId, d.id, "work", resumeActivityId, idempotencyKey, overrides);
-    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage));
+    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage, d.employeeSecurityRole));
   })
 );
 
@@ -843,7 +848,7 @@ router.post(
       client.release();
     }
 
-    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage));
+    res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage, d.employeeSecurityRole));
   })
 );
 

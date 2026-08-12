@@ -14,6 +14,12 @@ export interface AuthedDevice {
   // serializeStatus) so the mobile Home/Stats UI can pick a language; null
   // means "not set," which the client treats the same as English.
   employeePreferredLanguage: string | null;
+  // The paired employee's desktop-configured security role name (e.g.
+  // "Administrator", "Manager", "Employee"). Added for the mobile app's
+  // role-based "Admin Mode" (NFC tag registration, etc.) — client-side use
+  // is display-only; any admin-only mobile route must still check this
+  // itself server-side rather than trust what the client shows.
+  employeeSecurityRole: string;
 }
 
 declare global {
@@ -84,10 +90,11 @@ export async function requireDevice(req: Request, res: Response, next: NextFunct
   const { rows } = await pool.query(
     `select d.id as device_id, d.is_active as device_active,
             da.employee_id, e.is_active as employee_active,
-            e.first_name, e.last_name, e.preferred_language
+            e.first_name, e.last_name, e.preferred_language, sr.name as security_role
      from devices d
      left join device_assignments da on da.device_id = d.id and da.unassigned_at is null
      left join employees e on e.id = da.employee_id
+     left join security_roles sr on sr.id = e.security_role_id
      where d.device_identifier = $1`,
     [deviceIdentifier]
   );
@@ -119,6 +126,7 @@ export async function requireDevice(req: Request, res: Response, next: NextFunct
     employeeFirstName: row.first_name,
     employeeLastName: row.last_name,
     employeePreferredLanguage: row.preferred_language,
+    employeeSecurityRole: row.security_role,
   };
   next();
 }
