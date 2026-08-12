@@ -106,7 +106,7 @@ export function CarrierPickerSheet({
         }
 
         setSelectedCarrierId(resolved.targetId);
-      });
+      }, undefined, "CarrierPickerSheet");
     })();
 
     return () => {

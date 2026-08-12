@@ -1,0 +1,139 @@
+diff --git a/node_modules/@capgo/capacitor-nfc/android/src/main/java/app/capgo/nfc/CapacitorNfcPlugin.java b/node_modules/@capgo/capacitor-nfc/android/src/main/java/app/capgo/nfc/CapacitorNfcPlugin.java
+index 9e87599..e21bcb3 100644
+--- a/node_modules/@capgo/capacitor-nfc/android/src/main/java/app/capgo/nfc/CapacitorNfcPlugin.java
++++ b/node_modules/@capgo/capacitor-nfc/android/src/main/java/app/capgo/nfc/CapacitorNfcPlugin.java
+@@ -16,6 +16,8 @@ import android.nfc.tech.NdefFormatable;
+ import android.nfc.tech.NfcA;
+ import android.os.Build;
+ import android.os.Bundle;
++import android.os.Handler;
++import android.os.Looper;
+ import android.provider.Settings;
+ import android.util.Log;
+ import com.getcapacitor.JSArray;
+@@ -46,6 +48,28 @@ public class CapacitorNfcPlugin extends Plugin {
+         NfcAdapter.FLAG_READER_NFC_V |
+         NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS;
+ 
++    // Patched for LabourLink: once a tag has been processed, tell the NFC
++    // stack to stop redelivering that same Tag instance to readerCallback —
++    // reader mode's own presence-check poll (100ms, see
++    // EXTRA_READER_PRESENCE_CHECK_DELAY below) otherwise keeps re-firing
++    // onTagDiscovered for as long as the tag remains in range, which is the
++    // leading suspect for the OEM "New tag collected" system viewer
++    // reappearing ~1s after a successful scan while the tag is still held
++    // against the phone. adapter.ignore() requires API 24+; this project's
++    // minSdkVersion is already 24, so no version guard is needed. See
++    // https://developer.android.com/reference/android/nfc/NfcAdapter#ignore(android.nfc.Tag,%20int,%20android.nfc.NfcAdapter.OnTagRemovedListener,%20android.os.Handler)
++    private static final int IGNORE_DEBOUNCE_MS = 3000;
++    private final Handler mainHandler = new Handler(Looper.getMainLooper());
++
++    // Timestamped logging (System.currentTimeMillis(), matches lib/nfc.ts's
++    // own logNfc format on the JS side) added for on-device Logcat
++    // diagnosis of the OEM-viewer-reappearing bug — filter logcat with
++    // "CapacitorNfcPlugin" to see reader-mode enable/disable, activity
++    // pause/resume, and tag detection/ignore lifecycle in one stream.
++    private void logTimed(String message) {
++        Log.d(TAG, "[" + System.currentTimeMillis() + "] " + message);
++    }
++
+     private NfcAdapter adapter;
+     private final AtomicReference<Tag> lastTag = new AtomicReference<>(null);
+     private final AtomicReference<NdefMessage> lastMessage = new AtomicReference<>(null);
+@@ -75,6 +99,7 @@ public class CapacitorNfcPlugin extends Plugin {
+     @Override
+     protected void handleOnPause() {
+         super.handleOnPause();
++        logTimed("handleOnPause: readerModeActive=" + readerModeActive + " readerModeRequested=" + readerModeRequested);
+         if (readerModeActive) {
+             disableReaderMode(false);
+         }
+@@ -83,6 +108,7 @@ public class CapacitorNfcPlugin extends Plugin {
+     @Override
+     protected void handleOnResume() {
+         super.handleOnResume();
++        logTimed("handleOnResume: readerModeActive=" + readerModeActive + " readerModeRequested=" + readerModeRequested);
+         if (readerModeRequested && !readerModeActive) {
+             enableReaderMode(readerModeFlags);
+         }
+@@ -96,12 +122,14 @@ public class CapacitorNfcPlugin extends Plugin {
+ 
+         readerModeFlags = call.getInt("androidReaderModeFlags", DEFAULT_READER_FLAGS);
+         readerModeRequested = true;
++        logTimed("startScanning: requested flags=" + readerModeFlags);
+         enableReaderMode(readerModeFlags);
+         call.resolve();
+     }
+ 
+     @PluginMethod
+     public void stopScanning(PluginCall call) {
++        logTimed("stopScanning called");
+         readerModeRequested = false;
+         disableReaderMode(true);
+         call.resolve();
+@@ -339,7 +367,9 @@ public class CapacitorNfcPlugin extends Plugin {
+             try {
+                 adapter.enableReaderMode(activity, readerCallback, flags, extras);
+                 readerModeActive = true;
++                logTimed("enableReaderMode: succeeded, flags=" + flags);
+             } catch (IllegalStateException ex) {
++                logTimed("enableReaderMode: FAILED, flags=" + flags + " ex=" + ex);
+                 Log.w(TAG, "Failed to enable reader mode", ex);
+             }
+         });
+@@ -354,7 +384,9 @@ public class CapacitorNfcPlugin extends Plugin {
+         activity.runOnUiThread(() -> {
+             try {
+                 adapter.disableReaderMode(activity);
++                logTimed("disableReaderMode: succeeded, clearRequested=" + clearRequested);
+             } catch (IllegalStateException ex) {
++                logTimed("disableReaderMode: FAILED, clearRequested=" + clearRequested + " ex=" + ex);
+                 Log.w(TAG, "Failed to disable reader mode", ex);
+             } finally {
+                 readerModeActive = false;
+@@ -370,6 +402,8 @@ public class CapacitorNfcPlugin extends Plugin {
+             return;
+         }
+ 
++        logTimed("onTagDiscovered: id=" + bytesToHex(tag.getId()));
++
+         NdefMessage message = null;
+         String[] techList = tag.getTechList();
+ 
+@@ -416,6 +450,36 @@ public class CapacitorNfcPlugin extends Plugin {
+         lastTag.set(tag);
+         lastMessage.set(message);
+         emitTagEvent(tag, message);
++        ignoreUntilRemoved(tag);
++    }
++
++    // See IGNORE_DEBOUNCE_MS's comment above for why this exists. Called
++    // every time a tag is fully processed so reader mode's own 100ms
++    // presence-check poll can't keep redelivering the same physical tag to
++    // readerCallback (and therefore re-running this whole method, including
++    // re-emitting a JS event) for as long as it's held against the phone.
++    private void ignoreUntilRemoved(Tag tag) {
++        if (adapter == null) {
++            return;
++        }
++        boolean accepted = adapter.ignore(
++            tag,
++            IGNORE_DEBOUNCE_MS,
++            () -> logTimed("onTagRemoved: id=" + bytesToHex(tag.getId())),
++            mainHandler
++        );
++        logTimed("ignore: id=" + bytesToHex(tag.getId()) + " accepted=" + accepted + " debounceMs=" + IGNORE_DEBOUNCE_MS);
++    }
++
++    private static String bytesToHex(byte[] bytes) {
++        if (bytes == null) {
++            return "null";
++        }
++        StringBuilder sb = new StringBuilder(bytes.length * 2);
++        for (byte b : bytes) {
++            sb.append(String.format("%02X", b));
++        }
++        return sb.toString();
+     }
+ 
+     /**

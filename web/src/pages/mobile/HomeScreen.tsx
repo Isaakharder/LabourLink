@@ -9,7 +9,7 @@ import { ActivityPicker, PickerActivity } from "../../components/mobile/Activity
 import { RowPickerSheet, RowPickerLand } from "../../components/mobile/RowPickerSheet";
 import { CarrierPickerSheet, PickerCarrier } from "../../components/mobile/CarrierPickerSheet";
 import { SwitchWarningDialog } from "../../components/mobile/SwitchWarningDialog";
-import { isNfcSupported, startScanSession } from "../../lib/nfc";
+import { isNfcSupported, startScanSession, ScannedTag } from "../../lib/nfc";
 import { refreshTagMappingCache, resolveScannedTag } from "../../lib/nfcMappingCache";
 import { checkSwitchWarning, SwitchWarning } from "../../lib/nfcSwitchWarning";
 import { classifyHomeRowScan, isHomeNfcScanActive } from "../../lib/nfcActiveScreenScan";
@@ -204,17 +204,6 @@ export function HomeScreen() {
     return () => clearTimeout(timer);
   }, [homeNfcMessage]);
 
-  // Read inside the scan callback below instead of me/activities/online
-  // directly — the callback is registered once per active session (the
-  // effect's own dependency is only the coarse active/inactive boolean, so
-  // the native reader isn't restarted on every unrelated `me` update) but
-  // still needs whichever values are current at the moment a tag actually
-  // resolves. Same pattern as RowPickerSheet's landsRef.
-  const homeScanContextRef = useRef({ me, activities, online });
-  useEffect(() => {
-    homeScanContextRef.current = { me, activities, online };
-  }, [me, activities, online]);
-
   const currentActivityDef = me?.currentActivity ? activities.find((a) => a.id === me.currentActivity!.id) : undefined;
   const rowQuestion = currentActivityDef?.questions.find((q) => q.questionType === "greenhouse_row") ?? null;
 
@@ -232,55 +221,116 @@ export function HomeScreen() {
       isRowBasedActivity: Boolean(rowQuestion),
     });
 
+  // Everything the scan callback below needs, kept current on every render
+  // and read only via .current — never via closure — so the callback (which
+  // is registered with the native plugin only on a genuine active<->inactive
+  // *edge*, see scanSessionActiveRef below, and can therefore live across
+  // many renders untouched) never acts on a stale `me`/`activities`/`online`
+  // snapshot, and critically never calls a stale copy of submitQuestionFlow
+  // itself (a plain function recreated every render, closing over that
+  // render's own me/switchWarning/perform).
+  const homeScanContextRef = useRef({ me, activities, online, language, submitQuestionFlow });
   useEffect(() => {
-    if (!homeNfcActive) return;
-    const stop = startScanSession((tag) => {
-      const { me: currentMe, activities: currentActivities, online: currentlyOnline } = homeScanContextRef.current;
-      const resolved = resolveScannedTag(tag);
-      const outcome = classifyHomeRowScan(resolved, {
-        currentRowId: currentMe?.currentActivity?.row?.id ?? null,
-        online: currentlyOnline,
-      });
+    homeScanContextRef.current = { me, activities, online, language, submitQuestionFlow };
+  });
 
-      if (outcome.kind === "unknown") {
-        setHomeNfcMessage(t(language, "nfcTagNotRecognized"));
-        return;
-      }
-      if (outcome.kind === "wrong-type") {
-        setHomeNfcMessage(t(language, "nfcTagIsBinNotRow"));
-        return;
-      }
-      if (outcome.kind === "already-current-row") {
-        return;
-      }
-      if (outcome.kind === "offline") {
-        setHomeNfcMessage(t(language, "nfcOfflineCannotSwitchRow"));
-        return;
-      }
+  // Set the instant a resolved scan is classified as an actionable switch,
+  // cleared once submitQuestionFlow's attempt for it has fully settled (see
+  // submitQuestionFlow's own onSettled option, which in turn covers
+  // perform()'s onSettled — success, offline-queued, 5xx, a handled
+  // conflict, or a generic error). A synchronous, render-independent guard
+  // against a second, distinct tag event racing a switch already being
+  // processed — stronger than gating on `busy`/`switchWarning` React state,
+  // which is only current as of the last render.
+  const inFlightScanRef = useRef(false);
 
-      // outcome.kind === "switch" — defensive re-check even though the
-      // active-gate above already requires a row-based current activity:
-      // `me`/`activities` could theoretically have changed between the
-      // gate re-rendering and this specific scan event.
-      if (!currentMe?.currentActivity) return;
-      const activityDef = currentActivities.find((a) => a.id === currentMe.currentActivity!.id);
-      const rowQ = activityDef?.questions.find((q) => q.questionType === "greenhouse_row");
-      if (!activityDef || !rowQ) return;
-
-      setHomeNfcMessage(null);
-      // One stable idempotency key for this physical scan, reused if a
-      // same-row/minimum-duration warning fires and is then confirmed —
-      // see submitQuestionFlow's own idempotencyKey option.
-      submitQuestionFlow(
-        currentMe.currentActivity.id,
-        currentMe.currentActivity.name,
-        { [rowQ.id]: { questionId: rowQ.id, questionType: "greenhouse_row", greenhouseRowId: outcome.rowId } },
-        { idempotencyKey: uuid(), onSuccess: playSuccessFeedback }
-      );
+  // Stable across every render — reads everything it needs via refs and
+  // only ever calls the stable setState setters below, so it never needs to
+  // be recreated (and correspondingly never needs the native scan session
+  // restarted) just because HomeScreen re-rendered.
+  const handleHomeScannedTag = useCallback((tag: ScannedTag) => {
+    if (inFlightScanRef.current) return;
+    const ctx = homeScanContextRef.current;
+    const resolved = resolveScannedTag(tag);
+    const outcome = classifyHomeRowScan(resolved, {
+      currentRowId: ctx.me?.currentActivity?.row?.id ?? null,
+      online: ctx.online,
     });
-    return stop;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [homeNfcActive]);
+
+    if (outcome.kind === "unknown") {
+      setHomeNfcMessage(t(ctx.language, "nfcTagNotRecognized"));
+      return;
+    }
+    if (outcome.kind === "wrong-type") {
+      setHomeNfcMessage(t(ctx.language, "nfcTagIsBinNotRow"));
+      return;
+    }
+    if (outcome.kind === "already-current-row") {
+      return;
+    }
+    if (outcome.kind === "offline") {
+      setHomeNfcMessage(t(ctx.language, "nfcOfflineCannotSwitchRow"));
+      return;
+    }
+
+    // outcome.kind === "switch" — defensive re-check even though the
+    // active-gate already requires a row-based current activity: `me`/
+    // `activities` could theoretically have changed between the gate
+    // re-rendering and this specific scan event.
+    if (!ctx.me?.currentActivity) return;
+    const activityDef = ctx.activities.find((a) => a.id === ctx.me!.currentActivity!.id);
+    const rowQ = activityDef?.questions.find((q) => q.questionType === "greenhouse_row");
+    if (!activityDef || !rowQ) return;
+
+    setHomeNfcMessage(null);
+    inFlightScanRef.current = true;
+    // One stable idempotency key for this physical scan, reused if a
+    // same-row/minimum-duration warning fires and is then confirmed — see
+    // submitQuestionFlow's own idempotencyKey option.
+    ctx.submitQuestionFlow(
+      ctx.me.currentActivity.id,
+      ctx.me.currentActivity.name,
+      { [rowQ.id]: { questionId: rowQ.id, questionType: "greenhouse_row", greenhouseRowId: outcome.rowId } },
+      {
+        idempotencyKey: uuid(),
+        onSuccess: playSuccessFeedback,
+        onSettled: () => {
+          inFlightScanRef.current = false;
+        },
+      }
+    );
+  }, []);
+
+  // Edge-triggered, imperative sync instead of a cleanup-returning effect:
+  // this only ever calls startScanSession/stop() when homeNfcActive's
+  // boolean value has genuinely flipped (tracked in scanSessionActiveRef),
+  // never as a side effect of an unrelated rerender, loadMe() refresh, timer
+  // tick, or the open entry temporarily reloading — none of those change
+  // scanSessionActiveRef's tracked value, so none of them touch reader mode.
+  const scanSessionActiveRef = useRef(false);
+  const stopScanRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (homeNfcActive === scanSessionActiveRef.current) return;
+    scanSessionActiveRef.current = homeNfcActive;
+    if (homeNfcActive) {
+      stopScanRef.current = startScanSession(handleHomeScannedTag, undefined, "HomeScreen");
+    } else {
+      stopScanRef.current?.();
+      stopScanRef.current = null;
+    }
+  }, [homeNfcActive, handleHomeScannedTag]);
+
+  // Unmount-only backstop — the edge-triggered effect above already stops
+  // the session the moment homeNfcActive goes false, but this guarantees
+  // the native reader is released if HomeScreen itself ever unmounts while
+  // still active.
+  useEffect(() => {
+    return () => {
+      stopScanRef.current?.();
+      stopScanRef.current = null;
+      scanSessionActiveRef.current = false;
+    };
+  }, []);
 
   function openPicker() {
     loadActivities();
@@ -369,6 +419,12 @@ export function HomeScreen() {
       // beep/vibration here. Never called for a queued-offline or failed
       // attempt, only a real confirmed success.
       onSuccess?: () => void;
+      // Fired unconditionally once this call has fully settled — a no-op
+      // (already on this row/activity), a warning shown, or perform()
+      // itself finishing (success, queued, or error; see PerformOptions'
+      // own onSettled). HomeScreen's foreground NFC scan uses this to clear
+      // its in-flight-scan guard no matter how the attempt concluded.
+      onSettled?: () => void;
     }
   ) {
     const confirmSwitch = options?.confirmSwitch ?? false;
@@ -389,6 +445,7 @@ export function HomeScreen() {
       if (newRowId === currentRowId && newCarrierId === currentCarrierId) {
         setQuestionFlow(null);
         setSingleQuestionEdit(null);
+        options?.onSettled?.();
         return;
       }
     }
@@ -411,6 +468,7 @@ export function HomeScreen() {
       );
       if (warning) {
         setSwitchWarning({ warning, targetKind, activityId, activityName, answers, idempotencyKey, onSuccess: options?.onSuccess });
+        options?.onSettled?.();
         return;
       }
     }
@@ -456,6 +514,7 @@ export function HomeScreen() {
           setSwitchWarning({ warning, targetKind, activityId, activityName, answers, idempotencyKey, onSuccess: options?.onSuccess });
           return true;
         },
+        onSettled: options?.onSettled,
       }
     );
   }

@@ -70,6 +70,14 @@ interface PerformOptions {
   // whose check returns false) gets today's unchanged generic-error
   // behavior.
   onConflict?: (err: ApiError) => boolean;
+  // Fired unconditionally once this call is fully finished — success,
+  // offline-queued, 5xx, a handled conflict, or a generic error — covering
+  // every exit path in one place (perform's own finally block) rather than
+  // requiring each caller to reconstruct "did this settle yet" from
+  // onResolved/onConflict, which only fire on some paths. Used by
+  // HomeScreen's foreground NFC scanning to clear its in-flight-scan guard
+  // regardless of how the request concluded.
+  onSettled?: () => void;
 }
 
 interface WorkSessionContextValue {
@@ -355,6 +363,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         }
       } finally {
         setBusy(false);
+        options?.onSettled?.();
       }
     },
     [applyMeResponse, markUnpaired, setServerReachable, language]

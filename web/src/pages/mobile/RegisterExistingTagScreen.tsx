@@ -69,10 +69,14 @@ export function RegisterExistingTagScreen() {
   // error's "Try again" reopen a fresh session without changing `step`.
   useEffect(() => {
     if (step !== "scan") return;
-    const stop = startScanSession((tag) => {
-      stop();
-      void handleScanAndRegister(tag);
-    });
+    const stop = startScanSession(
+      (tag) => {
+        stop();
+        void handleScanAndRegister(tag);
+      },
+      undefined,
+      "RegisterExistingTagScreen"
+    );
     return stop;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, scanGeneration]);

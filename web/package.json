@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "patch-package",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "start": "node serve-static.js",
@@ -37,6 +38,7 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
     "jsdom": "^29.1.1",
+    "patch-package": "^8.0.1",
     "typescript": "^5.5.2",
     "vite": "^5.3.3",
     "vitest": "^2.1.9"

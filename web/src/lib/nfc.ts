@@ -188,6 +188,19 @@ export const ANDROID_READER_MODE_FLAGS =
   0x80 | // FLAG_READER_SKIP_NDEF_CHECK
   0x100; // FLAG_READER_NO_PLATFORM_SOUNDS
 
+// Timestamped, greppable logging for reader-mode/session diagnosis (see the
+// NFC feature plan's "add timestamped logging for Reader Mode enable/
+// disable, activity pause/resume, tag detection and scan-session
+// ownership") — deliberately console.log, not a debug-only wrapper, so it
+// shows up in `adb logcat` (Capacitor's WebView console output is
+// forwarded there) without needing a special build. Every call site below
+// is tagged [nfc-js] to distinguish it from the native plugin's own
+// [CapacitorNfcPlugin] logcat tag when correlating a capture.
+function logNfc(label: string, message: string): void {
+  // eslint-disable-next-line no-console
+  console.log(`[nfc-js ${Date.now()}] (${label}) ${message}`);
+}
+
 // Starts a foreground-dispatch scan session and calls onTag for every tag
 // read until the returned stop function is called. A no-op outside a
 // native platform (isNfcSupported()/getNfcAvailability() is what callers
@@ -195,8 +208,21 @@ export const ANDROID_READER_MODE_FLAGS =
 // Safe to call stop() before the async plugin setup below has actually
 // finished — a fast mount+unmount (e.g. a sheet opened and immediately
 // closed) never leaves a dangling active scan or a leaked listener.
-export function startScanSession(onTag: (tag: ScannedTag) => void, onError?: (message: string) => void): () => void {
-  activeStop?.();
+//
+// `label` is diagnostic only (identifies which caller owns the session in
+// logcat — "HomeScreen", "RowPickerSheet", "RegisterExistingTagScreen",
+// etc.) — defaults to "session" so existing call sites that don't pass one
+// still log something identifiable.
+export function startScanSession(
+  onTag: (tag: ScannedTag) => void,
+  onError?: (message: string) => void,
+  label = "session"
+): () => void {
+  logNfc(label, "startScanSession called");
+  if (activeStop) {
+    logNfc(label, "preempting a previously active session (single reader-ownership guard)");
+    activeStop();
+  }
 
   let stopped = false;
   let listenerHandle: { remove: () => Promise<void> } | null = null;
@@ -210,7 +236,11 @@ export function startScanSession(onTag: (tag: ScannedTag) => void, onError?: (me
         listenerHandle = await CapacitorNfc.addListener("nfcEvent", (event: NfcEvent) => {
           if (!event.tag) return;
           const tag = toScannedTag(event.tag);
-          if (shouldSuppressDuplicateScan(lastHardwareId, tag.hardwareId)) return;
+          if (shouldSuppressDuplicateScan(lastHardwareId, tag.hardwareId)) {
+            logNfc(label, `tag suppressed (duplicate of last): hardwareId=${tag.hardwareId}`);
+            return;
+          }
+          logNfc(label, `tag detected: hardwareId=${tag.hardwareId} hasNdefData=${tag.hasNdefData}`);
           lastHardwareId = tag.hardwareId;
           onTag(tag);
         });
@@ -219,11 +249,14 @@ export function startScanSession(onTag: (tag: ScannedTag) => void, onError?: (me
           listenerHandle = null;
           return;
         }
+        logNfc(label, `calling native startScanning() with androidReaderModeFlags=${ANDROID_READER_MODE_FLAGS}`);
         await CapacitorNfc.startScanning({
           invalidateAfterFirstRead: false,
           androidReaderModeFlags: ANDROID_READER_MODE_FLAGS,
         });
+        logNfc(label, "native startScanning() resolved — reader mode should now be active");
       } catch (err) {
+        logNfc(label, `startScanning failed: ${err instanceof Error ? err.message : String(err)}`);
         onError?.(err instanceof Error ? err.message : "Could not start NFC scanning.");
       }
     })();
@@ -232,6 +265,7 @@ export function startScanSession(onTag: (tag: ScannedTag) => void, onError?: (me
   const stop = () => {
     if (stopped) return;
     stopped = true;
+    logNfc(label, "stop() called");
     if (activeStop === stop) activeStop = null;
     if (!isNativePlatform()) return;
     (async () => {
@@ -242,6 +276,7 @@ export function startScanSession(onTag: (tag: ScannedTag) => void, onError?: (me
           listenerHandle = null;
         }
         await CapacitorNfc.stopScanning();
+        logNfc(label, "native stopScanning() resolved — reader mode should now be inactive");
       } catch {
         // Best-effort cleanup — nothing left listening matters more than a
         // clean rejection here.

@@ -71,7 +71,7 @@ export function WriteNewTagScreen() {
           );
         }
       }
-    });
+    }, undefined, "WriteNewTagScreen");
     return stop;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);

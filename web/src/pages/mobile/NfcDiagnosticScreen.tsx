@@ -49,7 +49,8 @@ export function NfcDiagnosticScreen() {
         });
         setScanError(null);
       },
-      (message) => setScanError(message)
+      (message) => setScanError(message),
+      "NfcDiagnosticScreen"
     );
     return stop;
   }, [availability]);
