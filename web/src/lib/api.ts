@@ -34,11 +34,17 @@ export class ApiError extends Error {
   // undefined, not guessed at, so callers can't mistake an unrelated error
   // for a specific one.
   code?: string;
-  constructor(status: number, message: string, errors?: Record<string, string>, code?: string) {
+  // The full parsed JSON body, for the handful of callers (e.g. the NFC tag
+  // registration 409s — see nfcTags.ts's tagConflict/targetConflict) that
+  // need structured data beyond error/errors/code. Most callers never touch
+  // this and should keep reading the fields above instead.
+  body?: unknown;
+  constructor(status: number, message: string, errors?: Record<string, string>, code?: string, body?: unknown) {
     super(message);
     this.status = status;
     this.errors = errors;
     this.code = code;
+    this.body = body;
   }
 }
 
@@ -71,7 +77,8 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
       res.status,
       body.error || (typeof firstFieldError === "string" ? firstFieldError : "Request failed"),
       body.errors,
-      typeof body.code === "string" ? body.code : undefined
+      typeof body.code === "string" ? body.code : undefined,
+      body
     );
   }
 

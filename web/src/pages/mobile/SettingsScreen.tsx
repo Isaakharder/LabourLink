@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useDevicePairing } from "../../context/DevicePairingContext";
 import { useMessages } from "../../context/MessagesContext";
 import { useWorkSession } from "../../context/WorkSessionContext";
@@ -17,7 +18,12 @@ import { isNativePlatform } from "../../lib/platform";
 export function SettingsScreen() {
   const { cachedEmployee } = useDevicePairing();
   const { refresh } = useMessages();
-  const { online, pending, flush } = useWorkSession();
+  const { online, pending, flush, me } = useWorkSession();
+  // me.employee.securityRole (freshly fetched from the server on every /me
+  // call, unlike cachedEmployee) is display-gating only — the routes behind
+  // "NFC Diagnostic" and, later, tag registration each re-check the paired
+  // employee's role server-side regardless of what this section shows.
+  const isAdminMode = me?.employee.securityRole === "Administrator" || me?.employee.securityRole === "Manager";
   const [notifEnabled, setNotifEnabled] = useState(isPushMarkedEnabled());
   const [notifBusy, setNotifBusy] = useState(false);
   const [notifError, setNotifError] = useState<string | null>(null);
@@ -97,6 +103,29 @@ export function SettingsScreen() {
           {syncing ? "Syncing..." : "Sync now"}
         </button>
       </section>
+
+      {/* Role-based, not a new on-device PIN — see the header comment above
+          on why this codebase deliberately avoids on-device secrets. Shown
+          only when the currently paired employee's server-verified role is
+          Administrator/Manager; every route reached from here re-checks
+          that role itself. Never translated (same convention as the rest of
+          this screen — see i18n.ts's scope note). */}
+      {isAdminMode && (
+        <section className="mobile-settings-device-section">
+          <h2>Admin Mode</h2>
+          <div className="mobile-confirm-actions">
+            <Link to="/mobile/settings/register-tag" className="mobile-action-button mobile-action-secondary">
+              Register Existing Tag
+            </Link>
+            <Link to="/mobile/settings/write-tag" className="mobile-action-button mobile-action-secondary">
+              Write New Tag
+            </Link>
+            <Link to="/mobile/settings/nfc-diagnostic" className="mobile-action-button mobile-action-secondary">
+              NFC Diagnostic
+            </Link>
+          </div>
+        </section>
+      )}
     </div>
   );
 }

@@ -24,7 +24,8 @@
     "test:break-reconciliation": "ts-node src/lib/breakReconciliation.test.ts",
     "test:inputs-performance": "ts-node src/routes/inputs.performance.test.ts",
     "test:work-end-rounding": "ts-node src/routes/workEndRounding.test.ts",
-    "test:device-assignment": "ts-node src/routes/deviceAssignment.test.ts"
+    "test:device-assignment": "ts-node src/routes/deviceAssignment.test.ts",
+    "test:nfc-tags": "ts-node src/routes/nfcTags.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",

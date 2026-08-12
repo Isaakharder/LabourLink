@@ -54,4 +54,12 @@
          requestPermissions() (see web/src/lib/push.ts), same as any other
          Android 13+ runtime permission. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- @capgo/capacitor-nfc (web/src/lib/nfc.ts). required="false" so the
+         APK still installs and runs on farm phones without NFC hardware —
+         manual row/bin selection must keep working there; lib/nfc.ts's
+         isNfcSupported() is what the UI actually checks at runtime. No NDEF
+         intent-filter: scanning is foreground-dispatch only (started/stopped
+         while a specific screen is open), never launch-the-app-via-tag-tap. -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
 </manifest>

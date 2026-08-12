@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Language, t } from "../../lib/i18n";
+import { isNfcSupported, ScannedTag, startScanSession } from "../../lib/nfc";
+import { resolveScannedTag } from "../../lib/nfcMappingCache";
 
 export interface RowPickerRow {
   id: string;
@@ -71,6 +73,18 @@ export function RowPickerSheet({
   const [expandedPhaseId, setExpandedPhaseId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selectedRowId, setSelectedRowId] = useState<string | null>(initialSelectedRowId ?? null);
+  const [nfcActive, setNfcActive] = useState(false);
+  const [nfcHint, setNfcHint] = useState<string | null>(null);
+
+  // Read inside the NFC scan callback below instead of `lands` directly —
+  // the callback is registered once (see the scan effect's `[]` deps, so a
+  // held-open scan session survives `lands` finishing its async load
+  // without being torn down and restarted) but still needs whichever lands
+  // value is current at the moment a tag actually resolves.
+  const landsRef = useRef(lands);
+  useEffect(() => {
+    landsRef.current = lands;
+  }, [lands]);
 
   // Auto-select the only land once loaded — most greenhouses have exactly
   // one, and there's no reason to make the employee tap through an extra
@@ -108,6 +122,58 @@ export function RowPickerSheet({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [busy, onCancel]);
+
+  // NFC scan session lives exactly as long as this sheet does — started on
+  // mount, stopped on unmount (Cancel, Confirm, Back, or the parent closing
+  // it for any other reason all unmount this component the same way) — so a
+  // tag tapped after the employee has moved on can never affect a selection
+  // it wasn't open for. A resolved tag only *selects* the row (same as a
+  // manual tap), never auto-confirms: this opens a real work entry, so it
+  // stays reviewable before Confirm, matching this sheet's existing
+  // select-then-confirm design (see the header comment above).
+  useEffect(() => {
+    let cancelled = false;
+    let stopScan: (() => void) | null = null;
+    let waitingTimer: ReturnType<typeof setTimeout> | null = null;
+
+    (async () => {
+      const supported = await isNfcSupported();
+      if (cancelled || !supported) return;
+      setNfcActive(true);
+      waitingTimer = setTimeout(() => {
+        if (!cancelled) setNfcHint(t(language, "nfcStillWaiting"));
+      }, 15000);
+
+      stopScan = startScanSession((tag: ScannedTag) => {
+        const resolved = resolveScannedTag(tag);
+        if (!resolved || resolved.targetType !== "greenhouse_row") {
+          setNfcHint(t(language, "nfcTagNotRecognized"));
+          return;
+        }
+        setNfcHint(null);
+        setSelectedRowId(resolved.targetId);
+        for (const l of landsRef.current ?? []) {
+          for (const p of l.phases) {
+            if (p.rows.some((r) => r.id === resolved.targetId)) {
+              setSelectedLandId(l.id);
+              setExpandedPhaseId(p.id);
+              return;
+            }
+          }
+        }
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+      if (waitingTimer) clearTimeout(waitingTimer);
+      stopScan?.();
+    };
+    // language is read inside the callback via closure — re-subscribing the
+    // whole scan session on a language change (which can't happen mid-sheet
+    // anyway, it's fixed per employee) isn't worth guarding against.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const land = lands?.find((l) => l.id === selectedLandId) ?? null;
 
@@ -177,6 +243,7 @@ export function RowPickerSheet({
         </div>
 
         {error && <p className="error-text">{error}</p>}
+        {nfcActive && <p className="mobile-row-picker-subtitle">{nfcHint ?? t(language, "tapRowTag")}</p>}
 
         {!lands ? (
           <p className="mobile-sheet-empty">{t(language, "loadingRows")}</p>

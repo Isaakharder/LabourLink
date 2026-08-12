@@ -29,7 +29,15 @@ export interface PreviousActivity {
 }
 
 export interface MeResponse {
-  employee: { id: string; firstName: string; lastName: string; preferredLanguage: string | null };
+  employee: {
+    id: string;
+    firstName: string;
+    lastName: string;
+    preferredLanguage: string | null;
+    // Display-only client-side (e.g. gating the mobile "Admin Mode" section)
+    // — every server route that actually needs this re-checks it itself.
+    securityRole: string;
+  };
   status: "idle" | "work" | "break";
   currentActivity: CurrentActivity | null;
   since: string | null;

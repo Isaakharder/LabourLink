@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Language, t } from "../../lib/i18n";
+import { isNfcSupported, ScannedTag, startScanSession } from "../../lib/nfc";
+import { resolveScannedTag } from "../../lib/nfcMappingCache";
 
 export interface PickerCarrier {
   id: string;
@@ -53,6 +55,8 @@ export function CarrierPickerSheet({
 }: CarrierPickerSheetProps) {
   const [search, setSearch] = useState("");
   const [selectedCarrierId, setSelectedCarrierId] = useState<string | null>(initialSelectedCarrierId ?? null);
+  const [nfcActive, setNfcActive] = useState(false);
+  const [nfcHint, setNfcHint] = useState<string | null>(null);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -61,6 +65,42 @@ export function CarrierPickerSheet({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [busy, onCancel]);
+
+  // Same NFC scan lifecycle as RowPickerSheet: started on mount, stopped on
+  // unmount, and a resolved tag only *selects* a carrier (same as a manual
+  // tap) — never auto-confirms. See RowPickerSheet.tsx's matching effect for
+  // the full rationale.
+  useEffect(() => {
+    let cancelled = false;
+    let stopScan: (() => void) | null = null;
+    let waitingTimer: ReturnType<typeof setTimeout> | null = null;
+
+    (async () => {
+      const supported = await isNfcSupported();
+      if (cancelled || !supported) return;
+      setNfcActive(true);
+      waitingTimer = setTimeout(() => {
+        if (!cancelled) setNfcHint(t(language, "nfcStillWaiting"));
+      }, 15000);
+
+      stopScan = startScanSession((tag: ScannedTag) => {
+        const resolved = resolveScannedTag(tag);
+        if (!resolved || resolved.targetType !== "carrier") {
+          setNfcHint(t(language, "nfcTagNotRecognized"));
+          return;
+        }
+        setNfcHint(null);
+        setSelectedCarrierId(resolved.targetId);
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+      if (waitingTimer) clearTimeout(waitingTimer);
+      stopScan?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const filtered = useMemo(() => {
     if (!carriers) return null;
@@ -96,6 +136,7 @@ export function CarrierPickerSheet({
         </div>
 
         {error && <p className="error-text">{error}</p>}
+        {nfcActive && <p className="mobile-row-picker-subtitle">{nfcHint ?? t(language, "tapBinTag")}</p>}
 
         {!carriers ? (
           <p className="mobile-sheet-empty">{t(language, "loadingCarriers")}</p>

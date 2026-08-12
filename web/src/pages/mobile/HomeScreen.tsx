@@ -8,6 +8,7 @@ import { ActivityQuestion, QuestionAnswer } from "../../lib/activityQuestionType
 import { ActivityPicker, PickerActivity } from "../../components/mobile/ActivityPicker";
 import { RowPickerSheet, RowPickerLand } from "../../components/mobile/RowPickerSheet";
 import { CarrierPickerSheet, PickerCarrier } from "../../components/mobile/CarrierPickerSheet";
+import { refreshTagMappingCache } from "../../lib/nfcMappingCache";
 import { ActivityTimer, formatElapsed } from "../../components/mobile/ActivityTimer";
 import { RecentJobsCard } from "../../components/mobile/RecentJobsCard";
 
@@ -108,11 +109,21 @@ export function HomeScreen() {
       });
   }, [handleApiError]);
 
+  // Refreshes the offline NFC tag-mapping cache (lib/nfcMappingCache.ts) —
+  // same event-driven wiring as the loaders above, but deliberately
+  // fire-and-forget with no handleApiError call: a failed refresh (e.g.
+  // offline) just means the picker sheets keep resolving scans against
+  // whatever was cached last, not a blocking error for the employee.
+  const loadTagMappings = useCallback(() => {
+    refreshTagMappingCache().catch(() => {});
+  }, []);
+
   useEffect(() => {
     loadActivities();
     loadGreenhouseRows();
     loadCarriers();
-  }, [loadActivities, loadGreenhouseRows, loadCarriers]);
+    loadTagMappings();
+  }, [loadActivities, loadGreenhouseRows, loadCarriers, loadTagMappings]);
 
   // me/online/pairing reconnection is handled centrally by
   // WorkSessionProvider (mounted once in MobileLayout, so it survives tab
@@ -127,6 +138,7 @@ export function HomeScreen() {
         loadActivities();
         loadGreenhouseRows();
         loadCarriers();
+        loadTagMappings();
       }
     }
     window.addEventListener("online", goOnline);
@@ -135,7 +147,7 @@ export function HomeScreen() {
       window.removeEventListener("online", goOnline);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [loadActivities, loadGreenhouseRows, loadCarriers]);
+  }, [loadActivities, loadGreenhouseRows, loadCarriers, loadTagMappings]);
 
   function openPicker() {
     loadActivities();
@@ -149,6 +161,7 @@ export function HomeScreen() {
   function startQuestionFlow(activityId: string, activityName: string, questions: ActivityQuestion[]) {
     loadGreenhouseRows();
     loadCarriers();
+    loadTagMappings();
     setError(null);
     setQuestionFlow({ activityId, activityName, questions, stepIndex: 0, answers: {} });
     setPickerOpen(false);
@@ -331,6 +344,7 @@ export function HomeScreen() {
   function openSingleQuestionEdit(activity: Activity, question: ActivityQuestion) {
     loadGreenhouseRows();
     loadCarriers();
+    loadTagMappings();
     setError(null);
     setSingleQuestionEdit({ activityId: activity.id, activityName: activity.name, question });
   }

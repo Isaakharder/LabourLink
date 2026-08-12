@@ -78,6 +78,13 @@ const TRANSLATIONS_EN = {
   cancel: "Cancel",
   close: "Close",
 
+  // --- NFC scan-to-select (row/carrier pickers) — fixed LabourLink prompts
+  // only; row/bin names stay whatever the administrator named them. ---
+  tapRowTag: "Tap the row's tag to select it, or choose manually below.",
+  tapBinTag: "Tap the bin's tag to select it, or choose manually below.",
+  nfcTagNotRecognized: "That tag isn't registered. Choose manually below.",
+  nfcStillWaiting: "Still not seeing a tag — choose manually below.",
+
   // --- End work / breaks ---
   finishWorkQuestion: "Finish work?",
   finishWorkConfirmMessage:
@@ -159,6 +166,11 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   back: "Atrás",
   cancel: "Cancelar",
   close: "Cerrar",
+
+  tapRowTag: "Toque la etiqueta de la fila para seleccionarla, o elija manualmente abajo.",
+  tapBinTag: "Toque la etiqueta del transportador para seleccionarlo, o elija manualmente abajo.",
+  nfcTagNotRecognized: "Esa etiqueta no está registrada. Elija manualmente abajo.",
+  nfcStillWaiting: "Todavía no se detecta ninguna etiqueta — elija manualmente abajo.",
 
   finishWorkQuestion: "¿Finalizar trabajo?",
   finishWorkConfirmMessage:

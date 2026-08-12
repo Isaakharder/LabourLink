@@ -20,8 +20,11 @@ import { SetupPage } from "./pages/desktop/SetupPage";
 import { RequireRole } from "./components/auth/RequireRole";
 import { DeviceDeactivatedScreen } from "./pages/mobile/DeviceDeactivatedScreen";
 import { HomeScreen } from "./pages/mobile/HomeScreen";
+import { NfcDiagnosticScreen } from "./pages/mobile/NfcDiagnosticScreen";
 import { PairingScreen } from "./pages/mobile/PairingScreen";
+import { RegisterExistingTagScreen } from "./pages/mobile/RegisterExistingTagScreen";
 import { SettingsScreen } from "./pages/mobile/SettingsScreen";
+import { WriteNewTagScreen } from "./pages/mobile/WriteNewTagScreen";
 import { StatsScreen } from "./pages/mobile/StatsScreen";
 import { useIsMobile } from "./lib/useIsMobile";
 import { isNativePlatform, shouldRenderMobileApp } from "./lib/platform";
@@ -122,6 +125,9 @@ function MobileApp() {
         <Route path="home" element={<HomeScreen />} />
         <Route path="stats" element={<StatsScreen />} />
         <Route path="settings" element={<SettingsScreen />} />
+        <Route path="settings/nfc-diagnostic" element={<NfcDiagnosticScreen />} />
+        <Route path="settings/register-tag" element={<RegisterExistingTagScreen />} />
+        <Route path="settings/write-tag" element={<WriteNewTagScreen />} />
         <Route path="*" element={<Navigate to="/mobile/home" replace />} />
       </Route>
       <Route path="*" element={<Navigate to="/mobile" replace />} />

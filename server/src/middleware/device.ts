@@ -130,3 +130,18 @@ export async function requireDevice(req: Request, res: Response, next: NextFunct
   };
   next();
 }
+
+// Chain after requireDevice on any mobile route that mutates NFC tag
+// mappings (registration, writing). The mobile Settings UI already hides
+// those screens unless the paired employee's role qualifies, but that's
+// display convenience only — this is the actual gate, checked fresh from
+// the DB-backed req.device.employeeSecurityRole on every request, same
+// posture as requireRole on the desktop routes. No PIN, no unlock session:
+// access is simply whatever the currently paired employee's role allows.
+export function requireDeviceAdmin(req: Request, res: Response, next: NextFunction) {
+  const role = req.device?.employeeSecurityRole;
+  if (role !== "Administrator" && role !== "Manager") {
+    return res.status(403).json({ error: "This action requires an Administrator or Manager role." });
+  }
+  next();
+}
