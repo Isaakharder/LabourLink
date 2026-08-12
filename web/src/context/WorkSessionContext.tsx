@@ -16,6 +16,11 @@ export interface CurrentActivity {
   // chain (same activity, separated only by breaks) before this entry — the
   // live elapsed time since startedAt is added on top by ActivityTimer.
   accumulatedWorkedSecondsBeforeCurrentEntry: number;
+  // The currently-running activity's own configured minimum — used by
+  // lib/nfcSwitchWarning.ts's client-side pre-check so a scan-triggered
+  // switch attempt can warn before reaching the minimum without a round
+  // trip (the server independently re-checks the same rule).
+  minimumDurationMinutes: number;
   row: { id: string; label: string } | null;
   carrier: { id: string; name: string } | null;
 }
@@ -56,6 +61,15 @@ interface PerformOptions {
   // flow sheet) — irrelevant to break/end-day callers, which have no such
   // sheets open when they call perform.
   onResolved?: () => void;
+  // Structured 409 interception — e.g. HomeScreen's same-row/minimum-
+  // duration switch warnings (see lib/nfcSwitchWarning.ts and
+  // mobileTime.ts's SAME_ROW_RECENTLY_COMPLETED/MINIMUM_DURATION_NOT_
+  // REACHED codes). Called with the raw ApiError for any non-network,
+  // non-5xx failure; returning true means "I handled this, don't show the
+  // generic translated error banner." A caller that doesn't pass this (or
+  // whose check returns false) gets today's unchanged generic-error
+  // behavior.
+  onConflict?: (err: ApiError) => boolean;
 }
 
 interface WorkSessionContextValue {
@@ -329,6 +343,10 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
           options?.onResolved?.();
         } else if (err instanceof ApiError && err.status >= 500) {
           setServerReachable(false);
+        } else if (err instanceof ApiError && options?.onConflict?.(err)) {
+          // Handled entirely by the caller's dialog (e.g. the same-row/
+          // minimum-duration switch warnings) — no generic error banner.
+          setServerReachable(true);
         } else {
           setServerReachable(true);
           setError(

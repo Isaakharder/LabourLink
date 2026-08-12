@@ -62,4 +62,9 @@
          while a specific screen is open), never launch-the-app-via-tag-tap. -->
     <uses-permission android:name="android.permission.NFC" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
+    <!-- lib/feedback.ts's navigator.vibrate() — the instant-registration
+         success feedback on RegisterExistingTagScreen. Not declaring this
+         doesn't crash anything (vibrate() just silently no-ops), but
+         WebView vibration is more reliably granted with it present. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 </manifest>

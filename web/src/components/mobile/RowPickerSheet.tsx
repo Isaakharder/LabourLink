@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Language, t } from "../../lib/i18n";
 import { isNfcSupported, ScannedTag, startScanSession } from "../../lib/nfc";
-import { resolveScannedTag } from "../../lib/nfcMappingCache";
+import { resolveScannedTag, ResolvedTagTarget } from "../../lib/nfcMappingCache";
 
 export interface RowPickerRow {
   id: string;
@@ -48,6 +48,13 @@ interface RowPickerSheetProps {
   onBack?: () => void;
   onCancel: () => void;
   language: Language;
+  // When provided, a resolved NFC scan is handed entirely to the caller
+  // (business-rule checks, auto-submit, loading state — see HomeScreen's
+  // handleNfcScan) instead of this sheet's own default "just select the
+  // row" behavior. Omitted by the admin registration screens, which reuse
+  // this sheet purely for manual target selection and want the original
+  // behavior unchanged.
+  onNfcScan?: (resolved: ResolvedTagTarget) => void;
 }
 
 // Same bottom-sheet visual pattern as ActivityPicker/ConfirmEndDayModal
@@ -68,6 +75,7 @@ export function RowPickerSheet({
   onBack,
   onCancel,
   language,
+  onNfcScan,
 }: RowPickerSheetProps) {
   const [selectedLandId, setSelectedLandId] = useState<string | null>(null);
   const [expandedPhaseId, setExpandedPhaseId] = useState<string | null>(null);
@@ -85,6 +93,14 @@ export function RowPickerSheet({
   useEffect(() => {
     landsRef.current = lands;
   }, [lands]);
+
+  // Same reasoning as landsRef — onNfcScan is typically a fresh closure
+  // every render (it captures HomeScreen's current questionFlow/busy/etc.),
+  // but the scan effect below only runs once per mount.
+  const onNfcScanRef = useRef(onNfcScan);
+  useEffect(() => {
+    onNfcScanRef.current = onNfcScan;
+  }, [onNfcScan]);
 
   // Auto-select the only land once loaded — most greenhouses have exactly
   // one, and there's no reason to make the employee tap through an extra
@@ -127,10 +143,13 @@ export function RowPickerSheet({
   // mount, stopped on unmount (Cancel, Confirm, Back, or the parent closing
   // it for any other reason all unmount this component the same way) — so a
   // tag tapped after the employee has moved on can never affect a selection
-  // it wasn't open for. A resolved tag only *selects* the row (same as a
-  // manual tap), never auto-confirms: this opens a real work entry, so it
-  // stays reviewable before Confirm, matching this sheet's existing
-  // select-then-confirm design (see the header comment above).
+  // it wasn't open for. When onNfcScan is provided (the employee flow), a
+  // resolved tag is handed entirely to the caller — auto-submit, warning
+  // dialogs, and loading state are HomeScreen's responsibility, not this
+  // generic picker's. Without it (the admin registration screens), a
+  // resolved tag only *selects* the row (same as a manual tap), never
+  // auto-confirms — see this sheet's existing select-then-confirm design
+  // (header comment above), unchanged for that case.
   useEffect(() => {
     let cancelled = false;
     let stopScan: (() => void) | null = null;
@@ -151,6 +170,12 @@ export function RowPickerSheet({
           return;
         }
         setNfcHint(null);
+
+        if (onNfcScanRef.current) {
+          onNfcScanRef.current(resolved);
+          return;
+        }
+
         setSelectedRowId(resolved.targetId);
         for (const l of landsRef.current ?? []) {
           for (const p of l.phases) {
@@ -243,7 +268,9 @@ export function RowPickerSheet({
         </div>
 
         {error && <p className="error-text">{error}</p>}
-        {nfcActive && <p className="mobile-row-picker-subtitle">{nfcHint ?? t(language, "tapRowTag")}</p>}
+        {nfcActive && (
+          <p className="mobile-row-picker-subtitle">{busy ? t(language, "starting") : nfcHint ?? t(language, "tapRowTag")}</p>
+        )}
 
         {!lands ? (
           <p className="mobile-sheet-empty">{t(language, "loadingRows")}</p>

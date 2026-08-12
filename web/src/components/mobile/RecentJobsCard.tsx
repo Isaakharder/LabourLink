@@ -7,8 +7,8 @@ export interface RecentJob {
   startedAt: string;
   endedAt: string;
   durationSeconds: number;
-  row: { label: string } | null;
-  carrier: { label: string } | null;
+  row: { id: string; label: string } | null;
+  carrier: { id: string; label: string } | null;
   // Closed by the server-side daily-cutoff safety net (a forgotten End
   // Work carried past local midnight) rather than a real tap.
   autoClosed: boolean;

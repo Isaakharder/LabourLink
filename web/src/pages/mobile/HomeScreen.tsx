@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import { useDevicePairing } from "../../context/DevicePairingContext";
 import { useWorkSession } from "../../context/WorkSessionContext";
-import { api } from "../../lib/api";
+import { api, ApiError } from "../../lib/api";
 import { uuid } from "../../lib/uuid";
 import { t } from "../../lib/i18n";
 import { ActivityQuestion, QuestionAnswer } from "../../lib/activityQuestionTypes";
 import { ActivityPicker, PickerActivity } from "../../components/mobile/ActivityPicker";
 import { RowPickerSheet, RowPickerLand } from "../../components/mobile/RowPickerSheet";
 import { CarrierPickerSheet, PickerCarrier } from "../../components/mobile/CarrierPickerSheet";
+import { SwitchWarningDialog } from "../../components/mobile/SwitchWarningDialog";
 import { refreshTagMappingCache } from "../../lib/nfcMappingCache";
+import { checkSwitchWarning, SwitchWarning } from "../../lib/nfcSwitchWarning";
 import { ActivityTimer, formatElapsed } from "../../components/mobile/ActivityTimer";
 import { RecentJobsCard } from "../../components/mobile/RecentJobsCard";
 
@@ -69,6 +71,19 @@ export function HomeScreen() {
   // details" — see PendingQuestionFlow's own comment.
   const [questionFlow, setQuestionFlow] = useState<PendingQuestionFlow | null>(null);
   const [singleQuestionEdit, setSingleQuestionEdit] = useState<SingleQuestionEdit | null>(null);
+  // A same-row/minimum-duration warning blocking a submission until the
+  // employee explicitly confirms or cancels — see checkSwitchWarning and
+  // submitQuestionFlow below. Rendered on top of whichever picker sheet is
+  // still open underneath it (never unmounted just to show this), so
+  // Cancel returns straight back to scanning/manual selection with no
+  // state lost.
+  const [switchWarning, setSwitchWarning] = useState<{
+    warning: SwitchWarning;
+    targetKind: "row" | "carrier";
+    activityId: string;
+    activityName: string;
+    answers: Record<string, QuestionAnswer>;
+  } | null>(null);
 
   // Same event-driven wiring as loadGreenhouseRows/loadCarriers below — the
   // phone never has its own notion of which activities exist. Re-run on
@@ -214,21 +229,51 @@ export function HomeScreen() {
   function submitQuestionFlow(
     activityId: string,
     activityName: string,
-    answers: Record<string, QuestionAnswer>
+    answers: Record<string, QuestionAnswer>,
+    // Set only after the employee has explicitly dismissed the same-row or
+    // minimum-duration warning below (SwitchWarningDialog's confirm
+    // button) — bypasses the client-side pre-check for this one call and
+    // tells the server to bypass its own identical check too (see
+    // mobileTime.ts's confirmSwitch).
+    confirmSwitch = false
   ) {
+    const rowAnswer = Object.values(answers).find(
+      (a): a is Extract<QuestionAnswer, { questionType: "greenhouse_row" }> => a.questionType === "greenhouse_row"
+    );
+    const carrierAnswer = Object.values(answers).find(
+      (a): a is Extract<QuestionAnswer, { questionType: "carrier" }> => a.questionType === "carrier"
+    );
+    const newRowId = rowAnswer?.greenhouseRowId ?? null;
+    const newCarrierId = carrierAnswer?.carrierId ?? null;
+
     if (me?.status === "work" && me.currentActivity?.id === activityId) {
-      const rowAnswer = Object.values(answers).find(
-        (a): a is Extract<QuestionAnswer, { questionType: "greenhouse_row" }> => a.questionType === "greenhouse_row"
-      );
-      const carrierAnswer = Object.values(answers).find(
-        (a): a is Extract<QuestionAnswer, { questionType: "carrier" }> => a.questionType === "carrier"
-      );
-      const newRowId = rowAnswer?.greenhouseRowId ?? null;
-      const newCarrierId = carrierAnswer?.carrierId ?? null;
       const currentRowId = me.currentActivity.row?.id ?? null;
       const currentCarrierId = me.currentActivity.carrier?.id ?? null;
       if (newRowId === currentRowId && newCarrierId === currentCarrierId) {
         setQuestionFlow(null);
+        setSingleQuestionEdit(null);
+        return;
+      }
+    }
+
+    const targetKind: "row" | "carrier" = newCarrierId !== null ? "carrier" : "row";
+
+    // Client-side pre-check — immediate, offline-capable UX only; the
+    // server independently re-checks the identical rule (see
+    // mobileTime.ts), so a stale me/recentJobs cache here can never let a
+    // switch that should have warned go through silently, it just means
+    // the warning shows up one round trip later instead (the onConflict
+    // handler below).
+    if (!confirmSwitch && me) {
+      const warning = checkSwitchWarning(
+        { status: me.status, currentActivity: me.currentActivity, recentJobs: me.recentJobs },
+        activityId,
+        newRowId,
+        newCarrierId,
+        new Date()
+      );
+      if (warning) {
+        setSwitchWarning({ warning, targetKind, activityId, activityName, answers });
         return;
       }
     }
@@ -242,8 +287,38 @@ export function HomeScreen() {
     // reasoning, same call site shape, just reached via the question flow.
     perform(
       "/api/mobile/time-entries/work",
-      { activityId, answers: answersPayload, idempotencyKey: uuid(), clientStartedAt: new Date().toISOString() },
-      { pendingLabel: activityName, onResolved: () => setQuestionFlow(null) }
+      {
+        activityId,
+        answers: answersPayload,
+        idempotencyKey: uuid(),
+        clientStartedAt: new Date().toISOString(),
+        confirmSwitch,
+      },
+      {
+        pendingLabel: activityName,
+        onResolved: () => {
+          setQuestionFlow(null);
+          setSingleQuestionEdit(null);
+          setSwitchWarning(null);
+        },
+        // The server's own authoritative check, for the case the client-
+        // side pre-check above missed (stale me/recentJobs) — same dialog,
+        // just arriving a round trip later instead of instantly.
+        onConflict: (err: ApiError) => {
+          if (err.code !== "SAME_ROW_RECENTLY_COMPLETED" && err.code !== "MINIMUM_DURATION_NOT_REACHED") return false;
+          const body = (err.body ?? {}) as { elapsedSeconds?: number; minimumMinutes?: number };
+          const warning: SwitchWarning =
+            err.code === "SAME_ROW_RECENTLY_COMPLETED"
+              ? { kind: "sameRow" }
+              : {
+                  kind: "minimumDuration",
+                  elapsedSeconds: body.elapsedSeconds ?? 0,
+                  minimumMinutes: body.minimumMinutes ?? 0,
+                };
+          setSwitchWarning({ warning, targetKind, activityId, activityName, answers });
+          return true;
+        },
+      }
     );
   }
 
@@ -361,26 +436,33 @@ export function HomeScreen() {
   // behavior otherwise, the same mechanics the old full re-ask flow relied
   // on, just scoped to one question instead of stepping through all of
   // them.
+  // Does NOT close singleQuestionEdit itself — submitQuestionFlow's
+  // onResolved does that once the request actually succeeds, and leaves it
+  // open (showing the SwitchWarningDialog on top, or the sheet's own
+  // `error`) if a same-row/minimum-duration warning fires or the request
+  // fails. Previously this closed unconditionally before even calling
+  // submitQuestionFlow, which meant a failed edit's error had nowhere left
+  // to render — fixed as part of adding the warning checks, since both
+  // need the same "stay open until actually resolved" behavior.
   function confirmSingleQuestionEdit(answer: QuestionAnswer) {
     if (!singleQuestionEdit) return;
     const activity = activities.find((a) => a.id === singleQuestionEdit.activityId);
     if (!activity) return;
     const answers = { ...currentAnswersFor(activity), [answer.questionId]: answer };
-    setSingleQuestionEdit(null);
     submitQuestionFlow(singleQuestionEdit.activityId, singleQuestionEdit.activityName, answers);
   }
 
   // Only reachable when the question being edited is optional (see
   // allowSkip in the render below) — submits the current answer set with
   // this one question's answer removed entirely, same "absent, not
-  // explicit null" convention skipQuestionStep already uses.
+  // explicit null" convention skipQuestionStep already uses. Same
+  // does-not-close-early note as confirmSingleQuestionEdit above.
   function skipSingleQuestionEdit() {
     if (!singleQuestionEdit) return;
     const activity = activities.find((a) => a.id === singleQuestionEdit.activityId);
     if (!activity) return;
     const answers = currentAnswersFor(activity);
     delete answers[singleQuestionEdit.question.id];
-    setSingleQuestionEdit(null);
     submitQuestionFlow(singleQuestionEdit.activityId, singleQuestionEdit.activityName, answers);
   }
 
@@ -569,6 +651,17 @@ export function HomeScreen() {
                 onConfirm={(rowId) =>
                   answerQuestionStep({ questionId: currentQuestion.id, questionType: "greenhouse_row", greenhouseRowId: rowId })
                 }
+                onNfcScan={(resolved) => {
+                  // Guards against a stray/rapid repeated scan firing again
+                  // while a submission is already in flight or a warning
+                  // dialog is already up for a previous scan of this sheet.
+                  if (busy || switchWarning) return;
+                  answerQuestionStep({
+                    questionId: currentQuestion.id,
+                    questionType: "greenhouse_row",
+                    greenhouseRowId: resolved.targetId,
+                  });
+                }}
                 onSkip={skipQuestionStep}
                 onBack={onBack}
                 onCancel={cancelQuestionFlow}
@@ -591,12 +684,30 @@ export function HomeScreen() {
               onConfirm={(carrierId) =>
                 answerQuestionStep({ questionId: currentQuestion.id, questionType: "carrier", carrierId })
               }
+              onNfcScan={(resolved) => {
+                if (busy || switchWarning) return;
+                answerQuestionStep({ questionId: currentQuestion.id, questionType: "carrier", carrierId: resolved.targetId });
+              }}
               onSkip={skipQuestionStep}
               onBack={onBack}
               onCancel={cancelQuestionFlow}
             />
           );
         })()}
+
+      {switchWarning && (
+        <SwitchWarningDialog
+          warning={switchWarning.warning}
+          targetKind={switchWarning.targetKind}
+          submitting={busy}
+          language={language}
+          onConfirm={() => {
+            const pending = switchWarning;
+            submitQuestionFlow(pending.activityId, pending.activityName, pending.answers, true);
+          }}
+          onCancel={() => setSwitchWarning(null)}
+        />
+      )}
 
       {/* Single-question edit sheet — opened by tapping one of the
           per-question buttons above. Same per-type dispatch as the
@@ -620,6 +731,10 @@ export function HomeScreen() {
                 onConfirm={(rowId) =>
                   confirmSingleQuestionEdit({ questionId: q.id, questionType: "greenhouse_row", greenhouseRowId: rowId })
                 }
+                onNfcScan={(resolved) => {
+                  if (busy || switchWarning) return;
+                  confirmSingleQuestionEdit({ questionId: q.id, questionType: "greenhouse_row", greenhouseRowId: resolved.targetId });
+                }}
                 onSkip={skipSingleQuestionEdit}
                 onCancel={cancelSingleQuestionEdit}
               />
@@ -637,6 +752,10 @@ export function HomeScreen() {
               busy={busy}
               language={language}
               onConfirm={(carrierId) => confirmSingleQuestionEdit({ questionId: q.id, questionType: "carrier", carrierId })}
+              onNfcScan={(resolved) => {
+                if (busy || switchWarning) return;
+                confirmSingleQuestionEdit({ questionId: q.id, questionType: "carrier", carrierId: resolved.targetId });
+              }}
               onSkip={skipSingleQuestionEdit}
               onCancel={cancelSingleQuestionEdit}
             />

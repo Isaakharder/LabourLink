@@ -249,6 +249,52 @@ function accumulateChainSeconds(
   return Math.round(totalSeconds);
 }
 
+// The employee's currently open work segment — activity, row/carrier, and
+// elapsed seconds on the "effective active work segment" (chain-accumulated
+// across break interruptions exactly like accumulatedWorkedSecondsBefore
+// CurrentEntry above, break time never counted) — or null if not currently
+// working (idle, on break, or a data lookup came back empty). Used by the
+// same-row/minimum-duration switch checks in POST /time-entries/work below;
+// pulled out as its own function rather than duplicating serializeStatus's
+// inline version so the two can never drift on what "elapsed" means.
+async function getCurrentWorkSegment(employeeId: string): Promise<{
+  activityId: string;
+  rowId: string | null;
+  carrierId: string | null;
+  elapsedSeconds: number;
+  minimumDurationMinutes: number;
+} | null> {
+  const open = await getOpenEntry(employeeId);
+  if (!open || open.entry_type !== "work" || !open.activity_id) return null;
+
+  const { rows } = await pool.query("select minimum_duration_minutes from activities where id = $1", [open.activity_id]);
+  const activity = rows[0];
+  if (!activity) return null;
+
+  const { rows: chainRows } = await pool.query<ChainEntry>(
+    `select entry_type, activity_id, started_at, ended_at, greenhouse_row_id, carrier_id
+     from time_entries
+     where employee_id = $1 and started_at >= now() - interval '24 hours' and deleted_at is null`,
+    [employeeId]
+  );
+  const accumulated = accumulateChainSeconds(
+    chainRows,
+    open.activity_id,
+    open.greenhouse_row_id,
+    open.carrier_id,
+    new Date(open.started_at)
+  );
+  const elapsedSeconds = accumulated + (Date.now() - new Date(open.started_at).getTime()) / 1000;
+
+  return {
+    activityId: open.activity_id,
+    rowId: open.greenhouse_row_id,
+    carrierId: open.carrier_id,
+    elapsedSeconds: Math.round(elapsedSeconds),
+    minimumDurationMinutes: activity.minimum_duration_minutes,
+  };
+}
+
 interface FixedItem {
   id: string;
   start_time: string;
@@ -366,12 +412,19 @@ async function serializeStatus(
         name: string;
         startedAt: string;
         accumulatedWorkedSecondsBeforeCurrentEntry: number;
+        // The row/bin-switch same-row/minimum-duration warnings (see
+        // checkSwitchWarning on the client, and the mirrored server-side
+        // check in POST /time-entries/work) both need this — exposed here
+        // so the client's fast pre-check never has to make a second request
+        // just to learn the currently-running activity's own configured
+        // minimum.
+        minimumDurationMinutes: number;
         row: { id: string; label: string } | null;
         carrier: { id: string; name: string } | null;
       }
     | null = null;
   if (open?.entry_type === "work" && open.activity_id) {
-    const { rows } = await pool.query("select id, name from activities where id = $1", [
+    const { rows } = await pool.query("select id, name, minimum_duration_minutes from activities where id = $1", [
       open.activity_id,
     ]);
     const a = rows[0];
@@ -410,6 +463,7 @@ async function serializeStatus(
         name: a.name,
         startedAt: open.started_at,
         accumulatedWorkedSecondsBeforeCurrentEntry: accumulated,
+        minimumDurationMinutes: a.minimum_duration_minutes,
         row,
         carrier,
       };
@@ -469,7 +523,7 @@ async function serializeStatus(
   const { rows: recentRows } = await pool.query(
     `select te.id, te.activity_id, a.name, te.started_at, te.ended_at, te.auto_closed_at,
             extract(epoch from (te.ended_at - te.started_at))::int as duration_seconds,
-            gr.row_number, gp.name as row_phase_name,
+            gr.id as row_id, gr.row_number, gp.name as row_phase_name,
             c.id as carrier_id, c.name as carrier_name
      from time_entries te
      join activities a on a.id = te.activity_id
@@ -492,8 +546,8 @@ async function serializeStatus(
     startedAt: r.started_at,
     endedAt: r.ended_at,
     durationSeconds: r.duration_seconds,
-    row: r.row_number != null ? { label: `${r.row_phase_name} · Row ${r.row_number}` } : null,
-    carrier: r.carrier_id ? { label: r.carrier_name as string } : null,
+    row: r.row_id ? { id: r.row_id as string, label: `${r.row_phase_name} · Row ${r.row_number}` } : null,
+    carrier: r.carrier_id ? { id: r.carrier_id as string, label: r.carrier_name as string } : null,
     // Closed by the daily-cutoff safety net rather than a real End Work
     // tap — surfaced so the mobile app can optionally label it, matching
     // the same indicator Inputs shows.
@@ -541,7 +595,7 @@ router.post(
   "/time-entries/work",
   asyncHandler(async (req, res) => {
     const d = req.device!;
-    const { activityId, idempotencyKey, answers, clientStartedAt } = req.body as {
+    const { activityId, idempotencyKey, answers, clientStartedAt, confirmSwitch } = req.body as {
       activityId?: string;
       idempotencyKey?: string;
       answers?: { questionId?: string; greenhouseRowId?: string; carrierId?: string }[];
@@ -552,6 +606,15 @@ router.post(
       // activity change or a break/end resume, which always use server time
       // exactly as before.
       clientStartedAt?: string;
+      // Set only after the employee has explicitly dismissed the same-row
+      // or minimum-duration warning below (client-side dialog, see
+      // lib/nfcSwitchWarning.ts) — bypasses BOTH checks for this one
+      // request. Never trusted as "the client already checked, skip
+      // re-checking": the checks below are the actual enforcement,
+      // independent of what triggered this call (manual tap or NFC scan),
+      // so a stale/offline/manipulated client can't silently skip them by
+      // just never sending a warning it decided not to show.
+      confirmSwitch?: boolean;
     };
     if (!activityId || !UUID_RE.test(activityId) || !isValidIdempotencyKey(idempotencyKey)) {
       return res.status(400).json({ error: "activityId and a valid idempotencyKey are required" });
@@ -583,6 +646,52 @@ router.post(
     // rounding decision honest and debuggable on every call, not only the
     // first.
     const wasIdle = (await getOpenEntryExcluding(d.employeeId, idempotencyKey)) === null;
+
+    // Interrupting an already-open work segment to start a different
+    // activity/row/carrier — never on a genuine idle/break -> work start,
+    // which has nothing to interrupt. Priority order (checked in this
+    // order, only the first applicable one is ever returned — see the NFC
+    // feature plan's "do not stack multiple confirmation dialogs for one
+    // scan"): same-row-recently-completed, then minimum-duration. Both are
+    // skippable in one request via confirmSwitch, set only after the
+    // employee has actually seen and dismissed whichever dialog fired.
+    if (!wasIdle && !confirmSwitch) {
+      const current = await getCurrentWorkSegment(d.employeeId);
+      const isRealSwitch =
+        current !== null &&
+        (current.activityId !== activityId || current.rowId !== validatedRowId || current.carrierId !== validatedCarrierId);
+
+      if (isRealSwitch) {
+        const { rows: mostRecentRows } = await pool.query(
+          `select activity_id, greenhouse_row_id, carrier_id from time_entries
+           where employee_id = $1 and entry_type = 'work' and ended_at is not null and deleted_at is null
+           order by started_at desc limit 1`,
+          [d.employeeId]
+        );
+        const mostRecent = mostRecentRows[0];
+        if (
+          mostRecent &&
+          mostRecent.activity_id === activityId &&
+          mostRecent.greenhouse_row_id === validatedRowId &&
+          mostRecent.carrier_id === validatedCarrierId
+        ) {
+          return res.status(409).json({
+            error: "You just finished this row/bin.",
+            code: "SAME_ROW_RECENTLY_COMPLETED",
+          });
+        }
+
+        const minimumSeconds = current!.minimumDurationMinutes * 60;
+        if (current!.elapsedSeconds < minimumSeconds) {
+          return res.status(409).json({
+            error: "The minimum duration for this activity has not been reached.",
+            code: "MINIMUM_DURATION_NOT_REACHED",
+            elapsedSeconds: current!.elapsedSeconds,
+            minimumMinutes: current!.minimumDurationMinutes,
+          });
+        }
+      }
+    }
 
     let overrides: OpenEntryOverrides = {
       greenhouseRowId: validatedRowId,

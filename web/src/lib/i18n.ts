@@ -80,10 +80,24 @@ const TRANSLATIONS_EN = {
 
   // --- NFC scan-to-select (row/carrier pickers) — fixed LabourLink prompts
   // only; row/bin names stay whatever the administrator named them. ---
-  tapRowTag: "Tap the row's tag to select it, or choose manually below.",
-  tapBinTag: "Tap the bin's tag to select it, or choose manually below.",
+  tapRowTag: "Tap the row's tag to start working there, or choose manually below.",
+  tapBinTag: "Tap the bin's tag to start working there, or choose manually below.",
   nfcTagNotRecognized: "That tag isn't registered. Choose manually below.",
   nfcStillWaiting: "Still not seeing a tag — choose manually below.",
+
+  // --- NFC switch warnings (same-row-recently-completed, minimum-
+  // duration) — fixed prompts/buttons only, never the activity/row/bin
+  // name itself, which is shown alongside exactly as entered. ---
+  sameRowJustFinished: "You just finished this row. Do you want to go back into it?",
+  sameBinJustFinished: "You just finished this bin. Do you want to go back into it?",
+  goBackIntoRow: "Go back into row",
+  goBackIntoBin: "Go back into bin",
+  minimumDurationWarningRow: (p: Params) =>
+    `You have worked on this row for ${p.elapsedMinutes} minute${p.elapsedMinutes === 1 ? "" : "s"}. The minimum for this activity is ${p.minimumMinutes} minute${p.minimumMinutes === 1 ? "" : "s"}. Make sure you scanned the correct row.`,
+  minimumDurationWarningBin: (p: Params) =>
+    `You have worked on this bin for ${p.elapsedMinutes} minute${p.elapsedMinutes === 1 ? "" : "s"}. The minimum for this activity is ${p.minimumMinutes} minute${p.minimumMinutes === 1 ? "" : "s"}. Make sure you scanned the correct bin.`,
+  startNewRowAnyway: "Start new row anyway",
+  startNewBinAnyway: "Start new bin anyway",
 
   // --- End work / breaks ---
   finishWorkQuestion: "Finish work?",
@@ -167,10 +181,21 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   cancel: "Cancelar",
   close: "Cerrar",
 
-  tapRowTag: "Toque la etiqueta de la fila para seleccionarla, o elija manualmente abajo.",
-  tapBinTag: "Toque la etiqueta del transportador para seleccionarlo, o elija manualmente abajo.",
+  tapRowTag: "Toque la etiqueta de la fila para comenzar a trabajar allí, o elija manualmente abajo.",
+  tapBinTag: "Toque la etiqueta del transportador para comenzar a trabajar allí, o elija manualmente abajo.",
   nfcTagNotRecognized: "Esa etiqueta no está registrada. Elija manualmente abajo.",
   nfcStillWaiting: "Todavía no se detecta ninguna etiqueta — elija manualmente abajo.",
+
+  sameRowJustFinished: "Acaba de terminar esta fila. ¿Desea volver a entrar en ella?",
+  sameBinJustFinished: "Acaba de terminar este transportador. ¿Desea volver a entrar en él?",
+  goBackIntoRow: "Volver a entrar en la fila",
+  goBackIntoBin: "Volver a entrar en el transportador",
+  minimumDurationWarningRow: (p: Params) =>
+    `Ha trabajado en esta fila durante ${p.elapsedMinutes} minuto${p.elapsedMinutes === 1 ? "" : "s"}. El mínimo para esta actividad es ${p.minimumMinutes} minuto${p.minimumMinutes === 1 ? "" : "s"}. Asegúrese de haber escaneado la fila correcta.`,
+  minimumDurationWarningBin: (p: Params) =>
+    `Ha trabajado en este transportador durante ${p.elapsedMinutes} minuto${p.elapsedMinutes === 1 ? "" : "s"}. El mínimo para esta actividad es ${p.minimumMinutes} minuto${p.minimumMinutes === 1 ? "" : "s"}. Asegúrese de haber escaneado el transportador correcto.`,
+  startNewRowAnyway: "Comenzar nueva fila de todos modos",
+  startNewBinAnyway: "Comenzar nuevo transportador de todos modos",
 
   finishWorkQuestion: "¿Finalizar trabajo?",
   finishWorkConfirmMessage:

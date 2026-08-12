@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Language, t } from "../../lib/i18n";
 import { isNfcSupported, ScannedTag, startScanSession } from "../../lib/nfc";
-import { resolveScannedTag } from "../../lib/nfcMappingCache";
+import { resolveScannedTag, ResolvedTagTarget } from "../../lib/nfcMappingCache";
 
 export interface PickerCarrier {
   id: string;
@@ -31,6 +31,8 @@ interface CarrierPickerSheetProps {
   onBack?: () => void;
   onCancel: () => void;
   language: Language;
+  // See RowPickerSheet.tsx's identical prop for the full rationale.
+  onNfcScan?: (resolved: ResolvedTagTarget) => void;
 }
 
 // Same bottom-sheet visual pattern and select-then-confirm interaction as
@@ -52,11 +54,18 @@ export function CarrierPickerSheet({
   onBack,
   onCancel,
   language,
+  onNfcScan,
 }: CarrierPickerSheetProps) {
   const [search, setSearch] = useState("");
   const [selectedCarrierId, setSelectedCarrierId] = useState<string | null>(initialSelectedCarrierId ?? null);
   const [nfcActive, setNfcActive] = useState(false);
   const [nfcHint, setNfcHint] = useState<string | null>(null);
+
+  // Same reasoning as RowPickerSheet's onNfcScanRef.
+  const onNfcScanRef = useRef(onNfcScan);
+  useEffect(() => {
+    onNfcScanRef.current = onNfcScan;
+  }, [onNfcScan]);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -90,6 +99,12 @@ export function CarrierPickerSheet({
           return;
         }
         setNfcHint(null);
+
+        if (onNfcScanRef.current) {
+          onNfcScanRef.current(resolved);
+          return;
+        }
+
         setSelectedCarrierId(resolved.targetId);
       });
     })();
@@ -136,7 +151,9 @@ export function CarrierPickerSheet({
         </div>
 
         {error && <p className="error-text">{error}</p>}
-        {nfcActive && <p className="mobile-row-picker-subtitle">{nfcHint ?? t(language, "tapBinTag")}</p>}
+        {nfcActive && (
+          <p className="mobile-row-picker-subtitle">{busy ? t(language, "starting") : nfcHint ?? t(language, "tapBinTag")}</p>
+        )}
 
         {!carriers ? (
           <p className="mobile-sheet-empty">{t(language, "loadingCarriers")}</p>

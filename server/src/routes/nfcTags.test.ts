@@ -33,6 +33,15 @@ function check(condition: boolean, label: string, extra?: unknown) {
 }
 
 const RUN_ID = Date.now();
+// Synthetic, RUN_ID-derived hex hardware IDs — deliberately never a real
+// scanned tag's ID (an earlier version of this file hardcoded the actual
+// Ridder tag confirmed during on-device testing, 048E7BE2202290, which
+// later collided with that exact tag being registered for real in
+// production and made this test spuriously fail against genuine data).
+// Hex-only (A-F/0-9), matching nfcTags.ts's HEX_ID_RE.
+const QA_HEX = RUN_ID.toString(16).toUpperCase();
+const QA_TAG_ROW = `AB${QA_HEX}`;
+const QA_TAG_CARRIER = `CD${QA_HEX}`;
 
 async function main() {
   const app = express();
@@ -142,19 +151,19 @@ async function main() {
     const nonAdminAttempt = await call("POST", "/api/mobile/tags/register", employeeDevice, {
       targetType: "greenhouse_row",
       targetId: rowAId,
-      ridderHardwareId: "048E7BE2202290",
+      ridderHardwareId: QA_TAG_ROW,
     });
     check(nonAdminAttempt.status === 403, "A) non-admin device is rejected by requireDeviceAdmin", nonAdminAttempt);
 
     // -----------------------------------------------------------------
     // B) register an existing Ridder tag to row A — normalizes to
     //    uppercase hex, matching the real Ridder tag confirmed on-device
-    //    (048e7be2202290 lowercase in the request, stored uppercase).
+    //    (lowercase in the request, stored uppercase).
     // -----------------------------------------------------------------
     const register1 = await call("POST", "/api/mobile/tags/register", adminDevice, {
       targetType: "greenhouse_row",
       targetId: rowAId,
-      ridderHardwareId: "048e7be2202290",
+      ridderHardwareId: QA_TAG_ROW.toLowerCase(),
     });
     check(register1.status === 200 && Boolean(register1.body?.mappingId), "B) admin registers an existing tag to row A", register1);
     if (register1.body?.mappingId) mappingIds.push(register1.body.mappingId);
@@ -162,7 +171,7 @@ async function main() {
     const mappingsAfterB = await call("GET", "/api/mobile/tags/mappings", employeeDevice);
     const rowAMapping = mappingsAfterB.body?.mappings?.find((m: any) => m.targetId === rowAId);
     check(
-      rowAMapping?.ridderHardwareId === "048E7BE2202290",
+      rowAMapping?.ridderHardwareId === QA_TAG_ROW,
       "C) GET /mappings returns the hardware ID normalized to uppercase",
       rowAMapping
     );
@@ -175,7 +184,7 @@ async function main() {
     const conflictAttempt = await call("POST", "/api/mobile/tags/register", adminDevice, {
       targetType: "greenhouse_row",
       targetId: rowBId,
-      ridderHardwareId: "048E7BE2202290",
+      ridderHardwareId: QA_TAG_ROW,
     });
     check(
       conflictAttempt.status === 409 && conflictAttempt.body?.tagConflict?.targetId === rowAId,
@@ -186,7 +195,7 @@ async function main() {
     const confirmedMove = await call("POST", "/api/mobile/tags/register", adminDevice, {
       targetType: "greenhouse_row",
       targetId: rowBId,
-      ridderHardwareId: "048E7BE2202290",
+      ridderHardwareId: QA_TAG_ROW,
       confirmReplaceTag: true,
     });
     check(confirmedMove.status === 200, "E) confirming the move succeeds", confirmedMove);
@@ -196,7 +205,7 @@ async function main() {
     const stillOnRowA = mappingsAfterMove.body?.mappings?.some((m: any) => m.targetId === rowAId);
     const nowOnRowB = mappingsAfterMove.body?.mappings?.find((m: any) => m.targetId === rowBId);
     check(!stillOnRowA, "F) row A no longer has an active mapping after the tag moved to row B", mappingsAfterMove.body);
-    check(nowOnRowB?.ridderHardwareId === "048E7BE2202290", "G) row B now has the moved tag", nowOnRowB);
+    check(nowOnRowB?.ridderHardwareId === QA_TAG_ROW, "G) row B now has the moved tag", nowOnRowB);
 
     // -----------------------------------------------------------------
     // H) target-side conflict: writing a brand-new LabourLink tag to a
@@ -207,7 +216,7 @@ async function main() {
     const firstCarrierTag = await call("POST", "/api/mobile/tags/register", adminDevice, {
       targetType: "carrier",
       targetId: carrierAId,
-      ridderHardwareId: "AABBCCDDEE",
+      ridderHardwareId: QA_TAG_CARRIER,
     });
     check(firstCarrierTag.status === 200, "H) first tag registered to carrier A", firstCarrierTag);
     if (firstCarrierTag.body?.mappingId) mappingIds.push(firstCarrierTag.body.mappingId);
@@ -219,7 +228,7 @@ async function main() {
       labourlinkTagUuid: newLabourlinkUuid,
     });
     check(
-      targetConflictAttempt.status === 409 && targetConflictAttempt.body?.targetConflict?.ridderHardwareId === "AABBCCDDEE",
+      targetConflictAttempt.status === 409 && targetConflictAttempt.body?.targetConflict?.ridderHardwareId === QA_TAG_CARRIER,
       "I) mapping a new tag onto an already-tagged carrier is rejected without confirmReplaceTarget",
       targetConflictAttempt
     );
