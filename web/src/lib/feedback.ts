@@ -1,12 +1,13 @@
-// Short, best-effort success feedback for the Register Existing Tag admin
-// screen's instant-registration path (see RegisterExistingTagScreen.tsx) —
-// a brief vibration plus a synthesized beep, matching "short vibration
-// and/or success sound where supported." No bundled audio asset: the beep
-// is synthesized with the Web Audio API so this has no extra dependency and
-// nothing to fetch. Every call is wrapped in try/catch — this is purely an
-// enhancement, never something that should throw or block the caller if the
-// device/browser doesn't support one or both APIs.
-export function playRegistrationSuccessFeedback(): void {
+// Short, best-effort success feedback — a brief vibration plus a
+// synthesized beep, matching "short vibration and/or success sound where
+// supported." Used by both the Register Existing Tag admin screen's
+// instant-registration path and HomeScreen's active-screen NFC row switch.
+// No bundled audio asset: the beep is synthesized with the Web Audio API so
+// this has no extra dependency and nothing to fetch. Every call is wrapped
+// in try/catch — this is purely an enhancement, never something that
+// should throw or block the caller if the device/browser doesn't support
+// one or both APIs.
+export function playSuccessFeedback(): void {
   try {
     if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
       navigator.vibrate(80);

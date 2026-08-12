@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { useWorkSession } from "../../context/WorkSessionContext";
 import { api, ApiError } from "../../lib/api";
 import { isNfcSupported, ScannedTag, startScanSession } from "../../lib/nfc";
-import { playRegistrationSuccessFeedback } from "../../lib/feedback";
+import { playSuccessFeedback } from "../../lib/feedback";
 import { TagMapping } from "../../lib/nfcTagTypes";
 import { RowPickerSheet, RowPickerLand } from "../../components/mobile/RowPickerSheet";
 import { CarrierPickerSheet, PickerCarrier } from "../../components/mobile/CarrierPickerSheet";
@@ -93,7 +93,7 @@ export function RegisterExistingTagScreen() {
           confirmReplaceTarget,
         }),
       });
-      playRegistrationSuccessFeedback();
+      playSuccessFeedback();
       setSuccessBanner(targetLabel);
       setConflict(null);
       // Return focus to the row/bin selector immediately, same targetType,

@@ -85,6 +85,11 @@ const TRANSLATIONS_EN = {
   nfcTagNotRecognized: "That tag isn't registered. Choose manually below.",
   nfcStillWaiting: "Still not seeing a tag — choose manually below.",
 
+  // --- Active-screen row scanning (Home, while working) ---
+  readyToScanNextRow: "Ready to scan next row",
+  nfcTagIsBinNotRow: "This tag belongs to a bin.",
+  nfcOfflineCannotSwitchRow: "Can't switch rows while offline — choose manually below.",
+
   // --- NFC switch warnings (same-row-recently-completed, minimum-
   // duration) — fixed prompts/buttons only, never the activity/row/bin
   // name itself, which is shown alongside exactly as entered. ---
@@ -185,6 +190,10 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   tapBinTag: "Toque la etiqueta del transportador para comenzar a trabajar allí, o elija manualmente abajo.",
   nfcTagNotRecognized: "Esa etiqueta no está registrada. Elija manualmente abajo.",
   nfcStillWaiting: "Todavía no se detecta ninguna etiqueta — elija manualmente abajo.",
+
+  readyToScanNextRow: "Listo para escanear la siguiente hilera",
+  nfcTagIsBinNotRow: "Esta etiqueta pertenece a un transportador.",
+  nfcOfflineCannotSwitchRow: "No se puede cambiar de fila sin conexión — elija manualmente abajo.",
 
   sameRowJustFinished: "Acaba de terminar esta fila. ¿Desea volver a entrar en ella?",
   sameBinJustFinished: "Acaba de terminar este transportador. ¿Desea volver a entrar en él?",

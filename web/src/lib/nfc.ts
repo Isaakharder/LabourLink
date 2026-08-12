@@ -136,6 +136,15 @@ export async function getNfcAvailability(): Promise<NfcAvailability> {
   }
 }
 
+// Only one scan session may own the native reader at a time (see the NFC
+// feature plan) — a new call always wins, forcibly stopping whatever
+// session was previously active. Call sites already gate themselves so
+// this rarely actually overlaps in practice (e.g. HomeScreen's foreground
+// row-scan session yields before a picker sheet's own session starts), but
+// this is the actual guarantee, not just call-site discipline — a bug or a
+// race in that gating can never leave two sessions both trying to listen.
+let activeStop: (() => void) | null = null;
+
 // Starts a foreground-dispatch scan session and calls onTag for every tag
 // read until the returned stop function is called. A no-op outside a
 // native platform (isNfcSupported()/getNfcAvailability() is what callers
@@ -144,6 +153,8 @@ export async function getNfcAvailability(): Promise<NfcAvailability> {
 // finished — a fast mount+unmount (e.g. a sheet opened and immediately
 // closed) never leaves a dangling active scan or a leaked listener.
 export function startScanSession(onTag: (tag: ScannedTag) => void, onError?: (message: string) => void): () => void {
+  activeStop?.();
+
   let stopped = false;
   let listenerHandle: { remove: () => Promise<void> } | null = null;
   let lastHardwareId: string | null = null;
@@ -172,9 +183,10 @@ export function startScanSession(onTag: (tag: ScannedTag) => void, onError?: (me
     })();
   }
 
-  return () => {
+  const stop = () => {
     if (stopped) return;
     stopped = true;
+    if (activeStop === stop) activeStop = null;
     if (!isNativePlatform()) return;
     (async () => {
       try {
@@ -190,6 +202,8 @@ export function startScanSession(onTag: (tag: ScannedTag) => void, onError?: (me
       }
     })();
   };
+  activeStop = stop;
+  return stop;
 }
 
 export type NfcWriteFailureReason = "not_writable" | "insufficient_capacity" | "unsupported" | "write_failed";

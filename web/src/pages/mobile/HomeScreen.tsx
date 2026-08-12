@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useDevicePairing } from "../../context/DevicePairingContext";
 import { useWorkSession } from "../../context/WorkSessionContext";
 import { api, ApiError } from "../../lib/api";
@@ -9,8 +9,11 @@ import { ActivityPicker, PickerActivity } from "../../components/mobile/Activity
 import { RowPickerSheet, RowPickerLand } from "../../components/mobile/RowPickerSheet";
 import { CarrierPickerSheet, PickerCarrier } from "../../components/mobile/CarrierPickerSheet";
 import { SwitchWarningDialog } from "../../components/mobile/SwitchWarningDialog";
-import { refreshTagMappingCache } from "../../lib/nfcMappingCache";
+import { isNfcSupported, startScanSession } from "../../lib/nfc";
+import { refreshTagMappingCache, resolveScannedTag } from "../../lib/nfcMappingCache";
 import { checkSwitchWarning, SwitchWarning } from "../../lib/nfcSwitchWarning";
+import { classifyHomeRowScan, isHomeNfcScanActive } from "../../lib/nfcActiveScreenScan";
+import { playSuccessFeedback } from "../../lib/feedback";
 import { ActivityTimer, formatElapsed } from "../../components/mobile/ActivityTimer";
 import { RecentJobsCard } from "../../components/mobile/RecentJobsCard";
 
@@ -83,6 +86,8 @@ export function HomeScreen() {
     activityId: string;
     activityName: string;
     answers: Record<string, QuestionAnswer>;
+    idempotencyKey: string;
+    onSuccess?: () => void;
   } | null>(null);
 
   // Same event-driven wiring as loadGreenhouseRows/loadCarriers below — the
@@ -164,6 +169,119 @@ export function HomeScreen() {
     };
   }, [loadActivities, loadGreenhouseRows, loadCarriers, loadTagMappings]);
 
+  // ---------------------------------------------------------------------
+  // Foreground NFC row scanning — listens directly on this screen while
+  // the employee is actively working a row-based activity, no need to tap
+  // the row button or open the selector first. See the NFC feature plan's
+  // "Add foreground NFC row switching directly to the active-working Home
+  // screen."
+  // ---------------------------------------------------------------------
+
+  // Tracked as state (not just read from document.visibilityState inline)
+  // so the scan-active decision below re-evaluates on every foreground/
+  // background transition, not just on mount.
+  const [foregrounded, setForegrounded] = useState(!document.hidden);
+  useEffect(() => {
+    function onVisibilityChange() {
+      setForegrounded(document.visibilityState === "visible");
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
+
+  const [homeNfcSupported, setHomeNfcSupported] = useState(false);
+  useEffect(() => {
+    isNfcSupported().then(setHomeNfcSupported);
+  }, []);
+
+  // Transient inline message for a scan this screen can't act on (unknown
+  // tag, a bin tag, or offline) — auto-clears rather than sitting
+  // indefinitely, same convention as the picker sheets' own nfcHint.
+  const [homeNfcMessage, setHomeNfcMessage] = useState<string | null>(null);
+  useEffect(() => {
+    if (!homeNfcMessage) return;
+    const timer = setTimeout(() => setHomeNfcMessage(null), 3000);
+    return () => clearTimeout(timer);
+  }, [homeNfcMessage]);
+
+  // Read inside the scan callback below instead of me/activities/online
+  // directly — the callback is registered once per active session (the
+  // effect's own dependency is only the coarse active/inactive boolean, so
+  // the native reader isn't restarted on every unrelated `me` update) but
+  // still needs whichever values are current at the moment a tag actually
+  // resolves. Same pattern as RowPickerSheet's landsRef.
+  const homeScanContextRef = useRef({ me, activities, online });
+  useEffect(() => {
+    homeScanContextRef.current = { me, activities, online };
+  }, [me, activities, online]);
+
+  const currentActivityDef = me?.currentActivity ? activities.find((a) => a.id === me.currentActivity!.id) : undefined;
+  const rowQuestion = currentActivityDef?.questions.find((q) => q.questionType === "greenhouse_row") ?? null;
+
+  // Yields to a picker sheet's own scan session, a single-question edit,
+  // or a pending switchWarning dialog — any of those already own (or are
+  // about to own) the native reader; lib/nfc.ts's own single-ownership
+  // guard is the hard backstop, this is what keeps HomeScreen from even
+  // trying to start a second one in the first place.
+  const homeNfcActive =
+    homeNfcSupported &&
+    isHomeNfcScanActive({
+      foregrounded,
+      status: me?.status ?? "idle",
+      hasCompetingNfcOwner: Boolean(questionFlow || singleQuestionEdit || switchWarning),
+      isRowBasedActivity: Boolean(rowQuestion),
+    });
+
+  useEffect(() => {
+    if (!homeNfcActive) return;
+    const stop = startScanSession((tag) => {
+      const { me: currentMe, activities: currentActivities, online: currentlyOnline } = homeScanContextRef.current;
+      const resolved = resolveScannedTag(tag);
+      const outcome = classifyHomeRowScan(resolved, {
+        currentRowId: currentMe?.currentActivity?.row?.id ?? null,
+        online: currentlyOnline,
+      });
+
+      if (outcome.kind === "unknown") {
+        setHomeNfcMessage(t(language, "nfcTagNotRecognized"));
+        return;
+      }
+      if (outcome.kind === "wrong-type") {
+        setHomeNfcMessage(t(language, "nfcTagIsBinNotRow"));
+        return;
+      }
+      if (outcome.kind === "already-current-row") {
+        return;
+      }
+      if (outcome.kind === "offline") {
+        setHomeNfcMessage(t(language, "nfcOfflineCannotSwitchRow"));
+        return;
+      }
+
+      // outcome.kind === "switch" — defensive re-check even though the
+      // active-gate above already requires a row-based current activity:
+      // `me`/`activities` could theoretically have changed between the
+      // gate re-rendering and this specific scan event.
+      if (!currentMe?.currentActivity) return;
+      const activityDef = currentActivities.find((a) => a.id === currentMe.currentActivity!.id);
+      const rowQ = activityDef?.questions.find((q) => q.questionType === "greenhouse_row");
+      if (!activityDef || !rowQ) return;
+
+      setHomeNfcMessage(null);
+      // One stable idempotency key for this physical scan, reused if a
+      // same-row/minimum-duration warning fires and is then confirmed —
+      // see submitQuestionFlow's own idempotencyKey option.
+      submitQuestionFlow(
+        currentMe.currentActivity.id,
+        currentMe.currentActivity.name,
+        { [rowQ.id]: { questionId: rowQ.id, questionType: "greenhouse_row", greenhouseRowId: outcome.rowId } },
+        { idempotencyKey: uuid(), onSuccess: playSuccessFeedback }
+      );
+    });
+    return stop;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [homeNfcActive]);
+
   function openPicker() {
     loadActivities();
     setPickerOpen(true);
@@ -230,13 +348,32 @@ export function HomeScreen() {
     activityId: string,
     activityName: string,
     answers: Record<string, QuestionAnswer>,
-    // Set only after the employee has explicitly dismissed the same-row or
-    // minimum-duration warning below (SwitchWarningDialog's confirm
-    // button) — bypasses the client-side pre-check for this one call and
-    // tells the server to bypass its own identical check too (see
-    // mobileTime.ts's confirmSwitch).
-    confirmSwitch = false
+    options?: {
+      // Set only after the employee has explicitly dismissed the same-row
+      // or minimum-duration warning below (SwitchWarningDialog's confirm
+      // button) — bypasses the client-side pre-check for this one call and
+      // tells the server to bypass its own identical check too (see
+      // mobileTime.ts's confirmSwitch).
+      confirmSwitch?: boolean;
+      // Reuses one physical scan/tap's idempotency key across its initial
+      // attempt and any warning-triggered retry, rather than minting a
+      // fresh one each call — see the NFC feature plan's "use stable
+      // idempotency keys so retrying one physical scan cannot create
+      // multiple switches." Falls back to a fresh uuid() when omitted
+      // (every pre-existing call site: manual taps, single-question
+      // edits), which is safe there since each is already its own
+      // distinct, once-only logical action.
+      idempotencyKey?: string;
+      // Extra caller-specific action once the switch actually succeeds —
+      // e.g. HomeScreen's foreground NFC row scan plays the success
+      // beep/vibration here. Never called for a queued-offline or failed
+      // attempt, only a real confirmed success.
+      onSuccess?: () => void;
+    }
   ) {
+    const confirmSwitch = options?.confirmSwitch ?? false;
+    const idempotencyKey = options?.idempotencyKey ?? uuid();
+
     const rowAnswer = Object.values(answers).find(
       (a): a is Extract<QuestionAnswer, { questionType: "greenhouse_row" }> => a.questionType === "greenhouse_row"
     );
@@ -273,7 +410,7 @@ export function HomeScreen() {
         new Date()
       );
       if (warning) {
-        setSwitchWarning({ warning, targetKind, activityId, activityName, answers });
+        setSwitchWarning({ warning, targetKind, activityId, activityName, answers, idempotencyKey, onSuccess: options?.onSuccess });
         return;
       }
     }
@@ -290,7 +427,7 @@ export function HomeScreen() {
       {
         activityId,
         answers: answersPayload,
-        idempotencyKey: uuid(),
+        idempotencyKey,
         clientStartedAt: new Date().toISOString(),
         confirmSwitch,
       },
@@ -300,6 +437,7 @@ export function HomeScreen() {
           setQuestionFlow(null);
           setSingleQuestionEdit(null);
           setSwitchWarning(null);
+          options?.onSuccess?.();
         },
         // The server's own authoritative check, for the case the client-
         // side pre-check above missed (stale me/recentJobs) — same dialog,
@@ -315,7 +453,7 @@ export function HomeScreen() {
                   elapsedSeconds: body.elapsedSeconds ?? 0,
                   minimumMinutes: body.minimumMinutes ?? 0,
                 };
-          setSwitchWarning({ warning, targetKind, activityId, activityName, answers });
+          setSwitchWarning({ warning, targetKind, activityId, activityName, answers, idempotencyKey, onSuccess: options?.onSuccess });
           return true;
         },
       }
@@ -597,6 +735,14 @@ export function HomeScreen() {
           })}
         </p>
       )}
+      {/* Small, unobtrusive status — deliberately not a button, matching
+          the NFC feature plan's "should not look like a button." Shown
+          only while the foreground scan session is actually running (NFC
+          supported, working a row-based activity, this screen
+          foregrounded, nothing else owns the reader). homeNfcMessage
+          (unknown/bin/offline scan) briefly replaces it, same auto-
+          clearing convention as the picker sheets' own nfcHint. */}
+      {homeNfcActive && <p className="mobile-timer-static">{homeNfcMessage ?? t(language, "readyToScanNextRow")}</p>}
 
       {/* 5. Recent jobs */}
       <RecentJobsCard jobs={me!.recentJobs} language={language} />
@@ -703,7 +849,11 @@ export function HomeScreen() {
           language={language}
           onConfirm={() => {
             const pending = switchWarning;
-            submitQuestionFlow(pending.activityId, pending.activityName, pending.answers, true);
+            submitQuestionFlow(pending.activityId, pending.activityName, pending.answers, {
+              confirmSwitch: true,
+              idempotencyKey: pending.idempotencyKey,
+              onSuccess: pending.onSuccess,
+            });
           }}
           onCancel={() => setSwitchWarning(null)}
         />

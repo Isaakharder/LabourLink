@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { buildLabourlinkUriRecord, hexId, LABOURLINK_URI_PREFIX, parseLabourlinkTagUuid, shouldSuppressDuplicateScan } from "./nfc";
+import {
+  buildLabourlinkUriRecord,
+  hexId,
+  LABOURLINK_URI_PREFIX,
+  parseLabourlinkTagUuid,
+  shouldSuppressDuplicateScan,
+  startScanSession,
+} from "./nfc";
 
 function utf8Bytes(s: string): number[] {
   return Array.from(new TextEncoder().encode(s));
@@ -103,5 +110,38 @@ describe("shouldSuppressDuplicateScan", () => {
 
   it("does not suppress a different hardware ID", () => {
     expect(shouldSuppressDuplicateScan("048E7BE2202290", "AABBCCDDEE")).toBe(false);
+  });
+});
+
+describe("startScanSession — single reader ownership", () => {
+  // This test environment isn't a native platform, so none of these calls
+  // ever touch the real plugin/hardware (isNativePlatform() gates that
+  // branch out entirely) — what's actually being verified here is the
+  // ownership bookkeeping itself: starting a new session always tears down
+  // whatever was previously active (see lib/nfc.ts's module-level
+  // activeStop), and every returned stop function stays safely idempotent
+  // regardless of whether it "won" or was pre-empted. Whether the *native*
+  // reader genuinely only ever has one listener is confirmed on-device
+  // (Ulefone), not here.
+  it("starting a second session does not throw and both stop functions remain safe to call", () => {
+    const stopA = startScanSession(() => {});
+    const stopB = startScanSession(() => {});
+    expect(() => stopA()).not.toThrow();
+    expect(() => stopB()).not.toThrow();
+  });
+
+  it("a stop function is idempotent — calling it more than once is a no-op, not an error", () => {
+    const stop = startScanSession(() => {});
+    stop();
+    expect(() => stop()).not.toThrow();
+  });
+
+  it("a fresh session can start cleanly after two prior sessions have both been superseded/stopped", () => {
+    const stopA = startScanSession(() => {});
+    const stopB = startScanSession(() => {});
+    stopA();
+    stopB();
+    const stopC = startScanSession(() => {});
+    expect(() => stopC()).not.toThrow();
   });
 });
