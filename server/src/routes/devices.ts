@@ -81,6 +81,16 @@ router.post(
          returning employee_id`,
         [deviceId]
       );
+      // An employee may only hold one active device at a time (partial
+      // unique index on employee_id below) — close any other still-open
+      // assignment they have on a *different* device before opening this
+      // one, so pairing a replacement/second device doesn't leave the old
+      // one dangling as "active" too.
+      await client.query(
+        `update device_assignments set unassigned_at = now()
+         where employee_id = $1 and device_id != $2 and unassigned_at is null`,
+        [employeeId, deviceId]
+      );
       await client.query(
         `insert into device_assignments (device_id, employee_id) values ($1, $2)`,
         [deviceId, employeeId]

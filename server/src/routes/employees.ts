@@ -293,7 +293,7 @@ const SELECT_COLUMNS = `
   e.break_profile_id, bp.name as break_profile_name, bp.is_active as break_profile_is_active,
   e.created_at, e.updated_at,
   sr.name as security_role, tr.name as team_role,
-  d.id as device_id, d.device_name,
+  dev.device_id, dev.device_name,
   coalesce(agg.groups, '[]'::json) as activity_groups
 `;
 
@@ -302,8 +302,14 @@ const FROM_JOINS = `
   join security_roles sr on sr.id = e.security_role_id
   join team_roles tr on tr.id = e.team_role_id
   left join break_profiles bp on bp.id = e.break_profile_id
-  left join device_assignments da on da.employee_id = e.id and da.unassigned_at is null
-  left join devices d on d.id = da.device_id
+  left join lateral (
+    select da.device_id, d.device_name
+    from device_assignments da
+    join devices d on d.id = da.device_id
+    where da.employee_id = e.id and da.unassigned_at is null
+    order by da.assigned_at desc
+    limit 1
+  ) dev on true
   left join lateral (
     select json_agg(json_build_object('id', ag.id, 'name', ag.name) order by ag.name) as groups
     from employee_activity_group_assignments eaga
