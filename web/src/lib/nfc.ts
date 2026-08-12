@@ -145,6 +145,49 @@ export async function getNfcAvailability(): Promise<NfcAvailability> {
 // race in that gating can never leave two sessions both trying to listen.
 let activeStop: (() => void) | null = null;
 
+// Passed straight through to NfcAdapter.enableReaderMode() by
+// @capgo/capacitor-nfc's own androidReaderModeFlags option (see its
+// CapacitorNfcPlugin.java — it already correctly calls enableReaderMode(),
+// not enableForegroundDispatch(), which is what gives the foreground
+// activity exclusive access to begin with). Values are Android's own
+// stable, public android.nfc.NfcAdapter constants (confirmed against
+// Android's official docs — hardcoded since JS has no way to import a
+// native class's constants):
+//   FLAG_READER_NFC_A              = 0x01
+//   FLAG_READER_NFC_B              = 0x02
+//   FLAG_READER_NFC_F              = 0x04
+//   FLAG_READER_NFC_V              = 0x08
+//   FLAG_READER_SKIP_NDEF_CHECK    = 0x80
+//   FLAG_READER_NO_PLATFORM_SOUNDS = 0x100
+// The first four plus NO_PLATFORM_SOUNDS match the plugin's own
+// DEFAULT_READER_FLAGS; SKIP_NDEF_CHECK is added on top of that default,
+// not instead of it (passing androidReaderModeFlags replaces the
+// plugin's default entirely rather than merging with it).
+//
+// SKIP_NDEF_CHECK targets a real device bug: on a Ulefone Armor X13,
+// plain enableReaderMode() (without this flag) still let the OEM's own
+// "New tag collected" system tag viewer interrupt the foregrounded app on
+// every scan, even though reader mode was already correctly suppressing
+// standard Android NDEF/tag-app dispatch. Android's own docs describe
+// this flag as preventing the platform from performing its own NDEF
+// check on discovered tags — the step this OEM's viewer most plausibly
+// hooks. It should not affect what LabourLink itself can read: hardwareId
+// always comes straight from the raw Tag object (tag.getId()), and the
+// plugin's onTagDiscovered reads NDEF itself directly
+// (Ndef.connect()/getNdefMessage(), or the MIFARE Ultralight raw-page
+// path existing Ridder tags use) rather than depending on the platform's
+// own pre-check — but this still needs on-device confirmation (real
+// Ridder tag + a real LabourLink-written tag) before being treated as
+// settled, not just reasoned through from the platform's documented
+// semantics.
+export const ANDROID_READER_MODE_FLAGS =
+  0x01 | // FLAG_READER_NFC_A
+  0x02 | // FLAG_READER_NFC_B
+  0x04 | // FLAG_READER_NFC_F
+  0x08 | // FLAG_READER_NFC_V
+  0x80 | // FLAG_READER_SKIP_NDEF_CHECK
+  0x100; // FLAG_READER_NO_PLATFORM_SOUNDS
+
 // Starts a foreground-dispatch scan session and calls onTag for every tag
 // read until the returned stop function is called. A no-op outside a
 // native platform (isNfcSupported()/getNfcAvailability() is what callers
@@ -176,7 +219,10 @@ export function startScanSession(onTag: (tag: ScannedTag) => void, onError?: (me
           listenerHandle = null;
           return;
         }
-        await CapacitorNfc.startScanning({ invalidateAfterFirstRead: false });
+        await CapacitorNfc.startScanning({
+          invalidateAfterFirstRead: false,
+          androidReaderModeFlags: ANDROID_READER_MODE_FLAGS,
+        });
       } catch (err) {
         onError?.(err instanceof Error ? err.message : "Could not start NFC scanning.");
       }

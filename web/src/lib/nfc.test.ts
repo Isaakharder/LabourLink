@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ANDROID_READER_MODE_FLAGS,
   buildLabourlinkUriRecord,
   hexId,
   LABOURLINK_URI_PREFIX,
@@ -96,6 +97,26 @@ describe("buildLabourlinkUriRecord", () => {
     expect(record.tnf).toBe(0x01);
     expect(record.type).toEqual([0x55]);
     expect(record.payload[0]).toBe(0x00);
+  });
+});
+
+describe("ANDROID_READER_MODE_FLAGS", () => {
+  // Regression guard against a silently-wrong bitmask (e.g. a typo'd hex
+  // literal) — Android's NfcAdapter constants are stable, public API
+  // values confirmed against the official docs: FLAG_READER_NFC_A=0x01,
+  // FLAG_READER_NFC_B=0x02, FLAG_READER_NFC_F=0x04, FLAG_READER_NFC_V=0x08,
+  // FLAG_READER_SKIP_NDEF_CHECK=0x80, FLAG_READER_NO_PLATFORM_SOUNDS=0x100.
+  it("matches the plugin's own default tech-polling flags plus SKIP_NDEF_CHECK", () => {
+    expect(ANDROID_READER_MODE_FLAGS).toBe(0x01 | 0x02 | 0x04 | 0x08 | 0x80 | 0x100);
+    expect(ANDROID_READER_MODE_FLAGS).toBe(399);
+  });
+
+  it("includes FLAG_READER_SKIP_NDEF_CHECK (0x80) — the actual fix for the OEM tag-viewer interruption", () => {
+    expect(ANDROID_READER_MODE_FLAGS & 0x80).toBe(0x80);
+  });
+
+  it("still includes FLAG_READER_NO_PLATFORM_SOUNDS (0x100), matching the plugin's existing default", () => {
+    expect(ANDROID_READER_MODE_FLAGS & 0x100).toBe(0x100);
   });
 });
 
