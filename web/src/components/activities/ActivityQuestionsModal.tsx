@@ -39,7 +39,7 @@ export function ActivityQuestionsModal({ activity, onClose, onSaved }: ActivityQ
   }
 
   return (
-    <Modal title={`Activity Questions — ${activity.name}`} onClose={onClose}>
+    <Modal title={`Activity Questions — ${activity.name}`} onClose={onClose} wide>
       <form onSubmit={handleSubmit} className="employee-form" noValidate>
         <QuestionsEditor questions={questions} onChange={setQuestions} />
 

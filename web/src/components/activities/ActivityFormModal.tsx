@@ -106,7 +106,7 @@ export function ActivityFormModal({ activity, onClose, onSaved }: ActivityFormMo
   }
 
   return (
-    <Modal title={isEdit ? "Edit Activity" : "Add Activity"} onClose={onClose}>
+    <Modal title={isEdit ? "Edit Activity" : "Add Activity"} onClose={onClose} wide>
       <form onSubmit={handleSubmit} className="employee-form" noValidate>
         {submitError && <p className="error-text">{submitError}</p>}
 

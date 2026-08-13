@@ -2882,19 +2882,38 @@ input {
   padding: 0;
 }
 
+/* Each row stacks its two halves on separate lines — index+type+label on
+   top, required/reorder/remove underneath — at every width, not just on
+   mobile. Giving the label its own full-width line (rather than sharing
+   one line with the fixed-width controls) is what actually makes long
+   question text readable, e.g. "Which carrier or bin are you using for
+   this row?" — the controls are compact and don't need that space. */
 .questions-editor-row {
   display: flex;
-  align-items: center;
-  gap: 0.6rem;
+  flex-direction: column;
+  gap: 0.5rem;
   padding: 0.6rem 0.75rem;
   border: 1px solid var(--color-border);
   border-radius: 8px;
+}
+
+.questions-editor-row-main {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.questions-editor-row-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
 }
 
 .questions-editor-index {
   font-size: 0.85rem;
   color: var(--color-muted);
   min-width: 1.2em;
+  flex-shrink: 0;
 }
 
 .questions-editor-row select,
@@ -2907,9 +2926,14 @@ input {
   color: var(--color-text);
 }
 
+.questions-editor-type {
+  flex-shrink: 0;
+  min-width: 8.5rem;
+}
+
 .questions-editor-label {
   flex: 1;
-  min-width: 0;
+  min-width: 8rem;
 }
 
 .questions-editor-required {
@@ -2946,9 +2970,22 @@ input {
   white-space: nowrap;
 }
 
-@media (max-width: 700px) {
-  .questions-editor-row {
+/* On phone-width screens even index+type+label no longer fit one line —
+   type wraps onto its own line above the label so neither gets squeezed,
+   and the controls line spreads out to keep tap targets apart. */
+@media (max-width: 480px) {
+  .questions-editor-row-main {
     flex-wrap: wrap;
+  }
+
+  .questions-editor-label {
+    flex-grow: 1;
+    flex-shrink: 0;
+    flex-basis: 100%;
+  }
+
+  .questions-editor-row-controls {
+    justify-content: space-between;
   }
 }
 
@@ -3466,7 +3503,12 @@ input {
 }
 
 .greenhouse-phase-rect {
-  fill: #cbd5e1;
+  /* Neutral gray "walkway" background the rows sit on top of — must read
+     as clearly not-a-row at a glance, so it's kept out of the blue family
+     entirely (unlike the old #cbd5e1, which was the exact same fill as
+     .greenhouse-live-row-neutral below and made idle rows disappear into
+     the bed behind them). */
+  fill: #e5e7eb;
   stroke: #475569;
   stroke-width: 1.5;
 }
@@ -3633,14 +3675,18 @@ input {
    through row_batch_id (see rowLayout.ts / greenhouseLayout.ts). */
 
 .greenhouse-row-rect {
-  fill: #fde68a;
-  stroke: #b45309;
+  /* Light blue-gray, deliberately close to white — reads as "empty bed
+     outline" rather than competing for attention with the live blue/green
+     work-status fills, while still standing well apart from the gray
+     .greenhouse-phase-rect walkway it sits on. */
+  fill: #eef6ff;
+  stroke: #60a5fa;
   stroke-width: 1;
   cursor: pointer;
 }
 
 .greenhouse-row-rect:hover {
-  fill: #fcd34d;
+  fill: #dbeafe;
 }
 
 .greenhouse-row-rect-selected {
@@ -4164,17 +4210,21 @@ input {
 }
 
 .greenhouse-live-row-neutral {
-  fill: #cbd5e1;
-  stroke: #94a3b8;
+  /* Same light blue-gray as the editor's default .greenhouse-row-rect —
+     was #cbd5e1, identical to .greenhouse-phase-rect's walkway fill, which
+     is exactly why idle rows and the walkway used to wash together. */
+  fill: #eef6ff;
+  stroke: #60a5fa;
 }
 
 /* Employee Blocks' Link Rows selection mode (GreenhouseLiveCanvas's
    onRowClick prop) — a separate three-state palette from the live blue/
    green/neutral states above, since selection mode never shows work
-   status. */
+   status. Matches .greenhouse-live-row-neutral's fill for the same reason
+   (kept distinct from the gray walkway it renders on). */
 .greenhouse-live-row-available {
-  fill: #cbd5e1;
-  stroke: #94a3b8;
+  fill: #eef6ff;
+  stroke: #60a5fa;
 }
 
 .greenhouse-live-row-selected {

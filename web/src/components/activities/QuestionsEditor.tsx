@@ -95,45 +95,58 @@ export function QuestionsEditor({ questions, onChange, error }: QuestionsEditorP
             const availableTypes = QUESTION_TYPES.filter((t) => t === q.questionType || !usedTypes.includes(t));
             return (
               <li key={q.key} className="questions-editor-row">
-                <span className="questions-editor-index">{index + 1}.</span>
-                <select value={q.questionType} onChange={(e) => changeType(q.key, e.target.value as QuestionType)}>
-                  {availableTypes.map((t) => (
-                    <option key={t} value={t}>
-                      {QUESTION_TYPE_LABELS[t]}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  type="text"
-                  className="questions-editor-label"
-                  value={q.label}
-                  onChange={(e) => patch(q.key, { label: e.target.value })}
-                  placeholder={QUESTION_TYPE_DEFAULT_LABEL[q.questionType]}
-                />
-                <label className="questions-editor-required">
+                <div className="questions-editor-row-main">
+                  <span className="questions-editor-index">{index + 1}.</span>
+                  <select
+                    className="questions-editor-type"
+                    value={q.questionType}
+                    onChange={(e) => changeType(q.key, e.target.value as QuestionType)}
+                  >
+                    {availableTypes.map((t) => (
+                      <option key={t} value={t}>
+                        {QUESTION_TYPE_LABELS[t]}
+                      </option>
+                    ))}
+                  </select>
                   <input
-                    type="checkbox"
-                    checked={q.isRequired}
-                    onChange={(e) => patch(q.key, { isRequired: e.target.checked })}
+                    type="text"
+                    className="questions-editor-label"
+                    value={q.label}
+                    onChange={(e) => patch(q.key, { label: e.target.value })}
+                    placeholder={QUESTION_TYPE_DEFAULT_LABEL[q.questionType]}
                   />
-                  Required
-                </label>
-                <div className="questions-editor-order">
-                  <button type="button" onClick={() => move(q.key, -1)} disabled={index === 0} aria-label="Move question up">
-                    ↑
-                  </button>
+                </div>
+                <div className="questions-editor-row-controls">
+                  <label className="questions-editor-required">
+                    <input
+                      type="checkbox"
+                      checked={q.isRequired}
+                      onChange={(e) => patch(q.key, { isRequired: e.target.checked })}
+                    />
+                    Required
+                  </label>
+                  <div className="questions-editor-order">
+                    <button type="button" onClick={() => move(q.key, -1)} disabled={index === 0} aria-label="Move question up">
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => move(q.key, 1)}
+                      disabled={index === questions.length - 1}
+                      aria-label="Move question down"
+                    >
+                      ↓
+                    </button>
+                  </div>
                   <button
                     type="button"
-                    onClick={() => move(q.key, 1)}
-                    disabled={index === questions.length - 1}
-                    aria-label="Move question down"
+                    className="questions-editor-remove"
+                    onClick={() => remove(q.key)}
+                    aria-label="Remove question"
                   >
-                    ↓
+                    Remove
                   </button>
                 </div>
-                <button type="button" className="questions-editor-remove" onClick={() => remove(q.key)} aria-label="Remove question">
-                  Remove
-                </button>
               </li>
             );
           })}
