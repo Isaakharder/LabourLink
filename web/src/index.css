@@ -318,15 +318,20 @@ input {
   padding: 1.5rem;
 }
 
-/* Android only (see main.tsx) — the APK draws edge-to-edge behind the status
-   bar (Capacitor's SystemBars plugin, "css" insetsHandling mode), so without
-   this, page content starts underneath it instead of below it. The PWA/
-   desktop build never gets .platform-android, so this never applies there. */
-.platform-android .mobile-content {
+/* Applies everywhere, not just the Android APK (previously scoped to
+   .platform-android — see main.tsx) — env(safe-area-inset-top) resolves to
+   0px on any device/browser without an inset, so this is a no-op there and
+   safe to apply unconditionally. It matters just as much on iOS: index.html
+   sets viewport-fit=cover (required for the Android APK's edge-to-edge
+   WebView), which also puts Safari's own viewport under the status bar/
+   notch, both in a regular tab and especially an "Add to Home Screen"
+   standalone PWA — without this, .mobile-content's own first child (e.g.
+   SettingsScreen's header) renders partly underneath it instead of below. */
+.mobile-content {
   padding-top: calc(1.5rem + env(safe-area-inset-top, 0px));
 }
 
-.platform-android .message-overlay {
+.message-overlay {
   padding-top: calc(1.5rem + env(safe-area-inset-top, 0px));
 }
 
@@ -374,8 +379,7 @@ input {
 }
 
 .pairing-screen,
-.mobile-home,
-.mobile-settings {
+.mobile-home {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -383,6 +387,64 @@ input {
   text-align: center;
   height: 100%;
   gap: 0.75rem;
+}
+
+/* Settings (and its NFC sub-screens — RegisterExistingTagScreen,
+   WriteNewTagScreen, NfcDiagnosticScreen — which reuse this same class)
+   used to share .pairing-screen/.mobile-home's centered, height:100% rule
+   above, appropriate for a single short focal message but not a multi-
+   section list: with only a couple of sections it left the whole page
+   vertically centered in the viewport with large empty margins top and
+   bottom — the "oversized"/sparse look. This flows top-down instead, like
+   an ordinary settings screen. */
+.mobile-settings {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.6rem;
+}
+
+/* Sits at the top of .mobile-settings, which already renders inside
+   .mobile-content — that container's own padding-top (see the safe-area
+   rule above) is what actually keeps this out from under the iPhone status
+   bar/notch; nothing extra needed here beyond normal flow. */
+.mobile-settings-header {
+  width: 100%;
+  max-width: 320px;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.mobile-settings-header h1 {
+  flex: 1;
+  margin: 0;
+  font-size: 1.15rem;
+  text-align: center;
+  /* Optically re-centers the title against the back button's own width,
+     rather than the title drifting right because only one side has content. */
+  margin-right: 36px;
+}
+
+.mobile-settings-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: none;
+  border: none;
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+.mobile-settings-back:hover,
+.mobile-settings-back:focus-visible {
+  background: var(--color-bg);
 }
 
 .pairing-code {

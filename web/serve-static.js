@@ -47,6 +47,39 @@ const server = createServer((request, response) => {
   handler(request, response, {
     public: "dist",
     rewrites: [{ source: "**", destination: "/index.html" }],
+    // Without explicit Cache-Control, serve-handler sends none at all (no
+    // ETag/Last-Modified either — etag defaults to false), leaving every
+    // browser's own heuristic caching to decide how long to hold onto a
+    // response. iOS Safari's standalone "Add to Home Screen" PWA mode in
+    // particular can hang onto that heuristic cache far longer than a
+    // normal tab reload would re-check it, which is what actually causes
+    // "a new deploy doesn't show up until you delete and reinstall the
+    // PWA": index.html was never explicitly marked stale, so nothing ever
+    // forced a re-fetch of it. index.html/sw.js/manifest.json must always
+    // be revalidated (index.html is what points at the current build's
+    // hashed asset filenames — swapping to no-cache instead of leaving it
+    // ambiguous is what actually plugs the gap here); the hashed asset
+    // files under /assets/ are safe to cache forever since Vite gives a
+    // build with any changed content a new filename (see the dist/assets
+    // output in build:android's own log), never reusing an old one.
+    headers: [
+      {
+        source: "index.html",
+        headers: [{ key: "Cache-Control", value: "no-cache, must-revalidate" }],
+      },
+      {
+        source: "sw.js",
+        headers: [{ key: "Cache-Control", value: "no-cache, must-revalidate" }],
+      },
+      {
+        source: "manifest.json",
+        headers: [{ key: "Cache-Control", value: "no-cache, must-revalidate" }],
+      },
+      {
+        source: "assets/**",
+        headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
+      },
+    ],
   });
 });
 

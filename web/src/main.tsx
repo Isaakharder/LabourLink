@@ -5,9 +5,11 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import "./index.css";
 
-// Scopes the Android-only top-safe-area CSS (see index.css's .mobile-content/
-// .message-overlay rules) so it never applies to the PWA/browser or a future
-// iOS build — only the Android APK gets this class.
+// Available for any Android-specific styling that isn't safe to apply
+// everywhere (unlike the top-safe-area padding in index.css's
+// .mobile-content/.message-overlay rules, which now applies unconditionally
+// since env(safe-area-inset-top) is already a no-op anywhere it doesn't
+// apply).
 if (Capacitor.getPlatform() === "android") {
   document.documentElement.classList.add("platform-android");
 }
