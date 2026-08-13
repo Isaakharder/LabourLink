@@ -15,6 +15,15 @@
 // the client for the precise elapsed === minimum boundary, which isn't
 // practical to hit here without sleeping in real wall-clock seconds).
 //
+// Also covers the same set of guarantees for a carrier ("bin") change on a
+// dual row+carrier activity (the NFC active-screen scan feature's server
+// side — see nfcActiveScreenScan.ts on the client): minimum-duration and
+// same-row-recently-completed both apply to a carrier-only change exactly
+// as they do to a row change (the switch guard compares row and carrier
+// together, generically), an inactive carrierId is a hard 400 validation
+// failure rather than a switch warning, and a literal retry of the same
+// idempotencyKey never creates a duplicate segment.
+//
 // Run with: npm run test:mobile-time-switch-warnings
 import "dotenv/config";
 import express, { NextFunction, Request, Response } from "express";
@@ -73,6 +82,18 @@ async function main() {
   let rowBId!: string;
   let rowCId!: string;
   let rowDId!: string;
+  let rowEId!: string;
+  // Dual-question activity (row + carrier both required, 15-minute
+  // minimum) — the same shape as "Picking Peppers" from the NFC scan
+  // feature, since a carrier-only switch has to run through the exact same
+  // switch-guard block a row switch does (see the isRealSwitch check in
+  // mobileTime.ts, which compares row AND carrier together, generically).
+  let activityRowCarrierId!: string;
+  let questionIdRowCarrierRow!: string;
+  let questionIdRowCarrierCarrier!: string;
+  let carrierAId!: string;
+  let carrierBId!: string;
+  let carrierInactiveId!: string;
 
   try {
     const teamRoleId = (await pool.query(`select id from team_roles where name = 'Team Member'`)).rows[0].id;
@@ -165,6 +186,42 @@ async function main() {
     rowBId = await makeRow(2);
     rowCId = await makeRow(3);
     rowDId = await makeRow(4);
+    rowEId = await makeRow(5);
+
+    activityRowCarrierId = (
+      await pool.query(
+        `insert into activities (name, is_active, minimum_duration_minutes) values ($1, true, 15) returning id`,
+        [`QA Switch Warnings ActivityRowCarrier ${RUN_ID}`]
+      )
+    ).rows[0].id;
+    questionIdRowCarrierRow = (
+      await pool.query(
+        `insert into activity_questions (activity_id, question_type, label, is_required, sort_order)
+         values ($1, 'greenhouse_row', 'Which row?', true, 0) returning id`,
+        [activityRowCarrierId]
+      )
+    ).rows[0].id;
+    questionIdRowCarrierCarrier = (
+      await pool.query(
+        `insert into activity_questions (activity_id, question_type, label, is_required, sort_order)
+         values ($1, 'carrier', 'Which bin?', true, 1) returning id`,
+        [activityRowCarrierId]
+      )
+    ).rows[0].id;
+    await pool.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2)`, [
+      groupId,
+      activityRowCarrierId,
+    ]);
+
+    carrierAId = (
+      await pool.query(`insert into carriers (name, is_active) values ($1, true) returning id`, [`QA Bin A ${RUN_ID}`])
+    ).rows[0].id;
+    carrierBId = (
+      await pool.query(`insert into carriers (name, is_active) values ($1, true) returning id`, [`QA Bin B ${RUN_ID}`])
+    ).rows[0].id;
+    carrierInactiveId = (
+      await pool.query(`insert into carriers (name, is_active) values ($1, false) returning id`, [`QA Bin Inactive ${RUN_ID}`])
+    ).rows[0].id;
 
     function answersFor(questionId: string, rowId: string) {
       return [{ questionId, greenhouseRowId: rowId }];
@@ -285,6 +342,151 @@ async function main() {
       "H2) switching again immediately, while the current activity's own minimum is 0, never triggers a warning",
       zeroMinuteSwitch.body
     );
+
+    // -----------------------------------------------------------------
+    // Carrier ("bin") switching on a dual row+carrier activity — the NFC
+    // active-screen scan feature's server-side contract: a carrier-only
+    // change goes through the exact same switch-guard/idempotency
+    // machinery a row change does, not a separate, weaker path.
+    // -----------------------------------------------------------------
+    function answersForRowAndCarrier(rowId: string, carrierId: string) {
+      return [
+        { questionId: questionIdRowCarrierRow, greenhouseRowId: rowId },
+        { questionId: questionIdRowCarrierCarrier, carrierId },
+      ];
+    }
+
+    // I) fresh start on the dual-question activity (row E, bin A) — no
+    //    warning, nothing is being interrupted.
+    const freshDualStart = await call("/api/mobile/time-entries/work", deviceIdentifier, {
+      activityId: activityRowCarrierId,
+      idempotencyKey: randomUUID(),
+      answers: answersForRowAndCarrier(rowEId, carrierAId),
+      confirmSwitch: true, // bypasses activity0's own still-unmet 0-minute minimum on the way out
+    });
+    check(
+      freshDualStart.status === 200 &&
+        freshDualStart.body?.currentActivity?.row?.id === rowEId &&
+        freshDualStart.body?.currentActivity?.carrier?.id === carrierAId,
+      "I) starting the dual row+carrier activity on row E / bin A succeeds",
+      freshDualStart.body
+    );
+
+    // J) switching to a DIFFERENT bin (B) on the SAME row, seconds later,
+    //    is a real switch (isRealSwitch compares row and carrier together)
+    //    and is well under the 15-minute minimum — rejected exactly like a
+    //    row switch would be, not silently applied just because the row
+    //    itself didn't change.
+    const binSwitchUnderMinimum = await call("/api/mobile/time-entries/work", deviceIdentifier, {
+      activityId: activityRowCarrierId,
+      idempotencyKey: randomUUID(),
+      answers: answersForRowAndCarrier(rowEId, carrierBId),
+    });
+    check(
+      binSwitchUnderMinimum.status === 409 && binSwitchUnderMinimum.body?.code === "MINIMUM_DURATION_NOT_REACHED",
+      "J) switching only the bin seconds after starting is rejected with MINIMUM_DURATION_NOT_REACHED, same as a row switch",
+      binSwitchUnderMinimum
+    );
+
+    // K) confirming the switch performs it — row stays E, bin becomes B.
+    const binSwitchConfirmed = await call("/api/mobile/time-entries/work", deviceIdentifier, {
+      activityId: activityRowCarrierId,
+      idempotencyKey: randomUUID(),
+      answers: answersForRowAndCarrier(rowEId, carrierBId),
+      confirmSwitch: true,
+    });
+    check(
+      binSwitchConfirmed.status === 200 &&
+        binSwitchConfirmed.body?.currentActivity?.row?.id === rowEId &&
+        binSwitchConfirmed.body?.currentActivity?.carrier?.id === carrierBId,
+      "K) confirmSwitch bypasses the minimum-duration warning and switches to bin B, row unchanged",
+      binSwitchConfirmed.body
+    );
+
+    // L) switching back to (row E, bin A) — the pair just closed by step
+    //    K's switch — is SAME_ROW_RECENTLY_COMPLETED, exactly as it would
+    //    be for a same-row-just-finished row switch. Confirms the "same
+    //    row/bin recently completed" guard is keyed on the full
+    //    (activity, row, carrier) tuple, not row alone.
+    const binSameJustFinished = await call("/api/mobile/time-entries/work", deviceIdentifier, {
+      activityId: activityRowCarrierId,
+      idempotencyKey: randomUUID(),
+      answers: answersForRowAndCarrier(rowEId, carrierAId),
+    });
+    check(
+      binSameJustFinished.status === 409 && binSameJustFinished.body?.code === "SAME_ROW_RECENTLY_COMPLETED",
+      "L) switching back to the just-finished (row, bin) pair is rejected with SAME_ROW_RECENTLY_COMPLETED",
+      binSameJustFinished.body
+    );
+
+    // M) an inactive carrier is a hard validation failure (400), never a
+    //    switch warning — the server independently re-validates the
+    //    carrier is active regardless of what the client's own tag cache
+    //    believed (see validateActivityAndAnswers), covering the case an
+    //    NFC scan resolves against a stale/offline mapping cache for a bin
+    //    that's since been deactivated.
+    const inactiveCarrierAttempt = await call("/api/mobile/time-entries/work", deviceIdentifier, {
+      activityId: activityRowCarrierId,
+      idempotencyKey: randomUUID(),
+      answers: answersForRowAndCarrier(rowEId, carrierInactiveId),
+      confirmSwitch: true,
+    });
+    check(
+      inactiveCarrierAttempt.status === 400 && /carrier/i.test(String(inactiveCarrierAttempt.body?.error ?? "")),
+      "M) an inactive carrierId is rejected with a 400 validation error, not silently accepted or treated as a warning",
+      inactiveCarrierAttempt.body
+    );
+
+    // N) idempotent retry — replaying the exact same request (same
+    //    idempotencyKey) for a bin switch must not create a second
+    //    segment. Confirms the "stable idempotency key per physical scan"
+    //    contract holds for carrier switches, not just row switches (every
+    //    earlier test in this file used a fresh idempotencyKey per call, so
+    //    a literal replay was never exercised before this).
+    const retryKey = randomUUID();
+    const beforeRetryCount = await pool.query(
+      `select count(*) from time_entries where employee_id = $1 and deleted_at is null`,
+      [employeeIds[0]]
+    );
+    const idempotentFirst = await call("/api/mobile/time-entries/work", deviceIdentifier, {
+      activityId: activityRowCarrierId,
+      idempotencyKey: retryKey,
+      answers: answersForRowAndCarrier(rowEId, carrierAId),
+      confirmSwitch: true,
+    });
+    check(
+      idempotentFirst.status === 200 && idempotentFirst.body?.currentActivity?.carrier?.id === carrierAId,
+      "N1) the first request of an idempotent-retry pair switches to bin A",
+      idempotentFirst.body
+    );
+    const idempotentRetry = await call("/api/mobile/time-entries/work", deviceIdentifier, {
+      activityId: activityRowCarrierId,
+      idempotencyKey: retryKey,
+      answers: answersForRowAndCarrier(rowEId, carrierAId),
+      confirmSwitch: true,
+    });
+    check(
+      idempotentRetry.status === 200 &&
+        idempotentRetry.body?.currentActivity?.carrier?.id === carrierAId &&
+        idempotentRetry.body?.currentActivity?.startedAt === idempotentFirst.body?.currentActivity?.startedAt,
+      "N2) replaying the identical request (same idempotencyKey) returns the same segment, not a new one",
+      idempotentRetry.body
+    );
+    const afterRetryCount = await pool.query(
+      `select count(*) from time_entries where employee_id = $1 and deleted_at is null`,
+      [employeeIds[0]]
+    );
+    check(
+      Number(afterRetryCount.rows[0].count) === Number(beforeRetryCount.rows[0].count) + 1,
+      "N3) the retry created exactly one new time_entries row total, not two — no duplicate segment from the replay",
+      { before: beforeRetryCount.rows[0].count, after: afterRetryCount.rows[0].count }
+    );
+    const dupeKeyRows = await pool.query(`select count(*) from time_entries where idempotency_key = $1`, [retryKey]);
+    check(
+      Number(dupeKeyRows.rows[0].count) === 1,
+      "N4) exactly one time_entries row carries this idempotencyKey, confirming the replay was a true no-op insert",
+      dupeKeyRows.rows[0]
+    );
   } finally {
     server.close();
 
@@ -297,14 +499,21 @@ async function main() {
       await client.query(`delete from devices where id = any($1::uuid[])`, [deviceIds]);
       await client.query(`delete from employee_activity_group_assignments where activity_group_id = $1`, [groupId ?? null]);
       await client.query(`delete from activity_group_activities where activity_group_id = $1`, [groupId ?? null]);
-      await client.query(`delete from activity_questions where id = any($1::uuid[])`, [[questionId15, questionId0].filter(Boolean)]);
-      await client.query(`delete from activities where id = any($1::uuid[])`, [[activity15Id, activity0Id].filter(Boolean)]);
+      await client.query(`delete from activity_questions where id = any($1::uuid[])`, [
+        [questionId15, questionId0, questionIdRowCarrierRow, questionIdRowCarrierCarrier].filter(Boolean),
+      ]);
+      await client.query(`delete from activities where id = any($1::uuid[])`, [
+        [activity15Id, activity0Id, activityRowCarrierId].filter(Boolean),
+      ]);
       if (groupId) await client.query(`delete from activity_groups where id = $1`, [groupId]);
       await client.query(`delete from greenhouse_rows where id = any($1::uuid[])`, [
-        [rowAId, rowBId, rowCId, rowDId].filter(Boolean),
+        [rowAId, rowBId, rowCId, rowDId, rowEId].filter(Boolean),
       ]);
       if (phaseId) await client.query(`delete from greenhouse_phases where id = $1`, [phaseId]);
       if (landId) await client.query(`delete from greenhouse_lands where id = $1`, [landId]);
+      await client.query(`delete from carriers where id = any($1::uuid[])`, [
+        [carrierAId, carrierBId, carrierInactiveId].filter(Boolean),
+      ]);
       await client.query(`delete from employees where id = any($1::uuid[])`, [employeeIds]);
       await client.query("commit");
     } catch (err) {
@@ -317,11 +526,16 @@ async function main() {
 
     const leftoverEmployees = await pool.query(`select count(*) from employees where id = any($1::uuid[])`, [employeeIds]);
     const leftoverActivities = await pool.query(`select count(*) from activities where id = any($1::uuid[])`, [
-      [activity15Id, activity0Id].filter(Boolean),
+      [activity15Id, activity0Id, activityRowCarrierId].filter(Boolean),
+    ]);
+    const leftoverCarriers = await pool.query(`select count(*) from carriers where id = any($1::uuid[])`, [
+      [carrierAId, carrierBId, carrierInactiveId].filter(Boolean),
     ]);
     check(
-      Number(leftoverEmployees.rows[0].count) === 0 && Number(leftoverActivities.rows[0].count) === 0,
-      "I) all QA fixtures cleaned up, none left orphaned"
+      Number(leftoverEmployees.rows[0].count) === 0 &&
+        Number(leftoverActivities.rows[0].count) === 0 &&
+        Number(leftoverCarriers.rows[0].count) === 0,
+      "Z) all QA fixtures cleaned up, none left orphaned"
     );
 
     await pool.end();

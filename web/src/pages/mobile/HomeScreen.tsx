@@ -12,8 +12,8 @@ import { SwitchWarningDialog } from "../../components/mobile/SwitchWarningDialog
 import { isNfcSupported, startScanSession, ScannedTag } from "../../lib/nfc";
 import { refreshTagMappingCache, resolveScannedTag } from "../../lib/nfcMappingCache";
 import { checkSwitchWarning, SwitchWarning } from "../../lib/nfcSwitchWarning";
-import { classifyHomeRowScan, isHomeNfcScanActive } from "../../lib/nfcActiveScreenScan";
-import { playSuccessFeedback } from "../../lib/feedback";
+import { buildScanSwitchAnswers, classifyHomeScan, HomeScanOutcome, isHomeNfcScanActive } from "../../lib/nfcActiveScreenScan";
+import { playErrorFeedback, playSuccessFeedback } from "../../lib/feedback";
 import { ActivityTimer, formatElapsed } from "../../components/mobile/ActivityTimer";
 import { RecentJobsCard } from "../../components/mobile/RecentJobsCard";
 
@@ -206,19 +206,23 @@ export function HomeScreen() {
 
   const currentActivityDef = me?.currentActivity ? activities.find((a) => a.id === me.currentActivity!.id) : undefined;
   const rowQuestion = currentActivityDef?.questions.find((q) => q.questionType === "greenhouse_row") ?? null;
+  const carrierQuestion = currentActivityDef?.questions.find((q) => q.questionType === "carrier") ?? null;
 
   // Yields to a picker sheet's own scan session, a single-question edit,
   // or a pending switchWarning dialog — any of those already own (or are
   // about to own) the native reader; lib/nfc.ts's own single-ownership
   // guard is the hard backstop, this is what keeps HomeScreen from even
-  // trying to start a second one in the first place.
+  // trying to start a second one in the first place. Active for either
+  // question type — a dual row+carrier activity (e.g. Picking Peppers)
+  // accepts both tag types from this one continuous session.
   const homeNfcActive =
     homeNfcSupported &&
     isHomeNfcScanActive({
       foregrounded,
       status: me?.status ?? "idle",
       hasCompetingNfcOwner: Boolean(questionFlow || singleQuestionEdit || switchWarning),
-      isRowBasedActivity: Boolean(rowQuestion),
+      hasRowQuestion: Boolean(rowQuestion),
+      hasCarrierQuestion: Boolean(carrierQuestion),
     });
 
   // Everything the scan callback below needs, kept current on every render
@@ -252,53 +256,86 @@ export function HomeScreen() {
     if (inFlightScanRef.current) return;
     const ctx = homeScanContextRef.current;
     const resolved = resolveScannedTag(tag);
-    const outcome = classifyHomeRowScan(resolved, {
-      currentRowId: ctx.me?.currentActivity?.row?.id ?? null,
+    if (!ctx.me?.currentActivity) return;
+    const activityDef = ctx.activities.find((a) => a.id === ctx.me!.currentActivity!.id);
+    const rowQ = activityDef?.questions.find((q) => q.questionType === "greenhouse_row") ?? null;
+    const carrierQ = activityDef?.questions.find((q) => q.questionType === "carrier") ?? null;
+
+    const outcome: HomeScanOutcome = classifyHomeScan(resolved, {
+      hasRowQuestion: Boolean(rowQ),
+      hasCarrierQuestion: Boolean(carrierQ),
+      currentRowId: ctx.me.currentActivity.row?.id ?? null,
+      currentCarrierId: ctx.me.currentActivity.carrier?.id ?? null,
       online: ctx.online,
     });
 
     if (outcome.kind === "unknown") {
+      playErrorFeedback();
       setHomeNfcMessage(t(ctx.language, "nfcTagNotRecognized"));
       return;
     }
     if (outcome.kind === "wrong-type") {
-      setHomeNfcMessage(t(ctx.language, "nfcTagIsBinNotRow"));
+      // Row tags are never treated as bins and vice versa — a tag whose own
+      // type has nothing to do here (no matching question configured)
+      // always shows the mismatch, never silently acts on it as the other
+      // type.
+      playErrorFeedback();
+      setHomeNfcMessage(t(ctx.language, outcome.targetType === "carrier" ? "nfcTagIsBinNotRow" : "nfcTagIsRowNotBin"));
       return;
     }
-    if (outcome.kind === "already-current-row") {
+    if (outcome.kind === "already-current") {
+      // A rescanned row is silently ignored (unchanged, established
+      // behavior) — a rescanned bin gets a small explicit "already using
+      // this bin" message per the same duplicate-scan-suppression
+      // requirement, since re-tapping the same bin tag is common enough
+      // (e.g. confirming it's still the right one) that silence alone reads
+      // as "did that do anything?".
+      if (outcome.targetType === "carrier") {
+        setHomeNfcMessage(t(ctx.language, "nfcAlreadyUsingThisBin"));
+      }
       return;
     }
     if (outcome.kind === "offline") {
-      setHomeNfcMessage(t(ctx.language, "nfcOfflineCannotSwitchRow"));
+      setHomeNfcMessage(t(ctx.language, outcome.targetType === "carrier" ? "nfcOfflineCannotSwitchBin" : "nfcOfflineCannotSwitchRow"));
       return;
     }
 
     // outcome.kind === "switch" — defensive re-check even though the
-    // active-gate already requires a row-based current activity: `me`/
-    // `activities` could theoretically have changed between the gate
+    // active-gate already requires a row/carrier-based current activity:
+    // `me`/`activities` could theoretically have changed between the gate
     // re-rendering and this specific scan event.
-    if (!ctx.me?.currentActivity) return;
-    const activityDef = ctx.activities.find((a) => a.id === ctx.me!.currentActivity!.id);
-    const rowQ = activityDef?.questions.find((q) => q.questionType === "greenhouse_row");
-    if (!activityDef || !rowQ) return;
+    const targetQ = outcome.targetType === "greenhouse_row" ? rowQ : carrierQ;
+    if (!activityDef || !targetQ) return;
+
+    // Preserves the currently-answered row/carrier question — a bin scan
+    // never touches the current row, and a row scan never touches the
+    // current bin, only the scanned tag's own question changes (see
+    // buildScanSwitchAnswers's own comment for why the full answer set,
+    // not just this one question, has to be submitted).
+    const answers = buildScanSwitchAnswers(outcome, {
+      rowQuestionId: rowQ?.id ?? null,
+      carrierQuestionId: carrierQ?.id ?? null,
+      currentRowId: ctx.me.currentActivity.row?.id ?? null,
+      currentCarrierId: ctx.me.currentActivity.carrier?.id ?? null,
+    });
 
     setHomeNfcMessage(null);
     inFlightScanRef.current = true;
     // One stable idempotency key for this physical scan, reused if a
     // same-row/minimum-duration warning fires and is then confirmed — see
     // submitQuestionFlow's own idempotencyKey option.
-    ctx.submitQuestionFlow(
-      ctx.me.currentActivity.id,
-      ctx.me.currentActivity.name,
-      { [rowQ.id]: { questionId: rowQ.id, questionType: "greenhouse_row", greenhouseRowId: outcome.rowId } },
-      {
-        idempotencyKey: uuid(),
-        onSuccess: playSuccessFeedback,
-        onSettled: () => {
-          inFlightScanRef.current = false;
-        },
-      }
-    );
+    ctx.submitQuestionFlow(ctx.me.currentActivity.id, ctx.me.currentActivity.name, answers, {
+      idempotencyKey: uuid(),
+      onSuccess: () => {
+        playSuccessFeedback();
+        setHomeNfcMessage(
+          t(ctx.language, outcome.targetType === "carrier" ? "nfcBinChangedTo" : "nfcRowChangedTo", { label: outcome.label })
+        );
+      },
+      onSettled: () => {
+        inFlightScanRef.current = false;
+      },
+    });
   }, []);
 
   // Edge-triggered, imperative sync instead of a cleanup-returning effect:
@@ -797,11 +834,22 @@ export function HomeScreen() {
       {/* Small, unobtrusive status — deliberately not a button, matching
           the NFC feature plan's "should not look like a button." Shown
           only while the foreground scan session is actually running (NFC
-          supported, working a row-based activity, this screen
-          foregrounded, nothing else owns the reader). homeNfcMessage
-          (unknown/bin/offline scan) briefly replaces it, same auto-
-          clearing convention as the picker sheets' own nfcHint. */}
-      {homeNfcActive && <p className="mobile-timer-static">{homeNfcMessage ?? t(language, "readyToScanNextRow")}</p>}
+          supported, working a row- and/or carrier-based activity, this
+          screen foregrounded, nothing else owns the reader). Wording
+          reflects which tag types this activity actually accepts — both on
+          a dual row+carrier activity like Picking Peppers, just one on a
+          single-question activity. homeNfcMessage (unknown/wrong-type/
+          offline/already-current/success) briefly replaces it, same
+          auto-clearing convention as the picker sheets' own nfcHint. */}
+      {homeNfcActive && (
+        <p className="mobile-timer-static">
+          {homeNfcMessage ??
+            t(
+              language,
+              rowQuestion && carrierQuestion ? "readyToScanRowOrBin" : carrierQuestion ? "readyToScanNextBin" : "readyToScanNextRow"
+            )}
+        </p>
+      )}
 
       {/* 5. Recent jobs */}
       <RecentJobsCard jobs={me!.recentJobs} language={language} />

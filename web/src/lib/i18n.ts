@@ -85,10 +85,19 @@ const TRANSLATIONS_EN = {
   nfcTagNotRecognized: "That tag isn't registered. Choose manually below.",
   nfcStillWaiting: "Still not seeing a tag — choose manually below.",
 
-  // --- Active-screen row scanning (Home, while working) ---
+  // --- Active-screen row/bin scanning (Home, while working) — accepts
+  // both tag types continuously on a dual-question activity like Picking
+  // Peppers, not just row tags. ---
   readyToScanNextRow: "Ready to scan next row",
+  readyToScanNextBin: "Ready to scan next bin",
+  readyToScanRowOrBin: "Ready to scan row or bin",
   nfcTagIsBinNotRow: "This tag belongs to a bin.",
+  nfcTagIsRowNotBin: "This tag belongs to a row.",
   nfcOfflineCannotSwitchRow: "Can't switch rows while offline — choose manually below.",
+  nfcOfflineCannotSwitchBin: "Can't switch bins while offline — choose manually below.",
+  nfcAlreadyUsingThisBin: "Already using this bin",
+  nfcRowChangedTo: (p: Params) => `Row changed to ${p.label}`,
+  nfcBinChangedTo: (p: Params) => `Bin changed to ${p.label}`,
 
   // --- NFC switch warnings (same-row-recently-completed, minimum-
   // duration) — fixed prompts/buttons only, never the activity/row/bin
@@ -192,8 +201,15 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   nfcStillWaiting: "Todavía no se detecta ninguna etiqueta — elija manualmente abajo.",
 
   readyToScanNextRow: "Listo para escanear la siguiente hilera",
+  readyToScanNextBin: "Listo para escanear el siguiente bin",
+  readyToScanRowOrBin: "Listo para escanear hilera o bin",
   nfcTagIsBinNotRow: "Esta etiqueta pertenece a un transportador.",
+  nfcTagIsRowNotBin: "Esta etiqueta pertenece a una hilera.",
   nfcOfflineCannotSwitchRow: "No se puede cambiar de fila sin conexión — elija manualmente abajo.",
+  nfcOfflineCannotSwitchBin: "No se puede cambiar de bin sin conexión — elija manualmente abajo.",
+  nfcAlreadyUsingThisBin: "Ya está usando este bin",
+  nfcRowChangedTo: (p) => `Hilera cambiada a ${p.label}`,
+  nfcBinChangedTo: (p) => `Bin cambiado a ${p.label}`,
 
   sameRowJustFinished: "Acaba de terminar esta fila. ¿Desea volver a entrar en ella?",
   sameBinJustFinished: "Acaba de terminar este transportador. ¿Desea volver a entrar en él?",
