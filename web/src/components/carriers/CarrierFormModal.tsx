@@ -12,6 +12,7 @@ interface CarrierFormModalProps {
 interface FormState {
   name: string;
   notes: string;
+  tareWeightKg: string;
   isActive: boolean;
 }
 
@@ -19,6 +20,7 @@ function toFormState(carrier: Carrier | null): FormState {
   return {
     name: carrier?.name ?? "",
     notes: carrier?.notes ?? "",
+    tareWeightKg: carrier ? String(carrier.tareWeightKg) : "0",
     isActive: carrier?.isActive ?? true,
   };
 }
@@ -37,6 +39,10 @@ export function CarrierFormModal({ carrier, onClose, onSaved }: CarrierFormModal
   function validate(): boolean {
     const next: Record<string, string> = {};
     if (!form.name.trim()) next.name = "Carrier name is required";
+    const tare = Number(form.tareWeightKg);
+    if (form.tareWeightKg.trim() === "" || !Number.isFinite(tare) || tare < 0) {
+      next.tareWeightKg = "Tare weight must be 0 or greater";
+    }
     setErrors(next);
     return Object.keys(next).length === 0;
   }
@@ -52,6 +58,7 @@ export function CarrierFormModal({ carrier, onClose, onSaved }: CarrierFormModal
       const payload = {
         name: form.name.trim(),
         notes: form.notes.trim() || null,
+        tareWeightKg: Number(form.tareWeightKg),
         isActive: form.isActive,
       };
 
@@ -90,6 +97,18 @@ export function CarrierFormModal({ carrier, onClose, onSaved }: CarrierFormModal
                 required
               />
               {errors.name && <span className="field-error">{errors.name}</span>}
+            </label>
+            <label>
+              Tare weight (kg) *
+              <input
+                type="number"
+                min="0"
+                step="any"
+                value={form.tareWeightKg}
+                onChange={(e) => set("tareWeightKg", e.target.value)}
+                required
+              />
+              {errors.tareWeightKg && <span className="field-error">{errors.tareWeightKg}</span>}
             </label>
             <label>
               Notes

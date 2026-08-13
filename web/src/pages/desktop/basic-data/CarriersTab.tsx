@@ -3,6 +3,7 @@ import { api, ApiError } from "../../../lib/api";
 import { Carrier } from "../../../lib/carrierTypes";
 import { useAuth } from "../../../context/AuthContext";
 import { CarrierFormModal } from "../../../components/carriers/CarrierFormModal";
+import { CarrierBulkAddModal } from "../../../components/carriers/CarrierBulkAddModal";
 
 type StatusFilter = "active" | "inactive" | "all";
 
@@ -12,11 +13,13 @@ export function CarriersTab() {
 
   const [carriers, setCarriers] = useState<Carrier[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<StatusFilter>("active");
 
   const [modalCarrier, setModalCarrier] = useState<Carrier | null | "new">(null);
+  const [bulkModalOpen, setBulkModalOpen] = useState(false);
 
   const load = useCallback(() => {
     const params = new URLSearchParams();
@@ -37,6 +40,12 @@ export function CarriersTab() {
     const t = window.setTimeout(load, search ? 300 : 0);
     return () => window.clearTimeout(t);
   }, [load, search]);
+
+  useEffect(() => {
+    if (!successMessage) return;
+    const t = window.setTimeout(() => setSuccessMessage(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [successMessage]);
 
   async function handleToggleActive(carrier: Carrier) {
     if (carrier.isActive) {
@@ -92,13 +101,19 @@ export function CarriersTab() {
         </span>
 
         {isAdmin && (
-          <button type="button" className="employees-add-button" onClick={() => setModalCarrier("new")}>
-            Add Carrier
-          </button>
+          <div className="carriers-toolbar-actions">
+            <button type="button" className="carriers-bulk-add-button" onClick={() => setBulkModalOpen(true)}>
+              Bulk Add
+            </button>
+            <button type="button" className="employees-add-button" onClick={() => setModalCarrier("new")}>
+              Add Carrier
+            </button>
+          </div>
         )}
       </div>
 
       {error && <p className="error-text">{error}</p>}
+      {successMessage && <p className="row-builder-success">{successMessage}</p>}
 
       {!carriers ? (
         <p>Loading...</p>
@@ -110,6 +125,7 @@ export function CarriersTab() {
             <thead>
               <tr>
                 <th>Name</th>
+                <th>Tare weight</th>
                 <th>Notes</th>
                 <th>Status</th>
                 <th></th>
@@ -119,6 +135,7 @@ export function CarriersTab() {
               {carriers.map((c) => (
                 <tr key={c.id}>
                   <td>{c.name}</td>
+                  <td>{c.tareWeightKg} kg</td>
                   <td>{c.notes ?? "—"}</td>
                   <td>
                     <span className={`status-pill ${c.isActive ? "status-active" : "status-inactive"}`}>
@@ -144,6 +161,10 @@ export function CarriersTab() {
                 </div>
                 <dl className="employee-card-fields">
                   <div>
+                    <dt>Tare weight</dt>
+                    <dd>{c.tareWeightKg} kg</dd>
+                  </div>
+                  <div>
                     <dt>Notes</dt>
                     <dd>{c.notes ?? "—"}</dd>
                   </div>
@@ -153,6 +174,17 @@ export function CarriersTab() {
             ))}
           </div>
         </>
+      )}
+
+      {bulkModalOpen && (
+        <CarrierBulkAddModal
+          onClose={() => setBulkModalOpen(false)}
+          onSaved={(message) => {
+            setBulkModalOpen(false);
+            setSuccessMessage(message);
+            load();
+          }}
+        />
       )}
 
       {modalCarrier && (

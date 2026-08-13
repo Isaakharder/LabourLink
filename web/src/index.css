@@ -1210,6 +1210,30 @@ input {
   white-space: nowrap;
 }
 
+/* Carriers toolbar's "Bulk Add" + "Add Carrier" pair — the wrapper takes
+   over .employees-add-button's own margin-left: auto so the two buttons
+   sit together at the toolbar's right edge instead of being pushed apart. */
+.carriers-toolbar-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.carriers-toolbar-actions .employees-add-button {
+  margin-left: 0;
+}
+
+.carriers-bulk-add-button {
+  padding: 0.55rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .app-content:has(.employees-page) {
   display: flex;
   flex-direction: column;
