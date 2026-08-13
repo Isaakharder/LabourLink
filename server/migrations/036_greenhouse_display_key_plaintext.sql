@@ -1,0 +1,21 @@
+-- Recoverable copy of the current TV link's raw token, alongside the
+-- existing display_key_hash (016_greenhouse_displays.sql) — added so an
+-- admin can come back to Greenhouse -> Display later and still see/copy the
+-- TV link, instead of it only ever being shown once at generation time.
+--
+-- display_key_hash remains the ONLY thing requireDisplayKey (displayAuth.ts)
+-- reads on every TV poll — this column changes nothing about that hot,
+-- unauthenticated lookup path or its security properties. This column is a
+-- deliberate, additive relaxation of the old "never persisted" plaintext
+-- rule, scoped narrowly: only ever returned by GET /api/greenhouse/displays
+-- to an Administrator (see serializeDisplay's includeToken parameter in
+-- routes/greenhouseDisplays.ts), the same role already required to generate
+-- or regenerate a link in the first place.
+--
+-- Nullable and left null for every display that already exists (created
+-- before this column existed, or via the create-greenhouse-display CLI
+-- script prior to this change) — their TV link keeps working exactly as
+-- before via display_key_hash, it's just not retrievable here until
+-- explicitly regenerated.
+alter table greenhouse_displays
+  add column display_key_plaintext text;

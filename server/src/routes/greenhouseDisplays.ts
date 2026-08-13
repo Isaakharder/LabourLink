@@ -30,14 +30,20 @@ const DISPLAY_SELECT = `
          gd.activity_id, a.name as activity_name,
          to_char(gd.date_start, 'YYYY-MM-DD') as date_start,
          to_char(gd.date_end, 'YYYY-MM-DD') as date_end,
-         gd.is_active, gd.updated_at, gd.rotation_degrees
+         gd.is_active, gd.updated_at, gd.rotation_degrees, gd.display_key_plaintext
   from greenhouse_displays gd
   join greenhouse_lands gl on gl.id = gd.land_id
   left join activities a on a.id = gd.activity_id
 `;
 
+// includeToken is false for anyone who isn't an Administrator — the same
+// role gate already required to generate/regenerate a link in the first
+// place (see requireRole below), so a Manager can see a display's config
+// via GET / but never its TV link (036_greenhouse_display_key_plaintext.sql
+// — display_key_plaintext is otherwise the raw, still-usable-forever token,
+// not something to leak to a role that can't act on it anyway).
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function serializeDisplay(row: any) {
+function serializeDisplay(row: any, includeToken: boolean) {
   return {
     id: row.id,
     name: row.name,
@@ -50,6 +56,11 @@ function serializeDisplay(row: any) {
     isActive: row.is_active,
     updatedAt: row.updated_at,
     rotationDegrees: row.rotation_degrees,
+    // null both when this display predates display_key_plaintext existing
+    // (regenerate to get a retrievable one) and whenever includeToken is
+    // false — the client only ever renders/copies a full URL built from
+    // this, never the bare token on its own.
+    tvToken: includeToken ? (row.display_key_plaintext as string | null) : null,
   };
 }
 
@@ -57,9 +68,10 @@ router.get(
   "/",
   requireAuth,
   requireRole("Administrator", "Manager"),
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
+    const includeToken = req.employee!.securityRole === "Administrator";
     const { rows } = await pool.query(`${DISPLAY_SELECT} order by gd.name`);
-    res.json({ displays: rows.map(serializeDisplay) });
+    res.json({ displays: rows.map((r) => serializeDisplay(r, includeToken)) });
   })
 );
 
@@ -80,16 +92,18 @@ router.post(
     const today = calendarDateInAppTimezone(new Date());
 
     const insert = await pool.query(
-      `insert into greenhouse_displays (name, display_key_hash, land_id, date_start, date_end)
-       values ($1, $2, $3, $4, $4)
+      `insert into greenhouse_displays (name, display_key_hash, display_key_plaintext, land_id, date_start, date_end)
+       values ($1, $2, $3, $4, $5, $5)
        returning id`,
-      [trimmedName, tokenHash, landId, today]
+      [trimmedName, tokenHash, token, landId, today]
     );
 
     const { rows } = await pool.query(`${DISPLAY_SELECT} where gd.id = $1`, [insert.rows[0].id]);
-    // token appears in this response body once — never logged, never
-    // persisted, never returned by any other route (see displayToken.ts).
-    res.status(201).json({ display: serializeDisplay(rows[0]), token });
+    // token is also returned as its own top-level field (unchanged shape) —
+    // display.tvToken above carries the identical value now that it's
+    // persisted, this is just kept for existing callers that only look at
+    // `token`.
+    res.status(201).json({ display: serializeDisplay(rows[0], true), token });
   })
 );
 
@@ -103,8 +117,8 @@ router.post(
 
     const { token, tokenHash } = generateDisplayKey();
     const { rows } = await pool.query(
-      "update greenhouse_displays set display_key_hash = $1 where id = $2 returning id",
-      [tokenHash, id]
+      "update greenhouse_displays set display_key_hash = $1, display_key_plaintext = $2 where id = $3 returning id",
+      [tokenHash, token, id]
     );
     if (!rows[0]) return res.status(404).json({ error: "Display not found" });
 
@@ -166,7 +180,7 @@ router.put(
     if (!rows[0]) return res.status(404).json({ error: "Display not found" });
 
     const { rows: full } = await pool.query(`${DISPLAY_SELECT} where gd.id = $1`, [id]);
-    res.json({ display: serializeDisplay(full[0]) });
+    res.json({ display: serializeDisplay(full[0], req.employee!.securityRole === "Administrator") });
   })
 );
 
@@ -188,7 +202,7 @@ router.patch(
     if (!rows[0]) return res.status(404).json({ error: "Display not found" });
 
     const { rows: full } = await pool.query(`${DISPLAY_SELECT} where gd.id = $1`, [id]);
-    res.json({ display: serializeDisplay(full[0]) });
+    res.json({ display: serializeDisplay(full[0], true) });
   })
 );
 

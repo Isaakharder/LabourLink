@@ -36,17 +36,17 @@ async function run() {
   const today = calendarDateInAppTimezone(new Date());
 
   const { rows } = await pool.query(
-    `insert into greenhouse_displays (name, display_key_hash, land_id, date_start, date_end)
-     values ($1, $2, $3, $4, $4)
+    `insert into greenhouse_displays (name, display_key_hash, display_key_plaintext, land_id, date_start, date_end)
+     values ($1, $2, $3, $4, $5, $5)
      returning id, name`,
-    [name, tokenHash, land.rows[0].id, today]
+    [name, tokenHash, token, land.rows[0].id, today]
   );
 
   const webUrl = process.env.WEB_APP_URL || "http://localhost:5173";
   console.log("Created display:", rows[0]);
   console.log("Land:", land.rows[0].name);
   console.log("");
-  console.log("TV URL (shown once — copy it now, open it on the break-room mini PC):");
+  console.log("TV URL (also retrievable later from Greenhouse -> Display in the app):");
   console.log(`  ${webUrl}/greenhouse/display/${token}`);
   await pool.end();
 }

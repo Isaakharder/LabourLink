@@ -88,6 +88,13 @@ export interface GreenhouseDisplaySummary {
   isActive: boolean;
   updatedAt: string;
   rotationDegrees: RotationDegrees;
+  // The display's current raw TV token, or null when either (a) this
+  // display predates the token being stored retrievably and hasn't been
+  // regenerated since, or (b) the current user isn't an Administrator (the
+  // server omits it entirely for anyone else — see serializeDisplay in
+  // routes/greenhouseDisplays.ts). Build a full URL from this via
+  // tvUrlFor(); never render/copy the bare token on its own.
+  tvToken: string | null;
 }
 
 export interface GreenhouseDisplayCreateResponse {

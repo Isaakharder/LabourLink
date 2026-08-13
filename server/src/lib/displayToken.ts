@@ -11,8 +11,12 @@ export function hashDisplayKey(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-// The raw token is returned once, in the API response for create/regenerate
-// only (see routes/greenhouseDisplays.ts) — never logged, never persisted.
+// The raw token is returned in the API response for create/regenerate (see
+// routes/greenhouseDisplays.ts), and also persisted in plaintext alongside
+// its hash (display_key_plaintext, 036_greenhouse_display_key_plaintext.sql)
+// so an Administrator can come back later and retrieve/copy the same TV
+// link — never logged, and only ever returned to an Administrator by GET
+// /api/greenhouse/displays, the same role required to generate one at all.
 // It's embedded directly in the TV's URL path (/greenhouse/display/<token>),
 // not sent as a header, since the whole point is a mini PC that only needs
 // to open one bookmarked URL with no login step.

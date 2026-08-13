@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Copy, Link2, MonitorUp, Plus } from "lucide-react";
+import { Check, Copy, ExternalLink, Link2, MonitorUp, Plus } from "lucide-react";
 import { GreenhouseLiveCanvas } from "../../components/greenhouseLive/GreenhouseLiveCanvas";
 import { GreenhouseLiveToolbar } from "../../components/greenhouseLive/GreenhouseLiveToolbar";
 import { DateRangeCalendar } from "../../components/greenhouseLive/DateRangeCalendar";
+import { RegenerateTvLinkModal } from "../../components/greenhouseLive/RegenerateTvLinkModal";
 import { useAuth } from "../../context/AuthContext";
 import { useUnsavedChangesGuard } from "../../context/UnsavedChangesContext";
 import { api, ApiError } from "../../lib/api";
@@ -55,7 +56,12 @@ export function GreenhousePage() {
   const [newDisplayName, setNewDisplayName] = useState("");
   const [creatingDisplay, setCreatingDisplay] = useState(false);
   const [createDisplayError, setCreateDisplayError] = useState<string | null>(null);
-  const [createdToken, setCreatedToken] = useState<string | null>(null);
+  // The TV link box (label + read-only URL + Copy/Open) is driven entirely
+  // by selectedDisplay.tvToken — persisted server-side (see
+  // greenhouseLiveTypes.ts's own comment), so it stays visible the same way
+  // on first creation, after a regenerate, and on returning to this page
+  // later. No separate "shown once" reveal state needed anymore.
+  const [showRegenerateConfirm, setShowRegenerateConfirm] = useState(false);
   const [generatingLink, setGeneratingLink] = useState(false);
   const [generateLinkError, setGenerateLinkError] = useState<string | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
@@ -322,7 +328,6 @@ export function GreenhousePage() {
       setDisplays((prev) => [...(prev ?? []), res.display]);
       setSelectedDisplayId(res.display.id);
       initializedFromDisplayRef.current = null;
-      setCreatedToken(res.token);
       setShowNewDisplayForm(false);
       setNewDisplayName("");
     } catch (err) {
@@ -338,8 +343,8 @@ export function GreenhousePage() {
 
   // Clipboard access can silently fail (insecure context, missing
   // permission, an older/kiosk browser) — this is never the only way to
-  // get the URL, just a convenience on top of the always-visible reveal
-  // box + its own Copy button below.
+  // get the URL, just a convenience on top of the always-visible TV link
+  // field + its own Copy button below.
   async function copyTvUrl(token: string) {
     try {
       await navigator.clipboard.writeText(tvUrlFor(token));
@@ -350,18 +355,21 @@ export function GreenhousePage() {
     }
   }
 
-  // The raw token is never recoverable once its one-time reveal is gone
-  // (only its hash is stored — see displayToken.ts) — regenerating is the
-  // only way to get a usable TV URL for a display that already exists.
-  // That's also exactly why this needs an explicit, informed confirmation:
-  // it immediately invalidates whatever URL is currently open on a TV.
-  async function handleGenerateTvLink() {
+  // Every selected display already has an active TV link the instant it's
+  // created (POST /api/greenhouse/displays mints one immediately) — so this
+  // button is always effectively a *regenerate*, and always needs the same
+  // explicit, informed confirmation: it immediately invalidates whatever
+  // link is currently open on a TV, whether or not that link happens to be
+  // visible here right now (see GreenhouseDisplaySummary.tvToken's own
+  // comment for when it can be null).
+  function handleGenerateTvLink() {
     if (!selectedDisplay) return;
-    const proceed = window.confirm(
-      `Generate a new TV link for "${selectedDisplay.name}"?\n\nThe current link will stop working immediately — any TV still showing it will go blank until it's reopened with the new link.`
-    );
-    if (!proceed) return;
+    setGenerateLinkError(null);
+    setShowRegenerateConfirm(true);
+  }
 
+  async function confirmRegenerateTvLink() {
+    if (!selectedDisplay) return;
     setGeneratingLink(true);
     setGenerateLinkError(null);
     try {
@@ -369,8 +377,8 @@ export function GreenhousePage() {
         `/api/greenhouse/displays/${selectedDisplay.id}/regenerate-key`,
         { method: "POST" }
       );
-      setCreatedToken(res.token);
-      await copyTvUrl(res.token);
+      setDisplays((prev) => prev?.map((d) => (d.id === selectedDisplay.id ? { ...d, tvToken: res.token } : d)) ?? prev);
+      setShowRegenerateConfirm(false);
     } catch (err) {
       setGenerateLinkError(err instanceof ApiError ? err.message : "Could not generate a new TV link");
     } finally {
@@ -454,18 +462,6 @@ export function GreenhousePage() {
                 <span>New Display</span>
               </button>
             )}
-            {isAdmin && (
-              <button
-                type="button"
-                className="greenhouse-office-secondary-button"
-                onClick={handleGenerateTvLink}
-                disabled={!selectedDisplay || generatingLink}
-              >
-                <Link2 size={16} aria-hidden="true" />
-                <span>{generatingLink ? "Generating..." : "Generate TV Link"}</span>
-              </button>
-            )}
-            {generateLinkError && <p className="error-text">{generateLinkError}</p>}
           </div>
 
           {showNewDisplayForm && (
@@ -494,35 +490,66 @@ export function GreenhousePage() {
             </div>
           )}
 
-          {createdToken && (
-            <div className="greenhouse-office-token-reveal">
-              <p>Copy this URL to the TV now — it will not be shown again:</p>
-              <code>{tvUrlFor(createdToken)}</code>
-              <div className="employee-form-actions">
-                <button type="button" onClick={() => copyTvUrl(createdToken)}>
-                  {linkCopied ? (
-                    <>
-                      <Check size={16} aria-hidden="true" />
-                      <span>Copied</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy size={16} aria-hidden="true" />
-                      <span>Copy</span>
-                    </>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  className="employee-form-save"
-                  onClick={() => {
-                    setCreatedToken(null);
-                    setLinkCopied(false);
-                  }}
-                >
-                  Done
-                </button>
-              </div>
+          {/* TV link — kept compact (one label, one field, two small
+              buttons) so it doesn't crowd the date picker below it. Driven
+              entirely by selectedDisplay.tvToken, so the same URL is still
+              here on a later visit, not just right after generating it. */}
+          {isAdmin && selectedDisplay && (
+            <div className="greenhouse-office-section greenhouse-office-tv-link">
+              <button
+                type="button"
+                className="greenhouse-office-secondary-button"
+                onClick={handleGenerateTvLink}
+                disabled={generatingLink}
+              >
+                <Link2 size={16} aria-hidden="true" />
+                <span>{selectedDisplay.tvToken ? "Regenerate TV Link" : "Generate TV Link"}</span>
+              </button>
+
+              <span className="greenhouse-office-tv-link-label">TV link</span>
+              {selectedDisplay.tvToken ? (
+                <>
+                  <input
+                    className="greenhouse-office-tv-link-field"
+                    type="text"
+                    readOnly
+                    value={tvUrlFor(selectedDisplay.tvToken)}
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                  <div className="greenhouse-office-tv-link-actions">
+                    <button
+                      type="button"
+                      className="greenhouse-office-secondary-button"
+                      onClick={() => copyTvUrl(selectedDisplay.tvToken!)}
+                    >
+                      {linkCopied ? (
+                        <>
+                          <Check size={16} aria-hidden="true" />
+                          <span>Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy size={16} aria-hidden="true" />
+                          <span>Copy</span>
+                        </>
+                      )}
+                    </button>
+                    <a
+                      className="greenhouse-office-secondary-button"
+                      href={tvUrlFor(selectedDisplay.tvToken)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <ExternalLink size={16} aria-hidden="true" />
+                      <span>Open</span>
+                    </a>
+                  </div>
+                </>
+              ) : (
+                <p className="greenhouse-office-tv-link-missing">
+                  This display's link was created before it could be shown here — regenerate to get a copyable one.
+                </p>
+              )}
             </div>
           )}
 
@@ -680,6 +707,19 @@ export function GreenhousePage() {
           )}
         </div>
       </div>
+
+      {showRegenerateConfirm && selectedDisplay && (
+        <RegenerateTvLinkModal
+          displayName={selectedDisplay.name}
+          submitting={generatingLink}
+          error={generateLinkError}
+          onConfirm={confirmRegenerateTvLink}
+          onCancel={() => {
+            setShowRegenerateConfirm(false);
+            setGenerateLinkError(null);
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -4430,24 +4430,53 @@ input {
   background: var(--color-surface);
 }
 
-.greenhouse-office-token-reveal {
-  padding: 0.75rem;
-  border: 1px solid var(--color-primary);
-  border-radius: var(--radius);
-  background: #e8edfc;
+/* Compact by design (requirement: "does not crowd the date picker") — one
+   label, one read-only field, one row of small buttons, no extra padding
+   box around the whole thing the way the old one-time token reveal had. */
+.greenhouse-office-tv-link {
+  gap: 0.4rem;
+}
+
+.greenhouse-office-tv-link-label {
   font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.greenhouse-office-tv-link-field {
+  width: 100%;
+  min-height: 36px;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 0.78rem;
+  font-family: monospace;
+  text-overflow: ellipsis;
+}
+
+.greenhouse-office-tv-link-actions {
   display: flex;
-  flex-direction: column;
   gap: 0.5rem;
 }
 
-.greenhouse-office-token-reveal code {
-  display: block;
-  padding: 0.5rem;
-  background: var(--color-surface);
-  border-radius: 6px;
-  word-break: break-all;
+.greenhouse-office-tv-link-actions .greenhouse-office-secondary-button {
+  flex: 1;
+  min-height: 34px;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.82rem;
+  text-decoration: none;
+}
+
+.greenhouse-office-tv-link-missing {
+  margin: 0;
   font-size: 0.8rem;
+  color: var(--color-muted);
+}
+
+.greenhouse-office-regenerate-target {
+  margin: 0;
+  font-weight: 600;
 }
 
 .greenhouse-office-range-label {
