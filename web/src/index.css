@@ -4923,6 +4923,48 @@ input {
   display: flex;
 }
 
+/* TV-only contrast boost — GreenhouseLiveCanvas's shared base palette
+   (.greenhouse-phase-rect/.greenhouse-live-row-neutral/.greenhouse-canvas-
+   viewport, used as-is by the office live preview in GreenhousePage.tsx)
+   reads fine on a calibrated monitor a couple feet away, but a phone photo
+   of the actual wall-mounted TV showed the greenhouse floor and the page
+   background around it at nearly identical brightness — from several
+   metres in a bright warehouse, the greenhouse's own footprint all but
+   disappeared. Scoped to .greenhouse-tv-canvas-wrapper specifically (not
+   the shared base classes themselves) so the office/desktop live preview
+   is untouched — same component, deliberately different contrast for a
+   different viewing distance/environment.
+   Status colors (.greenhouse-live-row-blue/-green) and the employee
+   bubbles (.employee-bubble*, a separate overlay entirely) are not
+   touched — they were already the most saturated things on the map and
+   stay that way; only the neutral floor/idle-row/outside-area grays move
+   further apart from each other and from blue/green. */
+.greenhouse-tv-canvas-wrapper .greenhouse-canvas-viewport {
+  background: #f8fafc;
+}
+
+.greenhouse-tv-canvas-wrapper .greenhouse-phase-rect {
+  fill: #94a3b8;
+  stroke: #334155;
+  stroke-width: 2;
+}
+
+.greenhouse-tv-canvas-wrapper .greenhouse-live-row-neutral {
+  fill: #f8fafc;
+  stroke: #2563eb;
+}
+
+/* Thicker row borders read as crisp lines instead of a faint hairline from
+   TV-viewing distance — vector-effect="non-scaling-stroke" on every row
+   <rect> (GreenhouseLiveCanvas.tsx) keeps this a constant on-screen
+   thickness regardless of zoom/fit-to-screen level, so it applies equally
+   whether the display is showing one phase or the whole land. Widens every
+   row's border, not just idle ones — working/completed rows read crisper
+   too, without changing their fill/stroke color at all. */
+.greenhouse-tv-canvas-wrapper .greenhouse-live-row-rect {
+  stroke-width: 1.75;
+}
+
 .greenhouse-tv-loading {
   margin: auto;
   font-size: 1.5rem;
