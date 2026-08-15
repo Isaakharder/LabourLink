@@ -111,6 +111,9 @@ async function main() {
   const fakePinHash = "$2a$10$QAplaceholderQAplaceholderQAplaceholderQAplaceholde";
   let adminActor!: { id: string; first_name: string; last_name: string };
   let target!: { id: string };
+  // Section K's own dedicated employee — see its own comment for why it
+  // can't safely reuse `target`.
+  let kTarget: { id: string } | null = null;
   let profile!: { id: string };
   let activity!: { id: string };
   const deviceIds: string[] = [];
@@ -487,9 +490,55 @@ async function main() {
     //    corrections leave an identically-shaped audit trail (who, when,
     //    why, before/after) — the two are meant to be one consistent
     //    behavior, not two independently-maintained ones.
+    //
+    //    Runs against its own dedicated employee/device rather than the
+    //    shared `target` — every section above leaves its own fixture
+    //    entries in place (nothing in this file resets `target`'s
+    //    timeline between sections) at a variety of fixed "minutes ago"
+    //    offsets, some of which land inside this section's own ~210-
+    //    minutes-ago/60-minute-long entry. PATCH /api/inputs/work-start
+    //    correctly rejects a correction that would overlap another of the
+    //    same employee's entries, so reusing `target` here is a genuine
+    //    fixture collision, not a bug in that validation — a fresh
+    //    employee has an empty timeline, so this section always tests
+    //    exactly what it says it does, independent of what ran before it.
     // -----------------------------------------------------------------
     {
-      const deviceIdentifier = await pairDevice();
+      // A local, non-nullable binding for this block's own use — `kTarget`
+      // itself stays declared as possibly-null at the outer scope (default
+      // state if this block never ran) purely for the cleanup loop below.
+      const kEmployee: { id: string } = (
+        await pool.query(
+          `insert into employees (first_name, last_name, email, security_role_id, team_role_id, settings_pin_hash, is_active, break_profile_id)
+           values ($1, $2, $3, $4, $5, $6, true, $7) returning id`,
+          [
+            "QA",
+            `WER K Target ${RUN_ID}`,
+            `qa-wer-k-target-${RUN_ID}@test.local`,
+            await roleId("Employee"),
+            teamRoleId,
+            fakePinHash,
+            profile!.id,
+          ]
+        )
+      ).rows[0];
+      kTarget = kEmployee;
+
+      // Not through pairDevice() — that helper closes `target`'s active
+      // assignment specifically, and this employee has never had one.
+      const kDeviceIdentifier = randomUUID();
+      const { rows: kDeviceRows } = await pool.query(
+        `insert into devices (device_identifier, device_name, is_active) values ($1, $2, true) returning id`,
+        [kDeviceIdentifier, `QA WER K Device ${RUN_ID}`]
+      );
+      deviceIds.push(kDeviceRows[0].id);
+      deviceIdentifiers.push(kDeviceIdentifier);
+      await pool.query(`insert into device_assignments (device_id, employee_id) values ($1, $2)`, [
+        kDeviceRows[0].id,
+        kEmployee.id,
+      ]);
+      const kDeviceId = kDeviceRows[0].id;
+
       const b = boundaryNear(210, 5);
       // Simulates an entry whose start AND end were previously set by
       // rounding (both audit columns populated) — inserted directly rather
@@ -506,7 +555,7 @@ async function main() {
              (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, actual_started_at, ended_at, actual_ended_at, source)
            values ($1, $2, 'work', $3, gen_random_uuid(), $4, $5, $6, $7, 'manual')
            returning id`,
-          [target!.id, deviceIds[deviceIds.length - 1], activity!.id, startedAt, originalStartTap, endedAt, originalEndTap]
+          [kEmployee.id, kDeviceId, activity!.id, startedAt, originalStartTap, endedAt, originalEndTap]
         )
       ).rows[0].id;
 
@@ -520,7 +569,7 @@ async function main() {
       const date = calendarDateInAppTimezone(startedAt);
       const correctedStart = new Date(startedAt.getTime() - 10 * 60000);
       const startCorrectionRes = await callAdmin("PATCH", `/api/inputs/work-start`, adminToken, {
-        employeeId: target!.id,
+        employeeId: kEmployee.id,
         date,
         newStartTime: correctedStart.toISOString(),
       });
@@ -707,7 +756,7 @@ async function main() {
       pool.query(`delete from device_assignments where device_id = any($1::uuid[])`, [deviceIds])
     );
     await tryDelete("devices", () => pool.query(`delete from devices where id = any($1::uuid[])`, [deviceIds]));
-    for (const employee of [target, adminActor]) {
+    for (const employee of [target, adminActor, kTarget]) {
       if (employee) await tryDelete("employees", () => pool.query("delete from employees where id = $1", [employee.id]));
     }
     if (activity) await tryDelete("activities", () => pool.query("delete from activities where id = $1", [activity!.id]));
