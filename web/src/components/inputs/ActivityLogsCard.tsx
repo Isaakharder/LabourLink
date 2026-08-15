@@ -33,10 +33,6 @@ interface ActivityLogsCardProps {
   // Called after the admin combines segments in the row-completion review
   // modal — the parent reloads the day so the newly-resolved speed shows up.
   onRowCompletionChanged: () => void;
-  // Opens AddActivityModal — omitted entirely (rather than passed disabled)
-  // when the signed-in employee can't edit this day, so the button never
-  // renders instead of rendering inertly.
-  onAddActivity?: () => void;
 }
 
 function ManualBadge({ meta }: { meta: NonNullable<ActivityRunDto["manualEntry"]> }) {
@@ -65,7 +61,6 @@ export function ActivityLogsCard({
   onCancelEdit,
   onDeleteRun,
   onRowCompletionChanged,
-  onAddActivity,
 }: ActivityLogsCardProps) {
   const [reviewTarget, setReviewTarget] = useState<{
     greenhouseRowId: string;
@@ -89,17 +84,6 @@ export function ActivityLogsCard({
 
   return (
     <>
-      <div className="inputs-section-header">
-        <h3>Activity details</h3>
-        <div className="inputs-section-header-actions">
-          {onAddActivity && (
-            <button type="button" className="inputs-section-header-button" onClick={onAddActivity}>
-              Add activity
-            </button>
-          )}
-        </div>
-      </div>
-
       <div className="inputs-logs-header">
         <Avatar photoUrl={employee.photoUrl} firstName={employee.firstName} lastName={employee.lastName} size="large" />
         <div className="inputs-logs-header-text">

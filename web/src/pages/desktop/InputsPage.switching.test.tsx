@@ -10,13 +10,15 @@
 // call is fully controlled by the test (deferred promises resolved on
 // demand), rather than hitting a real server.
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InputsPage } from "./InputsPage";
 import { AuthProvider } from "../../context/AuthContext";
-import { DailyInputsResponse, InputsEmployee } from "../../lib/inputsTypes";
+import { ApiError } from "../../lib/api";
+import { BreakDto, DailyInputsResponse, InputsEmployee } from "../../lib/inputsTypes";
+import { formatTimeInAppTimezone } from "../../lib/timezone";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -42,6 +44,7 @@ interface DailyCall {
 
 let employeesResponse: { employees: InputsEmployee[] } = { employees: [] };
 let dailyCalls: DailyCall[] = [];
+let breakPatchFailure: { status: number; message: string } | null = null;
 
 vi.mock("../../lib/api", () => {
   class ApiError extends Error {
@@ -80,6 +83,12 @@ vi.mock("../../lib/api", () => {
         }
         return deferred.promise;
       }
+      if (path.startsWith("/api/inputs/breaks/") && options?.method === "PATCH") {
+        if (breakPatchFailure) {
+          return Promise.reject(new ApiError(breakPatchFailure.status, breakPatchFailure.message));
+        }
+        return Promise.resolve({ ok: true });
+      }
       return Promise.reject(new Error(`Unhandled mock api() call in test: ${path}`));
     }),
   };
@@ -92,7 +101,7 @@ function employee(id: string, firstName: string, lastName: string): InputsEmploy
 // One distinguishing, easy-to-assert-on activity name per fixture employee
 // — standing in for "this employee's real data," so a test can check it's
 // genuinely gone from the page rather than just checking a loading flag.
-function buildDaily(emp: InputsEmployee, date: string, activityName: string): DailyInputsResponse {
+function buildDaily(emp: InputsEmployee, date: string, activityName: string, breaks: BreakDto[] = []): DailyInputsResponse {
   return {
     employee: { id: emp.id, firstName: emp.firstName, lastName: emp.lastName, photoUrl: null },
     date,
@@ -123,9 +132,27 @@ function buildDaily(emp: InputsEmployee, date: string, activityName: string): Da
         manualEntry: null,
       },
     ],
-    breaks: [],
+    breaks,
     totals: { workedSeconds: 3600, breakSeconds: 0, paidBreakSeconds: 0, unpaidBreakSeconds: 0 },
     canEdit: true,
+  };
+}
+
+function buildBreak(id: string, name: string, startedAt: string, endedAt: string): BreakDto {
+  return {
+    id,
+    startedAt,
+    endedAt,
+    startedAtOriginalTime: null,
+    endedAtOriginalTime: null,
+    durationSeconds: 900,
+    name,
+    isPaid: false,
+    source: "manual",
+    breakProfileItemId: null,
+    canEdit: true,
+    autoClosed: false,
+    manualEntry: null,
   };
 }
 
@@ -151,6 +178,7 @@ const empB = employee("emp-b", "Beatriz", "Barrios");
 beforeEach(() => {
   dailyCalls = [];
   employeesResponse = { employees: [empA, empB] };
+  breakPatchFailure = null;
 });
 
 afterEach(() => {
@@ -279,5 +307,36 @@ describe("InputsPage employee switching", () => {
       pollCall.deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Updated Activity"));
     });
     await vi.waitFor(() => expect(screen.getByText("Alice's Updated Activity")).toBeInTheDocument());
+  });
+
+  it("renders break-correction feedback inside the Activity details header instead of above the card", async () => {
+    breakPatchFailure = { status: 409, message: "Corrected break overlaps a work entry" };
+    const teaBreak = buildBreak(
+      "break-1",
+      "Tea break",
+      "2026-08-11T14:00:00.000Z",
+      "2026-08-11T14:15:00.000Z"
+    );
+
+    renderInputsPage();
+
+    await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
+    await act(async () => {
+      findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity", [teaBreak]));
+    });
+    await screen.findByText("Alice's Activity");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByText("Tea break"));
+    await user.click(screen.getByText(formatTimeInAppTimezone(teaBreak.endedAt!)));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    const statusMessage = await screen.findByText("Corrected break overlaps a work entry");
+    const header = screen.getByText("Activity details").closest(".inputs-section-header");
+
+    expect(header).not.toBeNull();
+    expect(within(header as HTMLElement).getByText("Corrected break overlaps a work entry")).toBe(statusMessage);
+    expect(statusMessage.closest(".inputs-section-header")).toBe(header);
+    expect(statusMessage.closest(".inputs-workspace-placeholder")).toBeNull();
   });
 });

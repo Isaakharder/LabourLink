@@ -1,17 +1,18 @@
 // HTTP-level tests for work-end rounding: POST /api/mobile/time-entries/
-// end-day (mobileTime.ts), the manual end-time correction route (inputs.ts)
-// clearing stale rounding audit data, and the Break Profile settings
-// save/reload round trip (breakProfiles.ts). Runs the real routers over
-// real HTTP against the real database with disposable QA fixtures, same
-// convention as inputs.manualEntries.test.ts / inputs.performance.test.ts.
+// end-day (mobileTime.ts), the manual end-time and start-time correction
+// routes (inputs.ts) clearing stale rounding audit data, and the Break
+// Profile settings save/reload round trip (breakProfiles.ts). Runs the real
+// routers over real HTTP against the real database with disposable QA
+// fixtures, same convention as inputs.manualEntries.test.ts /
+// inputs.performance.test.ts.
 //
 // Pure rounding-math coverage (both directions, exact boundaries, seconds,
 // midnight/DST) lives in workStartRounding.test.ts alongside roundWorkStart
 // — roundWorkEnd is the exact same math, just named for its call site. This
 // file covers what's genuinely new: the end-day route's own behavior
 // (disabled, enabled, short-workday clamp, offline retry/idempotency,
-// immediate-idle-on-future-round), manual corrections staying exact, and
-// settings persistence/independence.
+// immediate-idle-on-future-round), manual corrections staying exact on both
+// ends, and settings persistence/independence.
 //
 // Run with: npm run test:work-end-rounding
 import "dotenv/config";
@@ -22,6 +23,7 @@ import { randomUUID } from "crypto";
 import { pool } from "../db";
 import { signSession } from "../middleware/auth";
 import { roundWorkEnd } from "../lib/workStartRounding";
+import { calendarDateInAppTimezone } from "../lib/timezone";
 import mobileTimeRouter from "./mobileTime";
 import inputsRouter from "./inputs";
 import breakProfilesRouter from "./breakProfiles";
@@ -182,6 +184,15 @@ async function main() {
       );
       deviceIds.push(rows[0].id);
       deviceIdentifiers.push(identifier);
+      // This file calls pairDevice() repeatedly against the same single
+      // `target` employee to get a fresh device per test section —
+      // idx_device_assignments_active_per_employee (033_one_active_device_
+      // per_employee.sql) only allows one *active* assignment per employee
+      // at a time, so the previous one has to be closed out first, same as
+      // devices.ts's own "reassigning closes the old one" behavior.
+      await pool.query(`update device_assignments set unassigned_at = now() where employee_id = $1 and unassigned_at is null`, [
+        target!.id,
+      ]);
       await pool.query(`insert into device_assignments (device_id, employee_id) values ($1, $2)`, [
         rows[0].id,
         target!.id,
@@ -210,7 +221,7 @@ async function main() {
 
     async function fetchEntry(id: string) {
       const { rows } = await pool.query(
-        `select ended_at, actual_ended_at, started_at from time_entries where id = $1`,
+        `select started_at, actual_started_at, ended_at, actual_ended_at from time_entries where id = $1`,
         [id]
       );
       return rows[0];
@@ -467,6 +478,98 @@ async function main() {
         afterCorrection.actual_ended_at === null,
         "H) actual_ended_at is cleared — the stale 'Rounded' badge no longer applies",
         afterCorrection
+      );
+    }
+
+    // -----------------------------------------------------------------
+    // K) Manual start-time correction clears actual_started_at exactly the
+    //    same way H's end-time correction clears actual_ended_at, and both
+    //    corrections leave an identically-shaped audit trail (who, when,
+    //    why, before/after) — the two are meant to be one consistent
+    //    behavior, not two independently-maintained ones.
+    // -----------------------------------------------------------------
+    {
+      const deviceIdentifier = await pairDevice();
+      const b = boundaryNear(210, 5);
+      // Simulates an entry whose start AND end were previously set by
+      // rounding (both audit columns populated) — inserted directly rather
+      // than via the mobile routes, since what's under test here is the
+      // correction routes' own clearing behavior, not the rounding math
+      // that would have produced these values (covered elsewhere).
+      const originalStartTap = new Date(b.getTime() - 4 * 60000);
+      const startedAt = b;
+      const originalEndTap = new Date(b.getTime() + 56 * 60000);
+      const endedAt = new Date(b.getTime() + 60 * 60000);
+      const entryId = (
+        await pool.query(
+          `insert into time_entries
+             (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, actual_started_at, ended_at, actual_ended_at, source)
+           values ($1, $2, 'work', $3, gen_random_uuid(), $4, $5, $6, $7, 'manual')
+           returning id`,
+          [target!.id, deviceIds[deviceIds.length - 1], activity!.id, startedAt, originalStartTap, endedAt, originalEndTap]
+        )
+      ).rows[0].id;
+
+      const beforeCorrection = await fetchEntry(entryId);
+      check(
+        beforeCorrection.actual_started_at !== null && beforeCorrection.actual_ended_at !== null,
+        "K) the entry has rounding audit data on both ends before either correction",
+        beforeCorrection
+      );
+
+      const date = calendarDateInAppTimezone(startedAt);
+      const correctedStart = new Date(startedAt.getTime() - 10 * 60000);
+      const startCorrectionRes = await callAdmin("PATCH", `/api/inputs/work-start`, adminToken, {
+        employeeId: target!.id,
+        date,
+        newStartTime: correctedStart.toISOString(),
+      });
+      check(startCorrectionRes.status === 200, "K) the manual start-time correction succeeds", startCorrectionRes.body);
+
+      const correctedEnd = new Date(endedAt.getTime() + 10 * 60000);
+      const endCorrectionRes = await callAdmin(
+        "PATCH",
+        `/api/inputs/activity-runs/${entryId}/end-time`,
+        adminToken,
+        { endTime: correctedEnd.toISOString() }
+      );
+      check(endCorrectionRes.status === 200, "K) the manual end-time correction succeeds", endCorrectionRes.body);
+
+      const afterBoth = await fetchEntry(entryId);
+      check(
+        new Date(afterBoth.started_at).getTime() === correctedStart.getTime() &&
+          new Date(afterBoth.ended_at).getTime() === correctedEnd.getTime(),
+        "K) both corrected values are stored exactly, not rounded",
+        afterBoth
+      );
+      check(
+        afterBoth.actual_started_at === null && afterBoth.actual_ended_at === null,
+        "K) both corrections clear their respective audit column identically",
+        afterBoth
+      );
+
+      const { rows: corrections } = await pool.query(
+        `select field_name, old_value, new_value, changed_by_employee_id, reason, changed_at
+         from time_entry_corrections where time_entry_id = $1 order by field_name`,
+        [entryId]
+      );
+      const startedCorrection = corrections.find((c) => c.field_name === "started_at");
+      const endedCorrection = corrections.find((c) => c.field_name === "ended_at");
+      check(
+        !!startedCorrection &&
+          !!endedCorrection &&
+          startedCorrection.changed_by_employee_id === adminActor!.id &&
+          endedCorrection.changed_by_employee_id === adminActor!.id &&
+          !!startedCorrection.reason &&
+          !!endedCorrection.reason &&
+          startedCorrection.changed_at != null &&
+          endedCorrection.changed_at != null &&
+          new Date(startedCorrection.old_value).getTime() === startedAt.getTime() &&
+          new Date(startedCorrection.new_value).getTime() === correctedStart.getTime() &&
+          new Date(endedCorrection.old_value).getTime() === endedAt.getTime() &&
+          new Date(endedCorrection.new_value).getTime() === correctedEnd.getTime(),
+        "K) both corrections leave an identically-shaped audit trail — who, when, why, and before/after values",
+        corrections
       );
     }
 

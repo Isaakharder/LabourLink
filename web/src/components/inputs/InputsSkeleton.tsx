@@ -20,9 +20,6 @@ interface InputsSkeletonProps {
 export function InputsSkeleton({ employee }: InputsSkeletonProps) {
   return (
     <div className="inputs-skeleton" aria-busy="true" aria-label="Loading employee data">
-      <div className="inputs-section-header">
-        <h3>Activity details</h3>
-      </div>
       <div className="inputs-logs-header">
         <Avatar
           photoUrl={employee?.photoUrl ?? null}

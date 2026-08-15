@@ -39,6 +39,11 @@ function formatClockTime(d: Date): string {
   }).format(d);
 }
 
+type InputsHeaderStatus = {
+  tone: "success" | "warning" | "error";
+  message: string;
+};
+
 interface PendingDeletion {
   kind: "activity-run" | "break";
   id: string;
@@ -514,6 +519,22 @@ export function InputsPage() {
     setSuccessMessage(message);
   }
 
+  const activityHeaderStatus: InputsHeaderStatus | null = actionError
+    ? { tone: "error", message: actionError }
+    : error
+    ? { tone: "error", message: error }
+    : successMessage
+    ? { tone: "success", message: successMessage }
+    : null;
+
+  const activityHeaderStatusClassName = activityHeaderStatus
+    ? activityHeaderStatus.tone === "error"
+      ? "error-text"
+      : activityHeaderStatus.tone === "warning"
+      ? "warning-text"
+      : "success-text"
+    : null;
+
   return (
     <div className="inputs-page">
       <PageHeader title="Inputs" description="Review and correct daily employee activity logs." />
@@ -544,9 +565,30 @@ export function InputsPage() {
             )}
           </div>
 
-          {error && <p className="error-text inputs-workspace-placeholder">{error}</p>}
-          {actionError && <p className="error-text inputs-workspace-placeholder">{actionError}</p>}
-          {successMessage && <p className="success-text inputs-workspace-placeholder">{successMessage}</p>}
+          {selectedEmployeeId && (
+            <div className="inputs-section-header inputs-section-header-with-status">
+              <h3>Activity details</h3>
+              <div className="inputs-section-header-status">
+                {activityHeaderStatus && activityHeaderStatusClassName && (
+                  <p
+                    className={`inputs-section-header-status-text ${activityHeaderStatusClassName}`}
+                    title={activityHeaderStatus.message}
+                    role={activityHeaderStatus.tone === "error" ? "alert" : "status"}
+                    aria-live={activityHeaderStatus.tone === "error" ? "assertive" : "polite"}
+                  >
+                    {activityHeaderStatus.message}
+                  </p>
+                )}
+              </div>
+              <div className="inputs-section-header-actions">
+                {daily?.canEdit && (
+                  <button type="button" className="inputs-section-header-button" onClick={() => setAddModal("activity")}>
+                    Add activity
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
 
           {!selectedEmployeeId ? (
             employeesError ? null : (
@@ -579,7 +621,6 @@ export function InputsPage() {
                 onCancelEdit={handleCancelEdit}
                 onDeleteRun={handleDeleteRun}
                 onRowCompletionChanged={() => loadDaily()}
-                onAddActivity={daily.canEdit ? () => setAddModal("activity") : undefined}
               />
               <WorkdayDetailsCard
                 workStartTime={daily.workStartTime}
