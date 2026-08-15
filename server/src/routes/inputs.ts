@@ -303,7 +303,20 @@ router.get(
     // paid to count as paid, nothing is inferred from duration or time.
     const breakMeta = new Map<
       string,
-      { name: string | null; isPaid: boolean | null; source: "manual" | "auto"; breakProfileItemId: string | null }
+      {
+        name: string | null;
+        isPaid: boolean | null;
+        source: "manual" | "auto";
+        breakProfileItemId: string | null;
+        // The employee's original Start/End Break tap timestamps, only
+        // present when break rounding (or a fixed-item schedule match)
+        // actually applied to this break (see 037_break_rounding.sql and
+        // mobileTime.ts's break/start and break/end routes) — same "only
+        // shown when it differs from the effective value" convention as
+        // workStartOriginalTime/endedAtOriginalTime below.
+        startedAtOriginal: string | null;
+        endedAtOriginal: string | null;
+      }
     >();
     for (const r of entryRows) {
       autoClosedMeta.set(r.id, r.auto_closed_at !== null);
@@ -337,6 +350,8 @@ router.get(
           isPaid: r.is_paid,
           source: r.source,
           breakProfileItemId: r.break_profile_item_id,
+          startedAtOriginal: r.actual_started_at ?? null,
+          endedAtOriginal: r.actual_ended_at ?? null,
         });
       }
     }
@@ -593,6 +608,13 @@ router.get(
           id: b.id,
           startedAt: b.startedAt,
           endedAt: b.endedAt,
+          // The employee's original Start Break / End Break button-press
+          // timestamps, only present when break rounding or a fixed-item
+          // schedule match actually applied (see breakMeta above) — the
+          // desktop Inputs UI only surfaces these when they differ from
+          // startedAt/endedAt (see WorkdayDetailsCard).
+          startedAtOriginalTime: meta?.startedAtOriginal ?? null,
+          endedAtOriginalTime: meta?.endedAtOriginal ?? null,
           durationSeconds: b.endedAt ? Math.round((b.endedAt.getTime() - b.startedAt.getTime()) / 1000) : 0,
           name: meta?.name ?? null,
           isPaid: meta?.isPaid ?? null,
@@ -852,7 +874,16 @@ router.patch(
         return res.status(409).json({ error: "Corrected start time overlaps a previous entry" });
       }
 
-      await client.query("update time_entries set started_at = $1 where id = $2", [newStart, target.id]);
+      // A real correction supersedes any prior automatic/rounded placeholder
+      // the same way the end-time correction route above already clears
+      // actual_ended_at: if this row's started_at was previously set by a
+      // rounded Clock In tap, that original tap time no longer describes
+      // anything about the new, administratively-set start time, so a stale
+      // "Rounded" badge should no longer show against it.
+      await client.query(
+        "update time_entries set started_at = $1, actual_started_at = null where id = $2",
+        [newStart, target.id]
+      );
       await client.query(
         `insert into time_entry_corrections
            (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
@@ -1525,12 +1556,22 @@ router.patch(
       // the same reasoning on the end-time correction route above) — even
       // when only started_at actually changed, the row is being touched by
       // a real correction now, so any stale cutoff-placeholder marker no
-      // longer applies.
-      await client.query(`update time_entries set started_at = $1, ended_at = $2, auto_closed_at = null where id = $3`, [
-        newStart,
-        newEnd,
-        id,
-      ]);
+      // longer applies. actual_started_at/actual_ended_at are cleared only
+      // on whichever side actually changed — an admin's manual correction
+      // supersedes whatever break rounding or fixed-item schedule matching
+      // previously recorded, so a stale "Rounded" badge should no longer
+      // show against it (same convention as the work-start/work-end
+      // correction routes above).
+      const startChanged = newStart.getTime() !== oldStart.getTime();
+      const endChanged = newEnd.getTime() !== oldEnd.getTime();
+      await client.query(
+        `update time_entries
+         set started_at = $1, ended_at = $2, auto_closed_at = null,
+             actual_started_at = case when $4 then null else actual_started_at end,
+             actual_ended_at = case when $5 then null else actual_ended_at end
+         where id = $3`,
+        [newStart, newEnd, id, startChanged, endChanged]
+      );
 
       // Every affected timestamp — the break's own boundary plus whichever
       // adjacent work entry got dragged along with it — gets its own audit
@@ -1546,7 +1587,7 @@ router.patch(
           [entryId, target.employee_id, req.employee!.id, field, oldVal.toISOString(), newVal.toISOString(), AUTO_CORRECTION_REASON]
         );
 
-      if (newStart.getTime() !== oldStart.getTime()) {
+      if (startChanged) {
         await auditInsert(id, "started_at", oldStart, newStart);
         if (preceding) {
           await client.query(`update time_entries set ended_at = $1, auto_closed_at = null where id = $2`, [
@@ -1556,7 +1597,7 @@ router.patch(
           await auditInsert(preceding.id, "ended_at", new Date(preceding.ended_at), newStart);
         }
       }
-      if (newEnd.getTime() !== oldEnd.getTime()) {
+      if (endChanged) {
         await auditInsert(id, "ended_at", oldEnd, newEnd);
         if (following) {
           await client.query(`update time_entries set started_at = $1 where id = $2`, [newEnd, following.id]);

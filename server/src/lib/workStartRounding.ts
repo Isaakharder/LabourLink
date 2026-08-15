@@ -1,12 +1,14 @@
-// Configurable work-start AND work-end rounding (Basic Data > Breaks > a
-// break profile's "Work start rounding" / "Work end rounding" sections —
-// two independent settings, see breakProfiles.ts). Work-start rounding is
-// applied only at the moment an employee's workday genuinely starts (idle
-// -> work); work-end rounding only when they explicitly finish it (Finish
-// Work). server/src/routes/mobileTime.ts is the only caller of either, each
-// on exactly that one transition. Neither is ever applied to breaks,
-// activity changes, automatically-resumed activities, or manual Inputs
-// corrections.
+// Configurable work-start, work-end, AND break rounding (Basic Data >
+// Breaks > a break profile's "Work start rounding" / "Work end rounding" /
+// "Break rounding" sections — three independent settings, see
+// breakProfiles.ts). Work-start rounding is applied only at the moment an
+// employee's workday genuinely starts (idle -> work); work-end rounding
+// only when they explicitly finish it (Finish Work); break rounding at
+// both ends of a break (Start Break and End Break) whenever the break
+// isn't already snapped to a scheduled fixed-break item. None of the three
+// is ever applied to an activity change, an automatically-resumed
+// activity, or a manual Inputs correction. server/src/routes/mobileTime.ts
+// is the only caller of any of them, each on exactly its own transition.
 //
 // All arithmetic here happens in the greenhouse's local wall-clock reading
 // (via timezone.ts's zonedWallTimeParts/zonedWallTimeToUtc), not in raw UTC
@@ -138,6 +140,20 @@ export function roundWorkStart(
 }
 
 export function roundWorkEnd(
+  instant: Date,
+  intervalMinutes: number,
+  direction: RoundingDirection,
+  tz: string = APP_TIMEZONE
+): Date {
+  return roundToInterval(instant, intervalMinutes, direction, tz);
+}
+
+// Same math again, named for its own call sites — server/src/routes/
+// mobileTime.ts's POST /time-entries/break/start and POST /time-entries/
+// break/end both use this one wrapper (a single break-rounding setting
+// governs both ends of a break, unlike work-start/work-end which are two
+// independent settings for two different routes).
+export function roundBreak(
   instant: Date,
   intervalMinutes: number,
   direction: RoundingDirection,

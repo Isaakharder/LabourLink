@@ -195,6 +195,8 @@ const LIST_SELECT = `
          bp.work_start_rounding_interval_minutes,
          bp.work_end_rounding_enabled, bp.work_end_rounding_direction,
          bp.work_end_rounding_interval_minutes,
+         bp.break_rounding_enabled, bp.break_rounding_direction,
+         bp.break_rounding_interval_minutes,
          coalesce(items.items, '[]'::json) as items,
          coalesce(items.item_count, 0) as item_count,
          coalesce(emp.employee_count, 0) as assigned_employee_count
@@ -237,6 +239,9 @@ function serializeBreakProfile(row: any) {
     workEndRoundingEnabled: row.work_end_rounding_enabled,
     workEndRoundingDirection: row.work_end_rounding_direction,
     workEndRoundingIntervalMinutes: row.work_end_rounding_interval_minutes,
+    breakRoundingEnabled: row.break_rounding_enabled,
+    breakRoundingDirection: row.break_rounding_direction,
+    breakRoundingIntervalMinutes: row.break_rounding_interval_minutes,
     items: row.items,
     itemCount: Number(row.item_count),
     assignedEmployeeCount: Number(row.assigned_employee_count),
@@ -343,6 +348,31 @@ router.post(
       }
     }
 
+    // Break rounding — independent of both work-start and work-end
+    // rounding above (its own enabled/direction/interval, never coupled),
+    // same optional-on-create and "validate whenever supplied, regardless
+    // of whether enabled" conventions. A single group of settings governs
+    // both ends of a break (see 037_break_rounding.sql), unlike work-start/
+    // work-end which are two separate settings.
+    const rawBreakDirection = req.body?.breakRoundingDirection;
+    if (rawBreakDirection !== undefined && !isRoundingDirection(rawBreakDirection)) {
+      errors.breakRoundingDirection = "Direction must be 'clockwise' or 'counter_clockwise'";
+    }
+    const breakRoundingDirection: RoundingDirection = isRoundingDirection(rawBreakDirection)
+      ? rawBreakDirection
+      : "clockwise";
+
+    const rawBreakInterval = req.body?.breakRoundingIntervalMinutes;
+    let breakRoundingIntervalMinutes = 5;
+    if (rawBreakInterval !== undefined) {
+      const n = Number(rawBreakInterval);
+      if (!isValidRoundingIntervalMinutes(n)) {
+        errors.breakRoundingIntervalMinutes = `Interval must be a whole number of minutes between ${MIN_ROUNDING_INTERVAL_MINUTES} and ${MAX_ROUNDING_INTERVAL_MINUTES}`;
+      } else {
+        breakRoundingIntervalMinutes = n;
+      }
+    }
+
     if (Object.keys(errors).length) return res.status(400).json({ errors });
     const items = (itemsResult as { items: ItemInput[] }).items;
 
@@ -350,6 +380,7 @@ router.post(
     const isActive = req.body?.isActive === undefined ? true : Boolean(req.body.isActive);
     const workStartRoundingEnabled = Boolean(req.body?.workStartRoundingEnabled);
     const workEndRoundingEnabled = Boolean(req.body?.workEndRoundingEnabled);
+    const breakRoundingEnabled = Boolean(req.body?.breakRoundingEnabled);
 
     const client = await pool.connect();
     try {
@@ -361,8 +392,9 @@ router.post(
           `insert into break_profiles
              (name, description, is_active, work_start_rounding_enabled,
               work_start_rounding_direction, work_start_rounding_interval_minutes,
-              work_end_rounding_enabled, work_end_rounding_direction, work_end_rounding_interval_minutes)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning id`,
+              work_end_rounding_enabled, work_end_rounding_direction, work_end_rounding_interval_minutes,
+              break_rounding_enabled, break_rounding_direction, break_rounding_interval_minutes)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) returning id`,
           [
             name,
             description,
@@ -373,6 +405,9 @@ router.post(
             workEndRoundingEnabled,
             workEndRoundingDirection,
             workEndRoundingIntervalMinutes,
+            breakRoundingEnabled,
+            breakRoundingDirection,
+            breakRoundingIntervalMinutes,
           ]
         );
         profileId = rows[0].id;
@@ -469,6 +504,29 @@ router.patch(
       }
     }
 
+    // Break rounding — each field independently optional, same "present in
+    // body -> validate and apply; absent -> leave the existing column
+    // untouched" convention as work-start/work-end rounding above. Never
+    // coupled to either: an admin can change break rounding without
+    // touching work-start or work-end rounding.
+    let breakRoundingDirection: RoundingDirection | undefined;
+    if ("breakRoundingDirection" in body) {
+      if (!isRoundingDirection(body.breakRoundingDirection)) {
+        errors.breakRoundingDirection = "Direction must be 'clockwise' or 'counter_clockwise'";
+      } else {
+        breakRoundingDirection = body.breakRoundingDirection;
+      }
+    }
+    let breakRoundingIntervalMinutes: number | undefined;
+    if ("breakRoundingIntervalMinutes" in body) {
+      const n = Number(body.breakRoundingIntervalMinutes);
+      if (!isValidRoundingIntervalMinutes(n)) {
+        errors.breakRoundingIntervalMinutes = `Interval must be a whole number of minutes between ${MIN_ROUNDING_INTERVAL_MINUTES} and ${MAX_ROUNDING_INTERVAL_MINUTES}`;
+      } else {
+        breakRoundingIntervalMinutes = n;
+      }
+    }
+
     if (Object.keys(errors).length) return res.status(400).json({ errors });
 
     const columns: string[] = [];
@@ -500,6 +558,18 @@ router.patch(
     if (workEndRoundingIntervalMinutes !== undefined) {
       values.push(workEndRoundingIntervalMinutes);
       columns.push(`work_end_rounding_interval_minutes = $${values.length}`);
+    }
+    if ("breakRoundingEnabled" in body) {
+      values.push(Boolean(body.breakRoundingEnabled));
+      columns.push(`break_rounding_enabled = $${values.length}`);
+    }
+    if (breakRoundingDirection !== undefined) {
+      values.push(breakRoundingDirection);
+      columns.push(`break_rounding_direction = $${values.length}`);
+    }
+    if (breakRoundingIntervalMinutes !== undefined) {
+      values.push(breakRoundingIntervalMinutes);
+      columns.push(`break_rounding_interval_minutes = $${values.length}`);
     }
     if ("description" in body) {
       values.push(trimOrNull(body.description));

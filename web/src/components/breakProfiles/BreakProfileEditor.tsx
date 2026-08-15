@@ -65,6 +65,12 @@ export function BreakProfileEditor({ profileId, onSaved, onCancel }: BreakProfil
   const [workEndRoundingEnabled, setWorkEndRoundingEnabled] = useState(false);
   const [workEndRoundingDirection, setWorkEndRoundingDirection] = useState<RoundingDirection>("clockwise");
   const [workEndRoundingIntervalMinutes, setWorkEndRoundingIntervalMinutes] = useState(5);
+  // Independent of both work-start and work-end rounding above — a single
+  // group of settings applied to BOTH the start and end of a break (see the
+  // "Break rounding" section in the render below).
+  const [breakRoundingEnabled, setBreakRoundingEnabled] = useState(false);
+  const [breakRoundingDirection, setBreakRoundingDirection] = useState<RoundingDirection>("clockwise");
+  const [breakRoundingIntervalMinutes, setBreakRoundingIntervalMinutes] = useState(5);
 
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -85,6 +91,9 @@ export function BreakProfileEditor({ profileId, onSaved, onCancel }: BreakProfil
       setWorkEndRoundingEnabled(false);
       setWorkEndRoundingDirection("clockwise");
       setWorkEndRoundingIntervalMinutes(5);
+      setBreakRoundingEnabled(false);
+      setBreakRoundingDirection("clockwise");
+      setBreakRoundingIntervalMinutes(5);
       setLoading(false);
       setLoadError(null);
       return;
@@ -105,6 +114,9 @@ export function BreakProfileEditor({ profileId, onSaved, onCancel }: BreakProfil
         setWorkEndRoundingEnabled(p.workEndRoundingEnabled);
         setWorkEndRoundingDirection(p.workEndRoundingDirection);
         setWorkEndRoundingIntervalMinutes(p.workEndRoundingIntervalMinutes);
+        setBreakRoundingEnabled(p.breakRoundingEnabled);
+        setBreakRoundingDirection(p.breakRoundingDirection);
+        setBreakRoundingIntervalMinutes(p.breakRoundingIntervalMinutes);
       })
       .catch((err) => {
         setLoadError(err instanceof ApiError ? err.message : "Could not load break profile");
@@ -168,6 +180,13 @@ export function BreakProfileEditor({ profileId, onSaved, onCancel }: BreakProfil
     ) {
       return `Work-end rounding interval must be a whole number of minutes between ${MIN_ROUNDING_INTERVAL_MINUTES} and ${MAX_ROUNDING_INTERVAL_MINUTES}.`;
     }
+    if (
+      !Number.isInteger(breakRoundingIntervalMinutes) ||
+      breakRoundingIntervalMinutes < MIN_ROUNDING_INTERVAL_MINUTES ||
+      breakRoundingIntervalMinutes > MAX_ROUNDING_INTERVAL_MINUTES
+    ) {
+      return `Break rounding interval must be a whole number of minutes between ${MIN_ROUNDING_INTERVAL_MINUTES} and ${MAX_ROUNDING_INTERVAL_MINUTES}.`;
+    }
     return null;
   }
 
@@ -192,6 +211,9 @@ export function BreakProfileEditor({ profileId, onSaved, onCancel }: BreakProfil
       workEndRoundingEnabled,
       workEndRoundingDirection,
       workEndRoundingIntervalMinutes,
+      breakRoundingEnabled,
+      breakRoundingDirection,
+      breakRoundingIntervalMinutes,
       // Sending each row's id lets the server tell an existing row (update
       // in place, preserving history already recorded against it) from a
       // brand-new one (insert) — see upsertItems in breakProfiles.ts. Every
@@ -378,6 +400,71 @@ export function BreakProfileEditor({ profileId, onSaved, onCancel }: BreakProfil
               </p>
               <ul className="break-profile-rounding-example-list">
                 {computeRoundingExample(workEndRoundingIntervalMinutes, workEndRoundingDirection).map((row, i) => (
+                  <li key={i}>
+                    {row.inputLabel} → {row.outputLabel}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </>
+        )}
+      </section>
+
+      <section className="employee-form-section break-profile-rounding-section">
+        <h3>Break rounding</h3>
+        <p className="field-hint">
+          When enabled, both starting a break and returning from one are rounded to the nearest scheduled interval —
+          for a scheduled break the employee taps within its configured window, the existing exact schedule match
+          still applies instead. Activity changes and manual corrections on the Inputs page are never affected.
+          Independent of work-start and work-end rounding above — enabling one does not enable or affect the others.
+        </p>
+        <div className="employee-form-grid">
+          <label className="employee-form-checkbox">
+            <input
+              type="checkbox"
+              checked={breakRoundingEnabled}
+              onChange={(e) => setBreakRoundingEnabled(e.target.checked)}
+            />
+            Enable break rounding
+          </label>
+        </div>
+
+        {breakRoundingEnabled && (
+          <>
+            <div className="employee-form-grid">
+              <label>
+                Direction
+                <select
+                  value={breakRoundingDirection}
+                  onChange={(e) => setBreakRoundingDirection(e.target.value as RoundingDirection)}
+                >
+                  <option value="clockwise">Clockwise — round forward</option>
+                  <option value="counter_clockwise">Counter-clockwise — round backward</option>
+                </select>
+              </label>
+              <label>
+                Rounding interval (minutes)
+                <input
+                  type="number"
+                  min={MIN_ROUNDING_INTERVAL_MINUTES}
+                  max={MAX_ROUNDING_INTERVAL_MINUTES}
+                  value={breakRoundingIntervalMinutes}
+                  onChange={(e) => setBreakRoundingIntervalMinutes(clampRoundingInterval(Number(e.target.value)))}
+                />
+                {fieldErrors.breakRoundingIntervalMinutes && (
+                  <span className="field-error">{fieldErrors.breakRoundingIntervalMinutes}</span>
+                )}
+              </label>
+            </div>
+
+            <div className="break-profile-rounding-example">
+              <p className="field-hint">
+                <strong>{breakRoundingDirection === "clockwise" ? "Clockwise" : "Counter-clockwise"}</strong>{" "}
+                rounds {breakRoundingDirection === "clockwise" ? "forward" : "backward"} to the nearest{" "}
+                {breakRoundingIntervalMinutes}-minute mark. An exact boundary is never changed.
+              </p>
+              <ul className="break-profile-rounding-example-list">
+                {computeRoundingExample(breakRoundingIntervalMinutes, breakRoundingDirection).map((row, i) => (
                   <li key={i}>
                     {row.inputLabel} → {row.outputLabel}
                   </li>

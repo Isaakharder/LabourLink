@@ -127,6 +127,16 @@ export interface BreakDto {
   id: string;
   startedAt: string;
   endedAt: string | null;
+  // The employee's original Start Break / End Break button-press
+  // timestamps, only present when break rounding or a fixed-item schedule
+  // match actually applied to this break (see server/src/lib/
+  // workStartRounding.ts's roundBreak and mobileTime.ts's break/start and
+  // break/end routes) — null for every break rounding was never enabled
+  // for. Same "the UI only shows an adjustment indicator when it differs
+  // from the effective value" convention as workStartOriginalTime below
+  // (see WorkdayDetailsCard).
+  startedAtOriginalTime: string | null;
+  endedAtOriginalTime: string | null;
   durationSeconds: number;
   name: string | null;
   isPaid: boolean | null;

@@ -33,6 +33,13 @@ export interface BreakProfile {
   workEndRoundingEnabled: boolean;
   workEndRoundingDirection: RoundingDirection;
   workEndRoundingIntervalMinutes: number;
+  // Independent of both work-start and work-end rounding above — a single
+  // group of settings applied to BOTH the start and end of a break, unlike
+  // work-start/work-end which are two separate settings for two separate
+  // moments (see BreakProfileEditor).
+  breakRoundingEnabled: boolean;
+  breakRoundingDirection: RoundingDirection;
+  breakRoundingIntervalMinutes: number;
   items: BreakProfileItem[];
   itemCount: number;
   assignedEmployeeCount: number;

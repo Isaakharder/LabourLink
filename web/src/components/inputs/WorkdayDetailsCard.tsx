@@ -236,7 +236,17 @@ export function WorkdayDetailsCard({
                       </button>
                     </div>
                   ) : (
-                    formatTimeInAppTimezone(b.startedAt)
+                    <>
+                      {formatTimeInAppTimezone(b.startedAt)}
+                      {b.startedAtOriginalTime && b.startedAtOriginalTime !== b.startedAt && (
+                        <span
+                          className="inputs-rounded-badge"
+                          title={`Actual tap time: ${formatTimeInAppTimezone(b.startedAtOriginalTime)} — adjusted by this employee's break profile's break rounding setting or a scheduled break match.`}
+                        >
+                          Rounded
+                        </span>
+                      )}
+                    </>
                   )}
                 </td>
                 <td
@@ -270,6 +280,14 @@ export function WorkdayDetailsCard({
                   ) : b.endedAt ? (
                     <>
                       {formatTimeInAppTimezone(b.endedAt)}
+                      {b.endedAtOriginalTime && b.endedAtOriginalTime !== b.endedAt && (
+                        <span
+                          className="inputs-rounded-badge"
+                          title={`Actual tap time: ${formatTimeInAppTimezone(b.endedAtOriginalTime)} — adjusted by this employee's break profile's break rounding setting or a scheduled break match.`}
+                        >
+                          Rounded
+                        </span>
+                      )}
                       {b.autoClosed && <span className="inputs-autoclosed-badge">Auto-closed</span>}
                     </>
                   ) : (

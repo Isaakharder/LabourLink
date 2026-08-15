@@ -7,6 +7,7 @@ import { calendarDateInAppTimezone, parseTimeParts, zonedWallTimeToUtc } from ".
 import {
   resolveOriginalEndedAt,
   resolveOriginalStartedAt,
+  roundBreak,
   roundWorkEnd,
   roundWorkStart,
   RoundingDirection,
@@ -373,6 +374,30 @@ async function loadWorkEndRoundingSettings(employeeId: string): Promise<WorkStar
     enabled: row.work_end_rounding_enabled,
     direction: row.work_end_rounding_direction,
     intervalMinutes: row.work_end_rounding_interval_minutes,
+  };
+}
+
+// Same shape and same "read fresh on every call" reasoning as
+// loadWorkStartRoundingSettings/loadWorkEndRoundingSettings above, for the
+// employee's break-rounding configuration — a single independent setting
+// (see 037_break_rounding.sql) applied to BOTH ends of a break, unlike
+// work-start/work-end which are two separate settings for two separate
+// routes.
+async function loadBreakRoundingSettings(employeeId: string): Promise<WorkStartRoundingSettings | null> {
+  const { rows } = await pool.query(
+    `select bp.break_rounding_enabled, bp.break_rounding_direction,
+            bp.break_rounding_interval_minutes
+     from employees e
+     join break_profiles bp on bp.id = e.break_profile_id and bp.is_active = true
+     where e.id = $1 and e.is_active = true`,
+    [employeeId]
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    enabled: row.break_rounding_enabled,
+    direction: row.break_rounding_direction,
+    intervalMinutes: row.break_rounding_interval_minutes,
   };
 }
 
@@ -769,23 +794,50 @@ router.post(
       }
     }
 
-    await openEntry(
-      d.employeeId,
-      d.id,
-      "break",
-      null,
-      idempotencyKey,
-      match
-        ? {
-            startedAt: match.scheduledStart,
-            actualStartedAt: now,
-            breakProfileItemId: match.item.id,
-            scheduledBreakDate: todayLocal,
-            source: "manual",
-            isPaid: match.item.is_paid,
-          }
-        : {}
-    );
+    let overrides: OpenEntryOverrides = {};
+    if (match) {
+      overrides = {
+        startedAt: match.scheduledStart,
+        actualStartedAt: now,
+        breakProfileItemId: match.item.id,
+        scheduledBreakDate: todayLocal,
+        source: "manual",
+        isPaid: match.item.is_paid,
+      };
+    } else {
+      // No scheduled fixed-break item matched this tap — apply the
+      // employee's own break-rounding setting instead, if enabled (see
+      // 037_break_rounding.sql). Deliberately never layered on top of a
+      // fixed-item match above: that's already an exact scheduled-time
+      // snap, and rounding it further would just move it away from the
+      // schedule it was just matched to.
+      const settings = await loadBreakRoundingSettings(d.employeeId);
+      if (settings?.enabled) {
+        let rounded = roundBreak(now, settings.intervalMinutes, settings.direction);
+        // Never let rounding push this break's start at or before the
+        // work entry it's about to close — same short-workday guard (and
+        // the same two-step fallback) as end-day's work-end rounding (see
+        // loadWorkEndRoundingSettings's call site below). The first
+        // fallback (the exact unrounded tap) is itself not guaranteed to
+        // clear the floor: that entry's own started_at could itself be a
+        // clockwise-work-start-rounded instant still in the future
+        // relative to `now`, in which case a second, guaranteed-positive
+        // fallback is needed.
+        const currentlyOpen = await getOpenEntry(d.employeeId);
+        if (currentlyOpen) {
+          const floor = new Date(currentlyOpen.started_at).getTime();
+          if (rounded.getTime() <= floor) rounded = now;
+          if (rounded.getTime() <= floor) rounded = new Date(floor + 1000);
+        }
+        overrides = { startedAt: rounded, actualStartedAt: now };
+      }
+      // rounding disabled (or no active profile assigned): no overrides at
+      // all — openEntry() falls back to server now() for started_at
+      // exactly as it did before this feature existed, and
+      // actual_started_at stays null on this row.
+    }
+
+    await openEntry(d.employeeId, d.id, "break", null, idempotencyKey, overrides);
     res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage, d.employeeSecurityRole));
   })
 );
@@ -824,9 +876,11 @@ router.post(
       carrierId: resumeCarrierId,
     };
 
-    // Only round the end if the currently open break was itself matched to
-    // a fixed item at start time (never retroactively match on end alone).
+    // Only snap-to-schedule the end if the currently open break was itself
+    // matched to a fixed item at start time (never retroactively match on
+    // end alone).
     const open = await getOpenEntry(d.employeeId);
+    let matchedFixedEnd = false;
     if (open?.entry_type === "break") {
       const { rows: itemRows } = await pool.query(
         `select bpi.end_time, bpi.fixed_end_window_minutes,
@@ -844,8 +898,37 @@ router.post(
         const windowMs = row.fixed_end_window_minutes * 60 * 1000;
         if (Math.abs(now.getTime() - scheduledEnd.getTime()) <= windowMs) {
           overrides.startedAt = scheduledEnd;
+          matchedFixedEnd = true;
         }
       }
+    }
+
+    // No fixed-item end match — apply the employee's own break-rounding
+    // setting instead, if enabled (see 037_break_rounding.sql). Always
+    // explicitly resolved to a concrete value here (never left unset to
+    // fall through to openEntry()'s own `coalesce($3, now())` default) so
+    // this closing boundary and actualEndedAt above are built from the
+    // exact same JS Date — otherwise a JS-vs-Postgres now() skew of a few
+    // milliseconds could make an unrounded break look "Rounded" on the
+    // Inputs page for no real reason.
+    if (open?.entry_type === "break" && !matchedFixedEnd) {
+      let effectiveEnd = now;
+      const settings = await loadBreakRoundingSettings(d.employeeId);
+      if (settings?.enabled) {
+        effectiveEnd = roundBreak(now, settings.intervalMinutes, settings.direction);
+      }
+      // Never let the break's end land at or before its own start — same
+      // short-workday guard (and the same two-step fallback) as end-day's
+      // work-end rounding. Enforced unconditionally, not just when
+      // break-end rounding is enabled: this break's own started_at can
+      // itself be a clockwise-break-rounded instant still in the future
+      // relative to `now` (break-start rounding, above), so even the exact
+      // unrounded tap isn't guaranteed to clear it — the second fallback
+      // guarantees a strictly positive duration regardless.
+      const floor = new Date(open.started_at).getTime();
+      if (effectiveEnd.getTime() <= floor) effectiveEnd = now;
+      if (effectiveEnd.getTime() <= floor) effectiveEnd = new Date(floor + 1000);
+      overrides.startedAt = effectiveEnd;
     }
 
     await openEntry(d.employeeId, d.id, "work", resumeActivityId, idempotencyKey, overrides);
