@@ -15,7 +15,12 @@ import {
   resolveDensitySnapshot,
   validateActivityAndAnswers,
 } from "../lib/activitySelection";
-import { describeConflict, findOverlappingEntry, lockEmployeeForManualEntry } from "../lib/manualTimeEntries";
+import {
+  describeConflict,
+  findOverlappingEntry,
+  lockEmployeeForManualEntry,
+  planActivityInsertion,
+} from "../lib/manualTimeEntries";
 
 const router = Router();
 
@@ -1137,11 +1142,25 @@ router.post(
 // after existing entries — unlike POST /work-start above, which only ever
 // applies to a currently-blank day. Reuses the identical activity/question/
 // row/carrier rules (activitySelection.ts) a mobile activity start or
-// change uses; the only genuinely new logic here is checking the new
-// entry's [startTime, endTime) doesn't overlap anything that already
-// exists. A conflict is always reported and left for the administrator to
-// resolve explicitly — this endpoint never shrinks, splits, or otherwise
-// silently adjusts another entry to make room.
+// change uses; the only genuinely new logic here is resolving the new
+// entry's [startTime, endTime) against anything that already exists.
+//
+// For a BOUNDED entry (endTime given — the common case), an admin's manual
+// activity is authoritative for the exact range they typed: if it lands at
+// the START or END of an existing entry, that boundary is trimmed to make
+// room (see planActivityInsertion in manualTimeEntries.ts) rather than
+// rejecting the request — this is what lets an admin backdate a forgotten
+// work start and then log what the employee was actually doing before
+// their real first activity's original start, without first having to
+// manually shrink that activity themselves. A break entry fully inside the
+// new range is left untouched (breaks are never trimmed or moved). Only a
+// case that would require SPLITTING an existing entry (the new range sits
+// entirely inside it) or silently DELETING one (the new range completely
+// covers it) is still rejected — this endpoint only ever trims one
+// boundary of one entry, it never splits or removes one.
+//
+// An OPEN-ENDED entry (no endTime — a currently-in-progress activity) keeps
+// the simpler behavior: any overlap at all is rejected, unchanged.
 router.post(
   "/activities",
   requireAuth,
@@ -1202,13 +1221,43 @@ router.post(
       await client.query("begin");
       await lockEmployeeForManualEntry(client, employeeId);
 
-      const conflict = await findOverlappingEntry(client, employeeId, start, end);
-      if (conflict) {
-        await client.query("rollback");
-        const reason2 = end
-          ? `This time range conflicts with ${describeConflict(conflict)}`
-          : `An in-progress entry can't be created — it would conflict with ${describeConflict(conflict)}`;
-        return res.status(409).json({ error: `${reason2}. Resolve the existing entry first.` });
+      if (end) {
+        // Bounded entry — resolve boundary overlaps by trimming, only
+        // reject a case that would need a split or a silent delete (see
+        // planActivityInsertion's own comment).
+        const plan = await planActivityInsertion(client, employeeId, start, end);
+        if (!plan.ok) {
+          await client.query("rollback");
+          return res.status(409).json({ error: plan.error });
+        }
+        for (const trim of plan.trims) {
+          await client.query(`update time_entries set ${trim.field} = $1 where id = $2`, [trim.newValue, trim.id]);
+          await client.query(
+            `insert into time_entry_corrections
+               (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+             values ($1, $2, $3, $4, $5, $6, $7)`,
+            [
+              trim.id,
+              employeeId,
+              req.employee!.id,
+              trim.field,
+              trim.oldValue.toISOString(),
+              trim.newValue.toISOString(),
+              AUTO_CORRECTION_REASON,
+            ]
+          );
+        }
+      } else {
+        // Open-ended (in-progress) entry — any overlap at all is rejected,
+        // same as before; trimming an entry to make room for an activity
+        // with no known end time isn't something this endpoint attempts.
+        const conflict = await findOverlappingEntry(client, employeeId, start, end);
+        if (conflict) {
+          await client.query("rollback");
+          return res.status(409).json({
+            error: `An in-progress entry can't be created — it would conflict with ${describeConflict(conflict)}. Resolve the existing entry first.`,
+          });
+        }
       }
 
       const { densityType, densityCountPerRow } = await resolveDensitySnapshot(
