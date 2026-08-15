@@ -1604,19 +1604,42 @@ router.patch(
 
       if (startChanged) {
         await auditInsert(id, "started_at", oldStart, newStart);
+        // Only drag `preceding` along if doing so is actually warranted:
+        // either the two were already exactly contiguous going in (the
+        // live-mobile-rounding case — always keep them sharing one
+        // boundary, shrink or grow, exactly as before) or this correction
+        // reaches back far enough to genuinely overlap it (the historical-
+        // gap case this route's nearest-by-time lookup above now also
+        // finds — only reconcile when the new boundary actually collides
+        // with it). A `preceding` found with a real, untouched gap that
+        // this correction doesn't reach into is left alone — stretching
+        // it to close a gap the correction never actually crossed would
+        // silently fabricate work time that was never recorded.
         if (preceding) {
-          await client.query(`update time_entries set ended_at = $1, auto_closed_at = null where id = $2`, [
-            newStart,
-            preceding.id,
-          ]);
-          await auditInsert(preceding.id, "ended_at", new Date(preceding.ended_at), newStart);
+          const precedingEndedAt = new Date(preceding.ended_at).getTime();
+          const wasContiguous = oldStart.getTime() === precedingEndedAt;
+          const wouldOverlap = newStart.getTime() < precedingEndedAt;
+          if (wasContiguous || wouldOverlap) {
+            await client.query(`update time_entries set ended_at = $1, auto_closed_at = null where id = $2`, [
+              newStart,
+              preceding.id,
+            ]);
+            await auditInsert(preceding.id, "ended_at", new Date(preceding.ended_at), newStart);
+          }
         }
       }
       if (endChanged) {
         await auditInsert(id, "ended_at", oldEnd, newEnd);
+        // Same "only when warranted" guard as preceding above, mirrored
+        // for the other direction.
         if (following) {
-          await client.query(`update time_entries set started_at = $1 where id = $2`, [newEnd, following.id]);
-          await auditInsert(following.id, "started_at", new Date(following.started_at), newEnd);
+          const followingStartedAt = new Date(following.started_at).getTime();
+          const wasContiguous = oldEnd.getTime() === followingStartedAt;
+          const wouldOverlap = newEnd.getTime() > followingStartedAt;
+          if (wasContiguous || wouldOverlap) {
+            await client.query(`update time_entries set started_at = $1 where id = $2`, [newEnd, following.id]);
+            await auditInsert(following.id, "started_at", new Date(following.started_at), newEnd);
+          }
         }
       }
 

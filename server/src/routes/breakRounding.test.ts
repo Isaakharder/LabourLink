@@ -700,6 +700,109 @@ async function main() {
     }
 
     // -----------------------------------------------------------------
+    // G4) Safeguard: a work entry is reconciled ONLY when the corrected
+    //     break actually reaches/overlaps it — the nearest-by-time lookup
+    //     (G2/G3 above) must never stretch a distant entry across a
+    //     legitimate gap just because it happens to be the nearest work
+    //     entry chronologically. Both directions covered: correcting the
+    //     end short of a distant following entry, and correcting the
+    //     start short of a distant preceding entry.
+    // -----------------------------------------------------------------
+    {
+      await pool.query(`delete from time_entry_corrections where employee_id = $1`, [target!.id]);
+      await pool.query(`delete from time_entries where employee_id = $1`, [target!.id]);
+      const deviceId = deviceIds[deviceIds.length - 1];
+
+      // -- End side: following entry is a genuine 2-hour gap away. --
+      const breakStart = new Date(Date.now() - 300 * 60000);
+      const breakOldEnd = new Date(breakStart.getTime() + 10 * 60000);
+      const followingStart = new Date(breakOldEnd.getTime() + 120 * 60000); // a real 2-hour gap
+      const followingEnd = new Date(followingStart.getTime() + 30 * 60000);
+
+      const breakId = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
+           values ($1, $2, 'break', null, gen_random_uuid(), $3, $4, 'manual')
+           returning id`,
+          [target!.id, deviceId, breakStart, breakOldEnd]
+        )
+      ).rows[0].id;
+      const followingId = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
+           values ($1, $2, 'work', $3, gen_random_uuid(), $4, $5, 'manual')
+           returning id`,
+          [target!.id, deviceId, activity!.id, followingStart, followingEnd]
+        )
+      ).rows[0].id;
+
+      // Extends the break by 5 minutes — nowhere near reaching the
+      // following entry, which is still nearly 2 hours away.
+      const correctedEnd = new Date(breakOldEnd.getTime() + 5 * 60000);
+      const endRes = await callAdmin("PATCH", `/api/inputs/breaks/${breakId}`, adminToken, {
+        endTime: correctedEnd.toISOString(),
+      });
+      check(endRes.status === 200, "G4) correcting the break's end within the gap succeeds", endRes.body);
+
+      const breakAfterEnd = await fetchEntry(breakId);
+      check(
+        new Date(breakAfterEnd.ended_at).getTime() === correctedEnd.getTime(),
+        "G4) the break's own end is saved exactly as corrected",
+        breakAfterEnd
+      );
+      const { rows: followingRowsAfter } = await pool.query(`select started_at from time_entries where id = $1`, [
+        followingId,
+      ]);
+      check(
+        new Date(followingRowsAfter[0].started_at).getTime() === followingStart.getTime(),
+        "G4) the distant following entry is left untouched — the legitimate 2-hour gap is not stretched",
+        { followingAfter: followingRowsAfter[0], followingStart }
+      );
+
+      // -- Start side: preceding entry is a genuine 2-hour gap away. --
+      await pool.query(`delete from time_entry_corrections where employee_id = $1`, [target!.id]);
+      await pool.query(`delete from time_entries where employee_id = $1`, [target!.id]);
+      const precedingStart = new Date(Date.now() - 600 * 60000);
+      const precedingEnd = new Date(precedingStart.getTime() + 30 * 60000);
+      const breakOldStart2 = new Date(precedingEnd.getTime() + 120 * 60000); // a real 2-hour gap
+      const breakEnd2 = new Date(breakOldStart2.getTime() + 10 * 60000);
+
+      const precedingId = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
+           values ($1, $2, 'work', $3, gen_random_uuid(), $4, $5, 'manual')
+           returning id`,
+          [target!.id, deviceId, activity!.id, precedingStart, precedingEnd]
+        )
+      ).rows[0].id;
+      const breakId2 = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
+           values ($1, $2, 'break', null, gen_random_uuid(), $3, $4, 'manual')
+           returning id`,
+          [target!.id, deviceId, breakOldStart2, breakEnd2]
+        )
+      ).rows[0].id;
+
+      // Moves the break's start 5 minutes earlier — nowhere near reaching
+      // the preceding entry, still nearly 2 hours away.
+      const correctedStart2 = new Date(breakOldStart2.getTime() - 5 * 60000);
+      const startRes = await callAdmin("PATCH", `/api/inputs/breaks/${breakId2}`, adminToken, {
+        startTime: correctedStart2.toISOString(),
+      });
+      check(startRes.status === 200, "G4) correcting the break's start within the gap succeeds", startRes.body);
+
+      const { rows: precedingRowsAfter } = await pool.query(`select ended_at from time_entries where id = $1`, [
+        precedingId,
+      ]);
+      check(
+        new Date(precedingRowsAfter[0].ended_at).getTime() === precedingEnd.getTime(),
+        "G4) the distant preceding entry is left untouched — the legitimate 2-hour gap is not stretched",
+        { precedingAfter: precedingRowsAfter[0], precedingEnd }
+      );
+    }
+
+    // -----------------------------------------------------------------
     // H) GET /api/inputs/daily surfaces startedAtOriginalTime/
     //    endedAtOriginalTime for a rounded break, and totals are computed
     //    from the rounded (not raw) values — the exact bug reported
