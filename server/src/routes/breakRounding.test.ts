@@ -536,6 +536,170 @@ async function main() {
     }
 
     // -----------------------------------------------------------------
+    // G2) Correcting a break's END reconciles the FOLLOWING work entry's
+    //     START to match — the exact historical scenario reported: a break
+    //     recorded before break rounding existed (12:00:00 PM-12:55:42 PM
+    //     equivalent below), whose following work entry does NOT start at
+    //     the exact same instant the break ends (a 3-second gap, standing
+    //     in for whatever pre-existing imprecision this "historical" data
+    //     has) — must still reconcile via the shared-boundary behavior,
+    //     not reject with "Corrected break overlaps a work entry."
+    // -----------------------------------------------------------------
+    {
+      // Corrections first: G (and, on the second occurrence of this
+      // block, G2) leaves a corrected entry in place with a
+      // time_entry_corrections row referencing it (FK).
+      await pool.query(`delete from time_entry_corrections where employee_id = $1`, [target!.id]);
+      await pool.query(`delete from time_entries where employee_id = $1`, [target!.id]);
+      const deviceId = deviceIds[deviceIds.length - 1];
+
+      const breakStart = new Date(Date.now() - 65 * 60000); // ~12:00:00 PM equivalent
+      const breakOldEnd = new Date(breakStart.getTime() + 55 * 60000 + 42 * 1000); // ~12:55:42 PM equivalent
+      // Deliberately NOT exactly contiguous — a 3-second gap, simulating
+      // historical data that predates break rounding's guaranteed shared
+      // boundary.
+      const followingOldStart = new Date(breakOldEnd.getTime() + 3000);
+      const followingEnd = new Date(breakOldEnd.getTime() + 60 * 60000); // plenty of room
+      const followingQuantity = 240;
+
+      const breakId = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
+           values ($1, $2, 'break', null, gen_random_uuid(), $3, $4, 'manual')
+           returning id`,
+          [target!.id, deviceId, breakStart, breakOldEnd]
+        )
+      ).rows[0].id;
+      const followingId = (
+        await pool.query(
+          `insert into time_entries
+             (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source,
+              density_type, density_count_per_row)
+           values ($1, $2, 'work', $3, gen_random_uuid(), $4, $5, 'manual', 'plants', $6)
+           returning id`,
+          [target!.id, deviceId, activity!.id, followingOldStart, followingEnd, followingQuantity]
+        )
+      ).rows[0].id;
+
+      const correctedEnd = new Date(breakOldEnd.getTime() + 4 * 60000 + 18 * 1000); // ~1:00:00 PM equivalent
+      const res = await callAdmin("PATCH", `/api/inputs/breaks/${breakId}`, adminToken, {
+        endTime: correctedEnd.toISOString(),
+      });
+      check(
+        res.status === 200,
+        "G2) correcting a non-contiguous historical break's end succeeds instead of rejecting with an overlap error",
+        res.body
+      );
+
+      const breakAfter = await fetchEntry(breakId);
+      check(
+        new Date(breakAfter.ended_at).getTime() === correctedEnd.getTime(),
+        "G2) the break's end is saved exactly as corrected",
+        breakAfter
+      );
+
+      const { rows: followingRows } = await pool.query(
+        `select started_at, ended_at, activity_id, density_count_per_row from time_entries where id = $1`,
+        [followingId]
+      );
+      const followingAfter = followingRows[0];
+      check(
+        new Date(followingAfter.started_at).getTime() === correctedEnd.getTime(),
+        "G2) the following work entry's start is dragged to share the break's new end boundary — closing the old 3-second gap",
+        { followingAfter, correctedEnd }
+      );
+      check(
+        new Date(followingAfter.ended_at).getTime() === followingEnd.getTime(),
+        "G2) the following work entry's own end time is preserved",
+        followingAfter
+      );
+      check(
+        followingAfter.activity_id === activity!.id &&
+          Number(followingAfter.density_count_per_row) === followingQuantity,
+        "G2) the following work entry's activity and completed production quantity are preserved",
+        followingAfter
+      );
+
+      const { rows: followingCorrections } = await pool.query(
+        `select field_name, old_value, new_value from time_entry_corrections where time_entry_id = $1`,
+        [followingId]
+      );
+      check(
+        followingCorrections.some(
+          (c) =>
+            c.field_name === "started_at" &&
+            new Date(c.old_value).getTime() === followingOldStart.getTime() &&
+            new Date(c.new_value).getTime() === correctedEnd.getTime()
+        ),
+        "G2) the reconciled following entry gets its own audit row (old gap-having start -> new shared boundary)",
+        followingCorrections
+      );
+    }
+
+    // -----------------------------------------------------------------
+    // G3) Symmetric case: correcting a break's START reconciles the
+    //     PRECEDING work entry's END to match, again for a non-exactly-
+    //     contiguous historical pair.
+    // -----------------------------------------------------------------
+    {
+      // Corrections first: G (and, on the second occurrence of this
+      // block, G2) leaves a corrected entry in place with a
+      // time_entry_corrections row referencing it (FK).
+      await pool.query(`delete from time_entry_corrections where employee_id = $1`, [target!.id]);
+      await pool.query(`delete from time_entries where employee_id = $1`, [target!.id]);
+      const deviceId = deviceIds[deviceIds.length - 1];
+
+      const precedingStart = new Date(Date.now() - 180 * 60000);
+      const precedingOldEnd = new Date(Date.now() - 120 * 60000);
+      // A 2-second gap before the break's old start, same "not exactly
+      // contiguous historical data" simulation as G2.
+      const breakOldStart = new Date(precedingOldEnd.getTime() + 2000);
+      const breakEnd = new Date(breakOldStart.getTime() + 15 * 60000);
+
+      const precedingId = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
+           values ($1, $2, 'work', $3, gen_random_uuid(), $4, $5, 'manual')
+           returning id`,
+          [target!.id, deviceId, activity!.id, precedingStart, precedingOldEnd]
+        )
+      ).rows[0].id;
+      const breakId = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
+           values ($1, $2, 'break', null, gen_random_uuid(), $3, $4, 'manual')
+           returning id`,
+          [target!.id, deviceId, breakOldStart, breakEnd]
+        )
+      ).rows[0].id;
+
+      const correctedStart = new Date(breakOldStart.getTime() - 6 * 60000); // moved earlier
+      const res = await callAdmin("PATCH", `/api/inputs/breaks/${breakId}`, adminToken, {
+        startTime: correctedStart.toISOString(),
+      });
+      check(
+        res.status === 200,
+        "G3) correcting a non-contiguous historical break's start succeeds instead of rejecting with an overlap error",
+        res.body
+      );
+
+      const { rows: precedingRows } = await pool.query(`select started_at, ended_at from time_entries where id = $1`, [
+        precedingId,
+      ]);
+      const precedingAfter = precedingRows[0];
+      check(
+        new Date(precedingAfter.ended_at).getTime() === correctedStart.getTime(),
+        "G3) the preceding work entry's end is dragged earlier to share the break's new start boundary",
+        { precedingAfter, correctedStart }
+      );
+      check(
+        new Date(precedingAfter.started_at).getTime() === precedingStart.getTime(),
+        "G3) the preceding work entry's own start time is preserved",
+        precedingAfter
+      );
+    }
+
+    // -----------------------------------------------------------------
     // H) GET /api/inputs/daily surfaces startedAtOriginalTime/
     //    endedAtOriginalTime for a rounded break, and totals are computed
     //    from the rounded (not raw) values — the exact bug reported

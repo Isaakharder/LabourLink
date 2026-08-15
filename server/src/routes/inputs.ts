@@ -1412,19 +1412,29 @@ router.patch(
         return res.status(409).json({ error: "An in-progress break cannot be corrected here" });
       }
 
-      // Compared via a subquery on this break's own id, not by passing
-      // peekRow.started_at back in as a parameter — node-postgres's
-      // timestamptz parser only holds millisecond precision, while Postgres
-      // stores microseconds, so a round-tripped Date can silently fail to
-      // match a genuinely contiguous neighbor whose boundary was set via
-      // now() (see the identical fix already applied in mobileTime.ts's
-      // previousActivity lookup and this file's own end-time correction
-      // route above).
+      // The nearest work entry ending at or before this break's current
+      // start — not required to be exactly contiguous (started_at = the
+      // other's ended_at). Live mobile rounding always produces an exactly
+      // contiguous chain (see mobileTime.ts's openEntry, which resolves
+      // both boundaries from the same transaction-frozen now()), but a
+      // break recorded before break rounding existed, or one that's
+      // otherwise picked up a small gap from earlier corrections, may not
+      // be — an admin correcting it should still be able to drag the
+      // shared boundary and reconcile the adjacent work entry exactly the
+      // way the live mobile path already does, not just when the two
+      // happen to already be bit-identical. Bounded to the break's own
+      // calendar day so a sparse timeline (no work entries at all
+      // adjacent to this break) can never reach across into an unrelated
+      // day's entry.
+      const { start: dayStart, end: dayEnd } = getDayBoundsUtc(calendarDateInAppTimezone(new Date(peekRow.started_at)));
       const precedingPeek = await client.query(
         `select id from time_entries
          where employee_id = $1 and entry_type = 'work' and deleted_at is null
-           and ended_at = (select started_at from time_entries where id = $2)`,
-        [peekRow.employee_id, id]
+           and ended_at is not null and ended_at >= $3
+           and ended_at <= (select started_at from time_entries where id = $2)
+         order by ended_at desc
+         limit 1`,
+        [peekRow.employee_id, id, dayStart]
       );
 
       // Chronological lock order: preceding work entry (if any) first, then
@@ -1454,13 +1464,18 @@ router.patch(
           .json({ error: "This break changed since it was loaded — please refresh and try again" });
       }
 
-      // Same subquery-based comparison as precedingPeek above, for the same
-      // precision reason.
+      // Same "nearest, not necessarily exactly contiguous" reasoning as
+      // precedingPeek above, mirrored for the work entry immediately
+      // after this break — the earliest one starting at or after the
+      // break's current end, bounded to the same calendar day.
       const followingPeek = await client.query(
         `select id from time_entries
          where employee_id = $1 and entry_type = 'work' and deleted_at is null
-           and started_at = (select ended_at from time_entries where id = $2)`,
-        [target.employee_id, id]
+           and started_at < $3
+           and started_at >= (select ended_at from time_entries where id = $2)
+         order by started_at asc
+         limit 1`,
+        [target.employee_id, id, dayEnd]
       );
       let following: { id: string; started_at: string; ended_at: string | null } | null = null;
       if (followingPeek.rows[0]) {
