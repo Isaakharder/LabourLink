@@ -43,9 +43,14 @@ function isValidReason(v: unknown): v is string {
 // downstream reporting both still expect a non-empty reason on every
 // time_entry_corrections row) is preserved by always writing this fixed,
 // server-generated string instead of trusting client-supplied text.
-// Deletions are a separate, unrelated flow (POST .../delete below) and
-// still require and store a real typed reason.
+// Deletion is a separate, unrelated flow from the corrections above (POST
+// .../delete below) — an activity-log deletion still requires and stores a
+// real typed reason, but a break deletion no longer collects one from the
+// caller (the Inputs page's break-deletion modal only asks for
+// confirmation now), so it uses this same "fixed, server-generated string"
+// approach instead.
 const AUTO_CORRECTION_REASON = "Time corrected from Inputs page";
+const BREAK_DELETION_REASON = "Break deleted from Inputs page";
 
 function trimOrNull(v: unknown): string | null {
   if (typeof v !== "string") return null;
@@ -1712,11 +1717,9 @@ router.post(
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid break id" });
 
-    const { reason } = req.body as { reason?: string };
-    const trimmedReason = typeof reason === "string" ? reason.trim() : "";
-    if (trimmedReason.length < 3) {
-      return res.status(400).json({ error: "A deletion reason of at least 3 characters is required" });
-    }
+    // No typed reason collected from the caller here — see
+    // BREAK_DELETION_REASON's own comment above.
+    const trimmedReason = BREAK_DELETION_REASON;
 
     const client = await pool.connect();
     try {

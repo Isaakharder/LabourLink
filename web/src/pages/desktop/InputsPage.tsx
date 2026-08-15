@@ -50,6 +50,9 @@ interface PendingDeletion {
   title: string;
   message: string;
   confirmLabel: string;
+  // See DeleteTimeEntryModal's own comment — break deletion no longer
+  // collects a typed reason.
+  requireReason: boolean;
 }
 
 export function InputsPage() {
@@ -468,6 +471,7 @@ export function InputsPage() {
       message:
         "This will remove this recorded activity from the employee's day. The deletion will remain in the audit history.",
       confirmLabel: "Delete Log",
+      requireReason: true,
     });
   }
 
@@ -480,6 +484,7 @@ export function InputsPage() {
       message:
         "This will remove this break from the employee's day and reconnect the surrounding work time. The deletion will remain in the audit history.",
       confirmLabel: "Delete Break",
+      requireReason: false,
     });
   }
 
@@ -657,6 +662,7 @@ export function InputsPage() {
           title={pendingDeletion.title}
           message={pendingDeletion.message}
           confirmLabel={pendingDeletion.confirmLabel}
+          requireReason={pendingDeletion.requireReason}
           submitting={deletionSubmitting}
           error={deletionError}
           onConfirm={handleConfirmDeletion}
