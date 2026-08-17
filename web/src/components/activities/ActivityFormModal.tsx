@@ -6,6 +6,7 @@ import {
   ActivityQuestionDraft,
   DENSITY_SOURCES,
   DENSITY_SOURCE_LABELS,
+  DENSITY_SOURCE_SPEED_UNIT,
   DensitySource,
   SPEED_UNIT_SUGGESTIONS,
 } from "../../lib/activityTypes";
@@ -49,6 +50,15 @@ export function ActivityFormModal({ activity, onClose, onSaved }: ActivityFormMo
     setForm((f) => ({ ...f, [key]: value }));
   }
 
+  // A density source forces its matching speed unit — never form.speedUnit
+  // directly, so opening the form for an activity saved before this
+  // enforcement existed (e.g. Stems + plants/hour) immediately shows, and
+  // would save, the corrected unit rather than perpetuating the mismatch.
+  // form.speedUnit itself is left untouched by density source changes, so
+  // switching Density source back to None restores whatever free-text unit
+  // was there before.
+  const effectiveSpeedUnit = form.densitySource ? DENSITY_SOURCE_SPEED_UNIT[form.densitySource] : form.speedUnit;
+
   function validate(): boolean {
     const next: Record<string, string> = {};
     if (!form.name.trim()) next.name = "Activity name is required";
@@ -75,7 +85,7 @@ export function ActivityFormModal({ activity, onClose, onSaved }: ActivityFormMo
       const payload = {
         name: form.name.trim(),
         normalSpeed: form.normalSpeed.trim() ? Number(form.normalSpeed) : null,
-        speedUnit: form.speedUnit.trim() || null,
+        speedUnit: effectiveSpeedUnit.trim() || null,
         densitySource: form.densitySource || null,
         minimumDurationMinutes: Number(form.minimumDurationMinutes),
         isActive: form.isActive,
@@ -131,18 +141,25 @@ export function ActivityFormModal({ activity, onClose, onSaved }: ActivityFormMo
             </label>
             <label>
               Speed unit
-              <input
-                type="text"
-                list="speed-unit-suggestions"
-                value={form.speedUnit}
-                onChange={(e) => set("speedUnit", e.target.value)}
-                placeholder="e.g. kg/hour"
-              />
+              {form.densitySource ? (
+                <input type="text" value={effectiveSpeedUnit} readOnly disabled />
+              ) : (
+                <input
+                  type="text"
+                  list="speed-unit-suggestions"
+                  value={form.speedUnit}
+                  onChange={(e) => set("speedUnit", e.target.value)}
+                  placeholder="e.g. kg/hour"
+                />
+              )}
               <datalist id="speed-unit-suggestions">
                 {SPEED_UNIT_SUGGESTIONS.map((u) => (
                   <option key={u} value={u} />
                 ))}
               </datalist>
+              {form.densitySource && (
+                <span className="field-hint">Set automatically to match the density source.</span>
+              )}
             </label>
             <label>
               Density source

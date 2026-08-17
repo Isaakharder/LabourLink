@@ -78,8 +78,13 @@ export function ActivityLogsCard({
 
   function openReview(run: ActivityRunDto, e: MouseEvent) {
     e.stopPropagation();
-    if (!run.row || !run.activityDensitySource) return;
-    setReviewTarget({ greenhouseRowId: run.row.id, densityType: run.activityDensitySource, rowLabel: run.row.label });
+    // run.densityType (this run's own frozen density type), never
+    // run.activityDensitySource (the activity's current config) — the
+    // "Needs review" badge itself was computed server-side from the frozen
+    // value, so querying candidates with anything else can silently return
+    // zero results for a row the badge just flagged (see inputsTypes.ts).
+    if (!run.row || !run.densityType) return;
+    setReviewTarget({ greenhouseRowId: run.row.id, densityType: run.densityType, rowLabel: run.row.label });
   }
 
   return (
@@ -258,6 +263,10 @@ export function ActivityLogsCard({
           rowLabel={reviewTarget.rowLabel}
           onClose={() => setReviewTarget(null)}
           onCombined={() => {
+            setReviewTarget(null);
+            onRowCompletionChanged();
+          }}
+          onNoLongerPending={() => {
             setReviewTarget(null);
             onRowCompletionChanged();
           }}

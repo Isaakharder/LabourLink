@@ -10,6 +10,13 @@ interface RowCompletionReviewModalProps {
   rowLabel: string;
   onClose: () => void;
   onCombined: () => void;
+  // Called when this row genuinely has no pending work to review — the
+  // "Needs review" badge that opened this modal was stale (already
+  // resolved elsewhere, or the underlying data changed since the page
+  // loaded). Distinct from onCombined (nothing was actually combined here),
+  // but the caller typically reacts the same way: reload the day so the
+  // now-correctly-computed badge disappears.
+  onNoLongerPending: () => void;
 }
 
 export function RowCompletionReviewModal({
@@ -18,6 +25,7 @@ export function RowCompletionReviewModal({
   rowLabel,
   onClose,
   onCombined,
+  onNoLongerPending,
 }: RowCompletionReviewModalProps) {
   const [candidates, setCandidates] = useState<RowCompletionCandidateRun[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -58,6 +66,16 @@ export function RowCompletionReviewModal({
   const totalDuration = candidates
     ? candidates.filter((c) => selected.has(c.runId)).reduce((sum, c) => sum + c.durationSeconds, 0)
     : 0;
+  // Distinguishes "still loading" (candidates === null) from "loaded, and
+  // there's genuinely nothing to review" (candidates.length === 0) — the
+  // latter must never offer a Combine action at all (there's nothing to
+  // select), only a way to acknowledge the stale badge and refresh.
+  const isEmpty = candidates !== null && candidates.length === 0;
+
+  function handleAcknowledgeStale() {
+    onNoLongerPending();
+    onClose();
+  }
 
   return (
     <Modal
@@ -65,36 +83,48 @@ export function RowCompletionReviewModal({
       onClose={onClose}
       wide
       footer={
-        <>
-          <span className="employees-count">
-            {selected.size > 0 ? `${selected.size} selected · ${formatDurationHMS(totalDuration)} total` : ""}
-          </span>
-          <button type="button" onClick={onClose}>
-            Cancel
+        isEmpty ? (
+          <button type="button" className="employees-add-button" onClick={handleAcknowledgeStale}>
+            Refresh
           </button>
-          <button
-            type="button"
-            className="employees-add-button"
-            disabled={selected.size === 0 || submitting}
-            onClick={handleCombine}
-          >
-            Combine as one completed row
-          </button>
-        </>
+        ) : (
+          <>
+            <span className="employees-count">
+              {selected.size > 0 ? `${selected.size} selected · ${formatDurationHMS(totalDuration)} total` : ""}
+            </span>
+            <button type="button" onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="employees-add-button"
+              disabled={selected.size === 0 || submitting}
+              onClick={handleCombine}
+            >
+              Combine as one completed row
+            </button>
+          </>
+        )
       }
     >
-      <p className="field-hint">
-        This physical row has work logged across more than one segment — select the segments that represent the same
-        completed row before its density-based speed can be calculated. Selecting just one segment on its own confirms
-        it as a separate, deliberately-not-combined completion.
-      </p>
+      {!isEmpty && (
+        <p className="field-hint">
+          This physical row has work logged across more than one segment — select the segments that represent the
+          same completed row before its density-based speed can be calculated. Selecting just one segment on its own
+          confirms it as a separate, deliberately-not-combined completion.
+        </p>
+      )}
 
       {error && <p className="error-text">{error}</p>}
 
       {!candidates ? (
         <p>Loading...</p>
-      ) : candidates.length === 0 ? (
-        <p className="placeholder-page">No pending work found for this row.</p>
+      ) : isEmpty ? (
+        <p className="placeholder-page">
+          This row has no pending work to review right now — the "Needs review" badge was stale. The work has likely
+          already been resolved, or the underlying data changed since this page loaded. Click Refresh to reload this
+          row and clear the badge.
+        </p>
       ) : (
         <table className="employees-table">
           <thead>

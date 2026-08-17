@@ -6,7 +6,7 @@ import { getSignedPhotoUrl, getSignedPhotoUrls } from "../lib/storage";
 import { calendarDateInAppTimezone, getDayBoundsUtc } from "../lib/timezone";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
-import { aggregateDensitySpeed, DensityContribution } from "../lib/densitySpeed";
+import { aggregateDensitySpeed } from "../lib/densitySpeed";
 import { getUnresolvedRunsForRow } from "../lib/rowCompletionCandidates";
 import {
   loadCarrierOptions,
@@ -390,6 +390,7 @@ router.get(
     // density-eligible runs whose row simply has no matching density at
     // all (those stay blank exactly as before, unrelated to ambiguity).
     const densityEligibleRuns = runs.filter((r) => r.densityCountPerRow != null);
+    const runById = new Map(runs.map((r) => [r.id, r]));
 
     const allSegmentIds = densityEligibleRuns.flatMap((r) => r.segmentIds);
     const segmentCompletionMap = new Map<string, string>();
@@ -411,20 +412,54 @@ router.get(
       }
     }
 
+    // A run linked via splitByDensityChangeFromRunId (activityRuns.ts) is
+    // the SAME physical visit as its immediately preceding run, just frozen
+    // under a different density_type — never an independent row+type
+    // occurrence. Walk back to the visit's true origin so quantity/duration
+    // attribution (and ambiguity checking) uses that ONE original frozen
+    // type, never awarding one physical row's completion to two different
+    // density types. Stops at a completion-linked run — a confirmed
+    // row_completions record is always authoritative on its own, never
+    // silently folded into another chain.
+    function visitRoot(run: (typeof runs)[number]): (typeof runs)[number] {
+      let cur = run;
+      const seen = new Set<string>();
+      while (cur.splitByDensityChangeFromRunId && !seen.has(cur.id)) {
+        seen.add(cur.id);
+        const prior = runById.get(cur.splitByDensityChangeFromRunId);
+        if (!prior || prior.densityCountPerRow == null || runCompletionId.has(prior.id)) break;
+        cur = prior;
+      }
+      return cur;
+    }
+
+    const visitRootByRunId = new Map<string, string>();
+    const chainDurationByRootId = new Map<string, number>();
+    for (const r of densityEligibleRuns) {
+      if (runCompletionId.has(r.id)) continue;
+      const root = visitRoot(r);
+      visitRootByRunId.set(r.id, root.id);
+      chainDurationByRootId.set(root.id, (chainDurationByRootId.get(root.id) ?? 0) + r.durationSeconds);
+    }
+
     // unresolvedPairs only needs runCompletionId (already known above), so
     // it's built up front rather than after completionTotals — nothing
     // below it depends on completionTotals at all (see the Promise.all
     // just below: the two queries this section needs are independent of
     // each other, both only depending on runCompletionId/densityEligibleRuns
-    // computed above, never on one another's result).
+    // computed above, never on one another's result). Keyed by each run's
+    // VISIT ROOT, not the run's own row/type — a later segment of a
+    // density-type-split visit must never contribute its own (spurious)
+    // key here, or it would be checked for ambiguity under the wrong type.
     const unresolvedPairs = new Map<string, { greenhouseRowId: string; densityType: "plants" | "stems" }>();
     for (const r of densityEligibleRuns) {
       if (runCompletionId.has(r.id)) continue;
-      const key = `${r.greenhouseRowId}:${r.densityType}`;
+      const root = runById.get(visitRootByRunId.get(r.id)!)!;
+      const key = `${root.greenhouseRowId}:${root.densityType}`;
       if (!unresolvedPairs.has(key)) {
         unresolvedPairs.set(key, {
-          greenhouseRowId: r.greenhouseRowId!,
-          densityType: r.densityType as "plants" | "stems",
+          greenhouseRowId: root.greenhouseRowId!,
+          densityType: root.densityType as "plants" | "stems",
         });
       }
     }
@@ -478,22 +513,44 @@ router.get(
       );
     }
 
+    // Rule 2 (see comment above densityEligibleRuns): a not-yet-completed
+    // run that's the sole candidate for its row+type auto-counts using ITS
+    // OWN quantity/duration — never pooled with any other run, even other
+    // runs on the same activity. Two different physical rows finishing in
+    // different amounts of time must show two different speeds; the
+    // ratio-of-sums rule (sum quantities, sum durations, divide once) only
+    // applies *within* a single run's own segments (already handled by
+    // groupIntoActivityRuns merging same-row-same-density-type segments into
+    // one run — see activityRuns.ts), *within* one density-type-split
+    // visit's whole chain (visitRoot above), or within a single
+    // row_completions record's linked segments (the completionId branch
+    // below) — never across multiple distinct runs/rows/visits. Keyed by
+    // each run's visit root — every member of a split chain shares the same
+    // ambiguity verdict as its root, so a "Needs review" badge (or its
+    // absence) is always consistent across the whole visit.
     const isUnresolvedByRunId = new Map<string, boolean>();
-    const densityContributionsByActivity = new Map<string, DensityContribution[]>();
     for (const r of densityEligibleRuns) {
       if (runCompletionId.has(r.id)) continue;
-      const key = `${r.greenhouseRowId}:${r.densityType}`;
+      const root = runById.get(visitRootByRunId.get(r.id)!)!;
+      const key = `${root.greenhouseRowId}:${root.densityType}`;
       if (ambiguousPairKeys.has(key)) {
         isUnresolvedByRunId.set(r.id, true);
-        continue;
       }
-      const list = densityContributionsByActivity.get(r.activityId) ?? [];
-      list.push({ quantityPerRow: r.densityCountPerRow!, durationSeconds: r.durationSeconds });
-      densityContributionsByActivity.set(r.activityId, list);
     }
-    const calculatedSpeedByActivity = new Map<string, number | null>();
-    for (const [activityId, contributions] of densityContributionsByActivity) {
-      calculatedSpeedByActivity.set(activityId, aggregateDensitySpeed(contributions));
+
+    // One combined speed per visit root — its OWN quantity_per_row (a
+    // physical row's density is counted exactly once, never once per
+    // density-type-split segment) divided by the chain's SUMMED duration
+    // across every segment that visit touched. A standalone run (no split
+    // chain) is trivially its own root with a "chain" of just itself, so
+    // this is also the single source of per-run speed math below — no
+    // separate standalone-case calculation needed.
+    const speedByRootId = new Map<string, number | null>();
+    for (const [rootId, durationSeconds] of chainDurationByRootId) {
+      const root = runById.get(rootId)!;
+      const key = `${root.greenhouseRowId}:${root.densityType}`;
+      if (ambiguousPairKeys.has(key)) continue;
+      speedByRootId.set(rootId, aggregateDensitySpeed([{ quantityPerRow: root.densityCountPerRow!, durationSeconds }]));
     }
 
     const canEditRole = EDIT_ROLES.includes(req.employee!.securityRole);
@@ -555,15 +612,36 @@ router.get(
         const isUnresolved = isUnresolvedByRunId.get(r.id) ?? false;
         let calculatedSpeed: number | null = null;
         let rowCompletion: { id: string; quantityPerRow: number; segmentCount: number } | null = null;
+        const rootRunId = visitRootByRunId.get(r.id);
+        const rootRun = rootRunId ? runById.get(rootRunId) : undefined;
         if (completionId) {
           const totals = completionTotals.get(completionId);
           calculatedSpeed = speedByCompletionId.get(completionId) ?? null;
           if (totals) {
             rowCompletion = { id: completionId, quantityPerRow: totals.quantity, segmentCount: totals.segmentCount };
           }
-        } else if (meta?.densitySource && !isUnresolved) {
-          calculatedSpeed = calculatedSpeedByActivity.get(r.activityId) ?? null;
+        } else if (meta?.densitySource && !isUnresolved && r.densityCountPerRow != null && rootRunId) {
+          // This run's visit root's combined quantity/duration — see the
+          // comment above isUnresolvedByRunId/speedByRootId for why this
+          // must never pool across independent runs/rows, but MUST combine
+          // every segment of one density-type-split visit into a single
+          // number (never award that row's density independently to each
+          // side of the split).
+          calculatedSpeed = speedByRootId.get(rootRunId) ?? null;
         }
+        // Unit follows the run's VISIT ROOT's frozen densityType — not this
+        // run's own (which, for a later segment of a density-type-split
+        // visit, is the spurious post-config-change type being corrected
+        // away from here), and not the activity's current speedUnit, which
+        // can independently disagree once an admin edits the activity's
+        // density_source/speed_unit after this run was recorded (same
+        // divergence documented above for densityType vs.
+        // activityDensitySource). normalSpeedPerHour above is intentionally
+        // different: it's a static current-config target, not a historical
+        // measurement, so it keeps using meta.speedUnit as-is.
+        const effectiveDensityType = rootRun?.densityType ?? r.densityType;
+        const calculatedSpeedUnit =
+          effectiveDensityType === "plants" ? "plants/hour" : effectiveDensityType === "stems" ? "stems/hour" : meta?.speedUnit ?? null;
 
         return {
           id: r.id,
@@ -574,8 +652,20 @@ router.get(
           normalSpeedPerHour:
             meta?.normalSpeed != null ? { value: Number(meta.normalSpeed), unit: meta.speedUnit } : null,
           activityDensitySource: meta?.densitySource ?? null,
+          // The run's OWN frozen density type (from time_entries.density_type,
+          // set once when the entry was opened) — deliberately distinct from
+          // activityDensitySource above, which is the activity's CURRENT,
+          // live density_source. isUnresolvedRowCompletion is computed from
+          // THIS frozen value (see unresolvedPairs/ambiguousPairKeys above),
+          // so any caller that needs to re-query the same ambiguity (e.g.
+          // opening the review modal) must use densityType here, never
+          // activityDensitySource — if an activity's density_source is ever
+          // edited after a run was recorded, the two can genuinely disagree,
+          // and querying with the wrong one silently finds zero candidates
+          // for a row the badge just said was ambiguous.
+          densityType: r.densityType,
           calculatedSpeedPerHour:
-            calculatedSpeed != null ? { value: calculatedSpeed, unit: meta?.speedUnit ?? null } : null,
+            calculatedSpeed != null ? { value: calculatedSpeed, unit: calculatedSpeedUnit } : null,
           isUnresolvedRowCompletion: isUnresolved,
           rowCompletion,
           segmentIds: r.segmentIds,

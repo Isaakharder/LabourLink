@@ -13,6 +13,16 @@ type QuestionType = (typeof QUESTION_TYPES)[number];
 
 const DENSITY_SOURCES = ["plants", "stems"] as const;
 type DensitySource = (typeof DENSITY_SOURCES)[number];
+
+// A density-driven activity's speed unit must always match its density
+// source — "Stems" with "plants/hour" is a nonsensical, self-contradictory
+// configuration a frozen historical run could never actually have measured.
+// Deriving it here (rather than trusting whatever the client sends) is what
+// makes that combination impossible to save, in create AND update alike.
+const DENSITY_SPEED_UNIT: Record<DensitySource, string> = {
+  plants: "plants/hour",
+  stems: "stems/hour",
+};
 const DEFAULT_LABEL: Record<QuestionType, string> = {
   greenhouse_row: "Where?",
   carrier: "Which Carrier?",
@@ -62,8 +72,6 @@ function validateCreate(body: Record<string, unknown>):
     }
   }
 
-  const speedUnit = trimOrNull(body.speedUnit as string);
-
   let densitySource: DensitySource | null = null;
   if (body.densitySource !== undefined && body.densitySource !== null && body.densitySource !== "") {
     if (!DENSITY_SOURCES.includes(body.densitySource as DensitySource)) {
@@ -72,6 +80,11 @@ function validateCreate(body: Record<string, unknown>):
       densitySource = body.densitySource as DensitySource;
     }
   }
+
+  // Density-driven activities never take a free-text speed unit — it's
+  // fully derived, so the two fields can never contradict each other (see
+  // DENSITY_SPEED_UNIT above).
+  const speedUnit = densitySource ? DENSITY_SPEED_UNIT[densitySource] : trimOrNull(body.speedUnit as string);
 
   let minimumDurationMinutes = 0;
   if (body.minimumDurationMinutes === undefined || body.minimumDurationMinutes === null || body.minimumDurationMinutes === "") {
@@ -99,7 +112,12 @@ function validateCreate(body: Record<string, unknown>):
   };
 }
 
-function validateUpdate(body: Record<string, unknown>):
+// currentDensitySource is the activity's density_source BEFORE this patch is
+// applied — needed because a patch may touch only one of densitySource/
+// speedUnit (e.g. an admin renaming the activity, or just editing
+// normalSpeed), and consistency still has to hold against whichever value
+// isn't part of this particular request.
+function validateUpdate(body: Record<string, unknown>, currentDensitySource: DensitySource | null):
   | { errors: Record<string, string> }
   | { data: Partial<ActivityFields> } {
   const errors: Record<string, string> = {};
@@ -133,6 +151,19 @@ function validateUpdate(body: Record<string, unknown>):
       errors.densitySource = "Density source must be 'plants' or 'stems'";
     } else {
       data.densitySource = body.densitySource as DensitySource;
+    }
+  }
+
+  // Force speedUnit to match whichever density source is effective after
+  // this patch — whether densitySource is being set right now, or was
+  // already set and this patch just didn't mention it. This also
+  // self-heals any activity that was already saved with a mismatch (e.g.
+  // by a client predating this check) the next time it's touched at all,
+  // even for an unrelated field like normalSpeed.
+  if (!errors.densitySource) {
+    const effectiveDensitySource = "densitySource" in data ? data.densitySource ?? null : currentDensitySource;
+    if (effectiveDensitySource) {
+      data.speedUnit = DENSITY_SPEED_UNIT[effectiveDensitySource];
     }
   }
 
@@ -417,7 +448,11 @@ router.patch(
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid activity id" });
 
-    const result = validateUpdate(req.body ?? {});
+    const existing = await pool.query("select density_source from activities where id = $1", [id]);
+    if (!existing.rows[0]) return res.status(404).json({ error: "Activity not found" });
+    const currentDensitySource = existing.rows[0].density_source as DensitySource | null;
+
+    const result = validateUpdate(req.body ?? {}, currentDensitySource);
     const hasQuestions = "questions" in (req.body ?? {});
     const questionsResult = hasQuestions ? validateQuestions(req.body.questions) : null;
     const errors: Record<string, string> = "errors" in result ? result.errors : {};

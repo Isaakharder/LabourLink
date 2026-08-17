@@ -115,6 +115,7 @@ function buildDaily(emp: InputsEmployee, date: string, activityName: string, bre
         activityName,
         normalSpeedPerHour: null,
         activityDensitySource: null,
+        densityType: null,
         calculatedSpeedPerHour: null,
         isUnresolvedRowCompletion: false,
         rowCompletion: null,

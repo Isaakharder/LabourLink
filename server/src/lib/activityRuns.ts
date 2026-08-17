@@ -32,9 +32,16 @@ export interface RunSegment {
   carrier_id: string | null;
   // Frozen density snapshot from when this segment was opened (see
   // 025_activity_density_speed.sql) — always null/null together, and only
-  // ever non-null on a work segment. Not part of the contiguity check: it's
-  // derived from activity_id + greenhouse_row_id, both of which are already
-  // checked, so it's always identical across segments that are contiguous.
+  // ever non-null on a work segment. IS part of the contiguity check below:
+  // it's derived from activity_id + greenhouse_row_id + the activity's
+  // density_source *at the moment the segment opened*, and an admin can edit
+  // an activity's density_source between two otherwise-contiguous segments
+  // (same activity, same row) — so two segments can share activity_id and
+  // greenhouse_row_id yet freeze different density types. Without this
+  // check, such a pair would be silently merged into one run carrying only
+  // the last segment's density type, corrupting that run's quantity/duration
+  // pairing for every consumer (Inputs speed, row-completion candidates,
+  // report attribution).
   density_type: "plants" | "stems" | null;
   density_count_per_row: number | null;
 }
@@ -59,6 +66,21 @@ export interface ActivityRun {
   // in it shares the same resolved snapshot.
   densityType: "plants" | "stems" | null;
   densityCountPerRow: number | null;
+  // Set when this run's first segment is boundary-contiguous with the
+  // immediately preceding run — same activity, row, and carrier — but
+  // differs ONLY in density_type, i.e. it's genuinely the same physical
+  // visit, just frozen under a different type because an activity's
+  // density_source was edited while an employee was on break between the
+  // two (see mobileTime.ts's break/end resume, which now inherits the
+  // interrupted entry's own frozen snapshot specifically to prevent this
+  // going forward — this field exists for whatever slips through anyway:
+  // historical data recorded before that fix, or a manual entry). Points at
+  // the immediately preceding run only (never further back) — a consumer
+  // that needs the true visit origin walks this chain itself (see
+  // rowCompletionCandidates.ts / inputs.ts's visitRoot helpers), since only
+  // it has the full run list and completion state needed to know where to
+  // stop.
+  splitByDensityChangeFromRunId: string | null;
 }
 
 export interface BreakSegment {
@@ -84,13 +106,14 @@ export function groupIntoActivityRuns(entries: RunSegment[]): {
     }
 
     const segDuration = e.ended_at ? (e.ended_at.getTime() - e.started_at.getTime()) / 1000 : 0;
-    const contiguous =
+    const sameRowActivityCarrier: boolean =
       current !== null &&
       lastEndedAt !== null &&
       e.started_at.getTime() === lastEndedAt &&
       e.activity_id === current.activityId &&
       e.greenhouse_row_id === current.greenhouseRowId &&
       e.carrier_id === current.carrierId;
+    const contiguous = sameRowActivityCarrier && e.density_type === current!.densityType;
 
     if (contiguous && current) {
       current.id = e.id;
@@ -113,6 +136,7 @@ export function groupIntoActivityRuns(entries: RunSegment[]): {
         carrierId: e.carrier_id,
         densityType: e.density_type,
         densityCountPerRow: e.density_count_per_row,
+        splitByDensityChangeFromRunId: sameRowActivityCarrier ? current!.id : null,
       };
       runs.push(current);
     }

@@ -63,6 +63,19 @@ interface OpenEntryOverrides {
   // greenhouseRowId (see chk_time_entries_carrier_only_on_work,
   // 019_carriers.sql).
   carrierId?: string | null;
+  // When provided, used verbatim as this new segment's frozen density
+  // snapshot INSTEAD of resolveDensitySnapshot's live activity lookup. The
+  // logical-run density type must be frozen once, when the run genuinely
+  // begins — never re-read on every underlying time_entries row a break
+  // happens to split it into. POST /time-entries/break/end (resuming the
+  // SAME activity/row/carrier that was interrupted) passes the resumed
+  // entry's own already-frozen values here, so an admin editing an
+  // activity's density_source while an employee is on break can never
+  // silently re-freeze the second half of one physical visit under the new
+  // type. A genuine new activity/row start (POST /time-entries/work) omits
+  // this and gets the activity's live config exactly as before — that IS a
+  // new logical run, so it's supposed to pick up the new config.
+  densitySnapshot?: { densityType: "plants" | "stems" | null; densityCountPerRow: number | null };
 }
 
 async function getOpenEntry(employeeId: string): Promise<OpenEntry | null> {
@@ -127,12 +140,18 @@ async function openEntry(
 
     // Frozen at the moment this work entry is opened (see
     // resolveDensitySnapshot's own comment for why it's never re-read
-    // afterward). Breaks never reach here (entryType !== "work"
-    // short-circuits), matching the chk_time_entries_density_only_on_work
-    // constraint for free.
+    // afterward) — UNLESS overrides.densitySnapshot says this segment is
+    // resuming an already-open logical run (see OpenEntryOverrides' own
+    // comment), in which case that frozen snapshot is inherited verbatim
+    // instead of being re-resolved from the activity's current config.
+    // Breaks never reach here (entryType !== "work" short-circuits),
+    // matching the chk_time_entries_density_only_on_work constraint for
+    // free.
     const { densityType, densityCountPerRow } =
       entryType === "work" && activityId
-        ? await resolveDensitySnapshot(client, activityId, overrides.greenhouseRowId ?? null)
+        ? overrides.densitySnapshot !== undefined
+          ? overrides.densitySnapshot
+          : await resolveDensitySnapshot(client, activityId, overrides.greenhouseRowId ?? null)
         : { densityType: null, densityCountPerRow: null };
 
     const insert = await client.query(
@@ -855,9 +874,14 @@ router.post(
     // active before the break. Reattaching the same answers here, with no
     // client input at all, is what makes "resume the same activity, row,
     // and carrier automatically, no re-asking" work: the mobile app never
-    // needs to send (or re-collect) an answer on break/end.
+    // needs to send (or re-collect) an answer on break/end. Also carries
+    // forward that same interrupted entry's OWN frozen density_type/
+    // density_count_per_row (see OpenEntryOverrides.densitySnapshot) — this
+    // is genuinely the same physical visit resuming, not a new logical run,
+    // so it must never re-read the activity's current density config even
+    // if an admin changed it while this employee was on break.
     const { rows } = await pool.query(
-      `select activity_id, greenhouse_row_id, carrier_id from time_entries
+      `select activity_id, greenhouse_row_id, carrier_id, density_type, density_count_per_row from time_entries
        where employee_id = $1 and entry_type = 'work' and deleted_at is null
        order by started_at desc limit 1`,
       [d.employeeId]
@@ -865,6 +889,8 @@ router.post(
     const resumeActivityId = rows[0]?.activity_id ?? null;
     const resumeRowId = rows[0]?.greenhouse_row_id ?? null;
     const resumeCarrierId = rows[0]?.carrier_id ?? null;
+    const resumeDensityType = rows[0]?.density_type ?? null;
+    const resumeDensityCountPerRow = rows[0]?.density_count_per_row ?? null;
     if (!resumeActivityId) {
       return res.status(409).json({ error: "No prior activity to resume" });
     }
@@ -874,6 +900,7 @@ router.post(
       actualEndedAt: now,
       greenhouseRowId: resumeRowId,
       carrierId: resumeCarrierId,
+      densitySnapshot: { densityType: resumeDensityType, densityCountPerRow: resumeDensityCountPerRow },
     };
 
     // Only snap-to-schedule the end if the currently open break was itself

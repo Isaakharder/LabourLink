@@ -72,6 +72,14 @@ export interface ActivityRunDto {
   // with no density source, in which case calculatedSpeedPerHour is always
   // null too and normalSpeedPerHour is what should be displayed, unchanged.
   activityDensitySource: "plants" | "stems" | null;
+  // This run's OWN frozen density type (time_entries.density_type, set once
+  // when the entry was opened) — NOT the same thing as activityDensitySource
+  // above, which is the activity's current, live density_source. The server
+  // computes isUnresolvedRowCompletion using THIS field, so opening the
+  // review modal must query with densityType, never activityDensitySource —
+  // an activity's density_source can be edited after a run was recorded,
+  // and the two can then genuinely disagree (see server/src/routes/inputs.ts).
+  densityType: "plants" | "stems" | null;
   // Combined speed for this employee+activity+date (quantity summed across
   // every density-eligible run that day, divided by their combined
   // duration) — the same value appears on every run row for that activity

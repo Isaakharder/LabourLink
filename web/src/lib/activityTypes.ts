@@ -54,6 +54,15 @@ export const DENSITY_SOURCE_LABELS: Record<DensitySource, string> = {
   stems: "Stems",
 };
 
+// A density-driven activity's speed unit is always derived from its density
+// source — never independently editable — so the two fields can never
+// disagree (mirrors server/src/routes/activities.ts's DENSITY_SPEED_UNIT,
+// which enforces the same mapping server-side).
+export const DENSITY_SOURCE_SPEED_UNIT: Record<DensitySource, string> = {
+  plants: "plants/hour",
+  stems: "stems/hour",
+};
+
 export interface Activity {
   id: string;
   name: string;
