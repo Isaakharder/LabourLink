@@ -1,8 +1,9 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { api, ApiError } from "../../lib/api";
 import { formatDateLong, combineDateAndTimeToUtcIso, toTimeInputValue } from "../../lib/timezone";
 import { EmployeeBreakItemOption } from "../../lib/inputsTypes";
+import { BreakPreviewRun, describeBreakSplitEffect } from "../../lib/breakSplitPreview";
 
 const MIN_REASON_LENGTH = 3;
 // Sentinel <select> value for "not one of the assigned profile's scheduled
@@ -14,6 +15,12 @@ interface AddBreakModalProps {
   employeeId: string;
   employeeName: string;
   date: string;
+  // Today's already-loaded activity runs — used only to preview what
+  // adding this break will do (split/trim/remove an existing activity)
+  // before submitting. The server (planBreakInsertion, inputs.ts) is the
+  // real authority on whether the break is accepted; this is a heads-up,
+  // not a second implementation of the overlap logic.
+  runs: BreakPreviewRun[];
   onClose: () => void;
   onCreated: () => void;
 }
@@ -23,7 +30,7 @@ interface AddBreakModalProps {
 // is_paid/break_profile_item_id set the same way mobileTime.ts's
 // break/start sets them) so it flows through every existing paid/unpaid
 // total and reconciliation calculation with no special-casing.
-export function AddBreakModal({ employeeId, employeeName, date, onClose, onCreated }: AddBreakModalProps) {
+export function AddBreakModal({ employeeId, employeeName, date, runs, onClose, onCreated }: AddBreakModalProps) {
   const [items, setItems] = useState<EmployeeBreakItemOption[] | null>(null);
   const [breakProfileName, setBreakProfileName] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -52,6 +59,15 @@ export function AddBreakModal({ employeeId, employeeName, date, onClose, onCreat
   const reasonValid = reason.trim().length >= MIN_REASON_LENGTH;
   const canSubmit =
     Boolean(selectedValue) && Boolean(startTime) && Boolean(endTime) && reasonValid && !submitting;
+
+  // Non-blocking preview of what this break will do to today's activities
+  // (split/trim/remove one, or nothing at all) — recomputed live as the
+  // admin types. Never disables Save/Add; the server still makes the real
+  // decision on submit.
+  const splitPreview = useMemo(() => {
+    if (!startTime || !endTime) return null;
+    return describeBreakSplitEffect(runs, combineDateAndTimeToUtcIso(date, startTime), combineDateAndTimeToUtcIso(date, endTime));
+  }, [runs, date, startTime, endTime]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -177,6 +193,8 @@ export function AddBreakModal({ employeeId, employeeName, date, onClose, onCreat
             break profile.
           </p>
         )}
+
+        {splitPreview && <p className="warning-text">{splitPreview}</p>}
 
         {error && <p className="error-text">{error}</p>}
 

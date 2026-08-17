@@ -684,6 +684,7 @@ export function InputsPage() {
           employeeId={selectedEmployeeId}
           employeeName={`${daily.employee.firstName} ${daily.employee.lastName}`}
           date={date}
+          runs={daily.runs}
           onClose={() => setAddModal(null)}
           onCreated={() => handleManualEntryCreated("Break added.")}
         />

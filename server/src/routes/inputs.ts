@@ -20,6 +20,7 @@ import {
   findOverlappingEntry,
   lockEmployeeForManualEntry,
   planActivityInsertion,
+  planBreakInsertion,
 } from "../lib/manualTimeEntries";
 
 const router = Router();
@@ -51,6 +52,12 @@ function isValidReason(v: unknown): v is string {
 // approach instead.
 const AUTO_CORRECTION_REASON = "Time corrected from Inputs page";
 const BREAK_DELETION_REASON = "Break deleted from Inputs page";
+// A work entry a manually-added break turned out to completely cover (see
+// planBreakInsertion) is removed the same way any other admin-initiated
+// deletion is — this is that deletion's fixed, server-generated reason,
+// same "system-generated string, not trusted client text" convention as
+// AUTO_CORRECTION_REASON/BREAK_DELETION_REASON above.
+const BREAK_SPLIT_DELETION_REASON = "Removed — fully covered by a manually added break";
 
 function trimOrNull(v: unknown): string | null {
   if (typeof v !== "string") return null;
@@ -1543,12 +1550,72 @@ router.post(
       await client.query("begin");
       await lockEmployeeForManualEntry(client, employeeId);
 
-      const conflict = await findOverlappingEntry(client, employeeId, start, end);
-      if (conflict) {
+      // Resolves any work entry(s) the requested range overlaps into
+      // trims/splits/deletions instead of rejecting outright — see
+      // planBreakInsertion's own comment. Still rejects an overlap with an
+      // existing break or an open-ended work entry, unchanged from before.
+      const plan = await planBreakInsertion(client, employeeId, start, end);
+      if (!plan.ok) {
         await client.query("rollback");
-        return res
-          .status(409)
-          .json({ error: `This break conflicts with ${describeConflict(conflict)}. Resolve the existing entry first.` });
+        return res.status(409).json({ error: plan.error });
+      }
+
+      for (const trim of plan.trims) {
+        await client.query(`update time_entries set ${trim.field} = $1 where id = $2`, [trim.newValue, trim.id]);
+        await client.query(
+          `insert into time_entry_corrections
+             (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+           values ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            trim.id,
+            employeeId,
+            req.employee!.id,
+            trim.field,
+            trim.oldValue.toISOString(),
+            trim.newValue.toISOString(),
+            AUTO_CORRECTION_REASON,
+          ]
+        );
+      }
+
+      for (const del of plan.deletions) {
+        await client.query(
+          `update time_entries set deleted_at = now(), deleted_by_employee_id = $1, deletion_reason = $2 where id = $3`,
+          [req.employee!.id, BREAK_SPLIT_DELETION_REASON, del.id]
+        );
+        await client.query(
+          `insert into time_entry_deletions
+             (employee_id, deleted_by_employee_id, deletion_type, affected_time_entry_ids, reason)
+           values ($1, $2, 'activity_run', $3, $4)`,
+          [employeeId, req.employee!.id, [del.id], BREAK_SPLIT_DELETION_REASON]
+        );
+      }
+
+      // The break's own typed reason doubles as the continuation entry's
+      // creation reason — the split exists BECAUSE of this break, so "why
+      // was this second half created" and "why was this break added" are
+      // the same answer, unlike the trims above (an automatic side effect,
+      // not something the admin directly typed a reason for).
+      for (const cont of plan.continuations) {
+        await client.query(
+          `insert into time_entries
+             (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source,
+              greenhouse_row_id, carrier_id, density_type, density_count_per_row,
+              created_by_employee_id, creation_reason)
+           values ($1, null, 'work', $2, gen_random_uuid(), $3, $4, 'manual', $5, $6, $7, $8, $9, $10)`,
+          [
+            employeeId,
+            cont.activityId,
+            cont.startedAt,
+            cont.endedAt,
+            cont.greenhouseRowId,
+            cont.carrierId,
+            cont.densityType,
+            cont.densityCountPerRow,
+            req.employee!.id,
+            reason.trim(),
+          ]
+        );
       }
 
       await client.query(
