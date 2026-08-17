@@ -423,16 +423,6 @@ export function LandCanvas({
                 </rect>
                 <text
                   x={phase.xFeetFromWest + phase.eastWestFeet / 2}
-                  y={phase.yFeetFromNorth + phase.northSouthFeet / 2 - fontSize * 0.4}
-                  textAnchor="middle"
-                  fontSize={fontSize}
-                  className="greenhouse-phase-label"
-                  pointerEvents="none"
-                >
-                  {phase.name}
-                </text>
-                <text
-                  x={phase.xFeetFromWest + phase.eastWestFeet / 2}
                   y={phase.yFeetFromNorth + phase.northSouthFeet / 2 + fontSize * 0.9}
                   textAnchor="middle"
                   fontSize={fontSize * 0.8}

@@ -255,7 +255,6 @@ export function GreenhouseLiveCanvas({
               always the original, un-rotated world-feet coordinates. */}
           <g transform={rotationDegrees ? `rotate(${rotationDegrees} ${rotateCx} ${rotateCy})` : undefined}>
           {visiblePhases.map((phase) => {
-            const fontSize = Math.max(8, Math.min(phase.eastWestFeet, phase.northSouthFeet) * 0.12);
             return (
               <g key={phase.id} className="greenhouse-phase-group">
                 <rect
@@ -267,16 +266,6 @@ export function GreenhouseLiveCanvas({
                   vectorEffect="non-scaling-stroke"
                   pointerEvents="none"
                 />
-                <text
-                  x={phase.xFeetFromWest + phase.eastWestFeet / 2}
-                  y={phase.yFeetFromNorth + phase.northSouthFeet / 2 - fontSize * 0.4}
-                  textAnchor="middle"
-                  fontSize={fontSize}
-                  className="greenhouse-phase-label"
-                  pointerEvents="none"
-                >
-                  {phase.name}
-                </text>
 
                 {phase.rows.map((row) => {
                   const { width, height } = rowScreenRect(row);
