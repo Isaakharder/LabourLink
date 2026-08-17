@@ -775,7 +775,7 @@ router.post(
   "/time-entries/break/start",
   asyncHandler(async (req, res) => {
     const d = req.device!;
-    const { idempotencyKey } = req.body as { idempotencyKey?: string };
+    const { idempotencyKey, clientStartedAt } = req.body as { idempotencyKey?: string; clientStartedAt?: string };
     if (!isValidIdempotencyKey(idempotencyKey)) {
       return res.status(400).json({ error: "a valid idempotencyKey is required" });
     }
@@ -797,6 +797,18 @@ router.post(
     // characteristic — fixed-break rounding doesn't introduce a new class
     // of problem, it just makes an existing one slightly more visible.
     const now = new Date();
+    // The phone's own clock reading of the moment "Start Break" was
+    // tapped, captured client-side before the request was even attempted
+    // — same resolveOriginalStartedAt convention POST /time-entries/work
+    // already uses (see that route and workStartRounding.ts). Without
+    // this, a batch of actions replayed from the offline queue
+    // (web/src/lib/offlineQueue.ts) after connectivity returns all get
+    // rounded against REPLAY time instead of each one's own true tap
+    // moment — several taps landing within the same rounding instant is
+    // exactly what previously fed the floor-guard fallback below into a
+    // runaway cascade of ever-advancing, essentially fake timestamps (see
+    // migration 040's own comment for the incident this caused).
+    const originalTap = resolveOriginalStartedAt(clientStartedAt, now);
     const todayLocal = calendarDateInAppTimezone(now);
     const [y, mo, da] = todayLocal.split("-").map(Number);
     const fixedItems = await loadActiveFixedItems(d.employeeId);
@@ -817,7 +829,7 @@ router.post(
     if (match) {
       overrides = {
         startedAt: match.scheduledStart,
-        actualStartedAt: now,
+        actualStartedAt: originalTap,
         breakProfileItemId: match.item.id,
         scheduledBreakDate: todayLocal,
         source: "manual",
@@ -832,7 +844,7 @@ router.post(
       // schedule it was just matched to.
       const settings = await loadBreakRoundingSettings(d.employeeId);
       if (settings?.enabled) {
-        let rounded = roundBreak(now, settings.intervalMinutes, settings.direction);
+        let rounded = roundBreak(originalTap, settings.intervalMinutes, settings.direction);
         // Never let rounding push this break's start at or before the
         // work entry it's about to close — same short-workday guard (and
         // the same two-step fallback) as end-day's work-end rounding (see
@@ -845,10 +857,10 @@ router.post(
         const currentlyOpen = await getOpenEntry(d.employeeId);
         if (currentlyOpen) {
           const floor = new Date(currentlyOpen.started_at).getTime();
-          if (rounded.getTime() <= floor) rounded = now;
+          if (rounded.getTime() <= floor) rounded = originalTap;
           if (rounded.getTime() <= floor) rounded = new Date(floor + 1000);
         }
-        overrides = { startedAt: rounded, actualStartedAt: now };
+        overrides = { startedAt: rounded, actualStartedAt: originalTap };
       }
       // rounding disabled (or no active profile assigned): no overrides at
       // all — openEntry() falls back to server now() for started_at
@@ -865,7 +877,7 @@ router.post(
   "/time-entries/break/end",
   asyncHandler(async (req, res) => {
     const d = req.device!;
-    const { idempotencyKey } = req.body as { idempotencyKey?: string };
+    const { idempotencyKey, clientEndedAt } = req.body as { idempotencyKey?: string; clientEndedAt?: string };
     if (!isValidIdempotencyKey(idempotencyKey)) {
       return res.status(400).json({ error: "a valid idempotencyKey is required" });
     }
@@ -896,8 +908,14 @@ router.post(
     }
 
     const now = new Date();
+    // Same resolveOriginalEndedAt convention as break/start's originalTap
+    // above (and POST /time-entries/work's own clientStartedAt) — rounds
+    // and guards below are all based on the phone's own tap moment, not
+    // whenever a delayed offline-queue replay happens to process this
+    // request.
+    const originalTap = resolveOriginalEndedAt(clientEndedAt, now);
     const overrides: OpenEntryOverrides = {
-      actualEndedAt: now,
+      actualEndedAt: originalTap,
       greenhouseRowId: resumeRowId,
       carrierId: resumeCarrierId,
       densitySnapshot: { densityType: resumeDensityType, densityCountPerRow: resumeDensityCountPerRow },
@@ -924,7 +942,18 @@ router.post(
         const scheduledEnd = zonedWallTimeToUtc(y, mo, da, eh, em, es);
         const windowMs = row.fixed_end_window_minutes * 60 * 1000;
         if (Math.abs(now.getTime() - scheduledEnd.getTime()) <= windowMs) {
-          overrides.startedAt = scheduledEnd;
+          // Never let the scheduled end land at or before the break's own
+          // start — this guard was previously MISSING here (unlike the
+          // general rounding path just below, which always had it), and a
+          // scheduled end time earlier than the break's actual start
+          // produced a physically impossible negative-duration row (see
+          // migration 040). Same two-step fallback as every other
+          // rounding guard in this file.
+          const floor = new Date(open.started_at).getTime();
+          let guardedEnd = scheduledEnd;
+          if (guardedEnd.getTime() <= floor) guardedEnd = originalTap;
+          if (guardedEnd.getTime() <= floor) guardedEnd = new Date(floor + 1000);
+          overrides.startedAt = guardedEnd;
           matchedFixedEnd = true;
         }
       }
@@ -939,21 +968,21 @@ router.post(
     // milliseconds could make an unrounded break look "Rounded" on the
     // Inputs page for no real reason.
     if (open?.entry_type === "break" && !matchedFixedEnd) {
-      let effectiveEnd = now;
+      let effectiveEnd = originalTap;
       const settings = await loadBreakRoundingSettings(d.employeeId);
       if (settings?.enabled) {
-        effectiveEnd = roundBreak(now, settings.intervalMinutes, settings.direction);
+        effectiveEnd = roundBreak(originalTap, settings.intervalMinutes, settings.direction);
       }
       // Never let the break's end land at or before its own start — same
       // short-workday guard (and the same two-step fallback) as end-day's
       // work-end rounding. Enforced unconditionally, not just when
       // break-end rounding is enabled: this break's own started_at can
       // itself be a clockwise-break-rounded instant still in the future
-      // relative to `now` (break-start rounding, above), so even the exact
-      // unrounded tap isn't guaranteed to clear it — the second fallback
-      // guarantees a strictly positive duration regardless.
+      // relative to `originalTap` (break-start rounding, above), so even
+      // the exact unrounded tap isn't guaranteed to clear it — the second
+      // fallback guarantees a strictly positive duration regardless.
       const floor = new Date(open.started_at).getTime();
-      if (effectiveEnd.getTime() <= floor) effectiveEnd = now;
+      if (effectiveEnd.getTime() <= floor) effectiveEnd = originalTap;
       if (effectiveEnd.getTime() <= floor) effectiveEnd = new Date(floor + 1000);
       overrides.startedAt = effectiveEnd;
     }

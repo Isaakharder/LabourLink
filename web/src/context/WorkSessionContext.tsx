@@ -369,12 +369,23 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     [applyMeResponse, markUnpaired, setServerReachable, language]
   );
 
+  // clientStartedAt/clientEndedAt: the phone's own clock reading of this
+  // exact tap, captured before the request is even attempted — same
+  // pattern as HomeScreen's chooseActivity/switchActivity. If this goes
+  // offline and lands in the queue (offlineQueue.ts), the whole body
+  // (including this timestamp) is replayed verbatim later, so the server
+  // rounds against the real tap moment instead of whenever the replay
+  // happens to land — several queued taps replayed back-to-back within
+  // the same second previously all rounded against REPLAY time, which is
+  // what fed the server's floor-guard fallback into a runaway cascade of
+  // ever-advancing, essentially fake timestamps (see server migration
+  // 040's own comment for the incident this caused).
   const startBreak = useCallback(() => {
-    perform("/api/mobile/time-entries/break/start", { idempotencyKey: uuid() });
+    perform("/api/mobile/time-entries/break/start", { idempotencyKey: uuid(), clientStartedAt: new Date().toISOString() });
   }, [perform]);
 
   const endBreak = useCallback(() => {
-    perform("/api/mobile/time-entries/break/end", { idempotencyKey: uuid() });
+    perform("/api/mobile/time-entries/break/end", { idempotencyKey: uuid(), clientEndedAt: new Date().toISOString() });
   }, [perform]);
 
   const openEndDayConfirm = useCallback(() => {

@@ -17,14 +17,18 @@
 // corrections clearing audit data, the daily-inputs response shape, and
 // settings persistence/independence.
 //
-// Unlike work-start/work-end rounding, neither break route accepts a
-// client-supplied tap timestamp (no clientStartedAt/clientEndedAt
-// equivalent) — the server's own real-time now() is always what gets
-// rounded. So most assertions below read back the audit column
+// Neither break route requires a client-supplied tap timestamp
+// (clientStartedAt/clientEndedAt are optional — omitting them falls back
+// to the server's own real-time now(), exactly as before they existed).
+// None of the scenarios below send one, so they still exercise the
+// now()-based path; most assertions read back the audit column
 // (actual_started_at/actual_ended_at, the real tap the server itself
 // captured) and independently recompute what roundBreak should produce
 // from it, rather than trying to predict the server's exact "now" in
-// advance.
+// advance. See mobileTime.breakRoundingSafety.test.ts for coverage of
+// clientStartedAt/clientEndedAt themselves (added to fix an offline-queue
+// replay bug — see migration 040) and the fixed-item end-match floor
+// guard.
 //
 // Run with: npm run test:break-rounding
 import "dotenv/config";
@@ -203,10 +207,19 @@ async function main() {
       // Each section starts from a clean idle state — a prior section's
       // break/end resumes work (it never closes the day), so without this
       // the next section's insert here would violate the one-open-entry-
-      // per-employee constraint.
-      await pool.query(`update time_entries set ended_at = now() where employee_id = $1 and ended_at is null`, [
-        target!.id,
-      ]);
+      // per-employee constraint. greatest(now(), started_at + 1s) rather
+      // than a bare now(): a prior section's break-rounding round-up can
+      // leave the currently-open entry's own started_at briefly ahead of
+      // real now() (clockwise rounding can round into the near future),
+      // and closing it with a plain now() would then violate
+      // chk_time_entries_ended_after_started (migration 040) — this is
+      // pure test-fixture cleanup, not something the app itself needs to
+      // guard (the app never closes an entry with a bare now() either; see
+      // mobileTime.ts's own floor-guarded rounding).
+      await pool.query(
+        `update time_entries set ended_at = greatest(now(), started_at + interval '1 second') where employee_id = $1 and ended_at is null`,
+        [target!.id]
+      );
       const { rows } = await pool.query(
         `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, source)
          values ($1, $2, 'work', $3, gen_random_uuid(), $4, 'manual')
