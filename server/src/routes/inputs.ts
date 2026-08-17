@@ -1118,12 +1118,74 @@ router.post(
         }
       }
 
+      // Find the entry immediately following the deleted run, within this
+      // same employee/workday — locked here (not just inferred from the
+      // unlocked dayRows/runs computed above) so a concurrent change can't
+      // be missed. Bounded by the run's own last segment's *stored*
+      // ended_at via a subquery rather than a JS Date round-trip of it (same
+      // precision reasoning as the end-time correction route above). Lock
+      // order stays ascending by time (segments first, this row after — it's
+      // chronologically >= all of them), consistent with every other
+      // multi-row lock in this file, so this can't deadlock against a
+      // concurrent correction or another deletion.
+      const nextRes = await client.query(
+        `select id, entry_type, started_at from time_entries
+         where employee_id = $1 and deleted_at is null
+           and started_at >= (select ended_at from time_entries where id = $2)
+           and started_at < $3
+         order by started_at asc
+         limit 1
+         for update`,
+        [peekRow.employee_id, segmentIds[segmentIds.length - 1], end]
+      );
+      const next = nextRes.rows[0];
+      // Only a work entry directly following the deleted run absorbs the
+      // deleted interval, by extending backward to the deleted run's
+      // original start. "Work start" is nothing but "the earliest surviving
+      // work entry for the day" (see GET /daily above), so this is also
+      // exactly what keeps it unchanged when the deleted run was itself the
+      // day's first activity. A break is a protected workday boundary and is
+      // never extended across or modified; if there's no next entry at all
+      // within the day, there's nothing to extend either way.
+      const shouldExtend = next && next.entry_type === "work";
+
       await client.query(
         `update time_entries
          set deleted_at = now(), deleted_by_employee_id = $1, deletion_reason = $2
          where id = any($3::uuid[])`,
         [req.employee!.id, trimmedReason, segmentIds]
       );
+
+      if (shouldExtend) {
+        // Written via a subquery on the deleted run's first segment id, not
+        // the JS Date already on `run` from the earlier unlocked query — same
+        // full-precision-write reasoning as every other correction route in
+        // this file. actual_started_at is cleared for the same reason a real
+        // correction always clears it elsewhere (PATCH /work-start above):
+        // the entry's original tap time no longer describes anything about
+        // its new, extended start. Works identically whether `next` is
+        // completed or still in progress — only started_at is touched.
+        await client.query(
+          `update time_entries
+           set started_at = (select started_at from time_entries where id = $1), actual_started_at = null
+           where id = $2`,
+          [segmentIds[0], next.id]
+        );
+        await client.query(
+          `insert into time_entry_corrections
+             (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+           values ($1, $2, $3, 'started_at', $4, $5, $6)`,
+          [
+            next.id,
+            peekRow.employee_id,
+            req.employee!.id,
+            new Date(next.started_at).toISOString(),
+            run.startedAt.toISOString(),
+            AUTO_CORRECTION_REASON,
+          ]
+        );
+      }
+
       await client.query(
         `insert into time_entry_deletions
            (employee_id, deleted_by_employee_id, deletion_type, affected_time_entry_ids, reason)

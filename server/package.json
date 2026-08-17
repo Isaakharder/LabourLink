@@ -22,6 +22,7 @@
     "test:work-start-rounding": "ts-node src/lib/workStartRounding.test.ts",
     "test:manual-entries": "ts-node src/routes/inputs.manualEntries.test.ts",
     "test:add-activity-boundary-trim": "ts-node src/routes/inputs.addActivityBoundaryTrim.test.ts",
+    "test:activity-run-deletion": "ts-node src/routes/inputs.activityRunDeletion.test.ts",
     "test:storage": "ts-node src/lib/storage.test.ts",
     "test:break-reconciliation": "ts-node src/lib/breakReconciliation.test.ts",
     "test:inputs-performance": "ts-node src/routes/inputs.performance.test.ts",
