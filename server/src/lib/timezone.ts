@@ -178,6 +178,39 @@ export function zonedWallTimeParts(
   };
 }
 
+// Current Monday-start week [start, end) in APP_TIMEZONE — the one
+// canonical "current week" definition every caller (Dashboard, and
+// previously Reports' payroll weekly totals and mobile Stats, which used to
+// each carry their own copy of this exact `date_trunc('week', ...)`
+// expression) must share, so the same instant can never fall into different
+// weeks depending on which page asked. Async only because "now" has to come
+// from the database itself (server/db host clock is never trusted for
+// wall-clock date math — same reasoning as every other date_trunc/now() use
+// in this codebase), not because of any real I/O cost.
+export async function getCurrentWeekBoundsUtc(): Promise<{
+  weekStart: string;
+  weekEnd: string;
+  start: Date;
+  end: Date;
+}> {
+  // Required inside the function body, not at module top — this file is
+  // otherwise pure date/timezone math with no database dependency, and
+  // several tests (e.g. workStartRounding.test.ts) import it standalone
+  // without ever loading dotenv/config, since they never needed a DB
+  // connection before. A top-level `import { pool } from "../db"` would
+  // make merely importing this file throw ("DATABASE_URL is not set") the
+  // moment those tests run, even though they never call this function.
+  const { pool } = require("../db") as typeof import("../db");
+  const { rows } = await pool.query(
+    `select to_char(date_trunc('week', (now() at time zone $1))::date, 'YYYY-MM-DD') as week_start`,
+    [APP_TIMEZONE]
+  );
+  const weekStart = rows[0].week_start as string;
+  const weekEnd = addDaysToDateStr(weekStart, 6);
+  const { start, end } = getRangeBoundsUtc(weekStart, weekEnd);
+  return { weekStart, weekEnd, start, end };
+}
+
 // Splits a Postgres `time` column value ("HH:MM:SS", as returned by pg) into
 // its numeric parts. Shared by break_profile_items consumers —
 // breakReconciliation.ts (auto-add) and mobileTime.ts (fixed-break

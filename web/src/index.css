@@ -5309,6 +5309,13 @@ input {
   color: var(--color-muted);
 }
 
+.report-pivot-unit-note {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  font-style: italic;
+}
+
 .report-table-wrap,
 .report-pivot-wrap {
   overflow-x: auto;
@@ -5517,4 +5524,160 @@ input {
   .report-view-body {
     display: block;
   }
+}
+
+/* ---------- Dashboard ---------- */
+
+.dashboard-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+/* Exactly two columns at normal desktop widths, one column at/below the
+   same 900px breakpoint every other responsive layout in this file uses —
+   a fixed column count (not auto-fit/auto-fill) so this is unambiguous and
+   inspectable rather than "however many happen to fit." */
+.dashboard-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+}
+
+@media (max-width: 900px) {
+  .dashboard-card-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dashboard-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+
+.dashboard-card-skeleton {
+  min-height: 190px;
+  background: linear-gradient(
+    100deg,
+    var(--color-surface) 40%,
+    color-mix(in srgb, var(--color-border) 60%, transparent) 50%,
+    var(--color-surface) 60%
+  );
+  background-size: 200% 100%;
+  animation: dashboard-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes dashboard-skeleton-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+.dashboard-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+.dashboard-card-name {
+  font-weight: 600;
+}
+
+.dashboard-card-activity {
+  font-size: 0.82rem;
+  color: var(--color-muted);
+}
+
+.dashboard-card-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem 1rem;
+  margin: 0 0 0.85rem;
+}
+
+.dashboard-card-stats dt {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  color: var(--color-muted);
+  letter-spacing: 0.02em;
+}
+
+.dashboard-card-stats dd {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.dashboard-card-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-border) 60%, transparent);
+  overflow: hidden;
+  margin-bottom: 0.6rem;
+}
+
+.dashboard-card-progress-fill {
+  height: 100%;
+  background: var(--color-primary);
+  border-radius: 999px;
+}
+
+.dashboard-card-remaining {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.dashboard-card-hint {
+  margin: 0.6rem 0 0;
+  font-size: 0.72rem;
+  color: var(--color-muted);
+}
+
+.dashboard-settings-activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.dashboard-settings-activity-list label,
+.dashboard-pending-bin-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  width: 100%;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.dashboard-pending-bin-row {
+  justify-content: space-between;
+}
+
+.dashboard-settings-activity-name {
+  flex: 1;
+}
+
+.dashboard-settings-activity-cardtype {
+  font-size: 0.72rem;
+  color: var(--color-muted);
+}
+
+.dashboard-settings-activity-inactive {
+  opacity: 0.6;
 }

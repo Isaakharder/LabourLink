@@ -11,7 +11,7 @@ import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireDevice } from "../middleware/device";
-import { APP_TIMEZONE, addDaysToDateStr, getRangeBoundsUtc } from "../lib/timezone";
+import { addDaysToDateStr, getCurrentWeekBoundsUtc, getRangeBoundsUtc } from "../lib/timezone";
 import { getActivityDensityAttribution } from "../lib/reportQueries";
 import { aggregateDensitySpeed } from "../lib/densitySpeed";
 
@@ -41,16 +41,11 @@ router.get(
   asyncHandler(async (req, res) => {
     const employeeId = req.device!.employeeId;
 
-    // Monday-start week, same convention getPayrollReportData already uses
-    // for its own weekly grouping (date_trunc('week', ...) in APP_TIMEZONE)
-    // — reused via the identical SQL expression rather than re-deriving
-    // "which day is Monday" in JS, so this can never silently drift from
-    // Reports' own week boundaries.
-    const { rows: weekRows } = await pool.query(
-      `select to_char(date_trunc('week', (now() at time zone $1))::date, 'YYYY-MM-DD') as week_start`,
-      [APP_TIMEZONE]
-    );
-    const currentWeekStart = weekRows[0].week_start as string;
+    // Monday-start week, the one shared canonical "current week" definition
+    // (server/src/lib/timezone.ts's getCurrentWeekBoundsUtc) also used by
+    // the Dashboard — so this can never silently drift from another page's
+    // week boundaries.
+    const { weekStart: currentWeekStart } = await getCurrentWeekBoundsUtc();
 
     const weekBounds = Array.from({ length: WEEKS_SHOWN }, (_, offset) => {
       const weekStart = addDaysToDateStr(currentWeekStart, -7 * offset);
