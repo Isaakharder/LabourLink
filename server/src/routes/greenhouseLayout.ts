@@ -1049,6 +1049,109 @@ router.delete(
   })
 );
 
+// Un-deletes a single previously-deleted row, restoring its own already-
+// stored x/y/width/length/orientation exactly — never recomputed through
+// the batch placement engine (generateRowPreview/placeBatchFromSide). A
+// deleted row's geometry is never touched or cleared by the delete above,
+// so restoring is just clearing deleted_at on that same record: the row
+// returns to its own original position in the sequence, not wherever
+// "continue after existing" would place a brand-new row today (see
+// lib/rowLayout.ts's header comment on why continuation can only ever
+// resolve to "past the deepest surviving row in the lane," never to a
+// specific historical slot). No other row or batch is read/write-locked
+// except the ones this handler explicitly touches.
+router.post(
+  "/rows/:id/restore",
+  requireAuth,
+  requireRole("Administrator"),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid row id" });
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+
+      const rowRes = await client.query(
+        `select id, phase_id, row_number, x_ft, y_ft, width_ft, length_ft, orientation, deleted_at
+         from greenhouse_rows where id = $1 for update`,
+        [id]
+      );
+      const row = rowRes.rows[0];
+      if (!row) {
+        await client.query("rollback");
+        return res.status(404).json({ error: "Row not found" });
+      }
+      if (row.deleted_at === null) {
+        await client.query("rollback");
+        return res.status(409).json({ error: "This row is already active" });
+      }
+
+      const phaseRes = await client.query(
+        "select north_south_feet, east_west_feet, is_active from greenhouse_phases where id = $1 for update",
+        [row.phase_id]
+      );
+      const phase = phaseRes.rows[0];
+      if (!phase) {
+        await client.query("rollback");
+        return res.status(404).json({ error: "Phase not found" });
+      }
+      if (!phase.is_active) {
+        await client.query("rollback");
+        return res.status(409).json({ error: "Rows cannot be restored on a deactivated phase" });
+      }
+
+      // Same locking scope as POST /phases/:phaseId/row-batches' own
+      // duplicate/overlap checks: every currently-active row in the phase,
+      // locked so a concurrent add or restore can't race past these checks.
+      const activeRes = await client.query(
+        `select id, row_number, x_ft, y_ft, width_ft, length_ft, orientation
+         from greenhouse_rows where phase_id = $1 and deleted_at is null for update`,
+        [row.phase_id]
+      );
+
+      const duplicate = activeRes.rows.find((r) => r.row_number === row.row_number);
+      if (duplicate) {
+        await client.query("rollback");
+        return res.status(409).json({
+          error: `Row number ${row.row_number} is already in use by another active row in this phase — restore is only possible while that number is free.`,
+        });
+      }
+
+      const restoredRect = toRowRect(row);
+      const phaseSize = { eastWestFeet: Number(phase.east_west_feet), northSouthFeet: Number(phase.north_south_feet) };
+      const outOfBounds = validateRowsInsidePhase([restoredRect], phaseSize);
+      if (outOfBounds.length > 0) {
+        await client.query("rollback");
+        return res.status(422).json({
+          error: `Row ${row.row_number} no longer fits the phase boundary — the phase's dimensions changed since this row was deleted.`,
+        });
+      }
+
+      const overlaps = detectRowOverlap([restoredRect], activeRes.rows.map(toRowRect));
+      if (overlaps.length > 0) {
+        const [, other] = overlaps[0];
+        await client.query("rollback");
+        return res
+          .status(409)
+          .json({ error: `Restoring row ${row.row_number} would overlap existing row ${other.rowNumber}.` });
+      }
+
+      await client.query("update greenhouse_rows set deleted_at = null, updated_at = now() where id = $1", [id]);
+
+      await client.query("commit");
+
+      const { rows: full } = await pool.query(`${ROW_SELECT} where id = $1`, [id]);
+      res.json({ row: serializeRow(full[0]) });
+    } catch (err) {
+      await client.query("rollback");
+      throw err;
+    } finally {
+      client.release();
+    }
+  })
+);
+
 router.delete(
   "/row-batches/:id",
   requireAuth,

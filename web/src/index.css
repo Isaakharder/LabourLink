@@ -4149,6 +4149,29 @@ input {
   padding: 0.25rem 0.5rem;
 }
 
+/* Restore's confirmation includes dimensions/batch/position so an admin can
+   tell apart two inactive records that happen to share a row number (see
+   RowsTab.tsx's rowSummary). A definite `width` (not max-width) is required
+   here, not just flex-wrap: a table cell in auto layout sizes its column to
+   an unconstrained flex item's max-content width regardless of max-width,
+   so without a definite width this row of text pushes the table wider
+   instead of wrapping onto its own line above the buttons. */
+.rows-tab-confirm-restore {
+  display: flex;
+  flex-wrap: wrap;
+  width: 16rem;
+}
+
+.rows-tab-confirm-detail {
+  font-size: 0.72rem;
+  color: var(--color-muted);
+  width: 100%;
+  /* Overrides .employees-table td's inherited white-space: nowrap — without
+     this, the wrap-forcing `width` above has nothing to wrap: the text just
+     runs past the table's edge on one line instead of breaking. */
+  white-space: normal;
+}
+
 .rows-tab-details {
   flex: 0 0 280px;
   padding: 0.85rem 1rem;

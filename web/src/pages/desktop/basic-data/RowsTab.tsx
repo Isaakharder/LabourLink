@@ -30,7 +30,10 @@ export function RowsTab() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [confirmingRestoreId, setConfirmingRestoreId] = useState<string | null>(null);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   const load = useCallback(() => {
     const params = new URLSearchParams();
@@ -72,6 +75,7 @@ export function RowsTab() {
   async function handleDelete(id: string) {
     setDeletingId(id);
     setActionError(null);
+    setActionMessage(null);
     try {
       await api(`/api/greenhouse-layout/rows/${id}`, { method: "DELETE" });
       setConfirmingDeleteId(null);
@@ -81,6 +85,40 @@ export function RowsTab() {
       setActionError(err instanceof ApiError ? err.message : "Could not delete this row");
     } finally {
       setDeletingId(null);
+    }
+  }
+
+  // Distinguishing summary for a row that might share its number with
+  // another inactive record in the same phase (only the database id, never
+  // phase+rowNumber, ever identifies which one gets restored — see the
+  // confirmation step below) — used both in that confirmation and in the
+  // success message afterward, so what the admin confirmed is exactly what
+  // they're told got restored.
+  function rowSummary(row: GreenhouseRowListItem): string {
+    const position = `${Math.round(row.xFt * 10) / 10} ft east, ${Math.round(row.yFt * 10) / 10} ft south`;
+    return `${row.widthFt} ft × ${row.lengthFt} ft · ${row.batchName ?? "no batch"} · ${position} of phase NW corner`;
+  }
+
+  // Restores this exact row record (by database id) at its own already-
+  // stored position — not a re-add through the row builder, which has no
+  // way to target a specific historical slot (see greenhouseLayout.ts's
+  // POST /rows/:id/restore for why that distinction matters). Takes the
+  // full row object, captured at the moment the admin confirmed, purely so
+  // the success message can describe what was restored without depending
+  // on it still being in the (now stale, about-to-be-refetched) list.
+  async function handleRestore(row: GreenhouseRowListItem) {
+    setRestoringId(row.id);
+    setActionError(null);
+    setActionMessage(null);
+    try {
+      await api(`/api/greenhouse-layout/rows/${row.id}/restore`, { method: "POST" });
+      setConfirmingRestoreId(null);
+      setActionMessage(`Restored row ${row.rowNumber} — ${rowSummary(row)}.`);
+      load();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : "Could not restore this row");
+    } finally {
+      setRestoringId(null);
     }
   }
 
@@ -112,6 +150,7 @@ export function RowsTab() {
 
       {error && <p className="error-text">{error}</p>}
       {actionError && <p className="error-text">{actionError}</p>}
+      {actionMessage && <p className="success-text">{actionMessage}</p>}
 
       <div className="rows-tab-body">
         {!rows ? (
@@ -149,8 +188,8 @@ export function RowsTab() {
                     </span>
                   </td>
                   <td onClick={(e) => e.stopPropagation()}>
-                    {r.isActive &&
-                      (confirmingDeleteId === r.id ? (
+                    {r.isActive ? (
+                      confirmingDeleteId === r.id ? (
                         <span className="rows-tab-confirm">
                           <button type="button" onClick={() => handleDelete(r.id)} disabled={deletingId === r.id}>
                             {deletingId === r.id ? "Deleting..." : "Confirm"}
@@ -163,7 +202,26 @@ export function RowsTab() {
                         <button type="button" className="row-builder-batch-delete" onClick={() => setConfirmingDeleteId(r.id)}>
                           Delete
                         </button>
-                      ))}
+                      )
+                    ) : confirmingRestoreId === r.id ? (
+                      <span className="rows-tab-confirm rows-tab-confirm-restore">
+                        <span className="rows-tab-confirm-detail">{rowSummary(r)}</span>
+                        <button type="button" onClick={() => handleRestore(r)} disabled={restoringId === r.id}>
+                          {restoringId === r.id ? "Restoring..." : "Confirm restore"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmingRestoreId(null)}
+                          disabled={restoringId === r.id}
+                        >
+                          Cancel
+                        </button>
+                      </span>
+                    ) : (
+                      <button type="button" onClick={() => setConfirmingRestoreId(r.id)}>
+                        Restore
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
