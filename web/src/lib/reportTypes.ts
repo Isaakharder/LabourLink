@@ -57,16 +57,23 @@ export const ACTIVITY_METRIC_LABELS: Record<ActivityMetric, string> = {
   date: "Date",
 };
 
+// The "(H:MM)" suffix on every duration metric is the "clear indication ...
+// so users know this is a duration, not a clock time" requirement — applied
+// here so it shows up everywhere this label is already used (the metrics
+// editor, the pivot "Show:" selector, the Print/PDF preview's meta line, and
+// the CSV/PDF filename/subtitle — see reportExport.ts) without a second
+// place to keep in sync. daysWorked is a plain count, not a duration, so it
+// keeps no suffix.
 export const PAYROLL_METRIC_LABELS: Record<PayrollMetric, string> = {
   employee: "Employee",
   date: "Date",
   workStart: "Work start",
   workEnd: "Work end",
-  paidTime: "Paid time",
-  workTime: "Regular/work time",
-  breakTime: "Break time",
-  unpaidTime: "Unpaid time",
-  totalHours: "Total hours",
+  paidTime: "Paid time (H:MM)",
+  workTime: "Regular/work time (H:MM)",
+  breakTime: "Break time (H:MM)",
+  unpaidTime: "Unpaid time (H:MM)",
+  totalHours: "Total hours (H:MM)",
   daysWorked: "Days worked",
   activityBreakdown: "Activity breakdown",
   weeklyTotals: "Weekly totals",
@@ -287,31 +294,48 @@ export interface PayrollPivotCellSource {
   totalSeconds: number;
 }
 
-// Payroll's pivot cells intentionally keep decimal-hours formatting
-// (secondsToDecimalHours) — its existing, pre-pivot convention — rather
-// than Activity pivot's H:MM; each report type keeps its own established
-// number format, only the row grain (one row per employee) changed here.
+// Payroll's pivot cells use H:MM (formatPayrollDuration) — decimal hours
+// (the former "10.42" convention) reads as "10 hours 42 minutes" to anyone
+// not fluent in decimal-hour notation, when the real duration is 10:25.
+// Every source field here (workSeconds/paidSeconds/totalSeconds/...) is
+// already the server's own exact-second sum (reportQueries.ts) — this
+// formats that authoritative total directly, once, never by re-adding
+// already-rounded per-day display strings (see reportPivot.ts: employee/day
+// totals are independent fields on PayrollReportData, not derived from the
+// grid's own formatted cells).
 export function payrollPivotCellValue(metric: PayrollMetric, source: PayrollPivotCellSource): string {
   switch (metric) {
     case "workTime":
-      return secondsToDecimalHours(source.workSeconds);
+      return formatPayrollDuration(source.workSeconds);
     case "breakTime":
-      return secondsToDecimalHours(source.breakSeconds);
+      return formatPayrollDuration(source.breakSeconds);
     case "unpaidTime":
-      return secondsToDecimalHours(source.unpaidBreakSeconds);
+      return formatPayrollDuration(source.unpaidBreakSeconds);
     case "paidTime":
-      return secondsToDecimalHours(source.paidSeconds);
+      return formatPayrollDuration(source.paidSeconds);
     case "totalHours":
-      return secondsToDecimalHours(source.totalSeconds);
+      return formatPayrollDuration(source.totalSeconds);
     default:
       return "—";
   }
 }
 
-// "H:MM:SS" -> "H.HH" decimal hours, better suited to a report/export column
-// than the H:MM:SS clock format Inputs uses for a single day's live log.
-export function secondsToDecimalHours(seconds: number): string {
-  return (seconds / 3600).toFixed(2);
+// "H:MM" (hours not zero-padded so they can exceed 24 for a weekly total —
+// e.g. "64:35" — minutes always zero-padded) — the Payroll Report's duration
+// format. Rounds the exact underlying seconds to the nearest whole minute in
+// ONE step (never pre-rounds smaller segments before totaling, which can
+// accumulate error — see the file-level totals this is always called on).
+// A positive duration under 30 seconds would round to "0:00", which reads
+// as no time at all — shown as "<1m" instead so a real (if tiny) duration
+// is never silently indistinguishable from a genuinely empty cell ("—",
+// applied separately in reportPivot.ts for a day with no row at all).
+export function formatPayrollDuration(seconds: number): string {
+  const clamped = Math.max(0, seconds);
+  if (clamped > 0 && clamped < 30) return "<1m";
+  const totalMinutes = Math.round(clamped / 60);
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return `${h}:${String(m).padStart(2, "0")}`;
 }
 
 // "H:MM" (hours not zero-padded, no seconds) — compact enough for a

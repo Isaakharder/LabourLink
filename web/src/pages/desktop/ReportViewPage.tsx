@@ -10,7 +10,7 @@ import {
   PIVOT_ELIGIBLE_ACTIVITY_METRICS,
   PIVOT_ELIGIBLE_PAYROLL_METRICS,
   SavedReportDetail,
-  secondsToDecimalHours,
+  formatPayrollDuration,
 } from "../../lib/reportTypes";
 import { ReportDateFilterPanel } from "../../components/reports/ReportDateFilterPanel";
 import { ReportPivotTable } from "../../components/reports/ReportPivotTable";
@@ -226,6 +226,14 @@ export function ReportViewPage() {
                   </label>
                 </div>
               )}
+              {/* Always rendered (never hidden by print CSS, unlike the
+                  "Show:" selector above) so the H:MM indication survives
+                  Print/PDF too, not just the live screen — see index.css's
+                  @media print block, which hides .report-pivot-metric-select
+                  but has no rule targeting this class. */}
+              {!isActivity && pivotGrid && pivotGrid.employees.length > 0 && (
+                <p className="report-pivot-unit-note">Hours shown as H:MM (hours:minutes) — not decimal.</p>
+              )}
               {pivotGrid && pivotGrid.employees.length === 0 ? (
                 <p className="placeholder-page">No data for this date range.</p>
               ) : (
@@ -262,7 +270,7 @@ export function ReportViewPage() {
                       <tr>
                         <th>Employee</th>
                         <th>Activity</th>
-                        <th className="report-col-right">Hours</th>
+                        <th className="report-col-right">Hours (H:MM)</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -273,7 +281,7 @@ export function ReportViewPage() {
                           <tr key={i}>
                             <td>{employeeName}</td>
                             <td>{r.activityName}</td>
-                            <td className="report-col-right">{secondsToDecimalHours(r.workSeconds)}</td>
+                            <td className="report-col-right">{formatPayrollDuration(r.workSeconds)}</td>
                           </tr>
                         );
                       })}
@@ -289,9 +297,9 @@ export function ReportViewPage() {
                     <thead>
                       <tr>
                         <th>Week</th>
-                        <th className="report-col-right">Work hours</th>
-                        <th className="report-col-right">Break hours</th>
-                        <th className="report-col-right">Paid hours</th>
+                        <th className="report-col-right">Work hours (H:MM)</th>
+                        <th className="report-col-right">Break hours (H:MM)</th>
+                        <th className="report-col-right">Paid hours (H:MM)</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -300,9 +308,9 @@ export function ReportViewPage() {
                           <td>
                             {w.weekStart} – {w.weekEnd}
                           </td>
-                          <td className="report-col-right">{secondsToDecimalHours(w.workSeconds)}</td>
-                          <td className="report-col-right">{secondsToDecimalHours(w.breakSeconds)}</td>
-                          <td className="report-col-right">{secondsToDecimalHours(w.paidSeconds)}</td>
+                          <td className="report-col-right">{formatPayrollDuration(w.workSeconds)}</td>
+                          <td className="report-col-right">{formatPayrollDuration(w.breakSeconds)}</td>
+                          <td className="report-col-right">{formatPayrollDuration(w.paidSeconds)}</td>
                         </tr>
                       ))}
                     </tbody>
