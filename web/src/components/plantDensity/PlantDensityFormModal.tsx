@@ -65,6 +65,7 @@ function buildSelectionLand(land: GreenhouseLand, rows: GreenhouseRowListItem[])
             orientation: r.orientation,
             state: "neutral",
             employees: [],
+            blockId: null,
           })
         ),
     })),

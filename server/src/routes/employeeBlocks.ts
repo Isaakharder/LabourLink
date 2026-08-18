@@ -2,6 +2,7 @@ import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { EMPLOYEE_BLOCK_COLOR_KEYS, EmployeeBlockColorKey, isEmployeeBlockColorKey } from "../lib/employeeBlockColors";
 
 const router = Router();
 
@@ -18,7 +19,7 @@ function trimOrNull(v: unknown): string | null {
 // always lands before GROUP BY rather than after it.
 const BLOCK_BASE_SELECT = `
   select eb.id, eb.name, eb.employee_id, e.first_name, e.last_name,
-         eb.created_at, eb.updated_at,
+         eb.color_key, eb.created_at, eb.updated_at,
          count(ebr.greenhouse_row_id) as row_count
   from employee_blocks eb
   left join employees e on e.id = eb.employee_id
@@ -36,10 +37,36 @@ function serializeBlockSummary(row: any) {
     name: row.name,
     employeeId: row.employee_id,
     employeeName: row.employee_id ? `${row.first_name} ${row.last_name}` : null,
+    colorKey: row.color_key,
     rowCount: Number(row.row_count),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+// Picks whichever preset is currently linked to the fewest blocks (ties
+// broken by fixed palette order, so the choice is deterministic rather
+// than random) — "prefer a colour not already heavily used by the
+// organization," applied automatically whenever a new block is created
+// without an explicit colorKey. Counts EVERY block regardless of whether
+// it currently has any linked rows, since the goal is visual distinction
+// across the *organization's* blocks generally, not just the ones
+// currently visible on one land's map.
+async function pickLeastUsedColorKey(): Promise<EmployeeBlockColorKey> {
+  const { rows } = await pool.query(`select color_key, count(*) as c from employee_blocks group by color_key`);
+  const counts = new Map<string, number>(EMPLOYEE_BLOCK_COLOR_KEYS.map((k) => [k, 0]));
+  for (const r of rows) counts.set(r.color_key, Number(r.c));
+
+  let best: EmployeeBlockColorKey = EMPLOYEE_BLOCK_COLOR_KEYS[0];
+  let bestCount = Infinity;
+  for (const key of EMPLOYEE_BLOCK_COLOR_KEYS) {
+    const count = counts.get(key) ?? 0;
+    if (count < bestCount) {
+      best = key;
+      bestCount = count;
+    }
+  }
+  return best;
 }
 
 router.get(
@@ -126,9 +153,24 @@ router.post(
       if (!employee.rows[0]) return res.status(400).json({ errors: { employeeId: "Employee not found" } });
     }
 
+    // colorKey is optional on create — omitting it (the normal case, since
+    // the "Add Block" form doesn't force an explicit choice) auto-assigns
+    // whichever preset is currently least-used organization-wide. A
+    // client-supplied value is still only ever accepted from the fixed
+    // preset list, never arbitrary CSS.
+    let colorKey: EmployeeBlockColorKey;
+    if ("colorKey" in (req.body ?? {}) && req.body.colorKey != null) {
+      if (!isEmployeeBlockColorKey(req.body.colorKey)) {
+        return res.status(400).json({ errors: { colorKey: "Invalid block colour" } });
+      }
+      colorKey = req.body.colorKey;
+    } else {
+      colorKey = await pickLeastUsedColorKey();
+    }
+
     const { rows } = await pool.query(
-      `insert into employee_blocks (name, employee_id) values ($1, $2) returning id`,
-      [name, employeeId]
+      `insert into employee_blocks (name, employee_id, color_key) values ($1, $2, $3) returning id`,
+      [name, employeeId, colorKey]
     );
     const { rows: full } = await pool.query(`${blockSelect("eb.id = $1")}`, [rows[0].id]);
     res.status(201).json({ block: { ...serializeBlockSummary(full[0]), rows: [] } });
@@ -138,12 +180,24 @@ router.post(
 router.patch(
   "/:id",
   requireAuth,
-  requireRole("Administrator"),
+  // Loosened from Administrator-only so a Manager can pick a different
+  // preset colour for a block — the task's one explicit ask — without
+  // widening Managers' existing ability to rename a block or reassign its
+  // employee, which stays Administrator-only via the role check just below.
+  requireRole("Administrator", "Manager"),
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid block id" });
 
     const body = req.body ?? {};
+    const isAdministrator = req.employee!.securityRole === "Administrator";
+    if (!isAdministrator) {
+      const requestedNonColorFields = Object.keys(body).filter((k) => k !== "colorKey");
+      if (requestedNonColorFields.length > 0) {
+        return res.status(403).json({ error: "Only an Administrator can change a block's name or assigned employee" });
+      }
+    }
+
     const columns: string[] = [];
     const values: unknown[] = [];
 
@@ -164,6 +218,13 @@ router.patch(
       }
       values.push(employeeId);
       columns.push(`employee_id = $${values.length}`);
+    }
+    if ("colorKey" in body) {
+      if (!isEmployeeBlockColorKey(body.colorKey)) {
+        return res.status(400).json({ errors: { colorKey: "Invalid block colour" } });
+      }
+      values.push(body.colorKey);
+      columns.push(`color_key = $${values.length}`);
     }
     if (columns.length === 0) return res.status(400).json({ error: "No fields to update" });
     columns.push("updated_at = now()");

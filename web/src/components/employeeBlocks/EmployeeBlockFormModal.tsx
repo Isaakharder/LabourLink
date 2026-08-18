@@ -6,6 +6,8 @@ import { CanvasTransform, computeFitTransform } from "../../lib/canvasTransform"
 import { EmployeeBlockDetail, EmployeeBlockLinkedRow, EmployeeBlockRowLink } from "../../lib/employeeBlockTypes";
 import { GreenhouseLandListItem, GreenhouseLand, GreenhouseRowListItem } from "../../lib/greenhouseLayoutTypes";
 import { LiveLand, LiveRow } from "../../lib/greenhouseLiveTypes";
+import { EMPLOYEE_BLOCK_COLOR_KEYS, EMPLOYEE_BLOCK_COLORS, EmployeeBlockColorKey } from "../../lib/employeeBlockColors";
+import { useAuth } from "../../context/AuthContext";
 
 interface EmployeeBlockFormModalProps {
   blockId: string | null; // null = create mode
@@ -57,6 +59,7 @@ function buildSelectionLand(land: GreenhouseLand, rows: GreenhouseRowListItem[])
             orientation: r.orientation,
             state: "neutral",
             employees: [],
+            blockId: null,
           })
         ),
     })),
@@ -64,6 +67,12 @@ function buildSelectionLand(land: GreenhouseLand, rows: GreenhouseRowListItem[])
 }
 
 export function EmployeeBlockFormModal({ blockId, onClose, onSaved }: EmployeeBlockFormModalProps) {
+  const { employee: actor } = useAuth();
+  // A Manager may only change a block's colour (server-enforced too — see
+  // PATCH /api/employee-blocks/:id's own isAdministrator check); name,
+  // assigned employee, and row links stay Administrator-only.
+  const canEditNameAndRows = actor?.securityRole === "Administrator";
+
   const isEdit = Boolean(blockId);
   const [step, setStep] = useState<Step>("details");
 
@@ -73,6 +82,10 @@ export function EmployeeBlockFormModal({ blockId, onClose, onSaved }: EmployeeBl
   const [name, setName] = useState("");
   const [employeeId, setEmployeeId] = useState<string | null>(null);
   const [linkedRows, setLinkedRows] = useState<EmployeeBlockLinkedRow[]>([]);
+  // null on create = "let the server auto-assign the least-used preset" —
+  // only set here once the admin explicitly picks a swatch, or once an
+  // existing block's own saved colour has loaded.
+  const [colorKey, setColorKey] = useState<EmployeeBlockColorKey | null>(null);
 
   const [employees, setEmployees] = useState<EmployeeOption[] | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -103,6 +116,7 @@ export function EmployeeBlockFormModal({ blockId, onClose, onSaved }: EmployeeBl
         setName(res.block.name);
         setEmployeeId(res.block.employeeId);
         setLinkedRows(res.block.rows);
+        setColorKey(res.block.colorKey as EmployeeBlockColorKey);
       })
       .catch((err) => setLoadError(err instanceof ApiError ? err.message : "Could not load this block"))
       .finally(() => setLoadingDetail(false));
@@ -123,7 +137,13 @@ export function EmployeeBlockFormModal({ blockId, onClose, onSaved }: EmployeeBl
 
     setSubmitting(true);
     try {
-      const payload = { name: name.trim(), employeeId };
+      // A Manager's payload only ever carries colorKey (the fields they
+      // can't edit are disabled in the form below anyway, but this also
+      // keeps the actual request honest about what changed, matching the
+      // server's own isAdministrator-gated field check).
+      const payload = canEditNameAndRows
+        ? { name: name.trim(), employeeId, ...(colorKey ? { colorKey } : {}) }
+        : { ...(colorKey ? { colorKey } : {}) };
       const saved = isEdit
         ? await api<{ block: EmployeeBlockDetail }>(`/api/employee-blocks/${blockId}`, {
             method: "PATCH",
@@ -378,6 +398,7 @@ export function EmployeeBlockFormModal({ blockId, onClose, onSaved }: EmployeeBl
                   onChange={(e) => setName(e.target.value)}
                   placeholder="e.g. Lester's Block"
                   required
+                  disabled={!canEditNameAndRows}
                 />
                 {errors.name && <span className="field-error">{errors.name}</span>}
               </label>
@@ -388,7 +409,7 @@ export function EmployeeBlockFormModal({ blockId, onClose, onSaved }: EmployeeBl
                     className="greenhouse-office-select"
                     value={employeeId ?? ""}
                     onChange={(e) => setEmployeeId(e.target.value || null)}
-                    disabled={!employees}
+                    disabled={!employees || !canEditNameAndRows}
                   >
                     <option value="">Unassigned</option>
                     {employees?.map((emp) => (
@@ -401,8 +422,51 @@ export function EmployeeBlockFormModal({ blockId, onClose, onSaved }: EmployeeBl
                 {errors.employeeId && <span className="field-error">{errors.employeeId}</span>}
               </label>
             </div>
+            {!canEditNameAndRows && (
+              <p className="field-hint">As a Manager, you can change this block's colour below — name, assigned employee, and linked rows are Administrator-only.</p>
+            )}
           </section>
 
+          <section className="employee-form-section">
+            <span className="employee-form-grid-label">Block colour</span>
+            <div className="employee-block-color-swatches" role="group" aria-label="Block colour">
+              {EMPLOYEE_BLOCK_COLOR_KEYS.map((key) => {
+                const def = EMPLOYEE_BLOCK_COLORS[key];
+                const isSelected = colorKey === key;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    className={`employee-block-color-swatch${isSelected ? " employee-block-color-swatch-selected" : ""}`}
+                    style={{ background: def.fill, borderColor: def.stroke }}
+                    aria-pressed={isSelected}
+                    title={def.label}
+                    onClick={() => setColorKey(key)}
+                  >
+                    <span className="sr-only">{def.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+            {errors.colorKey && <span className="field-error">{errors.colorKey}</span>}
+            <div className="employee-block-color-preview">
+              <span
+                className="employee-block-color-preview-swatch"
+                style={
+                  colorKey
+                    ? { background: EMPLOYEE_BLOCK_COLORS[colorKey].fill, borderColor: EMPLOYEE_BLOCK_COLORS[colorKey].stroke }
+                    : undefined
+                }
+              />
+              <span>
+                {colorKey
+                  ? `Preview: ${name.trim() || "This block"} will show as ${EMPLOYEE_BLOCK_COLORS[colorKey].label.toLowerCase()} on the live map.`
+                  : "A soft colour not already heavily used will be assigned automatically, or pick one above."}
+              </span>
+            </div>
+          </section>
+
+          {canEditNameAndRows && (
           <section className="employee-form-section">
             <div className="employee-block-linked-rows-header">
               <h3>Linked Rows</h3>
@@ -425,6 +489,7 @@ export function EmployeeBlockFormModal({ blockId, onClose, onSaved }: EmployeeBl
               Link Rows
             </button>
           </section>
+          )}
 
           <div className="employee-form-actions">
             <button type="button" onClick={onClose} disabled={submitting}>

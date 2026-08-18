@@ -213,10 +213,10 @@ async function main() {
       await confirmRowCompletion(rowA, 500, adminId, [completedEntry]);
       await insertWork(empRowStem, rowStemActivity, hoursAgo(1), null, { rowId: rowOpen }); // currently open
 
-      const { rows: blockRows } = await pool.query(`insert into employee_blocks (name, employee_id) values ($1, $2) returning id`, [
-        `QA Dashboard Block ${RUN_ID}`,
-        empRowStem,
-      ]);
+      const { rows: blockRows } = await pool.query(
+        `insert into employee_blocks (name, employee_id, color_key) values ($1, $2, 'slate') returning id`,
+        [`QA Dashboard Block ${RUN_ID}`, empRowStem]
+      );
       blockIds.push(blockRows[0].id);
       await pool.query(`insert into employee_block_rows (block_id, greenhouse_row_id) values ($1, $2), ($1, $3)`, [blockRows[0].id, rowA, rowC]);
     }

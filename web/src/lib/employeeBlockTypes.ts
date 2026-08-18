@@ -11,6 +11,11 @@ export interface EmployeeBlockSummary {
   name: string;
   employeeId: string | null;
   employeeName: string | null;
+  // A fixed preset palette key (see web/src/lib/employeeBlockColors.ts) —
+  // never arbitrary CSS. Always present: every block gets one at creation
+  // (auto-assigned when not explicitly chosen), and every pre-existing
+  // block received a stable one via migration 041_employee_block_color.sql.
+  colorKey: string;
   rowCount: number;
   createdAt: string;
   updatedAt: string;

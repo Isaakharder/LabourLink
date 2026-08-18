@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../../../lib/api";
 import { EmployeeBlockSummary } from "../../../lib/employeeBlockTypes";
+import { employeeBlockColorDef } from "../../../lib/employeeBlockColors";
 import { EmployeeBlockFormModal } from "../../../components/employeeBlocks/EmployeeBlockFormModal";
+import { useAuth } from "../../../context/AuthContext";
 
 export function EmployeeBlocksTab() {
+  const { employee: actor } = useAuth();
+  const canCreate = actor?.securityRole === "Administrator";
+
   const [blocks, setBlocks] = useState<EmployeeBlockSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -32,9 +37,11 @@ export function EmployeeBlocksTab() {
         <span className="employees-count">
           {blocks ? `${blocks.length} block${blocks.length === 1 ? "" : "s"}` : ""}
         </span>
-        <button type="button" className="employees-add-button" onClick={() => setModalBlock("new")}>
-          Create Block
-        </button>
+        {canCreate && (
+          <button type="button" className="employees-add-button" onClick={() => setModalBlock("new")}>
+            Create Block
+          </button>
+        )}
       </div>
 
       {error && <p className="error-text">{error}</p>}
@@ -47,6 +54,7 @@ export function EmployeeBlocksTab() {
         <table className="employees-table">
           <thead>
             <tr>
+              <th>Colour</th>
               <th>Block name</th>
               <th>Assigned employee</th>
               <th>Linked rows</th>
@@ -54,8 +62,17 @@ export function EmployeeBlocksTab() {
             </tr>
           </thead>
           <tbody>
-            {blocks.map((b) => (
+            {blocks.map((b) => {
+              const color = employeeBlockColorDef(b.colorKey);
+              return (
               <tr key={b.id}>
+                <td>
+                  <span
+                    className="employee-block-color-preview-swatch"
+                    title={color?.label}
+                    style={color ? { background: color.fill, borderColor: color.stroke } : undefined}
+                  />
+                </td>
                 <td>{b.name}</td>
                 <td>{b.employeeName ?? "Unassigned"}</td>
                 <td>{b.rowCount}</td>
@@ -67,7 +84,8 @@ export function EmployeeBlocksTab() {
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       )}

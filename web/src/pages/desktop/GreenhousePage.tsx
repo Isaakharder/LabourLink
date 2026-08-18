@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Copy, ExternalLink, Link2, MonitorUp, Plus } from "lucide-react";
 import { GreenhouseLiveCanvas } from "../../components/greenhouseLive/GreenhouseLiveCanvas";
+import { EmployeeBlockLegend } from "../../components/greenhouseLive/EmployeeBlockLegend";
 import { GreenhouseLiveToolbar } from "../../components/greenhouseLive/GreenhouseLiveToolbar";
 import { DateRangeCalendar } from "../../components/greenhouseLive/DateRangeCalendar";
 import { RegenerateTvLinkModal } from "../../components/greenhouseLive/RegenerateTvLinkModal";
@@ -689,6 +690,7 @@ export function GreenhousePage() {
                   minScale={minScale}
                   maxScale={maxScale}
                   rotationDegrees={rotationDegrees}
+                  blocks={data.blocks}
                 />
               </div>
 
@@ -703,6 +705,7 @@ export function GreenhousePage() {
                   <span className="greenhouse-live-legend-swatch greenhouse-live-row-neutral" /> No activity
                 </span>
               </div>
+              <EmployeeBlockLegend blocks={data.blocks} />
             </div>
           )}
         </div>

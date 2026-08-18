@@ -35,6 +35,30 @@ export interface LiveRow {
   orientation: "horizontal" | "vertical";
   state: LiveRowState;
   employees: LiveEmployee[];
+  // The Employee Block this row is currently linked to, if any (at most
+  // one — see server/src/lib/greenhouseLiveState.ts). Only ever applied as
+  // a colour override when state is still "neutral" — GreenhouseLiveCanvas
+  // never lets a block colour override blue/green.
+  blockId: string | null;
+}
+
+// One entry per Employee Block with at least one currently-active row on
+// the viewed land — server/src/lib/greenhouseLiveState.ts's
+// getBlockSummariesForLand, fetched once per page load alongside the land
+// itself (see LiveGreenhouseResponse.blocks / GreenhouseDisplayStateResponse.blocks
+// below), never one request per block.
+export interface LiveBlockSummary {
+  id: string;
+  name: string;
+  employeeId: string | null;
+  // Split rather than a single combined display string so the TV route's
+  // server-side redaction (full name -> "First L.") is visible in the type
+  // itself, same convention as LiveEmployee's firstName/lastName above.
+  employeeFirstName: string | null;
+  employeeLastName: string | null;
+  colorKey: string;
+  totalRows: number;
+  completedRows: number;
 }
 
 export interface LivePhase {
@@ -69,6 +93,7 @@ export interface LiveGreenhouseResponse {
   activityId: string | null;
   generatedAt: string;
   land: LiveLand;
+  blocks: LiveBlockSummary[];
 }
 
 export interface AvailableActivity {
@@ -116,4 +141,5 @@ export interface GreenhouseDisplayStateResponse {
   configVersion: string;
   generatedAt: string;
   land: LiveLand;
+  blocks: LiveBlockSummary[];
 }

@@ -1,10 +1,12 @@
 import { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { Navigation2 } from "lucide-react";
-import { LivePhase, LiveRow } from "../../lib/greenhouseLiveTypes";
+import { LiveBlockSummary, LivePhase, LiveRow } from "../../lib/greenhouseLiveTypes";
 import { CanvasTransform, RotationDegrees, clampPan, zoomAtPoint } from "../../lib/canvasTransform";
 import { rowScreenRect } from "../../lib/rowLayout";
 import { formatTimeInAppTimezone } from "../../lib/timezone";
+import { employeeBlockColorDef } from "../../lib/employeeBlockColors";
 import { EmployeeLocationBubbles } from "./EmployeeLocationBubbles";
+import { BlockClusterLabels } from "./BlockClusterLabels";
 
 interface GreenhouseLiveCanvasProps {
   land: { northSouthFeet: number; eastWestFeet: number };
@@ -49,6 +51,14 @@ interface GreenhouseLiveCanvasProps {
   // page, Employee Blocks' Link Rows step) keeps its current pan/zoom
   // behavior with no change. Used by the read-only TV display.
   interactive?: boolean;
+  // Employee Blocks present on this land — omit entirely in selection mode
+  // (Employee Blocks'/Plant Density's own Link Rows canvases never pass
+  // this) or when there simply are none. A row only ever renders its
+  // block's colour when NOT in selection mode and its own state is still
+  // "neutral" — blue (currently working) and green (completed) always win,
+  // computed with no awareness of blocks at all, so this can never
+  // override them. See employeeBlockColors.ts for the fixed preset shades.
+  blocks?: LiveBlockSummary[];
 }
 
 // Same threshold LandCanvas uses — below this many screen px-per-foot, row
@@ -64,7 +74,7 @@ function selectionTooltip(row: LiveRow, phaseName: string, unavailableBy?: strin
   return lines.join("\n");
 }
 
-function rowTooltip(row: LiveRow, phaseName: string): string {
+function rowTooltip(row: LiveRow, phaseName: string, blockName?: string): string {
   const lines = [`Row ${row.rowNumber}`, phaseName];
   if (row.state === "blue") {
     for (const e of row.employees) {
@@ -78,6 +88,10 @@ function rowTooltip(row: LiveRow, phaseName: string): string {
       const carrier = e.carrierName ? ` [${e.carrierName}]` : "";
       lines.push(`${e.firstName} ${e.lastName} · ${e.activityName ?? "Completed"}${carrier}${ended}`);
     }
+  } else if (blockName) {
+    // Neutral (no work today) but still assigned to a block — say whose
+    // area this is, matching what the row's own colour already implies.
+    lines.push(`Block: ${blockName}`);
   }
   return lines.join("\n");
 }
@@ -102,6 +116,7 @@ export function GreenhouseLiveCanvas({
   selectedRowIds,
   unavailableRowIds,
   interactive = true,
+  blocks,
 }: GreenhouseLiveCanvasProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -205,6 +220,16 @@ export function GreenhouseLiveCanvas({
   }
 
   const visiblePhases = phaseFilterId ? phases.filter((p) => p.id === phaseFilterId) : phases;
+  const selectable = Boolean(onRowClick);
+  // Block colour/labels only ever apply outside selection mode — selection
+  // mode's own three-state palette (selected/taken/available) already
+  // covers the whole row, and its placeholder land data has no real block
+  // assignments worth showing (see buildSelectionLand's own comment in
+  // EmployeeBlockFormModal.tsx/PlantDensityFormModal.tsx).
+  const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
+  // Block cluster labels only make sense outside row-selection mode, same
+  // reasoning as showEmployeeBubbles below.
+  const showBlockLabels = !selectable && (blocks ?? []).length > 0;
   // Employee location bubbles only make sense outside row-selection mode —
   // Employee Blocks' and Plant Density's Link Rows steps pass onRowClick
   // with placeholder land/employees data that has no real live work status
@@ -274,7 +299,6 @@ export function GreenhouseLiveCanvas({
                   const showLabel = transform.scale >= ROW_LABEL_MIN_SCALE;
                   const rowFontSize = Math.max(6, Math.min(width, height) * 0.5);
 
-                  const selectable = Boolean(onRowClick);
                   const isSelected = selectedRowIds?.has(row.id);
                   const unavailableBy = unavailableRowIds?.get(row.id);
                   const visualState = selectable
@@ -284,6 +308,15 @@ export function GreenhouseLiveCanvas({
                         ? "taken"
                         : "available"
                     : row.state;
+
+                  // Only when the row's own state has nothing else to show
+                  // (not blue/green) — an inline style always wins over any
+                  // CSS class, including the TV display's own higher-
+                  // specificity `.greenhouse-tv-canvas-wrapper
+                  // .greenhouse-live-row-neutral` contrast override, so
+                  // this never needs a competing class per colour.
+                  const block = !selectable && row.state === "neutral" && row.blockId ? blockById.get(row.blockId) : undefined;
+                  const blockColor = block ? employeeBlockColorDef(block.colorKey) : null;
 
                   return (
                     <g key={row.id} className="greenhouse-row-group">
@@ -295,10 +328,11 @@ export function GreenhouseLiveCanvas({
                         className={`greenhouse-live-row-rect greenhouse-live-row-${visualState}${
                           selectable ? " greenhouse-live-row-selectable" : ""
                         }`}
+                        style={blockColor ? { fill: blockColor.fill, stroke: blockColor.stroke } : undefined}
                         vectorEffect="non-scaling-stroke"
                         onClick={selectable ? (e) => handleRowSelectionClick(row, e) : undefined}
                       >
-                        <title>{selectable ? selectionTooltip(row, phase.name, unavailableBy) : rowTooltip(row, phase.name)}</title>
+                        <title>{selectable ? selectionTooltip(row, phase.name, unavailableBy) : rowTooltip(row, phase.name, block?.name)}</title>
                       </rect>
                       {showLabel && (
                         <text
@@ -329,6 +363,22 @@ export function GreenhouseLiveCanvas({
           land={land}
           transform={transform}
           rotationDegrees={rotationDegrees}
+        />
+      )}
+
+      {/* Block cluster labels — a plain HTML overlay (not part of the SVG's
+          pan/zoom transform stack), same technique as the employee bubbles
+          above: each pill's left/top is computed in screen px from the live
+          row geometry (see BlockClusterLabels.tsx) so it stays a readable
+          fixed size at any map zoom level, instead of shrinking to a few px
+          on a large real greenhouse the way world-feet-sized SVG text did. */}
+      {showBlockLabels && (
+        <BlockClusterLabels
+          phases={visiblePhases}
+          land={land}
+          transform={transform}
+          rotationDegrees={rotationDegrees}
+          blocks={blocks ?? []}
         />
       )}
 

@@ -7,6 +7,8 @@ import { calendarDateInAppTimezone, getRangeBoundsUtc, inclusiveDayCount } from 
 import {
   attachEmployeePhotoUrls,
   buildLiveLandQuery,
+  getBlockSummariesForLand,
+  redactBlockEmployeeNames,
   redactEmployeeNamesForDisplay,
   serializeLiveLand,
 } from "../lib/greenhouseLiveState";
@@ -71,6 +73,7 @@ router.get(
     if (!row) return res.status(404).json({ error: "Land not found" });
 
     const land = await attachEmployeePhotoUrls(serializeLiveLand(row));
+    const blocks = await getBlockSummariesForLand(landId);
 
     res.json({
       // Kept only when the range is a single day, for callers still reading
@@ -82,6 +85,7 @@ router.get(
       activityId: activityId ?? null,
       generatedAt: new Date().toISOString(),
       land,
+      blocks,
     });
   })
 );
@@ -161,6 +165,7 @@ router.get(
     }
 
     const land = await attachEmployeePhotoUrls(serializeLiveLand(row));
+    const blocks = await getBlockSummariesForLand(d.landId);
 
     res.json({
       name: d.name,
@@ -172,6 +177,7 @@ router.get(
       configVersion: d.updatedAt,
       generatedAt: new Date().toISOString(),
       land: redactEmployeeNamesForDisplay(land),
+      blocks: redactBlockEmployeeNames(blocks),
     });
   })
 );

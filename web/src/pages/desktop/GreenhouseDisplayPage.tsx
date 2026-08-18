@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { GreenhouseLiveCanvas } from "../../components/greenhouseLive/GreenhouseLiveCanvas";
+import { EmployeeBlockLegend } from "../../components/greenhouseLive/EmployeeBlockLegend";
 import { api } from "../../lib/api";
 import { CanvasTransform, computeFitTransformToPhases } from "../../lib/canvasTransform";
 import { GreenhouseDisplayStateResponse } from "../../lib/greenhouseLiveTypes";
@@ -150,6 +151,7 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
             maxScale={fitScale * 6}
             rotationDegrees={data.rotationDegrees}
             interactive={false}
+            blocks={data.blocks}
           />
         ) : (
           <p className="placeholder-page greenhouse-tv-loading">Loading…</p>
@@ -164,6 +166,7 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
           <span className="greenhouse-live-legend-swatch greenhouse-live-row-green" /> Completed Row
         </span>
       </div>
+      {data && <EmployeeBlockLegend blocks={data.blocks} />}
     </div>
   );
 }

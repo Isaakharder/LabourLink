@@ -32,6 +32,7 @@
 // against. A fresh database built only from this repo's committed
 // migrations up to this point would be missing that column until 012 lands
 // on its own.
+import { pool } from "../db";
 import { getSignedPhotoUrls } from "./storage";
 
 export interface LiveStateParams {
@@ -64,9 +65,17 @@ export function buildLiveLandQuery(params: LiveStateParams): { sql: string; valu
         'state', case when os.employees is not null then 'blue'
                       when cs.employees is not null then 'green'
                       else 'neutral' end,
-        'employees', coalesce(os.employees, cs.employees, '[]'::json)
+        'employees', coalesce(os.employees, cs.employees, '[]'::json),
+        -- The Employee Block this row is currently linked to, if any (at
+        -- most one — employee_block_rows.greenhouse_row_id is itself the
+        -- primary key, 022_employee_blocks.sql). The frontend only ever
+        -- applies this row's block colour when state is still 'neutral' —
+        -- blue/green above always take precedence, computed with no
+        -- awareness of blocks at all, so this can never override them.
+        'blockId', ebr.block_id
       ) order by gr.row_number) as rows
       from greenhouse_rows gr
+      left join employee_block_rows ebr on ebr.greenhouse_row_id = gr.id
       -- Exactly one open work entry can ever exist per employee (partial
       -- unique index on time_entries, see 003_activities_and_time_entries.sql
       -- + 010_break_profiles.sql), so this is already at most one row per
@@ -130,6 +139,73 @@ export function serializeLiveLand(row: any) {
     // same as greenhouseLayout.ts's serializeLandDetail.
     phases: row.phases,
   };
+}
+
+export interface LiveBlockSummary {
+  id: string;
+  name: string;
+  employeeId: string | null;
+  employeeFirstName: string | null;
+  employeeLastName: string | null;
+  colorKey: string;
+  totalRows: number;
+  completedRows: number;
+}
+
+// Every Employee Block with at least one currently-active (non-deleted, on
+// an active phase) row in this land — the live map's legend/per-block
+// label data, fetched once per page load alongside buildLiveLandQuery's own
+// single query (never one request per block or per row).
+//
+// completedRows counts a linked row as complete if it has ANY
+// row_completions record, regardless of density_type — deliberately
+// simpler than the Dashboard's own per-employee, density-type-scoped
+// getBlockProgressForEmployees (dashboardBlockProgress.ts), which needs to
+// know which ONE density type an employee's *current activity* uses. The
+// map has no single-activity context per block the way a Dashboard card
+// does, and in practice a physical row is only ever confirmed complete
+// under the one density type its assigned activity actually uses — so this
+// reads the same completedRows number the Dashboard would show for that
+// block's employee, from the exact same row_completions source of truth,
+// just not re-filtered by a density type the map doesn't have to hand.
+export async function getBlockSummariesForLand(landId: string): Promise<LiveBlockSummary[]> {
+  const { rows } = await pool.query(
+    `select eb.id, eb.name, eb.employee_id, e.first_name, e.last_name, eb.color_key,
+            count(ebr.greenhouse_row_id) as total_rows,
+            count(*) filter (
+              where exists (select 1 from row_completions rc where rc.greenhouse_row_id = ebr.greenhouse_row_id)
+            ) as completed_rows
+     from employee_blocks eb
+     join employee_block_rows ebr on ebr.block_id = eb.id
+     join greenhouse_rows gr on gr.id = ebr.greenhouse_row_id and gr.deleted_at is null
+     join greenhouse_phases gp on gp.id = gr.phase_id and gp.is_active = true
+     left join employees e on e.id = eb.employee_id
+     where gp.land_id = $1
+     group by eb.id, e.first_name, e.last_name
+     order by eb.name`,
+    [landId]
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    employeeId: r.employee_id,
+    employeeFirstName: r.first_name ?? null,
+    employeeLastName: r.last_name ?? null,
+    colorKey: r.color_key,
+    totalRows: Number(r.total_rows),
+    completedRows: Number(r.completed_rows),
+  }));
+}
+
+// Same redaction the TV route already applies to every row's own working/
+// completed employees (redactEmployeeNamesForDisplay below) — a display
+// token is a bearer credential embedded in a URL, so full names are cut
+// down to "First L." server-side, at the actual security boundary, for
+// block summaries too, not just row-level employee lists.
+export function redactBlockEmployeeNames(blocks: LiveBlockSummary[]): LiveBlockSummary[] {
+  return blocks.map((b) =>
+    b.employeeLastName ? { ...b, employeeLastName: `${b.employeeLastName.charAt(0)}.` } : b
+  );
 }
 
 // Resolves each currently-working employee's profile_photo_path (added to

@@ -66,7 +66,10 @@ async function main() {
     }
 
     async function insertBlock(name: string, employeeId: string, linkedRowIds: string[]): Promise<string> {
-      const { rows } = await pool.query(`insert into employee_blocks (name, employee_id) values ($1, $2) returning id`, [name, employeeId]);
+      const { rows } = await pool.query(
+        `insert into employee_blocks (name, employee_id, color_key) values ($1, $2, 'slate') returning id`,
+        [name, employeeId]
+      );
       const blockId = rows[0].id;
       blockIds.push(blockId);
       for (const rowId of linkedRowIds) {
