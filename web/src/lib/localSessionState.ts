@@ -163,8 +163,34 @@ async function buildDisplayLookup(): Promise<{
 // silently overwrite genuine in-progress work with stale "idle" server
 // truth, e.g. after a cold app restart. A no-op whenever there's nothing
 // pending, so the fully-synced steady state is unchanged from before.
+//
+// Bounded by a timeout — the local store's web backend (jeep-sqlite,
+// WASM + IndexedDB) has a documented category of WebKit bug where iOS
+// Safari's standalone "Add to Home Screen" PWA mode can hang an IndexedDB
+// operation forever with no error ever thrown (reproduced: a fresh
+// pairing on iOS stuck permanently on "Loading..." — this call, normally
+// well under 100ms, was the one thing standing between a successful
+// /api/mobile/me response and setMe() ever being called). A real device on
+// a healthy browser resolves this in milliseconds, so the timeout is only
+// ever felt on the broken path — and falling back to the untouched server
+// response there is always safe, just possibly missing an unsynced local
+// event's effect on this one render (it still exists on disk and will
+// sync/fold normally the next time this succeeds).
+const LOCAL_STORE_FOLD_TIMEOUT_MS = 4000;
+
 export async function foldPendingEventsOntoMe(deviceId: string, base: MeResponse): Promise<MeResponse> {
-  const pending = await getLocalEventStore().getPendingEvents(deviceId, 5000);
+  let pending: LocalEvent[];
+  try {
+    pending = await Promise.race([
+      getLocalEventStore().getPendingEvents(deviceId, 5000),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("local event store timed out")), LOCAL_STORE_FOLD_TIMEOUT_MS)
+      ),
+    ]);
+  } catch (err) {
+    console.error("[local-session-state] foldPendingEventsOntoMe: local store unavailable, using server response as-is:", err);
+    return base;
+  }
   if (pending.length === 0) return base;
 
   const lookup = await buildDisplayLookup();
