@@ -127,21 +127,55 @@ class LocalEventStoreImpl {
         throw err;
       }
     }
-    await this.persistIfWeb();
+    this.schedulePersist();
 
     return db;
   }
 
+  private persistPromise: Promise<void> | null = null;
+
   // jeep-sqlite (web/PWA) only writes from in-memory to its IndexedDB store
   // on an explicit saveToStore/close/closeConnection — never automatically
   // per statement the way native SQLite fsyncs to disk. Every durable write
-  // in this file calls this immediately afterward on that platform, so
+  // in this file schedules this immediately afterward on that platform, so
   // "durable" means the same thing on both backends: survives a killed tab/
   // process, not just a killed JS heap.
-  private async persistIfWeb(): Promise<void> {
+  //
+  // Fire-and-forget, deliberately never awaited by any caller — including
+  // this class's own init/migration path (openAndMigrate above). Real,
+  // measured incident: saveToStore() re-exports jeep-sqlite's ENTIRE
+  // in-memory database and writes the resulting blob to IndexedDB — an
+  // O(database size) operation, not a per-row write — and every write in
+  // this file, including the very first one at init time, used to `await`
+  // it before returning. On iOS Safari that made every single button tap
+  // in the PWA visibly slow ("you press any button it takes a very long
+  // time"): if that FIRST init-time save happened to hang (the same
+  // documented WebKit IndexedDB hang behind the earlier "stuck on
+  // Loading" incident), getDb()'s promise never resolved, which poisons
+  // every future call in this file for the rest of the session — not just
+  // the one save. None of that wait was ever actually needed: a write is
+  // already committed and immediately queryable in the live in-memory WASM
+  // database the moment db.commitTransaction() returns (every read in this
+  // file goes through that same in-memory connection) — persisting to
+  // IndexedDB only matters for surviving a killed tab/process, which
+  // doesn't require the CALLER to wait for it.
+  //
+  // Chained onto any in-flight/pending persist (never fired concurrently —
+  // jeep-sqlite serializes the whole DB per call, so overlapping calls
+  // could race) and never awaited by the caller. A prior failure is
+  // swallowed rather than left to permanently wedge every future persist
+  // attempt behind a rejected promise.
+  private schedulePersist(): void {
     if (isNativeSqlite()) return;
-    const sqlite = await getSqliteConnection();
-    await sqlite.saveToStore(DB_NAME);
+    this.persistPromise = (this.persistPromise ?? Promise.resolve())
+      .catch(() => {})
+      .then(async () => {
+        const sqlite = await getSqliteConnection();
+        await sqlite.saveToStore(DB_NAME);
+      })
+      .catch((err) => {
+        console.error("[local-event-store] background persist to IndexedDB failed:", err);
+      });
   }
 
   async init(): Promise<void> {
@@ -203,7 +237,7 @@ class LocalEventStoreImpl {
       await db.rollbackTransaction();
       throw err;
     }
-    await this.persistIfWeb();
+    this.schedulePersist();
 
     return {
       ...event,
@@ -306,7 +340,7 @@ class LocalEventStoreImpl {
         clientEventId,
       ]
     );
-    await this.persistIfWeb();
+    this.schedulePersist();
   }
 
   async getPendingCount(deviceId: string): Promise<number> {
@@ -376,7 +410,7 @@ class LocalEventStoreImpl {
       deviceId,
       cutoffIso,
     ]);
-    await this.persistIfWeb();
+    this.schedulePersist();
     return res.changes?.changes ?? 0;
   }
 
@@ -400,7 +434,7 @@ class LocalEventStoreImpl {
        on conflict(cache_key) do update set json_value = excluded.json_value, cached_at = excluded.cached_at`,
       [cacheKey, JSON.stringify(value), isoNow()]
     );
-    await this.persistIfWeb();
+    this.schedulePersist();
   }
 }
 
