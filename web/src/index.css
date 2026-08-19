@@ -484,6 +484,13 @@ input {
   font-size: 0.85rem;
 }
 
+.pairing-diagnostic-code {
+  color: var(--color-muted);
+  font-size: 0.75rem;
+  font-family: monospace;
+  opacity: 0.8;
+}
+
 .device-name {
   color: var(--color-muted);
 }
