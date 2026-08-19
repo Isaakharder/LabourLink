@@ -55,7 +55,8 @@
     "test:mobile-sync-conflicts": "ts-node src/routes/mobileSyncConflicts.test.ts",
     "test:mobile-time-sync-events-clock-anomaly": "ts-node src/routes/mobileTime.syncEvents.clockAnomaly.test.ts",
     "test:mobile-time-sync-events-scenarios": "ts-node src/routes/mobileTime.syncEvents.scenarios.test.ts",
-    "test:mobile-time-sync-events-concurrent-load": "ts-node src/routes/mobileTime.syncEvents.concurrentLoad.test.ts"
+    "test:mobile-time-sync-events-concurrent-load": "ts-node src/routes/mobileTime.syncEvents.concurrentLoad.test.ts",
+    "test:pairing": "ts-node src/routes/pairing.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",

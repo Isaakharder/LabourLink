@@ -49,26 +49,47 @@ router.post(
         const pgErr = err as { code?: string; constraint?: string };
         if (pgErr.code === "23505") {
           if (pgErr.constraint === "idx_pairing_requests_one_pending_per_device") {
-            // Lost a race against a concurrent request for this same device
-            // (e.g. an effect that mounted twice) — report whichever
-            // request actually won instead of creating a second one.
-            const winner = await pool.query(
+            // Real production incident this branch is hardened against:
+            // status is NEVER persisted to 'expired' anywhere in this
+            // codebase — GET /status below only COMPUTES "expired" for
+            // display, it never writes it back. idx_pairing_requests_
+            // one_pending_per_device only checks status = 'pending', with
+            // no regard for expires_at, so a device whose first attempt
+            // ages out unapproved past the 10-minute window is
+            // PERMANENTLY stuck on every future attempt: this same
+            // conflict fires every time, retrying with a fresh
+            // pairing_code can never fix a device_identifier conflict,
+            // and 5 identical failures fall through to the 503 below.
+            // Confirmed via production data: rows with status='pending'
+            // and expires_at days in the past.
+            const blocking = await pool.query(
               `select id, pairing_code, expires_at from pairing_requests
-               where device_identifier = $1 and status = 'pending' and expires_at > now()
-               limit 1`,
+               where device_identifier = $1 and status = 'pending'
+               order by created_at desc limit 1`,
               [deviceIdentifier]
             );
-            if (winner.rows[0]) {
-              const r = winner.rows[0];
-              return res.json({ requestId: r.id, pairingCode: r.pairing_code, expiresAt: r.expires_at });
+            const row = blocking.rows[0];
+            if (row && new Date(row.expires_at) > new Date()) {
+              // Still genuinely live — a real concurrent request for this
+              // same device won the race; hand back its request instead
+              // of creating a second one.
+              return res.json({ requestId: row.id, pairingCode: row.pairing_code, expiresAt: row.expires_at });
+            }
+            if (row) {
+              // Blocking row is only still 'pending' because nothing ever
+              // flipped it — it's actually time-expired. Mark it expired
+              // now so this (and any future) attempt for this device can
+              // proceed, then retry the insert.
+              await pool.query(`update pairing_requests set status = 'expired' where id = $1`, [row.id]);
             }
           }
-          continue; // pairing_code collision — retry with a new code
+          continue; // pairing_code collision (or the blocking row just got expired above) — retry with a new code
         }
         throw err;
       }
     }
-    res.status(503).json({ error: "Could not generate a pairing code, try again" });
+    console.error(`[pairing] exhausted 5 attempts generating a pairing code for device=${deviceIdentifier}`);
+    res.status(503).json({ error: "Could not generate a pairing code, try again", code: "PAIRING_CODE_GENERATION_EXHAUSTED" });
   })
 );
 
