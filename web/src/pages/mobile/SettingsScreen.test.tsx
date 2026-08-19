@@ -151,6 +151,39 @@ describe("SettingsScreen — NFC admin tools gated on Capacitor.isNativePlatform
   });
 });
 
+describe("SettingsScreen — Administrator Tools (Employees / Messages)", () => {
+  it("shows both Employees and Messages to an Administrator, with correct destinations", () => {
+    mockSecurityRole = "Administrator";
+    renderSettings();
+    expect(screen.getByRole("heading", { name: "Administrator Tools" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Employees" })).toHaveAttribute("href", "/mobile/settings/employees");
+    expect(screen.getByRole("link", { name: "Messages" })).toHaveAttribute("href", "/mobile/settings/messages");
+  });
+
+  it("shows Employees but not Messages to a Manager — matches GET /api/employees vs POST /api/messages's own role gates", () => {
+    mockSecurityRole = "Manager";
+    renderSettings();
+    expect(screen.getByRole("link", { name: "Employees" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Messages" })).not.toBeInTheDocument();
+  });
+
+  it("hides both Employees and Messages, and the whole Administrator Tools section, from a general Employee", () => {
+    mockSecurityRole = "Employee";
+    renderSettings();
+    expect(screen.queryByRole("heading", { name: "Administrator Tools" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Employees" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Messages" })).not.toBeInTheDocument();
+  });
+
+  it("Administrator Tools is unaffected by the native-platform gate that hides NFC tools (unlike Admin Mode)", () => {
+    mockIsNative = false;
+    mockSecurityRole = "Administrator";
+    renderSettings();
+    expect(screen.getByRole("link", { name: "Employees" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Messages" })).toBeInTheDocument();
+  });
+});
+
 // jsdom doesn't compute real layout/env(safe-area-inset-*), so the
 // meaningful check here is at the CSS source level: the exact regression
 // this bug report was about (the safe-area-inset-top padding on

@@ -37,3 +37,28 @@ export interface OutstandingMessage {
   createdAt: string;
   senderName: string;
 }
+
+// GET /api/mobile/messages/recipients — mobile Messages screen's compose
+// candidate list (Administrator-only). Every active employee, same
+// definition resolveRecipients() uses for "all employees" — not limited to
+// who's currently clocked in.
+export interface MobileMessageRecipient {
+  id: string;
+  firstName: string;
+  lastName: string;
+  photoUrl: string | null;
+  hasActiveDevice: boolean;
+}
+
+// POST /api/mobile/messages/send — mobile Messages screen's send result.
+// recipientCount is always the number of rows actually stored (the message
+// is committed before push is attempted, so this is never affected by push
+// outcome); pushSucceeded/pushFailed/noActiveDeviceCount describe delivery
+// only, never whether the message itself was saved.
+export interface MobileMessageSendResult {
+  messageId: string;
+  recipientCount: number;
+  pushSucceeded: number;
+  pushFailed: number;
+  noActiveDeviceCount: number;
+}

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDevicePairing } from "../../context/DevicePairingContext";
 import { useWorkSession } from "../../context/WorkSessionContext";
-import { api, ApiError } from "../../lib/api";
+import { ApiError } from "../../lib/api";
 import { uuid } from "../../lib/uuid";
 import { t } from "../../lib/i18n";
 import { ActivityQuestion, QuestionAnswer } from "../../lib/activityQuestionTypes";
@@ -16,6 +16,8 @@ import { buildScanSwitchAnswers, classifyHomeScan, HomeScanOutcome, isHomeNfcSca
 import { playErrorFeedback, playSuccessFeedback } from "../../lib/feedback";
 import { ActivityTimer, formatElapsed } from "../../components/mobile/ActivityTimer";
 import { RecentJobsCard } from "../../components/mobile/RecentJobsCard";
+import { fetchActivitiesWithCache, fetchRowsWithCache, fetchCarriersWithCache } from "../../lib/referenceDataCache";
+import { computeSyncIndicatorState } from "../../lib/syncIndicator";
 
 type Activity = PickerActivity;
 
@@ -60,6 +62,7 @@ export function HomeScreen() {
     error,
     setError,
     pending,
+    syncProblem,
     pendingActivityName,
     handleApiError,
     perform,
@@ -97,11 +100,9 @@ export function HomeScreen() {
   // is as fresh as possible. Deliberately event-driven rather than polling
   // on a timer.
   const loadActivities = useCallback(() => {
-    api<{ activities: Activity[]; activityGroups: { id: string; name: string }[] }>(
-      "/api/mobile/activities"
-    )
+    fetchActivitiesWithCache()
       .then((res) => {
-        setActivities(res.activities);
+        setActivities(res.data.activities);
         setActivitiesLoaded(true);
       })
       .catch((err) => {
@@ -110,20 +111,22 @@ export function HomeScreen() {
   }, [handleApiError]);
 
   // Same event-driven wiring as loadActivities — the phone never has its
-  // own notion of which rows exist either.
+  // own notion of which rows exist either. fetchRowsWithCache() falls back
+  // to the last-cached response when offline, so this keeps resolving even
+  // with no connection — see lib/referenceDataCache.ts.
   const loadGreenhouseRows = useCallback(() => {
-    api<{ lands: RowPickerLand[] }>("/api/mobile/greenhouse-rows")
-      .then((res) => setRowLands(res.lands))
+    fetchRowsWithCache()
+      .then((res) => setRowLands(res.data.lands))
       .catch((err) => {
         handleApiError(err);
       });
   }, [handleApiError]);
 
   // Same event-driven wiring again — the phone never has its own notion of
-  // which carriers exist either.
+  // which carriers exist either. Same offline-cache-fallback as above.
   const loadCarriers = useCallback(() => {
-    api<{ carriers: PickerCarrier[] }>("/api/mobile/carriers")
-      .then((res) => setCarriers(res.carriers))
+    fetchCarriersWithCache()
+      .then((res) => setCarriers(res.data.carriers))
       .catch((err) => {
         handleApiError(err);
       });
@@ -399,11 +402,13 @@ export function HomeScreen() {
     }
     // clientStartedAt: the phone's own clock reading of this exact tap,
     // captured now rather than whenever the request actually reaches the
-    // server — if this goes into the offline queue (offlineQueue.ts) and
-    // replays hours later, the server still rounds against the real tap
-    // moment instead of the delayed sync time (see mobileTime.ts's
-    // resolveOriginalStartedAt). Only meaningful to the server when this
-    // turns out to be a genuine workday start, not an activity change —
+    // server — this is what's frozen into the local event (see
+    // WorkSessionContext.tsx's commitLocalEvent/localEventStore.ts) and
+    // synced later, however long that takes, so the server still rounds
+    // against the real tap moment instead of whenever sync happens to land
+    // (see mobileTime.ts's resolveOriginalStartedAt). Only meaningful to
+    // the server when this turns out to be a genuine workday start, not an
+    // activity change —
     // sent unconditionally anyway since it's cheap and this same call site
     // serves both cases.
     perform(
@@ -854,12 +859,24 @@ export function HomeScreen() {
       {/* 5. Recent jobs */}
       <RecentJobsCard jobs={me!.recentJobs} language={language} />
 
-      {/* 6. Sync/offline status */}
-      <div className="connection-bar">
-        <span className={`connection-dot ${online ? "online" : "offline"}`} />
-        {t(language, online ? "online" : "offline")}
-        {pending > 0 && <span className="pending-badge">{t(language, "pendingSync", { count: pending })}</span>}
-      </div>
+      {/* 6. Sync/offline status — one derivation (computeSyncIndicatorState)
+          shared with SettingsScreen's Sync section, so the two can't show
+          different things for the same underlying state. Exactly the
+          plan's four states: Synced / N pending / Offline — N pending /
+          Sync problem. */}
+      {(() => {
+        const syncState = computeSyncIndicatorState({ online, pending, syncProblem });
+        return (
+          <div className="connection-bar">
+            <span className={`connection-dot ${syncState === "synced" || syncState === "pending" ? "online" : "offline"}`} />
+            {syncState === "synced" && t(language, "synced")}
+            {syncState === "pending" && t(language, "online")}
+            {syncState === "offline" && (pending > 0 ? t(language, "offlinePending", { count: pending }) : t(language, "offline"))}
+            {syncState === "problem" && t(language, "syncProblem")}
+            {syncState === "pending" && <span className="pending-badge">{t(language, "pendingSync", { count: pending })}</span>}
+          </div>
+        );
+      })()}
       {pendingActivityName && (
         <p className="mobile-pending-banner">
           {t(language, "switchingToPending", { name: pendingActivityName })}

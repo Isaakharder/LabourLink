@@ -9,6 +9,7 @@ import {
   Settings,
   Smartphone,
   Sprout,
+  TriangleAlert,
   Users,
   Wrench,
 } from "lucide-react";
@@ -30,6 +31,7 @@ const PRIMARY_NAV: { to: string; icon: typeof LayoutDashboard; label: string; ro
   { to: "/activities", icon: ListChecks, label: "Activities" },
   { to: "/basic-data", icon: Database, label: "Basic data" },
   { to: "/devices", icon: Smartphone, label: "Devices" },
+  { to: "/sync-conflicts", icon: TriangleAlert, label: "Sync conflicts", roles: ["Administrator", "Manager"] },
   { to: "/setup", icon: Wrench, label: "Setup" },
 ];
 

@@ -19,6 +19,19 @@ export default defineConfig({
     // the actual LAN address(es) on startup — no IP is hardcoded here.
     host: true,
   },
+  optimizeDeps: {
+    // jeep-sqlite (the browser/PWA backend behind @capacitor-community/
+    // sqlite — see web/src/lib/sqlite/bootstrap.ts) ships a hand-built
+    // Emscripten/wasm glue module (sql.js). Vite's default esbuild-based
+    // dependency pre-bundling rewrites that glue in a way that breaks its
+    // expected WebAssembly imports — confirmed by reproducing a genuine
+    // `LinkError: WebAssembly.instantiate(): ... function import requires a
+    // callable` with these excluded from optimizeDeps. Excluding lets Vite
+    // serve them as-is; a known, documented category of issue for
+    // Emscripten-generated wasm packages under Vite's dev-time optimizer,
+    // not specific to this one plugin.
+    exclude: ["jeep-sqlite", "sql.js", "@capacitor-community/sqlite"],
+  },
   test: {
     include: ["src/**/*.test.{ts,tsx}"],
   },

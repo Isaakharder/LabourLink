@@ -1,11 +1,14 @@
 import { createContext, ReactNode, useCallback, useContext, useEffect, useState } from "react";
 import { useDevicePairing } from "./DevicePairingContext";
 import { api, ApiError, getPermanentDeviceAuthErrorCode, isServerUnreachableError } from "../lib/api";
-import { getCachedEmployeeSummary } from "../lib/device";
+import { getCachedEmployeeSummary, getOrCreateDeviceIdentifier } from "../lib/device";
 import { Language, resolveLanguage, t, translateServerMessage } from "../lib/i18n";
-import { enqueue, flushQueue, getPendingCount, isNetworkError } from "../lib/offlineQueue";
 import { detectReassignment } from "../lib/reassignment";
-import { uuid } from "../lib/uuid";
+import { getLocalEventStore, LocalEventType } from "../lib/localEventStore";
+import { applyLocalEventToMe, foldPendingEventsOntoMe, LocalDisplayInfo } from "../lib/localSessionState";
+import { resolveDisplayLabels } from "../lib/referenceDataCache";
+import { hasSyncProblem, onSyncSettled, trySyncSoon } from "../lib/syncEngine";
+import { QuestionAnswer } from "../lib/activityQuestionTypes";
 import { RecentJob } from "../components/mobile/RecentJobsCard";
 
 export interface CurrentActivity {
@@ -52,7 +55,12 @@ export interface MeResponse {
 
 // While the server hasn't yet been reached this poll cycle, retry this
 // often — only runs while serverReachable is false (see the effect below),
-// so a healthy app never has a background timer running at all.
+// so a healthy app never has a background timer running at all. This is a
+// RECONCILIATION poll (catching up the full authoritative MeResponse —
+// employee info, recentJobs, precise accumulated seconds) — it has nothing
+// to do with whether local actions work: those are always immediate and
+// durable regardless of server reachability, see perform()/commitLocalEvent
+// below.
 const RECONNECT_POLL_INTERVAL_MS = 15000;
 
 interface PerformOptions {
@@ -61,23 +69,26 @@ interface PerformOptions {
   // flow sheet) — irrelevant to break/end-day callers, which have no such
   // sheets open when they call perform.
   onResolved?: () => void;
-  // Structured 409 interception — e.g. HomeScreen's same-row/minimum-
-  // duration switch warnings (see lib/nfcSwitchWarning.ts and
-  // mobileTime.ts's SAME_ROW_RECENTLY_COMPLETED/MINIMUM_DURATION_NOT_
-  // REACHED codes). Called with the raw ApiError for any non-network,
-  // non-5xx failure; returning true means "I handled this, don't show the
-  // generic translated error banner." A caller that doesn't pass this (or
-  // whose check returns false) gets today's unchanged generic-error
-  // behavior.
+  // No longer invoked — kept on the interface so existing callers (e.g.
+  // HomeScreen's switch-warning handling) don't need changes yet. The
+  // synchronous 409 round trip this used to intercept doesn't happen
+  // anymore: local actions commit immediately and reconcile against the
+  // server later (see Conflict handling, Stage 5), not via a blocking
+  // pre-commit rejection. checkSwitchWarning's own CLIENT-SIDE pre-check
+  // (lib/nfcSwitchWarning.ts, which runs in HomeScreen BEFORE perform() is
+  // ever called) is what still catches the common same-row/minimum-
+  // duration cases up front.
   onConflict?: (err: ApiError) => boolean;
-  // Fired unconditionally once this call is fully finished — success,
-  // offline-queued, 5xx, a handled conflict, or a generic error — covering
-  // every exit path in one place (perform's own finally block) rather than
-  // requiring each caller to reconstruct "did this settle yet" from
-  // onResolved/onConflict, which only fire on some paths. Used by
-  // HomeScreen's foreground NFC scanning to clear its in-flight-scan guard
-  // regardless of how the request concluded.
+  // Fired unconditionally once this call is fully finished.
   onSettled?: () => void;
+  // What HomeScreen already knows about the activity/row/carrier being
+  // committed (it just resolved these to render its own picker UI) — used
+  // to build an immediately-readable optimistic MeResponse instead of
+  // leaving names blank until the next sync. Falls back to whatever's in
+  // Stage 2's local reference-data cache when omitted (e.g. NFC-scan-
+  // triggered switches, which know the ids but not necessarily the exact
+  // display strings HomeScreen would have shown).
+  localDisplay?: LocalDisplayInfo;
 }
 
 interface WorkSessionContextValue {
@@ -95,6 +106,11 @@ interface WorkSessionContextValue {
   error: string | null;
   setError: (error: string | null) => void;
   pending: number;
+  // True once syncEngine.ts has failed at least two consecutive attempts
+  // with no success in between — see lib/syncIndicator.ts's
+  // computeSyncIndicatorState, the single place this and `pending`/`online`
+  // combine into what the sync indicator actually shows.
+  syncProblem: boolean;
   pendingActivityName: string | null;
   // Set whenever a server response's employee id differs from the locally
   // cached one — an admin reassigned this physical device to someone else
@@ -126,6 +142,18 @@ const WorkSessionContext = createContext<WorkSessionContextValue | undefined>(un
 // screen, not just Home. Mounted once inside MobileLayout, which persists
 // across mobile route changes, so switching tabs never interrupts a poll or
 // resets status.
+//
+// LOCAL-FIRST: every action below (perform/startBreak/endBreak/
+// confirmEndDay) writes to the durable local SQLite event log
+// (lib/localEventStore.ts) FIRST, updates `me` from that local write
+// immediately, and only THEN fires an unawaited background sync attempt
+// (lib/syncEngine.ts). This is the SAME path online or offline — there is
+// no separate "try the network, fall back to a queue on failure" branch
+// anymore (that was the old design; see git history). loadMe()/the
+// reconnect poll below are a separate, ongoing RECONCILIATION path that
+// fetches the server's own authoritative view and reconciles it — that's
+// what keeps employee info/recentJobs/precise accumulated-seconds correct,
+// but it never blocks or gates the immediate local UI update.
 export function WorkSessionProvider({ children }: { children: ReactNode }) {
   const { cachedEmployee, markUnpaired, serverReachable, setServerReachable, refreshCachedEmployee } =
     useDevicePairing();
@@ -143,27 +171,26 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [online, setOnline] = useState(navigator.onLine);
-  const [pending, setPending] = useState(getPendingCount());
+  const [pending, setPending] = useState(0);
+  const [syncProblem, setSyncProblem] = useState(false);
   const [pendingActivityName, setPendingActivityName] = useState<string | null>(null);
   const [endDayConfirmOpen, setEndDayConfirmOpen] = useState(false);
   const [endDaySubmitting, setEndDaySubmitting] = useState(false);
   const [endDayError, setEndDayError] = useState<string | null>(null);
-  const [endDayIdempotencyKey, setEndDayIdempotencyKey] = useState<string | null>(null);
-  // The phone's own clock reading of the moment "Finish Work" was actually
-  // tapped (inside confirmEndDay, not when the confirmation dialog merely
-  // opened) — captured once and reused across a retry with the same
-  // endDayIdempotencyKey, the same "capture before the action is attempted,
-  // never re-capture on replay" principle work-start rounding's offline
-  // queue gets for free (the whole request body, including
-  // clientStartedAt, is queued once and replayed verbatim) but end-day has
-  // to do explicitly since it deliberately never goes through that queue
-  // (see confirmEndDay's own comment). Reset to null alongside a fresh
-  // idempotency key whenever the confirm dialog (re)opens.
-  const [endDayClientEndedAt, setEndDayClientEndedAt] = useState<string | null>(null);
   const [pendingReassignment, setPendingReassignment] = useState<MeResponse | null>(null);
 
+  const refreshPendingCount = useCallback(async () => {
+    const deviceId = getOrCreateDeviceIdentifier();
+    const count = await getLocalEventStore().getPendingCount(deviceId);
+    setPending(count);
+  }, []);
+
+  useEffect(() => {
+    void refreshPendingCount();
+  }, [refreshPendingCount]);
+
   // The single place every server response carrying an `employee` gets
-  // applied — loadMe, perform, and confirmEndDay all funnel through this
+  // applied — loadMe and acknowledgeReassignment funnel through this
   // rather than each setting me/verified/the cached employee directly, so
   // reassignment can never be missed from one of those call sites just
   // because it was added to another. Compares against the *persisted*
@@ -172,16 +199,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
   // mounted. When a reassignment is detected, `result` is held in
   // `pendingReassignment` instead of applied — me/verified/the cached
   // employee summary stay exactly as they were until acknowledgeReassignment
-  // runs. Deliberately does not touch the offline queue (offlineQueue.ts) in
-  // either branch: that queue lives in its own localStorage key untouched by
-  // anything here, so legitimate queued offline work survives a pending
-  // reassignment exactly as it would survive any other screen transition,
-  // and replays normally via flush() once the new employee's session
-  // resumes. Returns whether it applied immediately, so a caller with its
-  // own post-response cleanup (perform's onResolved, its picker-closing
-  // sheets) can skip that cleanup while a reassignment is pending — there's
-  // no point closing a sheet for an activity that belonged to whoever used
-  // to be paired here.
+  // runs. Returns whether it applied immediately.
   const applyMeResponse = useCallback(
     (result: MeResponse): boolean => {
       const cachedEmployeeId = getCachedEmployeeSummary()?.employeeId ?? null;
@@ -249,9 +267,22 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     [markUnpaired, setServerReachable]
   );
 
+  // RECONCILIATION — fetches the server's own authoritative view, then
+  // re-applies (folds) any still-unsynced local events on top of it before
+  // committing to `me`. The fold is what stops a stale server response
+  // (anything that predates a pending local event — today, that's
+  // EVERYTHING, since Stage 4's real sync endpoint doesn't exist yet) from
+  // clobbering genuine in-progress local work, e.g. on a cold app restart
+  // where `me` starts null and this is the very first thing that sets it.
+  // Never blocks/gates a local action; called after a successful sync
+  // (Stage 4) and on the same mount/reconnect/foreground triggers as before.
   const loadMe = useCallback(() => {
     api<MeResponse>("/api/mobile/me")
-      .then((res) => applyMeResponse(res))
+      .then(async (res) => {
+        const deviceId = getOrCreateDeviceIdentifier();
+        const merged = await foldPendingEventsOntoMe(deviceId, res);
+        applyMeResponse(merged);
+      })
       .catch((err) => {
         if (!handleApiError(err)) setError(t(language, "couldNotLoadStatus"));
       });
@@ -272,51 +303,27 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     return () => window.clearInterval(interval);
   }, [serverReachable, loadMe]);
 
-  const flush = useCallback(() => {
-    // flushQueue's own retry/drop logic only knows "network error" (keep
-    // queued) vs "anything else" (drop, report as rejected) — it has no
-    // notion of device-auth codes. A queued action replayed after the
-    // device was deactivated/unassigned while offline would otherwise just
-    // get silently dropped and reported as an ordinary "activity no longer
-    // available" rejection, never actually returning the app to Pairing.
-    // This flag, set from inside the send wrapper, is how that specific
-    // case still gets caught once the whole queue has drained.
-    let permanentFailureCode: string | null = null;
-    return flushQueue((path, body) =>
-      api(path, { method: "POST", body: JSON.stringify(body) }).catch((err) => {
-        const code = getPermanentDeviceAuthErrorCode(err);
-        if (code) permanentFailureCode = code;
-        throw err;
-      })
-    )
-      .then(({ rejected }) => {
-        setPending(getPendingCount());
-        if (permanentFailureCode) {
-          markUnpaired(permanentFailureCode);
-          return;
-        }
-        if (rejected.length > 0) {
-          setError(t(language, "queuedChangesFailed"));
-        }
-        if (getPendingCount() === 0) {
-          setPendingActivityName(null);
-        }
-        loadMe();
-      })
-      .catch(() => {});
-  }, [loadMe, markUnpaired, language]);
+  // Manual sync trigger — Settings' "Sync now" button and the network-
+  // restoration listener below both call this. Reconciles via loadMe()
+  // afterward regardless of whether the sync attempt itself found anything
+  // to send, so "Sync now" also doubles as a manual status refresh.
+  const flush = useCallback(async () => {
+    await trySyncSoon();
+    await refreshPendingCount();
+    loadMe();
+  }, [refreshPendingCount, loadMe]);
 
   useEffect(() => {
     function goOnline() {
       setOnline(true);
-      flush();
+      void flush();
     }
     function goOffline() {
       setOnline(false);
     }
     window.addEventListener("online", goOnline);
     window.addEventListener("offline", goOffline);
-    if (navigator.onLine) flush();
+    if (navigator.onLine) void flush();
     return () => {
       window.removeEventListener("online", goOnline);
       window.removeEventListener("offline", goOffline);
@@ -324,74 +331,167 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flush]);
 
+  // A background sync can be triggered by syncEngine.ts's own native
+  // lifecycle listeners (app resume, network restoration) with no user
+  // interaction and no guarantee this provider instance started it — this
+  // is what keeps the pending-count badge and the local-first-aware
+  // reconciled `me` state (see loadMe's foldPendingEventsOntoMe) fresh
+  // regardless of what actually triggered the sync that just settled.
+  useEffect(() => {
+    return onSyncSettled(() => {
+      void refreshPendingCount();
+      setSyncProblem(hasSyncProblem());
+      loadMe();
+    });
+  }, [refreshPendingCount, loadMe]);
+
+  // The one place every local-first action actually commits: durable
+  // SQLite write (target <100ms) -> immediate `me` update from that same
+  // event (target <250ms total) -> pending count refresh -> unawaited
+  // background sync kick-off. Every action below (perform/startBreak/
+  // endBreak/confirmEndDay) funnels through this — the single shared path
+  // regardless of which UI action triggered it or whether the device is
+  // online.
+  const commitLocalEvent = useCallback(
+    async (
+      eventType: LocalEventType,
+      occurredAtUtc: string,
+      fields: {
+        activityId?: string | null;
+        greenhouseRowId?: string | null;
+        carrierId?: string | null;
+        answers?: Record<string, QuestionAnswer> | null;
+      },
+      display: LocalDisplayInfo
+    ) => {
+      const deviceId = getOrCreateDeviceIdentifier();
+      const employeeId = me?.employee.id ?? getCachedEmployeeSummary()?.employeeId ?? "";
+      const store = getLocalEventStore();
+
+      const event = await store.appendEvent({
+        deviceId,
+        employeeId,
+        eventType,
+        occurredAtUtc,
+        activityId: fields.activityId ?? null,
+        greenhouseRowId: fields.greenhouseRowId ?? null,
+        carrierId: fields.carrierId ?? null,
+        answers: fields.answers ?? null,
+        // Density snapshotting still happens server-side at sync time for
+        // now (same as today's openEntry() resolveDensitySnapshot) — a
+        // client-side frozen snapshot captured from the reference cache is
+        // a Stage 6 refinement, not required for the local-first write/UI
+        // update itself to work correctly.
+        densitySnapshot: null,
+        configRevision: null,
+      });
+
+      setMe((prev) => applyLocalEventToMe(prev, event, display));
+      setPendingActivityName(null);
+      await refreshPendingCount();
+      void trySyncSoon();
+    },
+    [me, refreshPendingCount]
+  );
+
   const perform = useCallback(
     async (path: string, body: Record<string, unknown>, options?: PerformOptions) => {
       setBusy(true);
       setError(null);
       try {
-        const result = await api<MeResponse>(path, { method: "POST", body: JSON.stringify(body) });
-        if (applyMeResponse(result)) {
-          setPendingActivityName(null);
-          options?.onResolved?.();
-        }
+        const answers = (body.answers as Record<string, QuestionAnswer> | undefined) ?? {};
+        const rowAnswer = Object.values(answers).find((a) => a.questionType === "greenhouse_row");
+        const carrierAnswer = Object.values(answers).find((a) => a.questionType === "carrier");
+        const activityId = (body.activityId as string | undefined) ?? null;
+        const greenhouseRowId = rowAnswer?.greenhouseRowId ?? null;
+        const carrierId = carrierAnswer?.carrierId ?? null;
+
+        let eventType: LocalEventType;
+        if (path === "/api/mobile/time-entries/break/start") eventType = "break_start";
+        else if (path === "/api/mobile/time-entries/break/end") eventType = "break_end";
+        else eventType = me?.status === "work" ? "activity_switch" : "work_start";
+
+        const occurredAtUtc =
+          (body.clientStartedAt as string | undefined) ?? (body.clientEndedAt as string | undefined) ?? new Date().toISOString();
+
+        const display: LocalDisplayInfo =
+          options?.localDisplay ?? (await resolveDisplayLabels(activityId, greenhouseRowId, carrierId));
+        if (options?.pendingLabel && !display.activityName) display.activityName = options.pendingLabel;
+
+        await commitLocalEvent(eventType, occurredAtUtc, { activityId, greenhouseRowId, carrierId, answers }, display);
+        options?.onResolved?.();
       } catch (err) {
-        const permanentCode = getPermanentDeviceAuthErrorCode(err);
-        if (permanentCode) {
-          markUnpaired(permanentCode);
-          return;
-        }
-        if (isNetworkError(err)) {
-          enqueue({ id: body.idempotencyKey as string, path, body });
-          setPending(getPendingCount());
-          setServerReachable(false);
-          // Visible-but-honest: no timer starts locally for this — it only
-          // starts once a real server startedAt comes back after a
-          // successful flush. This just tells the employee what's queued.
-          if (options?.pendingLabel) setPendingActivityName(options.pendingLabel);
-          options?.onResolved?.();
-        } else if (err instanceof ApiError && err.status >= 500) {
-          setServerReachable(false);
-        } else if (err instanceof ApiError && options?.onConflict?.(err)) {
-          // Handled entirely by the caller's dialog (e.g. the same-row/
-          // minimum-duration switch warnings) — no generic error banner.
-          setServerReachable(true);
-        } else {
-          setServerReachable(true);
-          setError(
-            err instanceof ApiError ? translateServerMessage(language, err.message) : t(language, "somethingWentWrong")
-          );
-        }
+        console.error("[work-session] local commit failed:", err);
+        setError(t(language, "somethingWentWrong"));
       } finally {
         setBusy(false);
         options?.onSettled?.();
       }
     },
-    [applyMeResponse, markUnpaired, setServerReachable, language]
+    [commitLocalEvent, me, language]
   );
 
   // clientStartedAt/clientEndedAt: the phone's own clock reading of this
-  // exact tap, captured before the request is even attempted — same
-  // pattern as HomeScreen's chooseActivity/switchActivity. If this goes
-  // offline and lands in the queue (offlineQueue.ts), the whole body
-  // (including this timestamp) is replayed verbatim later, so the server
-  // rounds against the real tap moment instead of whenever the replay
-  // happens to land — several queued taps replayed back-to-back within
-  // the same second previously all rounded against REPLAY time, which is
-  // what fed the server's floor-guard fallback into a runaway cascade of
-  // ever-advancing, essentially fake timestamps (see server migration
-  // 040's own comment for the incident this caused).
-  const startBreak = useCallback(() => {
-    perform("/api/mobile/time-entries/break/start", { idempotencyKey: uuid(), clientStartedAt: new Date().toISOString() });
-  }, [perform]);
+  // exact tap, captured before the local commit even happens — this is the
+  // occurrence time frozen into the local event (and, eventually, the
+  // server's time_entries row) regardless of how long it sits pending
+  // before syncing. See localEventStore.ts's NewLocalEvent.occurredAtUtc.
+  const startBreak = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await commitLocalEvent("break_start", new Date().toISOString(), {}, {});
+    } catch (err) {
+      console.error("[work-session] break start failed:", err);
+      setError(t(language, "somethingWentWrong"));
+    } finally {
+      setBusy(false);
+    }
+  }, [commitLocalEvent, language]);
 
-  const endBreak = useCallback(() => {
-    perform("/api/mobile/time-entries/break/end", { idempotencyKey: uuid(), clientEndedAt: new Date().toISOString() });
-  }, [perform]);
+  // Resumes the exact interrupted run — same activity/row/carrier the break
+  // interrupted, per "break resume must preserve the original activity,
+  // row, carrier." Resolved from the local event log's own most recent
+  // WORK event (getLatestWorkEventForDevice), not from MeResponse's smaller
+  // PreviousActivity shape (which doesn't carry row/carrier) or any network
+  // round trip — this works identically online or offline.
+  const endBreak = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const deviceId = getOrCreateDeviceIdentifier();
+      const interrupted = await getLocalEventStore().getLatestWorkEventForDevice(deviceId);
+      const display = await resolveDisplayLabels(
+        interrupted?.activityId ?? null,
+        interrupted?.greenhouseRowId ?? null,
+        interrupted?.carrierId ?? null
+      );
+      await commitLocalEvent(
+        "break_end",
+        new Date().toISOString(),
+        {
+          activityId: interrupted?.activityId ?? null,
+          greenhouseRowId: interrupted?.greenhouseRowId ?? null,
+          carrierId: interrupted?.carrierId ?? null,
+          // Carried over verbatim from the interrupted run's own event —
+          // already a Record<string, QuestionAnswer> when it came from a
+          // work_start/activity_switch, just typed generically on
+          // LocalEvent (localEventStore.ts has no reason to know about
+          // QuestionAnswer's shape).
+          answers: (interrupted?.answers as Record<string, QuestionAnswer> | null | undefined) ?? null,
+        },
+        display
+      );
+    } catch (err) {
+      console.error("[work-session] break end failed:", err);
+      setError(t(language, "somethingWentWrong"));
+    } finally {
+      setBusy(false);
+    }
+  }, [commitLocalEvent, language]);
 
   const openEndDayConfirm = useCallback(() => {
     setEndDayError(null);
-    setEndDayIdempotencyKey(uuid());
-    setEndDayClientEndedAt(null);
     setEndDayConfirmOpen(true);
   }, []);
 
@@ -401,59 +501,24 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     setEndDayError(null);
   }, [endDaySubmitting]);
 
-  // Deliberately bypasses perform(): ending the day must never be silently
-  // queued for later (per requirement — it's the one action that should
-  // require a live connection), whereas perform()'s network-error branch
-  // exists specifically to queue everything else for offline replay.
+  // Local-first, same as every other action — the "Finish Work must be
+  // online" restriction has been removed (confirmed decision: end-of-day is
+  // now a normal queueable local event like everything else). The
+  // confirmation DIALOG itself is unrelated UX (a deliberate "are you sure"
+  // safety check) and stays regardless of connectivity.
   const confirmEndDay = useCallback(async () => {
-    if (!online) {
-      setEndDayError(t(language, "mustBeOnlineToFinish"));
-      return;
-    }
-    if (!endDayIdempotencyKey) return;
-
-    // Captured on the first attempt only — a retry (network hiccup, tapping
-    // Finish Work again after an error) reuses this same value rather than
-    // capturing a fresh "now," so work-end rounding on the server rounds
-    // against the moment Finish Work was actually tapped, not whenever the
-    // retry happened to land. React state updates inside this same
-    // callback aren't visible until the next render, so the value to send
-    // is resolved into a local first, and only written back to state if it
-    // didn't already exist.
-    const clientEndedAt = endDayClientEndedAt ?? new Date().toISOString();
-    if (!endDayClientEndedAt) setEndDayClientEndedAt(clientEndedAt);
-
     setEndDaySubmitting(true);
     setEndDayError(null);
     try {
-      const result = await api<MeResponse>("/api/mobile/time-entries/end-day", {
-        method: "POST",
-        body: JSON.stringify({ idempotencyKey: endDayIdempotencyKey, clientEndedAt }),
-      });
-      applyMeResponse(result);
+      await commitLocalEvent("end_day", new Date().toISOString(), {}, {});
       setEndDayConfirmOpen(false);
     } catch (err) {
-      const permanentCode = getPermanentDeviceAuthErrorCode(err);
-      if (permanentCode) {
-        markUnpaired(permanentCode);
-        return;
-      }
-      // Stay open, reusing the same idempotency key on retry — if the first
-      // attempt actually succeeded server-side but the response was lost, a
-      // retry with the same key returns that same result instead of ending
-      // the day twice.
-      if (isServerUnreachableError(err)) {
-        setServerReachable(false);
-        setEndDayError(t(language, "couldNotReachServer"));
-      } else {
-        setEndDayError(
-          err instanceof ApiError ? translateServerMessage(language, err.message) : t(language, "couldNotFinishWork")
-        );
-      }
+      console.error("[work-session] end day failed:", err);
+      setEndDayError(t(language, "somethingWentWrong"));
     } finally {
       setEndDaySubmitting(false);
     }
-  }, [online, endDayIdempotencyKey, endDayClientEndedAt, applyMeResponse, markUnpaired, setServerReachable, language]);
+  }, [commitLocalEvent, language]);
 
   return (
     <WorkSessionContext.Provider
@@ -466,6 +531,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         error,
         setError,
         pending,
+        syncProblem,
         pendingActivityName,
         pendingReassignment,
         acknowledgeReassignment,

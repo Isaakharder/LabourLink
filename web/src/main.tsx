@@ -3,7 +3,26 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
+import { getLocalEventStore } from "./lib/localEventStore";
+import { initSyncLifecycleTriggers } from "./lib/syncEngine";
 import "./index.css";
+
+// Kicked off here, not awaited — React still renders immediately (same
+// "never block first paint" convention as everything else in this file).
+// Every real caller (WorkSessionContext) awaits getLocalEventStore()'s own
+// internal init promise, which is already warm by the time anyone needs it
+// for anything past the very first cold app launch.
+void getLocalEventStore()
+  .init()
+  .catch((err) => console.error("[local-event-store] init failed:", err));
+
+// Native-only (no-ops immediately on browser/PWA) — wires @capacitor/network
+// and @capacitor/app listeners so a background sync attempt starts the
+// moment connectivity returns or the app is foregrounded again, on top of
+// the browser 'online'/visibilitychange triggers WorkSessionContext already
+// has. See syncEngine.ts's own comment for the honest caveat about Android
+// background-execution limits this does NOT get around.
+void initSyncLifecycleTriggers().catch((err) => console.error("[sync-engine] lifecycle trigger init failed:", err));
 
 // Available for any Android-specific styling that isn't safe to apply
 // everywhere (unlike the top-safe-area padding in index.css's

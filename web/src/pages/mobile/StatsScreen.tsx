@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
+import { ChevronLeft } from "lucide-react";
+import { Link } from "react-router-dom";
 import { useWorkSession } from "../../context/WorkSessionContext";
 import { api } from "../../lib/api";
 import { Language, t } from "../../lib/i18n";
@@ -76,7 +78,18 @@ export function StatsScreen() {
 
   return (
     <div className="mobile-stats">
-      <h1>{t(language, "statsTitle")}</h1>
+      {/* App navigation (React Router), never browser/hardware back — same
+          reasoning as SettingsScreen's identical header: a plain back
+          gesture could just as easily leave LabourLink entirely (e.g. this
+          screen reached from a push notification), which isn't reliably
+          "the job/activity picker" at all. This always goes to exactly one
+          place — Home, where an employee picks their activity/row/etc. */}
+      <div className="mobile-settings-header">
+        <Link to="/mobile/home" className="mobile-settings-back" aria-label={t(language, "statsBackToHome")}>
+          <ChevronLeft size={22} aria-hidden="true" />
+        </Link>
+        <h1>{t(language, "statsTitle")}</h1>
+      </div>
 
       {error && !weeks && <p className="error-text">{error}</p>}
       {!weeks && !error && <p className="mobile-stats-loading">{t(language, "loading")}</p>}

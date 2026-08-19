@@ -46,6 +46,9 @@ const TRANSLATIONS_EN = {
   online: "Online",
   offline: "Offline",
   pendingSync: (p: Params) => `${p.count} pending sync`,
+  synced: "Synced",
+  syncProblem: "Sync problem",
+  offlinePending: (p: Params) => `Offline — ${p.count} pending`,
   switchingToPending: (p: Params) => `Switching to ${p.name} — will sync when back online`,
 
   // --- Primary actions ---
@@ -130,6 +133,7 @@ const TRANSLATIONS_EN = {
 
   // --- Stats screen ---
   statsTitle: "Stats",
+  statsBackToHome: "Back to Home",
   statsLoadError: "Could not load stats",
   statsNoData: "No speed data this week",
   statsHoursSuffix: "hrs",
@@ -165,6 +169,9 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   online: "En línea",
   offline: "Sin conexión",
   pendingSync: (p) => `${p.count} pendiente(s) de sincronizar`,
+  synced: "Sincronizado",
+  syncProblem: "Problema de sincronización",
+  offlinePending: (p) => `Sin conexión — ${p.count} pendiente(s)`,
   switchingToPending: (p) => `Cambiando a ${p.name} — se sincronizará cuando vuelva la conexión`,
 
   chooseJob: "Elegir un trabajo",
@@ -236,6 +243,7 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   navStats: "Estadísticas",
 
   statsTitle: "Estadísticas",
+  statsBackToHome: "Volver al inicio",
   statsLoadError: "No se pudieron cargar las estadísticas",
   statsNoData: "Sin datos de velocidad esta semana",
   statsHoursSuffix: "h",

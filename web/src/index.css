@@ -1767,6 +1767,87 @@ input {
   gap: 0.5rem;
 }
 
+.report-employee-filter-bar {
+  margin-bottom: 1rem;
+  padding: 1rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.report-employee-filter-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.report-employee-filter-toolbar h2 {
+  margin: 0 0 0.15rem;
+  font-size: 0.95rem;
+}
+
+.report-employee-filter-toolbar p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 0.82rem;
+}
+
+.report-employee-filter-actions {
+  display: flex;
+  gap: 0.55rem;
+}
+
+.report-employee-filter-actions button {
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-size: 0.82rem;
+}
+
+.report-employee-search {
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.88rem;
+  margin-bottom: 0.85rem;
+}
+
+.report-employee-filter-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.55rem 0.85rem;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.report-employee-filter-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  font-size: 0.88rem;
+}
+
+.report-employee-filter-item span:first-of-type {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.report-employee-inactive {
+  margin-left: auto;
+  font-size: 0.72rem;
+  color: var(--color-muted);
+}
+
 .employee-form-photo-controls button {
   padding: 0.45rem 0.8rem;
   border: 1px solid var(--color-border);
@@ -2040,6 +2121,16 @@ input {
     max-width: 100%;
     max-height: 100vh;
     border-radius: 0;
+  }
+
+  .report-employee-filter-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .report-employee-filter-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
   }
 }
 
@@ -4575,6 +4666,206 @@ input {
   white-space: pre-wrap;
   font-size: 1rem;
   margin-bottom: 0.5rem;
+}
+
+/* ---------- Mobile: Employees screen (SettingsScreen's Administrator
+   Tools > Employees) ---------- */
+
+.mobile-employees-screen,
+.mobile-messages-screen {
+  width: 100%;
+}
+
+.mobile-employees-controls {
+  width: 100%;
+  max-width: 480px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  text-align: left;
+}
+
+.mobile-employees-search,
+.mobile-employees-filter-row select {
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font: inherit;
+}
+
+.mobile-employees-filter-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.mobile-employees-filter-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+.mobile-employees-updated {
+  font-size: 0.78rem;
+  color: var(--color-muted);
+  margin: 0;
+}
+
+.mobile-employees-list {
+  width: 100%;
+  max-width: 480px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  text-align: left;
+  /* Its own scroll container so the pull-to-refresh gesture (tracked from
+     this element's own scrollTop, see EmployeesScreen.tsx) only fires when
+     the list itself — not the whole page — is already at the top. */
+  overflow-y: auto;
+}
+
+.mobile-employees-pull-indicator {
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  margin: 0;
+}
+
+.mobile-employees-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.mobile-employees-skeleton-card {
+  height: 92px;
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, var(--color-surface) 25%, var(--color-border) 50%, var(--color-surface) 75%);
+  background-size: 200% 100%;
+  animation: mobile-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes mobile-skeleton-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.mobile-employee-card {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+}
+
+.mobile-employee-card-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.mobile-employee-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.mobile-employee-card-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-employee-card-status {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+}
+
+.mobile-employee-card-status-working {
+  background: color-mix(in srgb, var(--color-success, #2f9e44) 18%, transparent);
+  color: var(--color-success, #2f9e44);
+}
+
+.mobile-employee-card-status-on_break {
+  background: color-mix(in srgb, var(--color-warning, #e8590c) 18%, transparent);
+  color: var(--color-warning, #e8590c);
+}
+
+.mobile-employee-card-activity {
+  font-weight: 500;
+}
+
+.mobile-employee-card-location {
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.mobile-employee-card-row {
+  font-size: 0.85rem;
+  color: var(--color-muted);
+  display: flex;
+  gap: 0.3rem;
+}
+
+/* ---------- Mobile: Messages screen (SettingsScreen's Administrator
+   Tools > Messages) — reuses the desktop .message-* classes above for the
+   compose form itself; these are the mobile-only additions (select all/
+   clear all, per-recipient device indicator, confirm/result steps). ---------- */
+
+.mobile-messages-compose,
+.mobile-messages-confirm,
+.mobile-messages-result {
+  width: 100%;
+  max-width: 480px;
+  text-align: left;
+}
+
+.mobile-messages-select-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.mobile-message-recipient-item {
+  justify-content: flex-start;
+}
+
+.mobile-message-no-device {
+  margin-left: auto;
+  font-size: 0.72rem;
+  color: var(--color-muted);
+}
+
+.mobile-messages-preview-text {
+  white-space: pre-wrap;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.7rem;
+  background: var(--color-surface);
+}
+
+.mobile-messages-preview-meta {
+  font-weight: 600;
+}
+
+.mobile-messages-preview-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+  max-height: 160px;
+  overflow-y: auto;
 }
 
 .message-detail-meta {

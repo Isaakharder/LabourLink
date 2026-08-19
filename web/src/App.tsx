@@ -17,13 +17,17 @@ import { ReportViewPage } from "./pages/desktop/ReportViewPage";
 import { ResetPinPage } from "./pages/desktop/ResetPinPage";
 import { SettingsPage } from "./pages/desktop/SettingsPage";
 import { SetupPage } from "./pages/desktop/SetupPage";
+import { SyncConflictsPage } from "./pages/desktop/SyncConflictsPage";
 import { RequireRole } from "./components/auth/RequireRole";
 import { DeviceDeactivatedScreen } from "./pages/mobile/DeviceDeactivatedScreen";
+import { EmployeesScreen } from "./pages/mobile/EmployeesScreen";
 import { HomeScreen } from "./pages/mobile/HomeScreen";
+import { MessagesScreen } from "./pages/mobile/MessagesScreen";
 import { NfcDiagnosticScreen } from "./pages/mobile/NfcDiagnosticScreen";
 import { PairingScreen } from "./pages/mobile/PairingScreen";
 import { RegisterExistingTagScreen } from "./pages/mobile/RegisterExistingTagScreen";
 import { SettingsScreen } from "./pages/mobile/SettingsScreen";
+import { SyncStatusScreen } from "./pages/mobile/SyncStatusScreen";
 import { WriteNewTagScreen } from "./pages/mobile/WriteNewTagScreen";
 import { StatsScreen } from "./pages/mobile/StatsScreen";
 import { useIsMobile } from "./lib/useIsMobile";
@@ -90,6 +94,14 @@ function DesktopApp() {
         <Route path="activities/*" element={<ActivitiesPage />} />
         <Route path="basic-data/*" element={<BasicDataPage />} />
         <Route path="devices" element={<DevicesPage />} />
+        <Route
+          path="sync-conflicts"
+          element={
+            <RequireRole roles={["Administrator", "Manager"]}>
+              <SyncConflictsPage />
+            </RequireRole>
+          }
+        />
         <Route path="setup/*" element={<SetupPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/inputs" replace />} />
@@ -125,6 +137,9 @@ function MobileApp() {
         <Route path="home" element={<HomeScreen />} />
         <Route path="stats" element={<StatsScreen />} />
         <Route path="settings" element={<SettingsScreen />} />
+        <Route path="settings/employees" element={<EmployeesScreen />} />
+        <Route path="settings/messages" element={<MessagesScreen />} />
+        <Route path="settings/sync-status" element={<SyncStatusScreen />} />
         <Route path="settings/nfc-diagnostic" element={<NfcDiagnosticScreen />} />
         <Route path="settings/register-tag" element={<RegisterExistingTagScreen />} />
         <Route path="settings/write-tag" element={<WriteNewTagScreen />} />
