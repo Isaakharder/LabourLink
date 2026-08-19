@@ -7,9 +7,11 @@
 // DashboardPage.test.tsx / InputsPage.switching.test.tsx.
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReportViewPage } from "./ReportViewPage";
+import { api } from "../../lib/api";
 import { PayrollReportData, SavedReportDetail } from "../../lib/reportTypes";
 
 const report: SavedReportDetail = {
@@ -75,6 +77,9 @@ vi.mock("../../lib/api", () => {
     ApiError,
     api: vi.fn((path: string) => {
       if (path === "/api/reports/report-1") return Promise.resolve({ report });
+      if (path === "/api/employees") {
+        return Promise.resolve({ employees: [{ id: "lester", firstName: "Lester", lastName: "Langaoen", isActive: true }] });
+      }
       if (path.startsWith("/api/reports/report-1/data")) return Promise.resolve({ data: payrollData });
       return Promise.reject(new Error(`Unhandled mock api() call in test: ${path}`));
     }),
@@ -119,5 +124,20 @@ describe("ReportViewPage — Payroll Report H:MM formatting", () => {
     expect(tenTwentyFive.length).toBeGreaterThanOrEqual(3);
     expect(screen.getByText("Hours (H:MM)")).toBeInTheDocument();
     expect(screen.getByText("Work hours (H:MM)")).toBeInTheDocument();
+  });
+
+  it("reloads report data with employeeIds when an employee is selected from the top filter", async () => {
+    const user = userEvent.setup();
+    const apiMock = vi.mocked(api);
+
+    renderPage();
+    await screen.findAllByText("10:25");
+
+    await user.click(screen.getByRole("button", { name: "Employees" }));
+    await user.click(screen.getByRole("checkbox"));
+
+    expect(apiMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/reports/report-1/data?start=2026-08-10&end=2026-08-10&employeeIds=lester")
+    );
   });
 });

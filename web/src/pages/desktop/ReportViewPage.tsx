@@ -25,6 +25,13 @@ import { startOfWeekMonday, addCalendarDays, todayInAppTimezone } from "../../li
 // from before this pivot rework.
 const PAYROLL_SUBTABLE_METRICS = ["daysWorked", "activityBreakdown", "weeklyTotals"] as const;
 
+interface ReportEmployeeOption {
+  id: string;
+  firstName: string;
+  lastName: string;
+  isActive: boolean;
+}
+
 function defaultDateRange(): DateRange {
   const start = startOfWeekMonday(todayInAppTimezone());
   return { start, end: addCalendarDays(start, 6) };
@@ -43,6 +50,10 @@ export function ReportViewPage() {
   const [editingMetrics, setEditingMetrics] = useState(false);
   const [pivotMetric, setPivotMetric] = useState<string | null>(null);
   const [previewMode, setPreviewMode] = useState<"print" | "pdf" | null>(null);
+  const [employees, setEmployees] = useState<ReportEmployeeOption[] | null>(null);
+  const [employeeFilterOpen, setEmployeeFilterOpen] = useState(false);
+  const [employeeSearch, setEmployeeSearch] = useState("");
+  const [selectedEmployeeIds, setSelectedEmployeeIds] = useState<string[]>([]);
 
   useEffect(() => {
     if (!id) return;
@@ -55,15 +66,25 @@ export function ReportViewPage() {
       .catch((err) => setLoadError(err instanceof ApiError ? err.message : "Could not load report"));
   }, [id]);
 
+	useEffect(() => {
+		api<{ employees: ReportEmployeeOption[] }>("/api/employees")
+			.then((res) => setEmployees(res.employees))
+			.catch(() => setEmployees([]));
+	}, []);
+
   const loadData = useCallback(() => {
     if (!id) return;
     setDataError(null);
+    const params = new URLSearchParams({ start: dateRange.start, end: dateRange.end });
+    if (selectedEmployeeIds.length > 0) {
+      params.set("employeeIds", selectedEmployeeIds.join(","));
+    }
     api<{ data: ActivityReportData | PayrollReportData }>(
-      `/api/reports/${id}/data?start=${dateRange.start}&end=${dateRange.end}`
+      `/api/reports/${id}/data?${params.toString()}`
     )
       .then((res) => setData(res.data))
       .catch((err) => setDataError(err instanceof ApiError ? err.message : "Could not generate report"));
-  }, [id, dateRange]);
+  }, [id, dateRange, selectedEmployeeIds]);
 
   useEffect(() => {
     if (report) loadData();
@@ -94,7 +115,21 @@ export function ReportViewPage() {
     setMetrics((prev) => (prev.includes(key) ? prev.filter((m) => m !== key) : [...prev, key]));
   }
 
+  function toggleEmployee(id: string) {
+    setSelectedEmployeeIds((prev) => (prev.includes(id) ? prev.filter((value) => value !== id) : [...prev, id]));
+  }
+
   const isActivity = report?.reportType === "activity";
+  const selectedEmployeeIdSet = useMemo(() => new Set(selectedEmployeeIds), [selectedEmployeeIds]);
+  const selectedEmployeeCount = selectedEmployeeIds.length;
+  const employeeSearchTerm = employeeSearch.trim().toLowerCase();
+  const filteredEmployees = useMemo(() => {
+    const list = employees ?? [];
+    if (!employeeSearchTerm) return list;
+    return list.filter((employee) =>
+      `${employee.firstName} ${employee.lastName}`.toLowerCase().includes(employeeSearchTerm)
+    );
+  }, [employees, employeeSearchTerm]);
 
   // Which configured metrics can actually fill a pivot cell for this report
   // type — falls back to a sensible default ("workTime") if the report has
@@ -164,10 +199,18 @@ export function ReportViewPage() {
               {report.activity ? ` · ${report.activity.name}` : ""}
               {" · "}
               {dateRange.start} – {dateRange.end}
+              {selectedEmployeeCount > 0 ? ` · ${selectedEmployeeCount} employee${selectedEmployeeCount === 1 ? "" : "s"} selected` : ""}
             </p>
           </div>
         </div>
         <div className="report-view-actions">
+          <button type="button" onClick={() => setEmployeeFilterOpen((open) => !open)}>
+            {employeeFilterOpen
+              ? "Close Employees"
+              : selectedEmployeeCount > 0
+                ? `Employees (${selectedEmployeeCount})`
+                : "Employees"}
+          </button>
           <button type="button" onClick={() => setEditingMetrics((v) => !v)}>
             {editingMetrics ? "Close Metrics" : "Edit Metrics"}
           </button>
@@ -182,6 +225,59 @@ export function ReportViewPage() {
           </button>
         </div>
       </header>
+
+      {employeeFilterOpen && (
+        <section className="report-employee-filter-bar">
+          <div className="report-employee-filter-toolbar">
+            <div>
+              <h2>Employees</h2>
+              <p>{selectedEmployeeCount > 0 ? `${selectedEmployeeCount} selected` : "Showing all employees"}</p>
+            </div>
+            <div className="report-employee-filter-actions">
+              <button type="button" onClick={() => setSelectedEmployeeIds([])} disabled={selectedEmployeeCount === 0}>
+                Clear
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedEmployeeIds((employees ?? []).map((employee) => employee.id))}
+                disabled={!employees || employees.length === 0}
+              >
+                Select all
+              </button>
+            </div>
+          </div>
+
+          <input
+            type="text"
+            className="report-employee-search"
+            placeholder="Search employees..."
+            value={employeeSearch}
+            onChange={(e) => setEmployeeSearch(e.target.value)}
+          />
+
+          <div className="report-employee-filter-list">
+            {!employees ? (
+              <p className="placeholder-page">Loading employees...</p>
+            ) : filteredEmployees.length === 0 ? (
+              <p className="placeholder-page">No employees match.</p>
+            ) : (
+              filteredEmployees.map((employee) => (
+                <label key={employee.id} className="report-employee-filter-item">
+                  <input
+                    type="checkbox"
+                    checked={selectedEmployeeIdSet.has(employee.id)}
+                    onChange={() => toggleEmployee(employee.id)}
+                  />
+                  <span>
+                    {employee.firstName} {employee.lastName}
+                  </span>
+                  {!employee.isActive && <span className="report-employee-inactive">Inactive</span>}
+                </label>
+              ))
+            )}
+          </div>
+        </section>
+      )}
 
       {editingMetrics && (
         <fieldset className="report-metrics-fieldset">
