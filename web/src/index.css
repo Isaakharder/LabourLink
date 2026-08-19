@@ -43,6 +43,19 @@ input {
   font-size: 0.9rem;
 }
 
+.mobile-sheet-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.mobile-sheet-error .mobile-action-button {
+  width: auto;
+  padding: 0.5rem 1.25rem;
+}
+
 .success-text {
   color: var(--color-primary);
   font-size: 0.9rem;

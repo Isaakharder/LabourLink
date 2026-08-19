@@ -46,6 +46,12 @@ vi.mock("../lib/localEventStore", () => ({
     setSyncMeta: mockSetSyncMeta,
     getCachedJson: mockGetCachedJson,
   }),
+  // A real (module-level, not per-store-instance) named export as of the
+  // timestamped-checkpoint instrumentation added alongside the bounded
+  // local-commit timeout — WorkSessionContext.tsx calls this directly, so
+  // the mock needs to provide it too, even though this test doesn't
+  // assert on its output.
+  logCheckpoint: vi.fn(),
 }));
 
 vi.mock("../lib/api", async () => {

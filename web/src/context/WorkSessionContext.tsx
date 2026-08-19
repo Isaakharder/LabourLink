@@ -4,12 +4,48 @@ import { api, ApiError, getPermanentDeviceAuthErrorCode, isServerUnreachableErro
 import { getCachedEmployeeSummary, getOrCreateDeviceIdentifier } from "../lib/device";
 import { Language, resolveLanguage, t, translateServerMessage } from "../lib/i18n";
 import { detectReassignment } from "../lib/reassignment";
-import { getLocalEventStore, LocalEventType } from "../lib/localEventStore";
+import { getLocalEventStore, LocalEventType, logCheckpoint } from "../lib/localEventStore";
 import { applyLocalEventToMe, foldPendingEventsOntoMe, LocalDisplayInfo } from "../lib/localSessionState";
 import { resolveDisplayLabels } from "../lib/referenceDataCache";
 import { hasSyncProblem, onSyncSettled, trySyncSoon } from "../lib/syncEngine";
 import { QuestionAnswer } from "../lib/activityQuestionTypes";
 import { RecentJob } from "../components/mobile/RecentJobsCard";
+import { uuid } from "../lib/uuid";
+
+// Selecting a job/break/end-day must NEVER hang the UI indefinitely — see
+// commitLocalEvent's own comment for the real production incident
+// (tapping "General" on iOS Safari's PWA left the job sheet open, every
+// option gray, forever) this exists to bound. localEventStore.ts's web
+// path (webEventJournal.ts) already has its own internal open/transaction
+// timeouts, but this is an explicit, independent outer bound around the
+// WHOLE local commit (store write + display-label resolution + `me`
+// update + pending-count refresh) — defense in depth, not a replacement
+// for those, and generous enough (well above the journal's own worst-case
+// ~6s) that it only ever fires when something is genuinely stuck.
+const LOCAL_COMMIT_TIMEOUT_MS = 8000;
+
+class LocalCommitTimeoutError extends Error {
+  constructor() {
+    super("local commit timed out");
+    this.name = "LocalCommitTimeoutError";
+  }
+}
+
+function withCommitTimeout<T>(promise: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new LocalCommitTimeoutError()), LOCAL_COMMIT_TIMEOUT_MS);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
 
 export interface CurrentActivity {
   id: string;
@@ -105,6 +141,12 @@ interface WorkSessionContextValue {
   online: boolean;
   error: string | null;
   setError: (error: string | null) => void;
+  // Non-null only when the LAST perform()/startBreak/endBreak call timed
+  // out locally (never for a genuine rejection) — calling it retries the
+  // exact same tap with the exact same idempotencyKey, so it can never
+  // produce a duplicate. See commitLocalEvent's own comment for the real
+  // incident this exists to recover from.
+  retryAction: (() => void) | null;
   pending: number;
   // True once syncEngine.ts has failed at least two consecutive attempts
   // with no success in between — see lib/syncIndicator.ts's
@@ -128,6 +170,9 @@ interface WorkSessionContextValue {
   endDayConfirmOpen: boolean;
   endDaySubmitting: boolean;
   endDayError: string | null;
+  // Same idea as `retryAction` above, scoped to the end-day confirm
+  // dialog specifically so it never surfaces on an unrelated screen.
+  endDayRetryAction: (() => void) | null;
   openEndDayConfirm: () => void;
   closeEndDayConfirm: () => void;
   confirmEndDay: () => void;
@@ -170,6 +215,14 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
   const [verified, setVerified] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set only when the LAST local commit failed by timing out (never for a
+  // genuine rejection — those aren't safely retryable the same way). Holds
+  // a closure that re-runs the exact same attempt, idempotencyKey and all,
+  // so retrying can never produce a duplicate — see commitLocalEvent's
+  // clientEventId parameter and each of perform/startBreak/endBreak/
+  // confirmEndDay below, which all generate their id ONCE outside the
+  // retryable closure, not fresh on every attempt.
+  const [retryAction, setRetryAction] = useState<(() => void) | null>(null);
   const [online, setOnline] = useState(navigator.onLine);
   const [pending, setPending] = useState(0);
   const [syncProblem, setSyncProblem] = useState(false);
@@ -177,6 +230,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
   const [endDayConfirmOpen, setEndDayConfirmOpen] = useState(false);
   const [endDaySubmitting, setEndDaySubmitting] = useState(false);
   const [endDayError, setEndDayError] = useState<string | null>(null);
+  const [endDayRetryAction, setEndDayRetryAction] = useState<(() => void) | null>(null);
   const [pendingReassignment, setPendingReassignment] = useState<MeResponse | null>(null);
 
   const refreshPendingCount = useCallback(async () => {
@@ -346,13 +400,37 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
   }, [refreshPendingCount, loadMe]);
 
   // The one place every local-first action actually commits: durable
-  // SQLite write (target <100ms) -> immediate `me` update from that same
+  // local write (target <100ms) -> immediate `me` update from that same
   // event (target <250ms total) -> pending count refresh -> unawaited
   // background sync kick-off. Every action below (perform/startBreak/
   // endBreak/confirmEndDay) funnels through this — the single shared path
   // regardless of which UI action triggered it or whether the device is
-  // online.
-  const commitLocalEvent = useCallback(
+  // online. Selecting a job/break/end-day NEVER awaits the server here —
+  // the only awaited work is the local store write, resolving display
+  // labels (a local reference-data cache lookup), and this function's own
+  // synchronous state updates; trySyncSoon() at the end is deliberately
+  // unawaited (void).
+  //
+  // Real production incident this is now hardened against: on iOS
+  // Safari's standalone PWA, tapping "General" left the job sheet open,
+  // every option gray, and the UI never recovered — traced to the local
+  // store's underlying connection hanging indefinitely with no timeout
+  // anywhere in the chain, so this async function itself never settled,
+  // which means the CALLER's try/finally (perform/startBreak/endBreak/
+  // confirmEndDay, all of which already had one) never ran either — a
+  // hang isn't a rejection, and finally only runs once the awaited
+  // promise actually SETTLES. localEventStore.ts's web path now has its
+  // own internal timeouts that self-heal instead of hanging (see
+  // webEventJournal.ts), and withCommitTimeout below adds an explicit,
+  // independent outer bound around the whole local commit as defense in
+  // depth, so this function is now GUARANTEED to settle within
+  // LOCAL_COMMIT_TIMEOUT_MS no matter what.
+  //
+  // clientEventId is accepted (not always freshly minted) so a caller can
+  // retry the exact same logical tap after a timeout without risking a
+  // duplicate: appendEvent detects an existing event with the same id and
+  // returns it as-is rather than inserting a second one.
+  const commitLocalEventInner = useCallback(
     async (
       eventType: LocalEventType,
       occurredAtUtc: string,
@@ -362,12 +440,14 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         carrierId?: string | null;
         answers?: Record<string, QuestionAnswer> | null;
       },
-      display: LocalDisplayInfo
+      display: LocalDisplayInfo,
+      clientEventId: string
     ) => {
       const deviceId = getOrCreateDeviceIdentifier();
       const employeeId = me?.employee.id ?? getCachedEmployeeSummary()?.employeeId ?? "";
       const store = getLocalEventStore();
 
+      logCheckpoint(clientEventId, "commitLocalEvent:store-write-start", { eventType });
       const event = await store.appendEvent({
         deviceId,
         employeeId,
@@ -384,20 +464,47 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         // update itself to work correctly.
         densitySnapshot: null,
         configRevision: null,
+        clientEventId,
       });
+      logCheckpoint(clientEventId, "commitLocalEvent:store-write-committed", { deviceSeq: event.deviceSeq });
 
       setMe((prev) => applyLocalEventToMe(prev, event, display));
       setPendingActivityName(null);
+      logCheckpoint(clientEventId, "commitLocalEvent:ui-state-updated");
+
       await refreshPendingCount();
       void trySyncSoon();
+      logCheckpoint(clientEventId, "commitLocalEvent:background-sync-scheduled");
     },
     [me, refreshPendingCount]
   );
 
-  const perform = useCallback(
-    async (path: string, body: Record<string, unknown>, options?: PerformOptions) => {
+  const commitLocalEvent = useCallback(
+    (
+      eventType: LocalEventType,
+      occurredAtUtc: string,
+      fields: {
+        activityId?: string | null;
+        greenhouseRowId?: string | null;
+        carrierId?: string | null;
+        answers?: Record<string, QuestionAnswer> | null;
+      },
+      display: LocalDisplayInfo,
+      clientEventId: string = uuid()
+    ) => withCommitTimeout(commitLocalEventInner(eventType, occurredAtUtc, fields, display, clientEventId)),
+    [commitLocalEventInner]
+  );
+
+  // clientEventId is resolved ONCE per logical tap — reused verbatim by
+  // performInternal's own retry closure below, never regenerated on
+  // retry, so a timed-out-then-retried tap can only ever produce one
+  // event (appendEvent detects the existing clientEventId and returns it
+  // as-is rather than inserting a second one).
+  const performInternal = useCallback(
+    async (path: string, body: Record<string, unknown>, options: PerformOptions | undefined, clientEventId: string) => {
       setBusy(true);
       setError(null);
+      logCheckpoint(clientEventId, "perform:tap-handler-entered", { path });
       try {
         const answers = (body.answers as Record<string, QuestionAnswer> | undefined) ?? {};
         const rowAnswer = Object.values(answers).find((a) => a.questionType === "greenhouse_row");
@@ -418,17 +525,35 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
           options?.localDisplay ?? (await resolveDisplayLabels(activityId, greenhouseRowId, carrierId));
         if (options?.pendingLabel && !display.activityName) display.activityName = options.pendingLabel;
 
-        await commitLocalEvent(eventType, occurredAtUtc, { activityId, greenhouseRowId, carrierId, answers }, display);
+        await commitLocalEvent(eventType, occurredAtUtc, { activityId, greenhouseRowId, carrierId, answers }, display, clientEventId);
+        setRetryAction(null);
         options?.onResolved?.();
       } catch (err) {
-        console.error("[work-session] local commit failed:", err);
-        setError(t(language, "somethingWentWrong"));
+        if (err instanceof LocalCommitTimeoutError) {
+          console.error("[work-session] local commit timed out:", err);
+          setError(t(language, "localCommitTimedOut"));
+          setRetryAction(() => () => {
+            void performInternal(path, body, options, clientEventId);
+          });
+        } else {
+          console.error("[work-session] local commit failed:", err);
+          setError(t(language, "somethingWentWrong"));
+        }
       } finally {
         setBusy(false);
+        logCheckpoint(clientEventId, "perform:busy-cleared");
         options?.onSettled?.();
       }
     },
     [commitLocalEvent, me, language]
+  );
+
+  const perform = useCallback(
+    async (path: string, body: Record<string, unknown>, options?: PerformOptions) => {
+      const clientEventId = (body.idempotencyKey as string | undefined) ?? uuid();
+      await performInternal(path, body, options, clientEventId);
+    },
+    [performInternal]
   );
 
   // clientStartedAt/clientEndedAt: the phone's own clock reading of this
@@ -436,62 +561,110 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
   // occurrence time frozen into the local event (and, eventually, the
   // server's time_entries row) regardless of how long it sits pending
   // before syncing. See localEventStore.ts's NewLocalEvent.occurredAtUtc.
-  const startBreak = useCallback(async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await commitLocalEvent("break_start", new Date().toISOString(), {}, {});
-    } catch (err) {
-      console.error("[work-session] break start failed:", err);
-      setError(t(language, "somethingWentWrong"));
-    } finally {
-      setBusy(false);
-    }
-  }, [commitLocalEvent, language]);
+  const startBreakInternal = useCallback(
+    async (clientEventId: string) => {
+      setBusy(true);
+      setError(null);
+      logCheckpoint(clientEventId, "startBreak:tap-handler-entered");
+      try {
+        await commitLocalEvent("break_start", new Date().toISOString(), {}, {}, clientEventId);
+        setRetryAction(null);
+      } catch (err) {
+        if (err instanceof LocalCommitTimeoutError) {
+          console.error("[work-session] break start timed out:", err);
+          setError(t(language, "localCommitTimedOut"));
+          setRetryAction(() => () => {
+            void startBreakInternal(clientEventId);
+          });
+        } else {
+          console.error("[work-session] break start failed:", err);
+          setError(t(language, "somethingWentWrong"));
+        }
+      } finally {
+        setBusy(false);
+        logCheckpoint(clientEventId, "startBreak:busy-cleared");
+      }
+    },
+    [commitLocalEvent, language]
+  );
+
+  // Returns startBreakInternal's real promise (TypeScript's `() => void`
+  // interface type permits this — a fire-and-forget UI caller just
+  // ignores the return value, same as before this file's changes; a
+  // caller that DOES want to await full completion, e.g. a test, still
+  // can).
+  const startBreak = useCallback(() => startBreakInternal(uuid()), [startBreakInternal]);
 
   // Resumes the exact interrupted run — same activity/row/carrier the break
   // interrupted, per "break resume must preserve the original activity,
   // row, carrier." Resolved from the local event log's own most recent
   // WORK event (getLatestWorkEventForDevice), not from MeResponse's smaller
   // PreviousActivity shape (which doesn't carry row/carrier) or any network
-  // round trip — this works identically online or offline.
-  const endBreak = useCallback(async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const deviceId = getOrCreateDeviceIdentifier();
-      const interrupted = await getLocalEventStore().getLatestWorkEventForDevice(deviceId);
-      const display = await resolveDisplayLabels(
-        interrupted?.activityId ?? null,
-        interrupted?.greenhouseRowId ?? null,
-        interrupted?.carrierId ?? null
-      );
-      await commitLocalEvent(
-        "break_end",
-        new Date().toISOString(),
-        {
-          activityId: interrupted?.activityId ?? null,
-          greenhouseRowId: interrupted?.greenhouseRowId ?? null,
-          carrierId: interrupted?.carrierId ?? null,
-          // Carried over verbatim from the interrupted run's own event —
-          // already a Record<string, QuestionAnswer> when it came from a
-          // work_start/activity_switch, just typed generically on
-          // LocalEvent (localEventStore.ts has no reason to know about
-          // QuestionAnswer's shape).
-          answers: (interrupted?.answers as Record<string, QuestionAnswer> | null | undefined) ?? null,
-        },
-        display
-      );
-    } catch (err) {
-      console.error("[work-session] break end failed:", err);
-      setError(t(language, "somethingWentWrong"));
-    } finally {
-      setBusy(false);
-    }
-  }, [commitLocalEvent, language]);
+  // round trip — this works identically online or offline. The lookup +
+  // display-label resolution ahead of commitLocalEvent is wrapped in the
+  // same bounded timeout as the commit itself (withCommitTimeout), not
+  // just the commit — both go through the local store on the web
+  // platform and both are bounded by webEventJournal.ts internally, but
+  // this keeps ONE outer bound around the whole action for consistency.
+  const endBreakInternal = useCallback(
+    async (clientEventId: string) => {
+      setBusy(true);
+      setError(null);
+      logCheckpoint(clientEventId, "endBreak:tap-handler-entered");
+      try {
+        await withCommitTimeout(
+          (async () => {
+            const deviceId = getOrCreateDeviceIdentifier();
+            const interrupted = await getLocalEventStore().getLatestWorkEventForDevice(deviceId);
+            const display = await resolveDisplayLabels(
+              interrupted?.activityId ?? null,
+              interrupted?.greenhouseRowId ?? null,
+              interrupted?.carrierId ?? null
+            );
+            await commitLocalEvent(
+              "break_end",
+              new Date().toISOString(),
+              {
+                activityId: interrupted?.activityId ?? null,
+                greenhouseRowId: interrupted?.greenhouseRowId ?? null,
+                carrierId: interrupted?.carrierId ?? null,
+                // Carried over verbatim from the interrupted run's own event —
+                // already a Record<string, QuestionAnswer> when it came from a
+                // work_start/activity_switch, just typed generically on
+                // LocalEvent (localEventStore.ts has no reason to know about
+                // QuestionAnswer's shape).
+                answers: (interrupted?.answers as Record<string, QuestionAnswer> | null | undefined) ?? null,
+              },
+              display,
+              clientEventId
+            );
+          })()
+        );
+        setRetryAction(null);
+      } catch (err) {
+        if (err instanceof LocalCommitTimeoutError) {
+          console.error("[work-session] break end timed out:", err);
+          setError(t(language, "localCommitTimedOut"));
+          setRetryAction(() => () => {
+            void endBreakInternal(clientEventId);
+          });
+        } else {
+          console.error("[work-session] break end failed:", err);
+          setError(t(language, "somethingWentWrong"));
+        }
+      } finally {
+        setBusy(false);
+        logCheckpoint(clientEventId, "endBreak:busy-cleared");
+      }
+    },
+    [commitLocalEvent, language]
+  );
+
+  const endBreak = useCallback(() => endBreakInternal(uuid()), [endBreakInternal]);
 
   const openEndDayConfirm = useCallback(() => {
     setEndDayError(null);
+    setEndDayRetryAction(null);
     setEndDayConfirmOpen(true);
   }, []);
 
@@ -499,26 +672,47 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     if (endDaySubmitting) return; // block dismissal while a request is in flight
     setEndDayConfirmOpen(false);
     setEndDayError(null);
+    setEndDayRetryAction(null);
   }, [endDaySubmitting]);
 
   // Local-first, same as every other action — the "Finish Work must be
   // online" restriction has been removed (confirmed decision: end-of-day is
   // now a normal queueable local event like everything else). The
   // confirmation DIALOG itself is unrelated UX (a deliberate "are you sure"
-  // safety check) and stays regardless of connectivity.
-  const confirmEndDay = useCallback(async () => {
-    setEndDaySubmitting(true);
-    setEndDayError(null);
-    try {
-      await commitLocalEvent("end_day", new Date().toISOString(), {}, {});
-      setEndDayConfirmOpen(false);
-    } catch (err) {
-      console.error("[work-session] end day failed:", err);
-      setEndDayError(t(language, "somethingWentWrong"));
-    } finally {
-      setEndDaySubmitting(false);
-    }
-  }, [commitLocalEvent, language]);
+  // safety check) and stays regardless of connectivity. Uses its own
+  // retry slot (endDayRetryAction), separate from the shared `retryAction`
+  // the Home job picker/break buttons use — a timed-out end-day attempt's
+  // Retry belongs in the confirm dialog it happened in, never surfaced on
+  // an unrelated screen.
+  const confirmEndDayInternal = useCallback(
+    async (clientEventId: string) => {
+      setEndDaySubmitting(true);
+      setEndDayError(null);
+      logCheckpoint(clientEventId, "confirmEndDay:tap-handler-entered");
+      try {
+        await commitLocalEvent("end_day", new Date().toISOString(), {}, {}, clientEventId);
+        setEndDayRetryAction(null);
+        setEndDayConfirmOpen(false);
+      } catch (err) {
+        if (err instanceof LocalCommitTimeoutError) {
+          console.error("[work-session] end day timed out:", err);
+          setEndDayError(t(language, "localCommitTimedOut"));
+          setEndDayRetryAction(() => () => {
+            void confirmEndDayInternal(clientEventId);
+          });
+        } else {
+          console.error("[work-session] end day failed:", err);
+          setEndDayError(t(language, "somethingWentWrong"));
+        }
+      } finally {
+        setEndDaySubmitting(false);
+        logCheckpoint(clientEventId, "confirmEndDay:busy-cleared");
+      }
+    },
+    [commitLocalEvent, language]
+  );
+
+  const confirmEndDay = useCallback(() => confirmEndDayInternal(uuid()), [confirmEndDayInternal]);
 
   return (
     <WorkSessionContext.Provider
@@ -530,6 +724,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         online,
         error,
         setError,
+        retryAction,
         pending,
         syncProblem,
         pendingActivityName,
@@ -544,6 +739,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         endDayConfirmOpen,
         endDaySubmitting,
         endDayError,
+        endDayRetryAction,
         openEndDayConfirm,
         closeEndDayConfirm,
         confirmEndDay,

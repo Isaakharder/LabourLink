@@ -18,6 +18,7 @@ import { ActivityTimer, formatElapsed } from "../../components/mobile/ActivityTi
 import { RecentJobsCard } from "../../components/mobile/RecentJobsCard";
 import { fetchActivitiesWithCache, fetchRowsWithCache, fetchCarriersWithCache } from "../../lib/referenceDataCache";
 import { computeSyncIndicatorState } from "../../lib/syncIndicator";
+import { logCheckpoint } from "../../lib/localEventStore";
 
 type Activity = PickerActivity;
 
@@ -61,6 +62,7 @@ export function HomeScreen() {
     online,
     error,
     setError,
+    retryAction,
     pending,
     syncProblem,
     pendingActivityName,
@@ -400,6 +402,15 @@ export function HomeScreen() {
       startQuestionFlow(activity.id, activity.name, activity.questions);
       return;
     }
+    // Generated here, once, rather than inline in the perform() call below
+    // — this exact value is what WorkSessionContext.tsx's perform()/
+    // performInternal use as the local event's clientEventId AND is
+    // logged here as the true first instant of the tap, before ANY async
+    // work has happened (see localEventStore.ts's logCheckpoint and the
+    // rest of the timestamped checkpoints through performInternal ->
+    // commitLocalEvent -> the local store write).
+    const idempotencyKey = uuid();
+    logCheckpoint(idempotencyKey, "chooseActivity:tap-handler-entered", { activityId });
     // clientStartedAt: the phone's own clock reading of this exact tap,
     // captured now rather than whenever the request actually reaches the
     // server — this is what's frozen into the local event (see
@@ -413,7 +424,7 @@ export function HomeScreen() {
     // serves both cases.
     perform(
       "/api/mobile/time-entries/work",
-      { activityId, idempotencyKey: uuid(), clientStartedAt: new Date().toISOString() },
+      { activityId, idempotencyKey, clientStartedAt: new Date().toISOString() },
       { pendingLabel: activity?.name, onResolved: () => setPickerOpen(false) }
     );
   }
@@ -891,6 +902,7 @@ export function HomeScreen() {
           onClose={() => setPickerOpen(false)}
           busy={busy}
           error={error}
+          onRetry={retryAction}
           language={language}
         />
       )}

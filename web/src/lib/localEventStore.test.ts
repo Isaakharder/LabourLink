@@ -1,86 +1,87 @@
-// Regression test for a real production incident: on iOS Safari's
-// standalone PWA, every button tap was visibly slow. Root cause:
-// persistIfWeb()'s saveToStore() call — which re-exports jeep-sqlite's
-// ENTIRE in-memory database to IndexedDB, an O(database size) operation —
-// was awaited synchronously before every write (appendEvent, etc.)
-// returned, directly in the hot per-tap path. This proves appendEvent()
-// now resolves without waiting for that persist to finish, not just that
-// it typechecks.
+// Regression coverage for the local-first write path on the web platform,
+// now routed entirely through webEventJournal.ts (native IndexedDB) rather
+// than jeep-sqlite/WASM SQLite — see localEventStore.ts's own header
+// comment for the real production incident (iOS Safari PWA: tapping
+// "General" froze the UI forever) this replaced that architecture to fix.
+// webEventJournal.test.ts covers the journal's own internals (timeouts,
+// idempotent retries, non-poisoning connection) in depth; this file proves
+// LocalEventStoreImpl correctly delegates to it on the web platform.
 // @vitest-environment jsdom
+import "fake-indexeddb/auto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { getSqliteConnectionMock, isNativeSqliteMock, saveToStoreMock } = vi.hoisted(() => ({
-  getSqliteConnectionMock: vi.fn(),
-  isNativeSqliteMock: vi.fn(() => false),
-  saveToStoreMock: vi.fn(),
-}));
-
-vi.mock("./sqlite/bootstrap", () => ({
-  getSqliteConnection: getSqliteConnectionMock,
-  isNativeSqlite: isNativeSqliteMock,
-}));
-
-vi.mock("./sqlite/schema", () => ({
-  DB_NAME: "labourlink_test",
-  MIGRATIONS: [],
+vi.mock("@capacitor/core", () => ({
+  Capacitor: { isNativePlatform: () => false },
 }));
 
 import { getLocalEventStore } from "./localEventStore";
+import { __resetJournalConnectionForTests } from "./webEventJournal";
 
-function makeMockDb() {
-  const rows: Record<string, unknown>[] = [];
-  return {
-    open: vi.fn().mockResolvedValue(undefined),
-    execute: vi.fn().mockResolvedValue(undefined),
-    query: vi.fn().mockResolvedValue({ values: rows }),
-    beginTransaction: vi.fn().mockResolvedValue(undefined),
-    commitTransaction: vi.fn().mockResolvedValue(undefined),
-    rollbackTransaction: vi.fn().mockResolvedValue(undefined),
-    run: vi.fn().mockResolvedValue({ changes: { changes: 1 } }),
-  };
-}
-
-describe("LocalEventStoreImpl web persistence (appendEvent)", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    saveToStoreMock.mockReset();
-    isNativeSqliteMock.mockReturnValue(false);
-
-    const mockDb = makeMockDb();
-    getSqliteConnectionMock.mockResolvedValue({
-      checkConnectionsConsistency: vi.fn().mockResolvedValue({ result: false }),
-      isConnection: vi.fn().mockResolvedValue({ result: false }),
-      retrieveConnection: vi.fn().mockResolvedValue(mockDb),
-      createConnection: vi.fn().mockResolvedValue(mockDb),
-      saveToStore: saveToStoreMock,
+describe("LocalEventStoreImpl on the web platform", () => {
+  beforeEach(async () => {
+    await __resetJournalConnectionForTests();
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.deleteDatabase("labourlink_journal");
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+      req.onblocked = () => reject(new Error("deleteDatabase blocked by a connection from a previous test"));
     });
   });
 
-  it("resolves without waiting for a slow saveToStore() to finish", async () => {
-    let saveToStoreResolve!: () => void;
-    saveToStoreMock.mockReturnValue(
-      new Promise<void>((resolve) => {
-        saveToStoreResolve = resolve;
-      })
-    );
-
+  it("appendEvent commits durably and resolves quickly (never touches jeep-sqlite/WASM)", async () => {
     const store = getLocalEventStore();
     const start = Date.now();
+    const event = await store.appendEvent({
+      deviceId: "device-1",
+      employeeId: "emp-1",
+      eventType: "work_start",
+      occurredAtUtc: new Date().toISOString(),
+      activityId: "activity-general",
+    });
+    expect(Date.now() - start).toBeLessThan(1000);
+    expect(event.deviceSeq).toBe(1);
+    expect(event.syncStatus).toBe("pending");
+
+    const pending = await store.getPendingEvents("device-1");
+    expect(pending).toHaveLength(1);
+    expect(pending[0].clientEventId).toBe(event.clientEventId);
+  });
+
+  it("retrying appendEvent with the same clientEventId never creates a duplicate", async () => {
+    const store = getLocalEventStore();
+    const stableId = "tap-retry-id-1";
+    const first = await store.appendEvent({
+      deviceId: "device-1",
+      employeeId: "emp-1",
+      eventType: "work_start",
+      occurredAtUtc: "2026-01-01T00:00:00.000Z",
+      activityId: "activity-general",
+      clientEventId: stableId,
+    });
+    const retry = await store.appendEvent({
+      deviceId: "device-1",
+      employeeId: "emp-1",
+      eventType: "work_start",
+      occurredAtUtc: "2026-01-01T00:00:09.000Z",
+      activityId: "activity-general",
+      clientEventId: stableId,
+    });
+
+    expect(retry.clientEventId).toBe(first.clientEventId);
+    const pending = await store.getPendingEvents("device-1");
+    expect(pending).toHaveLength(1);
+  });
+
+  it("getLatestWorkEventForDevice resolves what a break should resume", async () => {
+    const store = getLocalEventStore();
     await store.appendEvent({
       deviceId: "device-1",
       employeeId: "emp-1",
       eventType: "work_start",
       occurredAtUtc: new Date().toISOString(),
+      activityId: "activity-general",
     });
-    const elapsed = Date.now() - start;
-
-    // saveToStore() is still pending (never resolved) — appendEvent
-    // returned anyway. Before the fix, this awaited saveToStore directly,
-    // so the test would hang here (and time out) instead of reaching this
-    // assertion.
-    expect(elapsed).toBeLessThan(1000);
-    expect(saveToStoreMock).toHaveBeenCalled();
-
-    saveToStoreResolve();
+    const latestWork = await store.getLatestWorkEventForDevice("device-1");
+    expect(latestWork?.activityId).toBe("activity-general");
   });
 });

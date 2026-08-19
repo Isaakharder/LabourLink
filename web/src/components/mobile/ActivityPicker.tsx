@@ -20,6 +20,10 @@ interface ActivityPickerProps {
   onClose: () => void;
   busy: boolean;
   error: string | null;
+  // Non-null only when the last selection attempt timed out locally —
+  // retrying reuses the exact same tap (same idempotencyKey), so it can
+  // never create a duplicate. See WorkSessionContext.tsx's retryAction.
+  onRetry: (() => void) | null;
   language: Language;
 }
 
@@ -30,6 +34,7 @@ export function ActivityPicker({
   onClose,
   busy,
   error,
+  onRetry,
   language,
 }: ActivityPickerProps) {
   useEffect(() => {
@@ -68,7 +73,16 @@ export function ActivityPicker({
           </button>
         </div>
 
-        {error && <p className="error-text">{error}</p>}
+        {error && (
+          <div className="mobile-sheet-error">
+            <p className="error-text">{error}</p>
+            {onRetry && (
+              <button type="button" className="mobile-action-button" onClick={onRetry}>
+                {t(language, "retry")}
+              </button>
+            )}
+          </div>
+        )}
 
         {activities.length === 0 ? (
           <p className="mobile-sheet-empty">{t(language, "noActivitiesMessage")}</p>

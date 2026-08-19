@@ -149,6 +149,11 @@ const TRANSLATIONS_EN = {
   mustBeOnlineToFinish: "You must be online to finish work.",
   couldNotReachServer: "Could not reach the server. Please try again.",
   couldNotFinishWork: "Could not finish work. Please try again.",
+  // Shown when the local commit itself (never the server) doesn't finish
+  // within a bounded time — see WorkSessionContext.tsx's commitLocalEvent.
+  // Retrying reuses the same tap, so it's always safe to press again.
+  localCommitTimedOut: "This is taking longer than expected.",
+  retry: "Retry",
 
   // --- The mandatory message overlay's own interface control (see its
   // component comment) — the message body/sender is administrator-entered
@@ -258,6 +263,8 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   mustBeOnlineToFinish: "Debe estar en línea para finalizar el trabajo.",
   couldNotReachServer: "No se pudo conectar con el servidor. Inténtelo de nuevo.",
   couldNotFinishWork: "No se pudo finalizar el trabajo. Inténtelo de nuevo.",
+  localCommitTimedOut: "Esto está tardando más de lo esperado.",
+  retry: "Reintentar",
 
   acknowledge: "Confirmar",
   acknowledging: "Confirmando...",
