@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Production/release default: HTTPS-only, no exceptions. Capacitor's
+  androidScheme "https" (capacitor.config.ts) gives the WebView page an
+  https://localhost origin, so the real production APK (pointed at
+  server-production-a4fb.up.railway.app, already HTTPS — web/.env.android)
+  never needs cleartext at all.
+
+  A DEBUG-BUILD-ONLY override permitting cleartext (needed so a QA/dev
+  build can reach the local plain-http dev API server, either via the
+  emulator's 10.0.2.2 host alias or a real phone's LAN address, without
+  Mixed Content blocking every request) lives at
+  src/debug/res/xml/network_security_config.xml — Android's standard
+  src/debug/ source-set overlay replaces this file entirely for any debug
+  build variant, and is never present in a release build. See that file's
+  own comment for why a plain source-set overlay is used here instead of
+  <debug-overrides> (which does NOT support cleartextTrafficPermitted at
+  all, confirmed against Android's own docs — an earlier attempt using it
+  silently had no effect).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>
