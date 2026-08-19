@@ -5,6 +5,7 @@ import { requireDevice } from "../middleware/device";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { calendarDateInAppTimezone, parseTimeParts, zonedWallTimeToUtc } from "../lib/timezone";
 import {
+  MAX_CLIENT_CLOCK_SKEW_FUTURE_MS,
   resolveOriginalEndedAt,
   resolveOriginalStartedAt,
   roundBreak,
@@ -13,6 +14,7 @@ import {
   RoundingDirection,
 } from "../lib/workStartRounding";
 import {
+  AnswerInput,
   loadCarrierOptions,
   loadEmployeeActivitiesWithQuestions,
   loadGreenhouseRowOptions,
@@ -378,8 +380,28 @@ async function loadWorkStartRoundingSettings(employeeId: string): Promise<WorkSt
 // employee's work-END rounding configuration — an independent setting on
 // the same break profile, never coupled to work-start rounding's own
 // enabled/direction/interval (see 032_work_end_rounding.sql).
-async function loadWorkEndRoundingSettings(employeeId: string): Promise<WorkStartRoundingSettings | null> {
-  const { rows } = await pool.query(
+//
+// Takes an optional already-open transaction client (db), defaulting to
+// the shared pool — every call site here runs inside a hand-rolled
+// `client = await pool.connect()` / begin / ... / commit block (end-day's
+// own two call sites below), and calling this with the bare pool from
+// inside one of those held a SECOND connection simultaneously for no
+// reason. Under light load that's invisible; under real concurrent
+// pressure (35 devices finishing their shift around the same moment — see
+// mobileTime.syncEvents.concurrentLoad.test.ts, which is what actually
+// caught this) it doubles the connections a single end-day operation
+// needs at once against the pool's own max: 10 cap (server/src/db.ts),
+// and — critically — retrying doesn't help: every stuck request is
+// ALSO waiting on a second connection that can't free up until some
+// OTHER stuck request's first connection releases, so the whole batch
+// stays wedged rather than gradually draining. Reusing the already-held
+// client instead of the shared pool needs zero extra connections and
+// closes that off entirely.
+async function loadWorkEndRoundingSettings(
+  employeeId: string,
+  db: Pick<import("pg").Pool | import("pg").PoolClient, "query"> = pool
+): Promise<WorkStartRoundingSettings | null> {
+  const { rows } = await db.query(
     `select bp.work_end_rounding_enabled, bp.work_end_rounding_direction,
             bp.work_end_rounding_interval_minutes
      from employees e
@@ -1036,7 +1058,7 @@ router.post(
       if (open) {
         const now = new Date();
         const original = resolveOriginalEndedAt(clientEndedAt, now);
-        const settings = await loadWorkEndRoundingSettings(d.employeeId);
+        const settings = await loadWorkEndRoundingSettings(d.employeeId, client);
 
         // ended_at is set to a real, non-null value in every case below —
         // including when rounding lands on a timestamp still in the
@@ -1117,6 +1139,545 @@ router.get(
   "/carriers",
   asyncHandler(async (_req, res) => {
     res.json({ carriers: await loadCarrierOptions(pool) });
+  })
+);
+
+// ---------------------------------------------------------------------------
+// POST /sync/events — the server side of the local-first mobile event log
+// (web/src/lib/localEventStore.ts / syncEngine.ts). A phone submits its own
+// still-pending events, oldest device_seq first; each gets applied through
+// the SAME domain logic (openEntry, rounding, validateActivityAndAnswers)
+// the direct routes above use — this is a batched alternate entry point
+// into that logic, not a second copy of it.
+//
+// Deliberately does NOT re-run the same-row-recently-completed /
+// minimum-duration 409 checks those direct routes enforce: those are
+// proactive UX warnings shown BEFORE a tap commits, so the employee can
+// reconsider — by the time an event reaches here it already committed
+// locally (that's the whole point of local-first), so rejecting it now
+// would just discard genuine offline work with no one present to see the
+// warning. Server-side enforcement here is about authorization/integrity
+// (is this activity/row/carrier real, active, and available to this
+// employee) — validateActivityAndAnswers still runs for every work_start/
+// activity_switch event, unconditionally.
+// ---------------------------------------------------------------------------
+
+interface SyncEventInput {
+  clientEventId: string;
+  deviceSeq: number;
+  eventType: string;
+  occurredAtUtc: string;
+  localTzOffsetMinutes?: number;
+  activityId?: string | null;
+  greenhouseRowId?: string | null;
+  carrierId?: string | null;
+  answers?: Record<string, unknown> | null;
+}
+
+function parseSyncEvent(raw: unknown): SyncEventInput | null {
+  if (!raw || typeof raw !== "object") return null;
+  const e = raw as Record<string, unknown>;
+  if (typeof e.clientEventId !== "string" || !UUID_RE.test(e.clientEventId)) return null;
+  if (typeof e.deviceSeq !== "number" || !Number.isInteger(e.deviceSeq) || e.deviceSeq < 1) return null;
+  if (typeof e.eventType !== "string") return null;
+  if (typeof e.occurredAtUtc !== "string" || isNaN(new Date(e.occurredAtUtc).getTime())) return null;
+  return {
+    clientEventId: e.clientEventId,
+    deviceSeq: e.deviceSeq,
+    eventType: e.eventType,
+    occurredAtUtc: e.occurredAtUtc,
+    localTzOffsetMinutes: typeof e.localTzOffsetMinutes === "number" ? e.localTzOffsetMinutes : 0,
+    activityId: typeof e.activityId === "string" ? e.activityId : null,
+    greenhouseRowId: typeof e.greenhouseRowId === "string" ? e.greenhouseRowId : null,
+    carrierId: typeof e.carrierId === "string" ? e.carrierId : null,
+    answers: (e.answers as Record<string, unknown> | null | undefined) ?? null,
+  };
+}
+
+interface SyncApplyOutcome {
+  status: "accepted" | "permanent_conflict" | "retryable_failure";
+  timeEntryId?: string | null;
+  conflictReason?: string | null;
+  conflictDetail?: unknown;
+}
+
+// Applies one already-locally-committed event through the same domain logic
+// as its corresponding direct route (see the big comment block above) and
+// reports what happened — never throws for an ordinary rejection (an
+// invalid/deleted activity, e.g.), only for a genuine unexpected failure
+// (caught by the caller, reported as retryable_failure).
+async function applySyncedEvent(employeeId: string, deviceId: string, event: SyncEventInput): Promise<SyncApplyOutcome> {
+  const now = new Date();
+  switch (event.eventType) {
+    case "work_start":
+    case "activity_switch": {
+      if (!event.activityId || !UUID_RE.test(event.activityId)) {
+        return { status: "permanent_conflict", conflictReason: "missing or invalid activityId" };
+      }
+      const answersArray = event.answers ? (Object.values(event.answers) as AnswerInput[]) : undefined;
+      const validation = await validateActivityAndAnswers(pool, event.activityId, employeeId, answersArray);
+      if (!validation.ok) {
+        return { status: "permanent_conflict", conflictReason: validation.error };
+      }
+
+      const wasIdle = (await getOpenEntryExcluding(employeeId, event.clientEventId)) === null;
+      // Unlike the direct POST /time-entries/work route (where a client
+      // submits within roughly a network round trip of the real tap, so
+      // falling through to openEntry()'s own now()-default when rounding
+      // is disabled is invisible in practice), a synced event can be
+      // replayed hours or days after it actually happened — so this
+      // boundary is ALWAYS anchored to the event's own real occurrence
+      // time, never left unset to fall through to server-arrival time.
+      // Rounding (a genuine idle -> work transition only, same restriction
+      // as the direct route) is applied on top of that anchor, never in
+      // place of it.
+      const original = resolveOriginalStartedAt(event.occurredAtUtc, now);
+      let overrides: OpenEntryOverrides = {
+        greenhouseRowId: validation.validatedRowId,
+        carrierId: validation.validatedCarrierId,
+        startedAt: original,
+      };
+      if (wasIdle) {
+        const settings = await loadWorkStartRoundingSettings(employeeId);
+        if (settings?.enabled) {
+          const rounded = roundWorkStart(original, settings.intervalMinutes, settings.direction);
+          overrides = { ...overrides, startedAt: rounded, actualStartedAt: original };
+        }
+      }
+      const entry = await openEntry(employeeId, deviceId, "work", event.activityId, event.clientEventId, overrides);
+      return { status: "accepted", timeEntryId: entry.id };
+    }
+    case "break_start": {
+      const originalTap = resolveOriginalStartedAt(event.occurredAtUtc, now);
+      const todayLocal = calendarDateInAppTimezone(now);
+      const [y, mo, da] = todayLocal.split("-").map(Number);
+      const fixedItems = await loadActiveFixedItems(employeeId);
+
+      let match: { item: FixedItem; scheduledStart: Date } | null = null;
+      for (const item of fixedItems) {
+        const [sh, sm, ss] = parseTimeParts(item.start_time);
+        const scheduledStart = zonedWallTimeToUtc(y, mo, da, sh, sm, ss);
+        const windowMs = item.fixed_start_window_minutes * 60 * 1000;
+        const distance = Math.abs(now.getTime() - scheduledStart.getTime());
+        if (distance > windowMs) continue;
+        if (!match || distance < Math.abs(now.getTime() - match.scheduledStart.getTime())) {
+          match = { item, scheduledStart };
+        }
+      }
+
+      let overrides: OpenEntryOverrides = {};
+      if (match) {
+        overrides = {
+          startedAt: match.scheduledStart,
+          actualStartedAt: originalTap,
+          breakProfileItemId: match.item.id,
+          scheduledBreakDate: todayLocal,
+          source: "manual",
+          isPaid: match.item.is_paid,
+        };
+      } else {
+        // Same anchoring fix as work_start/activity_switch above: always
+        // an explicit real occurrence time, never left unset to fall
+        // through to openEntry()'s server-now() default — a synced
+        // break_start can be replayed long after it actually happened.
+        overrides = { startedAt: originalTap };
+        const settings = await loadBreakRoundingSettings(employeeId);
+        if (settings?.enabled) {
+          let rounded = roundBreak(originalTap, settings.intervalMinutes, settings.direction);
+          const currentlyOpen = await getOpenEntry(employeeId);
+          if (currentlyOpen) {
+            const floor = new Date(currentlyOpen.started_at).getTime();
+            if (rounded.getTime() <= floor) rounded = originalTap;
+            if (rounded.getTime() <= floor) rounded = new Date(floor + 1000);
+          }
+          overrides = { startedAt: rounded, actualStartedAt: originalTap };
+        }
+      }
+
+      const entry = await openEntry(employeeId, deviceId, "break", null, event.clientEventId, overrides);
+      return { status: "accepted", timeEntryId: entry.id };
+    }
+    case "break_end": {
+      const { rows } = await pool.query(
+        `select activity_id, greenhouse_row_id, carrier_id, density_type, density_count_per_row from time_entries
+         where employee_id = $1 and entry_type = 'work' and deleted_at is null
+         order by started_at desc limit 1`,
+        [employeeId]
+      );
+      const resumeActivityId = rows[0]?.activity_id ?? null;
+      const resumeRowId = rows[0]?.greenhouse_row_id ?? null;
+      const resumeCarrierId = rows[0]?.carrier_id ?? null;
+      const resumeDensityType = rows[0]?.density_type ?? null;
+      const resumeDensityCountPerRow = rows[0]?.density_count_per_row ?? null;
+      if (!resumeActivityId) {
+        return { status: "permanent_conflict", conflictReason: "no prior activity to resume" };
+      }
+
+      const originalTap = resolveOriginalEndedAt(event.occurredAtUtc, now);
+      const overrides: OpenEntryOverrides = {
+        actualEndedAt: originalTap,
+        greenhouseRowId: resumeRowId,
+        carrierId: resumeCarrierId,
+        densitySnapshot: { densityType: resumeDensityType, densityCountPerRow: resumeDensityCountPerRow },
+      };
+
+      const open = await getOpenEntry(employeeId);
+      let matchedFixedEnd = false;
+      if (open?.entry_type === "break") {
+        const { rows: itemRows } = await pool.query(
+          `select bpi.end_time, bpi.fixed_end_window_minutes,
+                  to_char(te.scheduled_break_date, 'YYYY-MM-DD') as scheduled_break_date
+           from time_entries te
+           join break_profile_items bpi on bpi.id = te.break_profile_item_id
+           where te.id = $1`,
+          [open.id]
+        );
+        const row = itemRows[0];
+        if (row) {
+          const [y, mo, da] = (row.scheduled_break_date as string).split("-").map(Number);
+          const [eh, em, es] = parseTimeParts(row.end_time);
+          const scheduledEnd = zonedWallTimeToUtc(y, mo, da, eh, em, es);
+          const windowMs = row.fixed_end_window_minutes * 60 * 1000;
+          if (Math.abs(now.getTime() - scheduledEnd.getTime()) <= windowMs) {
+            const floor = new Date(open.started_at).getTime();
+            let guardedEnd = scheduledEnd;
+            if (guardedEnd.getTime() <= floor) guardedEnd = originalTap;
+            if (guardedEnd.getTime() <= floor) guardedEnd = new Date(floor + 1000);
+            overrides.startedAt = guardedEnd;
+            matchedFixedEnd = true;
+          }
+        }
+      }
+      if (open?.entry_type === "break" && !matchedFixedEnd) {
+        let effectiveEnd = originalTap;
+        const settings = await loadBreakRoundingSettings(employeeId);
+        if (settings?.enabled) {
+          effectiveEnd = roundBreak(originalTap, settings.intervalMinutes, settings.direction);
+        }
+        const floor = new Date(open.started_at).getTime();
+        if (effectiveEnd.getTime() <= floor) effectiveEnd = originalTap;
+        if (effectiveEnd.getTime() <= floor) effectiveEnd = new Date(floor + 1000);
+        overrides.startedAt = effectiveEnd;
+      }
+
+      const entry = await openEntry(employeeId, deviceId, "work", resumeActivityId, event.clientEventId, overrides);
+      return { status: "accepted", timeEntryId: entry.id };
+    }
+    case "end_day": {
+      const client = await pool.connect();
+      let closedId: string | null = null;
+      try {
+        await client.query("begin");
+        const openRes = await client.query(
+          `select id, started_at from time_entries
+           where employee_id = $1 and ended_at is null and deleted_at is null
+           for update`,
+          [employeeId]
+        );
+        const open = openRes.rows[0];
+        if (open) {
+          const original = resolveOriginalEndedAt(event.occurredAtUtc, now);
+          const settings = await loadWorkEndRoundingSettings(employeeId, client);
+          let effectiveEnd = original;
+          let actualEndedAt: Date | null = null;
+          if (settings?.enabled) {
+            let rounded = roundWorkEnd(original, settings.intervalMinutes, settings.direction);
+            const startedAt = new Date(open.started_at);
+            if (rounded.getTime() <= startedAt.getTime()) rounded = original;
+            if (rounded.getTime() <= startedAt.getTime()) rounded = new Date(startedAt.getTime() + 1000);
+            effectiveEnd = rounded;
+            actualEndedAt = original;
+          }
+          await client.query(`update time_entries set ended_at = $2, actual_ended_at = $3 where id = $1`, [
+            open.id,
+            effectiveEnd,
+            actualEndedAt,
+          ]);
+          closedId = open.id;
+        }
+        await client.query("commit");
+        // No open entry to close is a legitimate no-op (a replay of an
+        // end_day that already applied, or the device ended a day the
+        // server independently already closed some other way) — not a
+        // conflict, same "closes whatever's open" idempotency the direct
+        // /time-entries/end-day route already relies on.
+        return { status: "accepted", timeEntryId: closedId };
+      } catch (err) {
+        await client.query("rollback").catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+    default:
+      return { status: "permanent_conflict", conflictReason: `unknown event type: ${event.eventType}` };
+  }
+}
+
+// Persists a TERMINAL outcome only (accepted/duplicate/permanent_conflict)
+// — retryable_failure and sequence_gap are deliberately never written here.
+// Those two leave the client's own local event at sync_status='pending'
+// (see localEventStore.ts's markSyncResult), meaning the exact same event
+// will be resent in a later batch; if a transient failure or a since-cleared
+// gap were permanently recorded, that later resend would just replay the
+// stale result forever via the idempotency lookup below instead of getting
+// a fresh, genuine attempt once conditions change.
+async function recordSyncedEvent(
+  deviceId: string,
+  employeeId: string,
+  event: SyncEventInput,
+  status: "accepted" | "duplicate" | "permanent_conflict",
+  timeEntryId: string | null,
+  conflictReason: string | null,
+  conflictDetail: unknown
+): Promise<void> {
+  await pool.query(
+    `insert into mobile_time_events
+       (client_event_id, device_id, employee_id, device_seq, event_type, occurred_at_utc,
+        local_tz_offset_minutes, payload, processing_status, time_entry_id, conflict_reason, conflict_detail)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     on conflict (device_id, client_event_id) do nothing`,
+    [
+      event.clientEventId,
+      deviceId,
+      employeeId,
+      event.deviceSeq,
+      event.eventType,
+      event.occurredAtUtc,
+      event.localTzOffsetMinutes ?? 0,
+      JSON.stringify({
+        activityId: event.activityId ?? null,
+        greenhouseRowId: event.greenhouseRowId ?? null,
+        carrierId: event.carrierId ?? null,
+        answers: event.answers ?? null,
+      }),
+      status,
+      timeEntryId,
+      conflictReason,
+      conflictDetail !== undefined && conflictDetail !== null ? JSON.stringify(conflictDetail) : null,
+    ]
+  );
+}
+
+interface ClockAnomaly {
+  reason: string;
+  detail: Record<string, unknown>;
+}
+
+// A small allowance for ordinary jitter (clock drift, sub-second reordering
+// within a single tap) — only a genuine, meaningfully-sized regression is
+// worth flagging, not every millisecond of imprecision.
+const CLOCK_REGRESSION_TOLERANCE_MS = 2000;
+
+// Device-clock anomaly detection: this device's own occurred_at_utc values
+// should never run backward relative to each other (device_seq is
+// monotonic and each value is the phone's own clock reading at the moment
+// of that tap), and should never land implausibly ahead of the server's
+// clock either. Neither check blocks the event from applying — occurrence
+// time is always preserved, never silently dropped/overwritten/fabricated
+// (see resolveOriginalTimestamp's own comment) — this only ATTACHES a
+// reviewable flag (conflict_reason/conflict_detail on an otherwise
+// 'accepted' row) so an administrator can see a device's clock may have
+// been changed, per the plan's "detect significant device-clock changes;
+// store occurrence time+sequence for review" requirement.
+function detectClockAnomaly(occurredAtUtc: string, now: Date, lastAcceptedOccurredAtUtc: Date | null): ClockAnomaly | null {
+  const current = new Date(occurredAtUtc);
+
+  const forwardSkewMs = current.getTime() - now.getTime();
+  if (forwardSkewMs > MAX_CLIENT_CLOCK_SKEW_FUTURE_MS) {
+    return {
+      reason: "Device clock is ahead of the server by more than the accepted tolerance",
+      detail: { occurredAtUtc, receivedAt: now.toISOString(), forwardSkewMs },
+    };
+  }
+
+  if (lastAcceptedOccurredAtUtc && current.getTime() < lastAcceptedOccurredAtUtc.getTime() - CLOCK_REGRESSION_TOLERANCE_MS) {
+    return {
+      reason: "Device clock moved backward relative to this device's own previous synced event",
+      detail: {
+        occurredAtUtc,
+        previousOccurredAtUtc: lastAcceptedOccurredAtUtc.toISOString(),
+        regressionMs: lastAcceptedOccurredAtUtc.getTime() - current.getTime(),
+      },
+    };
+  }
+
+  return null;
+}
+
+router.post(
+  "/sync/events",
+  asyncHandler(async (req, res) => {
+    const d = req.device!;
+    const { events } = req.body as { events?: unknown };
+    if (!Array.isArray(events) || events.length === 0) {
+      return res.status(400).json({ error: "events must be a non-empty array" });
+    }
+
+    // The client (syncEngine.ts) always sends oldest device_seq first —
+    // sorted again here defensively, since sequence-gap detection below
+    // depends on strict ascending order and a client bug/network reorder
+    // must never silently corrupt apply order.
+    const parsed = events.map(parseSyncEvent);
+    const results: { clientEventId: string; status: string; detail?: unknown }[] = [];
+    const valid: SyncEventInput[] = [];
+    parsed.forEach((event, i) => {
+      if (!event) {
+        const raw = events[i] as Record<string, unknown> | undefined;
+        results.push({
+          clientEventId: typeof raw?.clientEventId === "string" ? raw.clientEventId : `invalid-${i}`,
+          status: "permanent_conflict",
+          detail: { reason: "malformed event" },
+        });
+      } else {
+        valid.push(event);
+      }
+    });
+    valid.sort((a, b) => a.deviceSeq - b.deviceSeq);
+
+    await pool.query(`insert into device_sync_state (device_id) values ($1) on conflict (device_id) do nothing`, [d.id]);
+    const { rows: stateRows } = await pool.query(
+      `select last_processed_seq from device_sync_state where device_id = $1`,
+      [d.id]
+    );
+    let lastProcessedSeq = Number(stateRows[0].last_processed_seq);
+    let halted = false;
+
+    // Baseline for backward-clock-jump detection (detectClockAnomaly below)
+    // — this device's own most recent successfully-applied event, if any.
+    const { rows: lastAcceptedRows } = await pool.query(
+      `select occurred_at_utc from mobile_time_events
+       where device_id = $1 and processing_status = 'accepted'
+       order by device_seq desc limit 1`,
+      [d.id]
+    );
+    let lastAcceptedOccurredAtUtc: Date | null = lastAcceptedRows[0] ? new Date(lastAcceptedRows[0].occurred_at_utc) : null;
+
+    for (const event of valid) {
+      const existing = await pool.query(
+        `select processing_status, conflict_reason, conflict_detail, time_entry_id from mobile_time_events
+         where device_id = $1 and client_event_id = $2`,
+        [d.id, event.clientEventId]
+      );
+      const existingRow = existing.rows[0];
+      if (existingRow) {
+        // Already recorded — return the SAME terminal result again (a real
+        // permanent_conflict must keep reading as a conflict on replay, not
+        // quietly turn into a "duplicate" success), with zero side effects.
+        const status = existingRow.processing_status === "accepted" ? "duplicate" : existingRow.processing_status;
+        results.push({
+          clientEventId: event.clientEventId,
+          status,
+          detail: existingRow.conflict_detail ?? (existingRow.conflict_reason ? { reason: existingRow.conflict_reason } : undefined),
+        });
+        continue;
+      }
+
+      if (halted || event.deviceSeq !== lastProcessedSeq + 1) {
+        halted = true;
+        results.push({
+          clientEventId: event.clientEventId,
+          status: "sequence_gap",
+          detail: { expectedDeviceSeq: lastProcessedSeq + 1, gotDeviceSeq: event.deviceSeq },
+        });
+        continue;
+      }
+
+      // Computed before applying (not just on success) so a constraint
+      // violation caught below can reference it in a useful permanent_
+      // conflict reason — a backward clock jump is exactly the situation
+      // that CAUSES the ended-before-started violation this catches.
+      const anomaly = detectClockAnomaly(event.occurredAtUtc, new Date(), lastAcceptedOccurredAtUtc);
+
+      let outcome: SyncApplyOutcome;
+      try {
+        outcome = await applySyncedEvent(d.employeeId, d.id, event);
+      } catch (err) {
+        // A device-clock regression severe enough that applying this
+        // event's own occurrence time would close an existing row with an
+        // end time before its start is NOT a transient failure — retrying
+        // the identical event can never succeed, since the timestamps
+        // themselves are what's contradictory. Treating it as
+        // retryable_failure would halt this device's sync FOREVER (the
+        // same doomed event retried on every future attempt, blocking
+        // every event behind it) instead of surfacing it for an
+        // administrator to actually resolve. permanent_conflict advances
+        // past it instead, same as any other rejected event.
+        const pgErr = err as { code?: string; constraint?: string };
+        if (pgErr.code === "23514" && pgErr.constraint === "chk_time_entries_ended_after_started") {
+          console.warn(`[mobile-sync] clock anomaly prevented a physically consistent close device=${d.id} event=${event.clientEventId}`);
+          outcome = {
+            status: "permanent_conflict",
+            conflictReason: anomaly
+              ? `${anomaly.reason} — applying this event's timestamp would close an existing entry before it started`
+              : "This event's timestamp would close an existing entry before it started",
+            conflictDetail: anomaly?.detail,
+          };
+        } else {
+          console.error(`[mobile-sync] apply failed device=${d.id} event=${event.clientEventId}:`, err);
+          outcome = { status: "retryable_failure", conflictReason: (err as Error).message };
+        }
+      }
+
+      if (outcome.status === "accepted") {
+        // A rejected (permanent_conflict) event never became this
+        // device's new "most recent real occurrence," so it shouldn't
+        // factor into the next event's backward-jump baseline either —
+        // only reached for a genuinely accepted event.
+        await recordSyncedEvent(
+          d.id,
+          d.employeeId,
+          event,
+          "accepted",
+          outcome.timeEntryId ?? null,
+          anomaly?.reason ?? null,
+          anomaly?.detail ?? null
+        );
+        lastAcceptedOccurredAtUtc = new Date(event.occurredAtUtc);
+        lastProcessedSeq = event.deviceSeq;
+        await pool.query(
+          `update device_sync_state set last_processed_seq = $2, last_synced_at = now() where device_id = $1`,
+          [d.id, lastProcessedSeq]
+        );
+        results.push({
+          clientEventId: event.clientEventId,
+          status: "accepted",
+          detail: anomaly?.detail ?? undefined,
+        });
+      } else if (outcome.status === "permanent_conflict") {
+        await recordSyncedEvent(
+          d.id,
+          d.employeeId,
+          event,
+          "permanent_conflict",
+          outcome.timeEntryId ?? null,
+          outcome.conflictReason ?? null,
+          outcome.conflictDetail
+        );
+        lastProcessedSeq = event.deviceSeq;
+        await pool.query(
+          `update device_sync_state set last_processed_seq = $2, last_synced_at = now() where device_id = $1`,
+          [d.id, lastProcessedSeq]
+        );
+        results.push({
+          clientEventId: event.clientEventId,
+          status: "permanent_conflict",
+          detail: outcome.conflictDetail ?? (outcome.conflictReason ? { reason: outcome.conflictReason } : undefined),
+        });
+      } else {
+        // retryable_failure — halts forward progress for this device (same
+        // as a sequence_gap) since later events may depend on this one
+        // having actually applied (e.g. an activity_switch after it).
+        halted = true;
+        results.push({
+          clientEventId: event.clientEventId,
+          status: "retryable_failure",
+          detail: outcome.conflictReason ? { reason: outcome.conflictReason } : undefined,
+        });
+      }
+    }
+
+    res.json({ results });
   })
 );
 

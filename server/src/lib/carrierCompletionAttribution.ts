@@ -100,8 +100,14 @@ export async function getCarrierCompletionAttribution(
        and ccs.time_entry_id is null`,
     [activityId, rangeStart, rangeEnd]
   );
-  for (const row of candidateCarrierRows) {
-    const candidates = await getUnresolvedRunsForCarrier(row.carrier_id);
+  // Resolved CONCURRENTLY, not one-carrier-at-a-time — same N+1 fix and
+  // same reasoning as getActivityDensityAttribution's identical Rule 2
+  // loop (reportQueries.ts): getUnresolvedRunsForCarrier calls share no
+  // mutable state, and addTo's Map accumulation is commutative, so this
+  // produces identical totals to the old sequential loop, just far faster
+  // against a remote database.
+  const candidateResults = await Promise.all(candidateCarrierRows.map((row) => getUnresolvedRunsForCarrier(row.carrier_id)));
+  for (const candidates of candidateResults) {
     if (candidates.length !== 1) continue; // ambiguous (2+) — excluded, same as row completions
     const only = candidates[0];
     if (only.activityId !== activityId) continue;

@@ -145,3 +145,24 @@ export function requireDeviceAdmin(req: Request, res: Response, next: NextFuncti
   }
   next();
 }
+
+// General form of requireDeviceAdmin above — an explicit allow-list instead
+// of a fixed Administrator-or-Manager pair, for mobile routes that need to
+// mirror a *specific* desktop route's own requireRole(...) gate rather than
+// always allowing both. E.g. the mobile Employees screen matches
+// GET /api/employees's requireRole("Administrator", "Manager"), but the
+// mobile Messages send screen matches POST /api/messages's stricter
+// requireRole("Administrator") only — see mobileEmployees.ts/
+// mobileMessages.ts. Same posture as requireDeviceAdmin: checked fresh from
+// req.device.employeeSecurityRole (populated by requireDevice on every
+// request) rather than trusted from the client, and the mobile UI hiding a
+// button is display convenience only, never the real gate.
+export function requireDeviceRole(...allowed: string[]) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const role = req.device?.employeeSecurityRole;
+    if (!role || !allowed.includes(role)) {
+      return res.status(403).json({ error: "Insufficient permissions" });
+    }
+    next();
+  };
+}

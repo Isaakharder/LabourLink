@@ -273,8 +273,10 @@ async function main() {
       await setBreakRounding(true, "clockwise", 15);
       const now0 = new Date();
       // Far enough in the past that 4 pairs of (20-minute break + 20-minute
-      // work gap) still land entirely before "now", comfortably inside
-      // MAX_OFFLINE_REPLAY_DELAY_MS (24h).
+      // work gap) still land entirely before "now" — resolveOriginalTimestamp
+      // has no backward bound at all (see workStartRounding.ts), so this is
+      // just about the test's own arithmetic staying self-consistent, not
+      // about clearing any server-side limit.
       await openWorkEntry(new Date(now0.getTime() - 6 * 3600000), deviceIds[deviceIds.length - 1]);
 
       let cursor = new Date(now0.getTime() - 4 * 3600000);

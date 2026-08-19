@@ -27,6 +27,16 @@ const connectionString = (() => {
 
 export const pool = new Pool({
   connectionString,
+  // Pinned explicitly (matches pg's own default of 10) rather than left
+  // implicit — Supabase's session-mode pooler on this project hard-caps
+  // at 15 total client connections ("EMAXCONNSESSION" when exceeded,
+  // confirmed by raising this to 20 during testing), so there's very
+  // little headroom above the default to give to any single endpoint's
+  // Promise.all concurrency (reportQueries.ts/carrierCompletionAttribution.ts's
+  // per-candidate-run resolution, mobileEmployees.ts's per-activity
+  // attribution calls) without risking exhausting the pool for every other
+  // concurrent request the app is serving at the same time.
+  max: 10,
   // Supabase's pooled connection presents a certificate Node won't validate
   // against a local CA bundle. This is needed unconditionally, not just in
   // production: with sslmode=require on the connection string above and no

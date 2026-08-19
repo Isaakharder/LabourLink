@@ -162,38 +162,37 @@ export function roundBreak(
   return roundToInterval(instant, intervalMinutes, direction, tz);
 }
 
-// A work-start tap made offline can be replayed by the phone's own offline
-// queue (web/src/lib/offlineQueue.ts) long after it actually happened — the
-// client always sends its own clock's reading of the moment the employee
-// tapped (`clientStartedAt`), captured before the request is even
-// attempted, so a delayed sync still rounds against the real tap time
+// A work-start tap made offline can be replayed — by the mobile local-first
+// event log (web/src/lib/localEventStore.ts) syncing after an extended
+// offline stretch, or the legacy offline queue — long after it actually
+// happened. The client always sends its own clock's reading of the moment
+// the employee tapped (`clientStartedAt`), captured before the request is
+// even attempted, so a delayed sync still rounds against the real tap time
 // instead of whenever the sync happened to land (server/src/routes/
 // mobileTime.ts's POST /time-entries/work is the only caller). A Finish
 // Work tap is the same idea for the opposite end of the day —
 // `clientEndedAt`, captured client-side before the request is attempted
-// (WorkSessionContext.tsx's confirmEndDay) and preserved across a retry
-// with the same idempotencyKey, even though end-day deliberately never
-// goes through the generic offline queue itself (see that route's own
-// comment for why). Either way, this client-reported value is untrusted
-// input feeding a paid-time calculation, so it's bounded rather than
-// accepted as-is: a small forward-skew tolerance covers ordinary clock
-// drift between the phone and the server, while the backward bound is
-// generous enough to cover a genuinely offline shift (this mobile app is
-// documented elsewhere, see mobileTime.ts's fixed-break rounding, as not
-// meant to survive an extended fully-offline shift beyond that) without
-// accepting an obviously broken clock (e.g. an unset-clock epoch date).
-// Missing, unparseable, or out-of-bounds values all fall back to `now` —
-// the same value used everywhere else in that file when no client
-// timestamp exists at all.
+// (WorkSessionContext.tsx's confirmEndDay). Either way, this client-reported
+// value is untrusted input feeding a paid-time calculation, so a forward
+// skew tolerance covers ordinary clock drift between the phone and the
+// server.
+//
+// Deliberately NO backward/"too old" bound anymore (removed a prior 24-hour
+// ceiling that silently fell back to server-arrival time for anything
+// queued longer than that — a genuinely offline shift can and should sync
+// well past 24 hours later without its timestamps quietly becoming wrong).
+// Occurrence time is always preserved, however late an event syncs; an
+// implausibly large backward gap (e.g. an unset device clock) is a job for
+// clock-anomaly detection surfaced to an administrator for review — not
+// implemented yet — rather than silent coercion here.
 export const MAX_CLIENT_CLOCK_SKEW_FUTURE_MS = 5 * 60 * 1000;
-export const MAX_OFFLINE_REPLAY_DELAY_MS = 24 * 60 * 60 * 1000;
 
 export function resolveOriginalTimestamp(clientTimestamp: unknown, now: Date): Date {
   if (typeof clientTimestamp !== "string") return now;
   const parsed = new Date(clientTimestamp);
   if (isNaN(parsed.getTime())) return now;
   const delta = now.getTime() - parsed.getTime();
-  if (delta < -MAX_CLIENT_CLOCK_SKEW_FUTURE_MS || delta > MAX_OFFLINE_REPLAY_DELAY_MS) return now;
+  if (delta < -MAX_CLIENT_CLOCK_SKEW_FUTURE_MS) return now;
   return parsed;
 }
 

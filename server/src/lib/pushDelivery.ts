@@ -36,7 +36,7 @@ function getFirebaseMessaging(): Messaging | null {
   return getMessaging(firebaseApp);
 }
 
-interface PushRegistration {
+export interface PushRegistration {
   employeeId: string;
   registrationId: string;
   platform: "android_fcm" | "web_push";
@@ -46,7 +46,16 @@ interface PushRegistration {
   webPushAuth: string | null;
 }
 
-async function loadActiveRegistrations(employeeIds: string[]): Promise<PushRegistration[]> {
+// Exported for callers that need to know reachability BEFORE (or instead
+// of) actually sending — e.g. the mobile Messages recipient picker
+// (mobileMessages.ts's GET /messages/recipients) shows whether each
+// candidate currently has a reachable device. There is at most one active
+// registration per employee (one active device_assignment per employee,
+// 033_one_active_device_per_employee.sql, times at most one active
+// registration per device, the partial unique index in
+// 028_device_push_registrations.sql), so employeeId is effectively unique
+// in the returned rows.
+export async function loadActiveRegistrations(employeeIds: string[]): Promise<PushRegistration[]> {
   const { rows } = await pool.query(
     `select da.employee_id, dpr.id as registration_id, dpr.platform,
             dpr.fcm_token, dpr.web_push_endpoint, dpr.web_push_p256dh, dpr.web_push_auth
@@ -86,6 +95,24 @@ async function disableRegistration(registrationId: string): Promise<void> {
   await pool.query(`update device_push_registrations set disabled_at = now() where id = $1`, [registrationId]);
 }
 
+// attempted/succeeded/failed count REGISTRATIONS, not employees (an
+// employee with zero active registrations contributes to none of the
+// three — see noActiveDeviceEmployeeIds below for that case). Returned so
+// callers that need a synchronous delivery summary can build one (the
+// mobile Messages send screen, mobileMessages.ts's POST /messages/send);
+// desktop's fire-and-forget caller (routes/messages.ts) simply ignores the
+// return value, unchanged from before this was added.
+export interface PushDeliverySummary {
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  // Employees among the input list who had no active registration at all
+  // (no assigned device, an inactive device, or a device that's never
+  // registered/has since disabled push) — distinct from a registration that
+  // was attempted and failed.
+  noActiveDeviceEmployeeIds: string[];
+}
+
 // Best-effort fan-out to every currently-registered device for the given
 // employees — called fire-and-forget from POST /api/messages (see
 // routes/messages.ts); a failure here must never fail or delay the send
@@ -94,30 +121,43 @@ async function disableRegistration(registrationId: string): Promise<void> {
 // (FCM "unregistered", Web Push 404/410) disables that registration so
 // future sends stop retrying against it; any other failure just logs and
 // leaves the registration alone for the next message to try again.
-export async function sendPushForRecipients(messageId: string, employeeIds: string[]): Promise<void> {
-  if (employeeIds.length === 0) return;
+export async function sendPushForRecipients(messageId: string, employeeIds: string[]): Promise<PushDeliverySummary> {
+  if (employeeIds.length === 0) return { attempted: 0, succeeded: 0, failed: 0, noActiveDeviceEmployeeIds: [] };
   const registrations = await loadActiveRegistrations(employeeIds);
+  const reachableEmployeeIds = new Set(registrations.map((r) => r.employeeId));
+  const noActiveDeviceEmployeeIds = employeeIds.filter((id) => !reachableEmployeeIds.has(id));
+
+  let succeeded = 0;
+  let failed = 0;
 
   await Promise.all(
     registrations.map(async (reg) => {
       try {
         if (reg.platform === "android_fcm") {
           const messaging = getFirebaseMessaging();
-          if (!messaging || !reg.fcmToken) return;
+          if (!messaging || !reg.fcmToken) {
+            failed++; // push not configured on this server — no notification will arrive
+            return;
+          }
           await messaging.send({
             token: reg.fcmToken,
             notification: { title: PUSH_TITLE, body: PUSH_BODY },
             data: { type: "message" },
           });
         } else {
-          if (!vapidConfigured || !reg.webPushEndpoint || !reg.webPushP256dh || !reg.webPushAuth) return;
+          if (!vapidConfigured || !reg.webPushEndpoint || !reg.webPushP256dh || !reg.webPushAuth) {
+            failed++; // push not configured on this server — no notification will arrive
+            return;
+          }
           await webpush.sendNotification(
             { endpoint: reg.webPushEndpoint, keys: { p256dh: reg.webPushP256dh, auth: reg.webPushAuth } },
             JSON.stringify({ title: PUSH_TITLE, body: PUSH_BODY, type: "message" })
           );
         }
         await markPushSent(messageId, reg.employeeId);
+        succeeded++;
       } catch (err) {
+        failed++;
         const statusCode = (err as { statusCode?: number }).statusCode;
         const code = (err as { code?: string }).code;
         const permanentlyInvalid =
@@ -134,4 +174,6 @@ export async function sendPushForRecipients(messageId: string, employeeIds: stri
       }
     })
   );
+
+  return { attempted: registrations.length, succeeded, failed, noActiveDeviceEmployeeIds };
 }

@@ -60,6 +60,14 @@ function isValidDate(v: unknown): v is string {
   return typeof v === "string" && DATE_RE.test(v) && !isNaN(Date.parse(v));
 }
 
+function parseEmployeeIds(value: unknown): string[] | null {
+  if (value == null || value === "") return [];
+  const raw = Array.isArray(value) ? value.join(",") : String(value);
+  const ids = [...new Set(raw.split(",").map((part) => part.trim()).filter(Boolean))];
+  if (!ids.every((id) => UUID_RE.test(id))) return null;
+  return ids;
+}
+
 function validateMetrics(reportType: "activity" | "payroll", metrics: unknown): string[] | null {
   if (!Array.isArray(metrics) || metrics.length === 0) return null;
   const allowed = reportType === "activity" ? ACTIVITY_METRICS : PAYROLL_METRICS;
@@ -280,12 +288,16 @@ router.get(
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid report id" });
 
-    const { start, end } = req.query as { start?: string; end?: string };
+    const { start, end, employeeIds } = req.query as { start?: string; end?: string; employeeIds?: string | string[] };
     if (!isValidDate(start) || !isValidDate(end)) {
       return res.status(400).json({ error: "A valid start and end date (YYYY-MM-DD) are required" });
     }
     if (start > end) {
       return res.status(400).json({ error: "start must not be after end" });
+    }
+    const selectedEmployeeIds = parseEmployeeIds(employeeIds);
+    if (selectedEmployeeIds === null) {
+      return res.status(400).json({ error: "employeeIds must be a comma-separated list of valid employee ids" });
     }
 
     const reportRes = await pool.query("select report_type, activity_id from saved_reports where id = $1", [id]);
@@ -293,12 +305,12 @@ router.get(
     if (!report) return res.status(404).json({ error: "Report not found" });
 
     if (report.report_type === "activity") {
-      const data = await getActivityReportData(report.activity_id, start, end);
+      const data = await getActivityReportData(report.activity_id, start, end, { employeeIds: selectedEmployeeIds });
       if (!data) return res.status(404).json({ error: "The activity this report was saved with no longer exists" });
       return res.json({ data });
     }
 
-    const data = await getPayrollReportData(start, end);
+    const data = await getPayrollReportData(start, end, { employeeIds: selectedEmployeeIds });
     res.json({ data });
   })
 );

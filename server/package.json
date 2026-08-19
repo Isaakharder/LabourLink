@@ -48,7 +48,14 @@
     "test:add-break-split": "ts-node src/routes/inputs.addBreakSplit.test.ts",
     "test:break-rounding-safety": "ts-node src/routes/mobileTime.breakRoundingSafety.test.ts",
     "test:employee-blocks": "ts-node src/routes/employeeBlocks.test.ts",
-    "test:greenhouse-live-block-colors": "ts-node src/routes/greenhouseLive.blockColors.test.ts"
+    "test:greenhouse-live-block-colors": "ts-node src/routes/greenhouseLive.blockColors.test.ts",
+    "test:mobile-messages": "ts-node src/routes/mobileMessages.test.ts",
+    "test:mobile-employees": "ts-node src/routes/mobileEmployees.test.ts",
+    "test:mobile-time-sync-events": "ts-node src/routes/mobileTime.syncEvents.test.ts",
+    "test:mobile-sync-conflicts": "ts-node src/routes/mobileSyncConflicts.test.ts",
+    "test:mobile-time-sync-events-clock-anomaly": "ts-node src/routes/mobileTime.syncEvents.clockAnomaly.test.ts",
+    "test:mobile-time-sync-events-scenarios": "ts-node src/routes/mobileTime.syncEvents.scenarios.test.ts",
+    "test:mobile-time-sync-events-concurrent-load": "ts-node src/routes/mobileTime.syncEvents.concurrentLoad.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",

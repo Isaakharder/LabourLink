@@ -1,0 +1,11 @@
+-- Client-generated idempotency key for message sends — same convention as
+-- time_entries.idempotency_key (003_activities_and_time_entries.sql): a
+-- retried/replayed POST with the same key is a true no-op on the insert
+-- (`on conflict (idempotency_key) do nothing`), so a double tap or an
+-- offline-queue replay from the mobile Messages screen can never create two
+-- messages. Nullable because existing desktop sends (server/src/routes/
+-- messages.ts) don't supply one and don't need to — Postgres unique
+-- constraints treat every null as distinct, so any number of desktop sends
+-- with no key can coexist without ever colliding with each other or with a
+-- mobile send's real key.
+alter table employee_messages add column idempotency_key uuid unique;

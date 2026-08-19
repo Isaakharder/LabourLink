@@ -119,6 +119,16 @@ export interface DensityAttribution {
   byEmployeeDay: Map<string, DensityTotals>;
 }
 
+interface ReportEmployeeFilter {
+  employeeIds?: string[];
+}
+
+function filterToUuidArray(employeeIds?: string[]): string[] | null {
+  if (!employeeIds || employeeIds.length === 0) return null;
+  const deduped = [...new Set(employeeIds)];
+  return deduped.length ? deduped : null;
+}
+
 // Exported so callers outside this file's own range-report shape (e.g. the
 // mobile employee Stats page, server/src/routes/mobileStats.ts) can reuse
 // this exact selection/attribution logic for a narrower slice — never
@@ -128,8 +138,10 @@ export interface DensityAttribution {
 export async function getActivityDensityAttribution(
   activityId: string,
   rangeStart: Date,
-  rangeEnd: Date
+  rangeEnd: Date,
+  filter: ReportEmployeeFilter = {}
 ): Promise<DensityAttribution> {
+  const employeeIds = filterToUuidArray(filter.employeeIds);
   const byEmployee = new Map<string, DensityTotals>();
   const byEmployeeDay = new Map<string, DensityTotals>();
 
@@ -155,6 +167,7 @@ export async function getActivityDensityAttribution(
        join row_completion_segments rcs on rcs.row_completion_id = rc.id
        join time_entries te on te.id = rcs.time_entry_id
        where te.deleted_at is null
+         and ($5::uuid[] is null or te.employee_id = any($5::uuid[]))
      )
      select completion_id,
             max(quantity_per_row) as quantity_per_row,
@@ -176,7 +189,7 @@ export async function getActivityDensityAttribution(
      from segs
      group by completion_id
      having bool_or(activity_id = $1) or count(distinct activity_id) > 1`,
-    [activityId, rangeStart, rangeEnd, APP_TIMEZONE]
+    [activityId, rangeStart, rangeEnd, APP_TIMEZONE, employeeIds]
   );
   for (const c of completionRows) {
     if (Number(c.employee_count) !== 1) continue;
@@ -204,11 +217,33 @@ export async function getActivityDensityAttribution(
      where te.activity_id = $1 and te.entry_type = 'work' and te.deleted_at is null
        and te.density_type is not null and te.greenhouse_row_id is not null
        and te.started_at >= $2 and te.started_at < $3
+       and ($4::uuid[] is null or te.employee_id = any($4::uuid[]))
        and rcs.time_entry_id is null`,
-    [activityId, rangeStart, rangeEnd]
+     [activityId, rangeStart, rangeEnd, employeeIds]
   );
-  for (const pair of candidateRowsRes) {
-    const candidates = await getUnresolvedRunsForRow(pair.greenhouse_row_id, pair.density_type);
+  // Resolved CONCURRENTLY (Promise.all), not one-row-at-a-time — a
+  // sequential await here was a genuine N+1 against a remote pooled
+  // database (confirmed: ~17s for a single busy activity with dozens of
+  // candidate rows this week), which violates this file's own header
+  // invariant ("never one query per employee or per day") and made the
+  // mobile Employees live screen (server/src/routes/mobileEmployees.ts,
+  // which calls this once per distinct activity on every poll) unusably
+  // slow. getUnresolvedRunsForRow has no shared mutable state between
+  // calls, and addTo's Map accumulation is commutative, so resolving
+  // every candidate row's runs concurrently — then filtering/aggregating
+  // in the original deterministic order below — produces byte-identical
+  // totals to the old sequential loop, just far faster.
+  const candidateResults = await Promise.all(
+    candidateRowsRes.map((pair) => getUnresolvedRunsForRow(pair.greenhouse_row_id, pair.density_type))
+  );
+
+  interface AcceptedRun {
+    only: (typeof candidateResults)[number][number];
+    startedAt: Date;
+    endedAt: Date;
+  }
+  const accepted: AcceptedRun[] = [];
+  for (const candidates of candidateResults) {
     if (candidates.length !== 1) continue; // ambiguous (2+) — excluded, same as Inputs
     const only = candidates[0];
     if (only.activityId !== activityId) continue;
@@ -220,16 +255,27 @@ export async function getActivityDensityAttribution(
     const startedAt = new Date(only.startedAt);
     const endedAt = only.endedAt ? new Date(only.endedAt) : null;
     if (!endedAt || startedAt < rangeStart || endedAt > rangeEnd) continue;
-    // Reuses the frozen density_count_per_row already resolved onto this
-    // run's segments — refetched here (not carried on CandidateRun) since
-    // getUnresolvedRunsForRow doesn't expose it; the query pattern mirrors
-    // Inputs' own densityContributionsByActivity lookup.
-    const { rows: densityRows } = await pool.query(
-      `select density_count_per_row from time_entries where id = any($1::uuid[]) and density_count_per_row is not null limit 1`,
-      [only.segmentIds]
-    );
-    const quantityPerRow = densityRows[0]?.density_count_per_row;
-    if (quantityPerRow == null) continue;
+    accepted.push({ only, startedAt, endedAt });
+  }
+
+  // Reuses the frozen density_count_per_row already resolved onto each
+  // run's segments — refetched here (not carried on CandidateRun) since
+  // getUnresolvedRunsForRow doesn't expose it; the query pattern mirrors
+  // Inputs' own densityContributionsByActivity lookup. Also concurrent —
+  // only as many of these fire as there are ACCEPTED (unambiguous,
+  // in-range) candidates, typically far fewer than candidateRowsRes.
+  const densityResults = await Promise.all(
+    accepted.map(({ only }) =>
+      pool.query(
+        `select density_count_per_row from time_entries where id = any($1::uuid[]) and density_count_per_row is not null limit 1`,
+        [only.segmentIds]
+      )
+    )
+  );
+
+  accepted.forEach(({ only, startedAt, endedAt }, i) => {
+    const quantityPerRow = densityResults[i].rows[0]?.density_count_per_row;
+    if (quantityPerRow == null) return;
     const quantity = Number(quantityPerRow);
     addTo(byEmployee, only.employeeId, quantity, only.durationSeconds, 0);
     // A run crossing midnight (started one calendar day, ended the next)
@@ -241,7 +287,7 @@ export async function getActivityDensityAttribution(
     if (startDay === endDay) {
       addTo(byEmployeeDay, `${only.employeeId}:${startDay}`, quantity, only.durationSeconds, 0);
     }
-  }
+  });
 
   return { byEmployee, byEmployeeDay };
 }
@@ -249,7 +295,8 @@ export async function getActivityDensityAttribution(
 export async function getActivityReportData(
   activityId: string,
   startDate: string,
-  endDate: string
+  endDate: string,
+  filter: ReportEmployeeFilter = {}
 ): Promise<ActivityReportData | null> {
   const activityRes = await pool.query(
     `select id, name, normal_speed, speed_unit from activities where id = $1`,
@@ -259,6 +306,7 @@ export async function getActivityReportData(
   if (!activity) return null;
 
   const { start, end } = getRangeBoundsUtc(startDate, endDate);
+  const employeeIds = filterToUuidArray(filter.employeeIds);
 
   const workRes = await pool.query(
     `select te.employee_id, e.first_name, e.last_name,
@@ -277,19 +325,20 @@ export async function getActivityReportData(
      join employees e on e.id = te.employee_id
      where te.activity_id = $1 and te.entry_type = 'work' and te.deleted_at is null
        and te.ended_at is not null and te.started_at >= $2 and te.started_at < $3
+       and ($5::uuid[] is null or te.employee_id = any($5::uuid[]))
      group by te.employee_id, e.first_name, e.last_name, work_date
      order by work_date, e.first_name, e.last_name`,
-    [activityId, start, end, APP_TIMEZONE]
+    [activityId, start, end, APP_TIMEZONE, employeeIds]
   );
 
-  const employeeIds = [...new Set(workRes.rows.map((r) => r.employee_id as string))];
+  const workEmployeeIds = [...new Set(workRes.rows.map((r) => r.employee_id as string))];
 
   // Whole-shift break totals for the same employee/day pairs — breaks carry
   // no activity_id (see time_entries schema), so "break time" on an Activity
   // Report is necessarily each employee's whole-day break time, not a
   // portion attributed to this one activity. This is the only safely
   // available reading of that column, not an invented split.
-  const breakRes = employeeIds.length
+  const breakRes = workEmployeeIds.length
     ? await pool.query(
         `select te.employee_id,
                 to_char((te.started_at at time zone $4)::date, 'YYYY-MM-DD') as work_date,
@@ -300,7 +349,7 @@ export async function getActivityReportData(
          where te.entry_type = 'break' and te.deleted_at is null and te.ended_at is not null
            and te.employee_id = any($1::uuid[]) and te.started_at >= $2 and te.started_at < $3
          group by te.employee_id, work_date`,
-        [employeeIds, start, end, APP_TIMEZONE]
+        [workEmployeeIds, start, end, APP_TIMEZONE]
       )
     : { rows: [] as { employee_id: string; work_date: string; break_seconds: string; paid_break_seconds: string; unpaid_break_seconds: string }[] };
   const breakByKey = new Map<string, { breakSeconds: number; paidBreakSeconds: number; unpaidBreakSeconds: number }>();
@@ -312,7 +361,7 @@ export async function getActivityReportData(
     });
   }
 
-  const attribution = await getActivityDensityAttribution(activityId, start, end);
+  const attribution = await getActivityDensityAttribution(activityId, start, end, { employeeIds: employeeIds ?? undefined });
 
   const rows: ActivityReportRow[] = workRes.rows.map((r) => {
     const dateStr = String(r.work_date);
@@ -360,8 +409,9 @@ export async function getActivityReportData(
     `select count(distinct greenhouse_row_id) as n
      from time_entries
      where activity_id = $1 and entry_type = 'work' and deleted_at is null
-       and greenhouse_row_id is not null and started_at >= $2 and started_at < $3`,
-    [activityId, start, end]
+       and greenhouse_row_id is not null and started_at >= $2 and started_at < $3
+       and ($4::uuid[] is null or employee_id = any($4::uuid[]))`,
+    [activityId, start, end, employeeIds]
   );
   const totalRowsTouched = Number(rangeRowsRes.rows[0]?.n ?? 0);
   void distinctRowsTouched;
@@ -428,8 +478,9 @@ export async function getActivityReportData(
      from time_entries
      where activity_id = $1 and entry_type = 'work' and deleted_at is null
        and greenhouse_row_id is not null and started_at >= $2 and started_at < $3
+       and ($4::uuid[] is null or employee_id = any($4::uuid[]))
      group by employee_id`,
-    [activityId, start, end]
+    [activityId, start, end, employeeIds]
   );
   const employeeRowsTouched = new Map(employeeRowsTouchedRes.rows.map((r) => [r.employee_id as string, Number(r.n)]));
 
@@ -438,8 +489,9 @@ export async function getActivityReportData(
      from time_entries
      where activity_id = $1 and entry_type = 'work' and deleted_at is null
        and greenhouse_row_id is not null and started_at >= $2 and started_at < $3
+       and ($5::uuid[] is null or employee_id = any($5::uuid[]))
      group by work_date`,
-    [activityId, start, end, APP_TIMEZONE]
+    [activityId, start, end, APP_TIMEZONE, employeeIds]
   );
   const dateRowsTouched = new Map(dateRowsTouchedRes.rows.map((r) => [String(r.work_date), Number(r.n)]));
 
@@ -585,8 +637,13 @@ export interface PayrollReportData {
 // establishes (totalPaidBreakSeconds/totalUnpaidBreakSeconds) — no new
 // pay-time rule is introduced here, only summed across a range instead of
 // one day.
-export async function getPayrollReportData(startDate: string, endDate: string): Promise<PayrollReportData> {
+export async function getPayrollReportData(
+  startDate: string,
+  endDate: string,
+  filter: ReportEmployeeFilter = {}
+): Promise<PayrollReportData> {
   const { start, end } = getRangeBoundsUtc(startDate, endDate);
+  const employeeIds = filterToUuidArray(filter.employeeIds);
 
   const { rows: dayRows } = await pool.query(
     `select te.employee_id, e.first_name, e.last_name,
@@ -601,9 +658,10 @@ export async function getPayrollReportData(startDate: string, endDate: string): 
      join employees e on e.id = te.employee_id
      where te.deleted_at is null and te.ended_at is not null
        and te.started_at >= $1 and te.started_at < $2
+       and ($4::uuid[] is null or te.employee_id = any($4::uuid[]))
      group by te.employee_id, e.first_name, e.last_name, work_date
      order by work_date, e.first_name, e.last_name`,
-    [start, end, APP_TIMEZONE]
+    [start, end, APP_TIMEZONE, employeeIds]
   );
 
   const rows: PayrollReportRow[] = dayRows.map((r) => {
@@ -633,8 +691,9 @@ export async function getPayrollReportData(startDate: string, endDate: string): 
      join employees e on e.id = te.employee_id
      where te.entry_type = 'work' and te.deleted_at is null and te.ended_at is not null
        and te.started_at >= $1 and te.started_at < $2
+       and ($4::uuid[] is null or te.employee_id = any($4::uuid[]))
      group by te.employee_id, e.first_name, e.last_name`,
-    [start, end, APP_TIMEZONE]
+    [start, end, APP_TIMEZONE, employeeIds]
   );
   const daysWorkedByEmployee = daysWorkedRows.map((r) => ({
     employeeId: r.employee_id,
@@ -649,9 +708,10 @@ export async function getPayrollReportData(startDate: string, endDate: string): 
      join activities a on a.id = te.activity_id
      where te.entry_type = 'work' and te.deleted_at is null and te.ended_at is not null
        and te.started_at >= $1 and te.started_at < $2
+       and ($3::uuid[] is null or te.employee_id = any($3::uuid[]))
      group by te.employee_id, te.activity_id, a.name
      order by a.name`,
-    [start, end]
+    [start, end, employeeIds]
   );
   const activityBreakdown: PayrollActivityBreakdownRow[] = activityRows.map((r) => ({
     employeeId: r.employee_id,
@@ -672,9 +732,10 @@ export async function getPayrollReportData(startDate: string, endDate: string): 
      from time_entries te
      where te.deleted_at is null and te.ended_at is not null
        and te.started_at >= $1 and te.started_at < $2
+       and ($4::uuid[] is null or te.employee_id = any($4::uuid[]))
      group by week_start
      order by week_start`,
-    [start, end, APP_TIMEZONE]
+    [start, end, APP_TIMEZONE, employeeIds]
   );
   const weeklyTotals: PayrollWeeklyTotalRow[] = weeklyRows.map((r) => {
     const weekStart = new Date(r.week_start as string);

@@ -7,7 +7,6 @@ import {
   resolveOriginalStartedAt,
   resolveOriginalEndedAt,
   MAX_CLIENT_CLOCK_SKEW_FUTURE_MS,
-  MAX_OFFLINE_REPLAY_DELAY_MS,
 } from "./workStartRounding";
 import { zonedWallTimeToUtc } from "./timezone";
 
@@ -278,17 +277,13 @@ check(threw, "roundWorkStart throws for an out-of-range interval rather than sil
     "resolveOriginalStartedAt: a 6-hour-old offline tap is trusted, not clamped to sync time"
   );
 
-  // Exactly at the backward bound is still trusted; one millisecond further
-  // back falls back to now.
-  const atBackwardBound = new Date(now.getTime() - MAX_OFFLINE_REPLAY_DELAY_MS);
+  // No backward bound at all anymore (removed 24h fallback — see
+  // workStartRounding.ts's own comment): a multi-day-old offline tap is
+  // still trusted as-is, never silently clamped to sync/arrival time.
+  const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
   check(
-    resolveOriginalStartedAt(atBackwardBound.toISOString(), now).getTime() === atBackwardBound.getTime(),
-    "resolveOriginalStartedAt: exactly at the backward bound is trusted"
-  );
-  const pastBackwardBound = new Date(now.getTime() - MAX_OFFLINE_REPLAY_DELAY_MS - 1);
-  check(
-    resolveOriginalStartedAt(pastBackwardBound.toISOString(), now).getTime() === now.getTime(),
-    "resolveOriginalStartedAt: one ms past the backward bound falls back to now"
+    resolveOriginalStartedAt(fiveDaysAgo.toISOString(), now).getTime() === fiveDaysAgo.getTime(),
+    "resolveOriginalStartedAt: a 5-day-old offline tap is trusted, not clamped to sync time"
   );
 
   // Small forward skew (phone clock slightly ahead of the server) is
@@ -304,12 +299,17 @@ check(threw, "roundWorkStart throws for an out-of-range interval rather than sil
     "resolveOriginalStartedAt: one ms past the forward skew bound falls back to now"
   );
 
-  // An obviously broken clock (unset-clock epoch date) is far outside the
-  // backward bound and falls back to now rather than recording a bogus
-  // 1970 timestamp.
+  // An obviously broken clock (unset-clock epoch date) is now trusted
+  // as-is, not silently clamped to now — the backward bound was removed
+  // entirely (confirmed decision: occurrence time is always preserved,
+  // however implausible, rather than quietly substituting server-arrival
+  // time). Detecting and flagging a clock this far off for admin review is
+  // a separate, not-yet-built concern (see the plan's conflict-handling
+  // stage), not something this bounding function should silently paper
+  // over by picking a different, equally-unverified timestamp (`now`).
   check(
-    resolveOriginalStartedAt(new Date(0).toISOString(), now).getTime() === now.getTime(),
-    "resolveOriginalStartedAt: an epoch-zero clientStartedAt (broken clock) falls back to now"
+    resolveOriginalStartedAt(new Date(0).toISOString(), now).getTime() === new Date(0).getTime(),
+    "resolveOriginalStartedAt: an epoch-zero clientStartedAt is trusted as-is, not clamped to now"
   );
 }
 
@@ -427,10 +427,10 @@ check(
     resolveOriginalEndedAt(undefined, now).getTime() === now.getTime(),
     "resolveOriginalEndedAt: missing clientEndedAt falls back to now"
   );
-  const tooFarBack = new Date(now.getTime() - MAX_OFFLINE_REPLAY_DELAY_MS - 1);
+  const farBack = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
   check(
-    resolveOriginalEndedAt(tooFarBack.toISOString(), now).getTime() === now.getTime(),
-    "resolveOriginalEndedAt: a clientEndedAt further back than the offline-replay bound falls back to now"
+    resolveOriginalEndedAt(farBack.toISOString(), now).getTime() === farBack.getTime(),
+    "resolveOriginalEndedAt: a 5-day-old clientEndedAt is trusted, not clamped to now"
   );
 }
 

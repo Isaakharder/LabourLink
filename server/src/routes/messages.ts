@@ -3,6 +3,7 @@ import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { sendPushForRecipients } from "../lib/pushDelivery";
+import { resolveRecipients, createEmployeeMessage } from "../lib/employeeMessages";
 
 const router = Router();
 
@@ -108,57 +109,20 @@ router.post(
       return res.status(400).json({ error: "recipientMode must be 'all' or 'selected'" });
     }
 
-    let employeeIds: string[];
-    if (recipientMode === "all") {
-      // Snapshotted here, once, at send time — never re-derived later, so a
-      // subsequent deactivation can't retroactively change who this send
-      // says it went to (see 027_employee_messages.sql's header comment).
-      const active = await pool.query("select id from employees where is_active = true");
-      employeeIds = active.rows.map((r) => r.id);
-    } else {
-      const ids = req.body?.employeeIds;
-      if (!Array.isArray(ids) || ids.length === 0 || !ids.every((v) => typeof v === "string" && UUID_RE.test(v))) {
-        return res.status(400).json({ error: "employeeIds must be a non-empty array of employee ids" });
-      }
-      // Re-validated against active employees server-side — a client-
-      // supplied id list is never trusted as-is, same convention
-      // employeeBlocks.ts's row-linking endpoint uses.
-      const active = await pool.query(
-        "select id from employees where id = any($1::uuid[]) and is_active = true",
-        [ids]
-      );
-      if (active.rows.length !== new Set(ids).size) {
-        return res.status(400).json({ error: "One or more selected employees are not active" });
-      }
-      employeeIds = active.rows.map((r) => r.id);
-    }
+    const resolved = await resolveRecipients(recipientMode, req.body?.employeeIds);
+    if (!resolved.ok) return res.status(400).json({ error: resolved.error });
+    const employeeIds = resolved.employeeIds;
 
     if (employeeIds.length === 0) {
       return res.status(400).json({ error: "No active employees to send to" });
     }
 
-    const client = await pool.connect();
-    let messageId: string;
-    try {
-      await client.query("begin");
-      const insert = await client.query(
-        `insert into employee_messages (message_text, created_by_employee_id, all_employees)
-         values ($1, $2, $3) returning id`,
-        [messageText, req.employee!.id, recipientMode === "all"]
-      );
-      messageId = insert.rows[0].id;
-      await client.query(
-        `insert into employee_message_recipients (message_id, employee_id)
-         select $1, unnest($2::uuid[])`,
-        [messageId, employeeIds]
-      );
-      await client.query("commit");
-    } catch (err) {
-      await client.query("rollback");
-      throw err;
-    } finally {
-      client.release();
-    }
+    const { messageId } = await createEmployeeMessage({
+      messageText,
+      createdByEmployeeId: req.employee!.id,
+      recipientMode,
+      employeeIds,
+    });
 
     // Best-effort push delivery, fire-and-forget — the recipient rows
     // (already committed above) are the source of truth regardless of
