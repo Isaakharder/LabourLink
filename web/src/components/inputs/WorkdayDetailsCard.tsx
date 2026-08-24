@@ -21,12 +21,34 @@ function ManualBadge({ meta }: { meta: ManualEntryMeta }) {
   );
 }
 
+// "Corrected" badge shared by the work-start row and every break row below
+// — distinct from the existing "Rounded" badge (a genuine phone tap the
+// server adjusted) and "Manually added" (an entry created outright from
+// this page). The server only ever sends correctedFrom when a real
+// time_entry_corrections record exists for this exact field, so this never
+// needs its own "did this actually change" check the way Rounded's inline
+// comparison does.
+function CorrectedBadge({ correctedFrom }: { correctedFrom: string }) {
+  return (
+    <span
+      className="inputs-corrected-badge"
+      title={`Previously ${formatTimeInAppTimezone(correctedFrom)} — adjusted by an administrator or an automatic correction.`}
+    >
+      Corrected
+    </span>
+  );
+}
+
 interface WorkdayDetailsCardProps {
   workStartTime: string | null;
   // Present only when work-start rounding was active for this entry (see
   // inputsTypes.ts) — used only to decide whether to show the "Rounded"
   // badge/tooltip, never rendered as the primary time itself.
   workStartOriginalTime: string | null;
+  // Present only when the work-start entry's started_at was set by an
+  // administrator/system correction — used only to decide whether to show
+  // the "Corrected" badge, same convention as workStartOriginalTime above.
+  workStartCorrectedFrom: string | null;
   workStartManualEntry: ManualEntryMeta | null;
   breaks: BreakDto[];
   paidBreakSeconds: number;
@@ -62,6 +84,7 @@ interface WorkdayDetailsCardProps {
 export function WorkdayDetailsCard({
   workStartTime,
   workStartOriginalTime,
+  workStartCorrectedFrom,
   workStartManualEntry,
   breaks,
   paidBreakSeconds,
@@ -180,6 +203,7 @@ export function WorkdayDetailsCard({
                       Rounded
                     </span>
                   )}
+                  {workStartCorrectedFrom && <CorrectedBadge correctedFrom={workStartCorrectedFrom} />}
                   {workStartManualEntry && <ManualBadge meta={workStartManualEntry} />}
                 </>
               ) : (
@@ -246,6 +270,7 @@ export function WorkdayDetailsCard({
                           Rounded
                         </span>
                       )}
+                      {b.startedAtCorrectedFrom && <CorrectedBadge correctedFrom={b.startedAtCorrectedFrom} />}
                     </>
                   )}
                 </td>
@@ -288,6 +313,7 @@ export function WorkdayDetailsCard({
                           Rounded
                         </span>
                       )}
+                      {b.endedAtCorrectedFrom && <CorrectedBadge correctedFrom={b.endedAtCorrectedFrom} />}
                       {b.autoClosed && <span className="inputs-autoclosed-badge">Auto-closed</span>}
                     </>
                   ) : (

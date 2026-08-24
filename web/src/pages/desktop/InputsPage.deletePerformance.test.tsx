@@ -88,6 +88,7 @@ function buildDaily(date: string): DailyInputsResponse {
     date,
     workStartTime: null,
     workStartOriginalTime: null,
+    workStartCorrectedFrom: null,
     workStartManualEntry: null,
     runs: [
       {
@@ -103,6 +104,7 @@ function buildDaily(date: string): DailyInputsResponse {
         segmentIds: ["run-1"],
         durationSeconds: 3600,
         endedAtOriginalTime: null,
+        endedAtCorrectedFrom: null,
         startedAt: `${date}T13:00:00.000Z`,
         currentSegmentStartedAt: `${date}T13:00:00.000Z`,
         endedAt: `${date}T14:00:00.000Z`,

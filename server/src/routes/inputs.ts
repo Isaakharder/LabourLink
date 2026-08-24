@@ -7,6 +7,7 @@ import { calendarDateInAppTimezone, getDayBoundsUtc } from "../lib/timezone";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { aggregateDensitySpeed } from "../lib/densitySpeed";
+import { computeWorkdayTotals, WorkdayBoundaryEntry } from "../lib/workdayTotals";
 import { getUnresolvedRunsForRows } from "../lib/rowCompletionCandidates";
 import {
   loadCarrierOptions,
@@ -284,6 +285,36 @@ router.get(
       [employeeId, start, end]
     );
     console.log(`[timing] daily entryRows fetch: ${Date.now() - __t0}ms (${entryRows.length} rows)`);
+
+    // Provenance evidence for the "Corrected" badge (distinct from
+    // "Rounded" — see workdayTotals.ts's header comment on the Reynaldo
+    // bug this whole file's investigation started from). A correction
+    // route (PATCH .../end-time, the automatic run-extension after a
+    // deletion, etc.) always nulls actual_started_at/actual_ended_at once
+    // it overwrites a boundary — correctly stops a stale "Rounded" badge
+    // from pointing at a tap time that no longer describes anything — but
+    // that must never mean the fact "an administrator/the system corrected
+    // this" is lost entirely: time_entry_corrections already keeps that
+    // full audit trail forever, just not previously surfaced here. Keyed by
+    // `${time_entry_id}:${field_name}`, most-recent correction only (a
+    // field corrected more than once still just shows as "Corrected" once,
+    // from its latest old value) — same "own the audit trail, not just a
+    // symptom flag" reasoning actual_started_at/actual_ended_at already
+    // used for Rounded.
+    const entryIds = entryRows.map((r) => r.id);
+    const correctedFromMap = new Map<string, string>();
+    if (entryIds.length > 0) {
+      const { rows: correctionRows } = await pool.query(
+        `select distinct on (time_entry_id, field_name) time_entry_id, field_name, old_value
+         from time_entry_corrections
+         where time_entry_id = any($1::uuid[]) and field_name in ('started_at', 'ended_at')
+         order by time_entry_id, field_name, changed_at desc`,
+        [entryIds]
+      );
+      for (const c of correctionRows) {
+        correctedFromMap.set(`${c.time_entry_id}:${c.field_name}`, c.old_value);
+      }
+    }
 
     const segments: RunSegment[] = entryRows.map((r) => ({
       id: r.id,
@@ -588,17 +619,26 @@ router.get(
     const canEditRole = EDIT_ROLES.includes(req.employee!.securityRole);
     const workStart = entryRows.find((r) => r.entry_type === "work");
 
-    const totalWorkedSeconds = Math.round(runs.reduce((sum, r) => sum + r.durationSeconds, 0));
-    const totalBreakSeconds = Math.round(
-      breaks.reduce((sum, b) => sum + (b.endedAt ? (b.endedAt.getTime() - b.startedAt.getTime()) / 1000 : 0), 0)
-    );
-    let totalPaidBreakSeconds = 0;
-    let totalUnpaidBreakSeconds = 0;
-    for (const b of breaks) {
-      const dur = b.endedAt ? Math.round((b.endedAt.getTime() - b.startedAt.getTime()) / 1000) : 0;
-      if (breakMeta.get(b.id)?.isPaid) totalPaidBreakSeconds += dur;
-      else totalUnpaidBreakSeconds += dur;
-    }
+    // The authoritative workday total — see workdayTotals.ts's own header
+    // for the full reasoning (the Reynaldo Dela Cruz Aug 17 bug: a ~68s
+    // transition gap between two activities, no break recorded across it,
+    // was silently excluded from Worked under the old "sum of work-entry
+    // durations" formula). Built directly from entryRows (every non-deleted
+    // entry this day, work AND break) rather than from `runs`/`breaks`
+    // above — those are already grouped into activity runs, which is the
+    // wrong grain for a whole-day span calculation and would need
+    // unpacking back into raw boundaries anyway.
+    const workdayEntries: WorkdayBoundaryEntry[] = entryRows.map((r) => ({
+      entryType: r.entry_type,
+      startedAt: r.started_at,
+      endedAt: r.ended_at,
+      isPaid: r.is_paid,
+    }));
+    const workdayTotals = computeWorkdayTotals(workdayEntries);
+    const totalWorkedSeconds = Math.round(workdayTotals.workedSeconds);
+    const totalBreakSeconds = Math.round(workdayTotals.breakSeconds);
+    const totalPaidBreakSeconds = Math.round(workdayTotals.paidBreakSeconds);
+    const totalUnpaidBreakSeconds = Math.round(workdayTotals.unpaidBreakSeconds);
 
     const photoUrl = await photoUrlPromise;
     console.log(`[timing] daily total (before res.json): ${Date.now() - __t0}ms`);
@@ -624,6 +664,15 @@ router.get(
       // anything. The desktop Inputs UI only actually surfaces this when it
       // differs from workStartTime (see WorkdayDetailsCard).
       workStartOriginalTime: workStart?.actual_started_at ?? null,
+      // Present when the work-start entry's own started_at was set by an
+      // administrator/system correction (PATCH .../work-start, or the
+      // automatic backward-extension after deleting a preceding bad entry)
+      // rather than a genuine phone tap — see correctedFromMap's own
+      // comment above. Mutually exclusive with workStartOriginalTime in
+      // practice: a correction always nulls actual_started_at when it
+      // overwrites this field, so at most one of the two is ever non-null
+      // for the same entry.
+      workStartCorrectedFrom: workStart ? correctedFromMap.get(`${workStart.id}:started_at`) ?? null : null,
       // Direct from the work-start row itself, not derived through the
       // runs array — a work-start that happens to be the first segment of
       // a multi-segment run wouldn't reliably surface here otherwise (see
@@ -719,6 +768,14 @@ router.get(
           // Inputs UI only surfaces this when it differs from endedAt (see
           // ActivityLogsCard).
           endedAtOriginalTime: endedAtOriginalMeta.get(r.id) ?? null,
+          // Present when this run's own end time (a run's id is always its
+          // *last* segment's id — see the comment on autoClosed below) was
+          // set by an administrator/system correction rather than a
+          // genuine Finish Work tap — see correctedFromMap's own comment
+          // above. Mutually exclusive with endedAtOriginalTime: a
+          // correction always nulls actual_ended_at when it overwrites
+          // this field.
+          endedAtCorrectedFrom: correctedFromMap.get(`${r.id}:ended_at`) ?? null,
           isOpen: r.isOpen,
           canEdit: canEditRole && !r.isOpen,
           row: row ? { id: r.greenhouseRowId, label: `${row.phaseName} · Row ${row.rowNumber}` } : null,
@@ -748,6 +805,15 @@ router.get(
           // startedAt/endedAt (see WorkdayDetailsCard).
           startedAtOriginalTime: meta?.startedAtOriginal ?? null,
           endedAtOriginalTime: meta?.endedAtOriginal ?? null,
+          // Present when this boundary was set by an administrator/system
+          // correction rather than a genuine phone tap — see
+          // correctedFromMap's own comment above. A break is always a
+          // single segment, so b.id is unambiguous for both fields (unlike
+          // a run, which needs its first vs. last segment). Mutually
+          // exclusive with the OriginalTime fields above for the same
+          // reason as workStartCorrectedFrom.
+          startedAtCorrectedFrom: correctedFromMap.get(`${b.id}:started_at`) ?? null,
+          endedAtCorrectedFrom: correctedFromMap.get(`${b.id}:ended_at`) ?? null,
           durationSeconds: b.endedAt ? Math.round((b.endedAt.getTime() - b.startedAt.getTime()) / 1000) : 0,
           name: meta?.name ?? null,
           isPaid: meta?.isPaid ?? null,

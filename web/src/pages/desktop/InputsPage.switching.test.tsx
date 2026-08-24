@@ -107,6 +107,7 @@ function buildDaily(emp: InputsEmployee, date: string, activityName: string, bre
     date,
     workStartTime: null,
     workStartOriginalTime: null,
+    workStartCorrectedFrom: null,
     workStartManualEntry: null,
     runs: [
       {
@@ -122,6 +123,7 @@ function buildDaily(emp: InputsEmployee, date: string, activityName: string, bre
         segmentIds: [`run-${emp.id}`],
         durationSeconds: 3600,
         endedAtOriginalTime: null,
+        endedAtCorrectedFrom: null,
         startedAt: `${date}T13:00:00.000Z`,
         currentSegmentStartedAt: `${date}T13:00:00.000Z`,
         endedAt: `${date}T14:00:00.000Z`,
@@ -146,6 +148,8 @@ function buildBreak(id: string, name: string, startedAt: string, endedAt: string
     endedAt,
     startedAtOriginalTime: null,
     endedAtOriginalTime: null,
+    startedAtCorrectedFrom: null,
+    endedAtCorrectedFrom: null,
     durationSeconds: 900,
     name,
     isPaid: false,

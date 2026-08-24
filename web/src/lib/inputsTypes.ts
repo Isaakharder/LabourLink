@@ -115,6 +115,14 @@ export interface ActivityRunDto {
   // rounding left unchanged" convention as workStartOriginalTime; only
   // shown when it differs from endedAt (see ActivityLogsCard).
   endedAtOriginalTime: string | null;
+  // The value endedAt held before an administrator/system correction
+  // overwrote it (PATCH .../end-time, or the automatic run-extension after
+  // deleting an adjacent bad entry) — present only then, and mutually
+  // exclusive with endedAtOriginalTime in practice: a correction always
+  // clears the server's own "rounded from a tap" evidence for the field it
+  // overwrites. Drives the "Corrected" badge, distinct from "Rounded" (see
+  // ActivityLogsCard).
+  endedAtCorrectedFrom: string | null;
   isOpen: boolean;
   canEdit: boolean;
   row: { id: string; label: string } | null;
@@ -145,6 +153,11 @@ export interface BreakDto {
   // (see WorkdayDetailsCard).
   startedAtOriginalTime: string | null;
   endedAtOriginalTime: string | null;
+  // Same "Corrected" provenance as ActivityRunDto.endedAtCorrectedFrom
+  // above, for this break's own start/end — a break is always a single
+  // segment, so both are unambiguous.
+  startedAtCorrectedFrom: string | null;
+  endedAtCorrectedFrom: string | null;
   durationSeconds: number;
   name: string | null;
   isPaid: boolean | null;
@@ -168,6 +181,9 @@ export interface DailyInputsResponse {
   // rounding happened to land exactly on a boundary; the UI only shows an
   // adjustment indicator when the two differ (see WorkdayDetailsCard).
   workStartOriginalTime: string | null;
+  // Same "Corrected" provenance as ActivityRunDto.endedAtCorrectedFrom
+  // above, for the work-start entry's own started_at.
+  workStartCorrectedFrom: string | null;
   // Present when the work-start entry itself (not necessarily any
   // activity run built from it) was created directly from the Inputs page
   // via Add work start, rather than a phone tap.

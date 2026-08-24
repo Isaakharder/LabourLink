@@ -350,7 +350,12 @@ async function main() {
     // -----------------------------------------------------------------
     // 3) Paid-break totals follow the existing paid-break rules — a paid
     //    break still splits the activity, but contributes to
-    //    paidBreakSeconds (and therefore paid time), not unpaid.
+    //    paidBreakSeconds (and therefore paid time), not unpaid. Per the
+    //    Inputs workday-total/boundary-provenance fix (workdayTotals.ts):
+    //    a paid break is never subtracted from Worked — Worked is now the
+    //    whole 7:00-17:00 span, the paid break's own 15 minutes folded in
+    //    (the employee is compensated for that span either way), not
+    //    excluded from it the way an unpaid break's time is.
     // -----------------------------------------------------------------
     {
       const start = zonedWallTimeToUtc(2017, 5, 2, 7, 0, 0);
@@ -369,8 +374,8 @@ async function main() {
         daily.body?.totals
       );
       check(
-        daily.body?.totals?.workedSeconds === 9 * 3600 + 45 * 60,
-        "3) worked total excludes the paid break's own time just like an unpaid one (9:45)",
+        daily.body?.totals?.workedSeconds === 10 * 3600,
+        "3) worked total is the FULL 7:00-17:00 span (10:00:00) — a paid break is never subtracted from Worked",
         daily.body?.totals
       );
     }

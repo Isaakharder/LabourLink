@@ -3228,6 +3228,23 @@ input {
   cursor: help;
 }
 
+/* Same pill shape as inputs-rounded-badge, tinted distinctly (blue, not
+   amber) so an administrator/system-corrected boundary never reads as
+   "rounded from a real tap" — they're different provenance facts and are
+   mutually exclusive per entry/field (see inputsTypes.ts). The title
+   attribute carries the pre-correction value, mirroring how
+   inputs-rounded-badge's title carries the original tap time. */
+.inputs-corrected-badge {
+  margin-left: 0.5rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1e40af;
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: help;
+}
+
 .inputs-workday-table tfoot td {
   font-weight: 600;
   border-top: 1px solid var(--color-border);

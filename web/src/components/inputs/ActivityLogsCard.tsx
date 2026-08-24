@@ -241,6 +241,16 @@ export function ActivityLogsCard({
                             Rounded
                           </span>
                         )}
+                        {run.endedAtCorrectedFrom && (
+                          <span
+                            className="inputs-corrected-badge"
+                            title={`Previously ${formatTimeInAppTimezone(
+                              run.endedAtCorrectedFrom
+                            )} — adjusted by an administrator or an automatic correction.`}
+                          >
+                            Corrected
+                          </span>
+                        )}
                         {run.autoClosed && <span className="inputs-autoclosed-badge">Auto-closed</span>}
                       </>
                     ) : (

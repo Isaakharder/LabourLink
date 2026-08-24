@@ -7,8 +7,9 @@
 // count) from Inputs' single-day grain to a date range; it never introduces
 // a second speed formula.
 import { pool } from "../db";
-import { APP_TIMEZONE, calendarDateInAppTimezone, getRangeBoundsUtc } from "./timezone";
+import { addDaysToDateStr, APP_TIMEZONE, calendarDateInAppTimezone, getRangeBoundsUtc } from "./timezone";
 import { aggregateDensitySpeed } from "./densitySpeed";
+import { computeWorkdayTotals, groupByEmployeeDay, WorkdayBoundaryEntry } from "./workdayTotals";
 import { getUnresolvedRunsForRows } from "./rowCompletionCandidates";
 
 export interface ActivityReportRow {
@@ -79,6 +80,20 @@ export interface ActivityReportData {
 
 function toSeconds(v: unknown): number {
   return Math.round(Number(v ?? 0));
+}
+
+// The Monday that starts dateStr's ISO calendar week, as a YYYY-MM-DD
+// string — plain calendar-date arithmetic (dateStr is already an
+// APP_TIMEZONE calendar date, same "no timezone conversion needed"
+// reasoning as addDaysToDateStr), matching Postgres's own
+// date_trunc('week', ...) definition (week starts Monday) that this
+// replaces.
+function isoWeekStartDateStr(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  const dayOfWeek = date.getUTCDay(); // 0 = Sunday .. 6 = Saturday
+  const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  return addDaysToDateStr(dateStr, -daysSinceMonday);
 }
 
 // Per-employee whole-range density contributions for one activity, following
@@ -661,44 +676,70 @@ export async function getPayrollReportData(
   const { start, end } = getRangeBoundsUtc(startDate, endDate);
   const employeeIds = filterToUuidArray(filter.employeeIds);
 
-  const { rows: dayRows } = await pool.query(
-    `select te.employee_id, e.first_name, e.last_name,
-            to_char((te.started_at at time zone $3)::date, 'YYYY-MM-DD') as work_date,
-            sum(extract(epoch from (te.ended_at - te.started_at))) filter (where te.entry_type = 'work') as work_seconds,
-            sum(extract(epoch from (te.ended_at - te.started_at))) filter (where te.entry_type = 'break') as break_seconds,
-            sum(extract(epoch from (te.ended_at - te.started_at))) filter (where te.entry_type = 'break' and te.is_paid) as paid_break_seconds,
-            sum(extract(epoch from (te.ended_at - te.started_at))) filter (where te.entry_type = 'break' and not coalesce(te.is_paid, false)) as unpaid_break_seconds,
-            min(te.started_at) filter (where te.entry_type = 'work') as started_at,
-            max(te.ended_at) filter (where te.entry_type = 'work') as ended_at
+  // Raw entries, not a SQL sum — the authoritative whole-day Worked total
+  // (workSeconds below) is span-based (corrected/rounded work-end minus
+  // corrected/rounded work-start, minus the union of unpaid breaks — see
+  // workdayTotals.ts), which a plain SQL sum/filter aggregate can't express
+  // (interval union needs either range-type support this schema doesn't
+  // use, or raw rows merged in application code). Same shared function GET
+  // /api/inputs/daily uses, so Inputs and Payroll can never disagree on one
+  // employee-day's total — the whole point of this fix (see
+  // workdayTotals.ts's header for the reported bug this traces back to).
+  const { rows: rawRows } = await pool.query(
+    `select te.employee_id, e.first_name, e.last_name, te.entry_type, te.started_at, te.ended_at, te.is_paid
      from time_entries te
      join employees e on e.id = te.employee_id
      where te.deleted_at is null and te.ended_at is not null
        and te.started_at >= $1 and te.started_at < $2
-       and ($4::uuid[] is null or te.employee_id = any($4::uuid[]))
-     group by te.employee_id, e.first_name, e.last_name, work_date
-     order by work_date, e.first_name, e.last_name`,
-    [start, end, APP_TIMEZONE, employeeIds]
+       and ($3::uuid[] is null or te.employee_id = any($3::uuid[]))
+     order by te.employee_id, te.started_at`,
+    [start, end, employeeIds]
   );
 
-  const rows: PayrollReportRow[] = dayRows.map((r) => {
-    const workSeconds = toSeconds(r.work_seconds);
-    const breakSeconds = toSeconds(r.break_seconds);
-    const paidBreakSeconds = toSeconds(r.paid_break_seconds);
-    const unpaidBreakSeconds = toSeconds(r.unpaid_break_seconds);
-    return {
-      employeeId: r.employee_id,
-      employeeName: `${r.first_name} ${r.last_name}`,
-      date: String(r.work_date),
-      startedAt: r.started_at,
-      endedAt: r.ended_at,
-      workSeconds,
-      breakSeconds,
-      paidBreakSeconds,
-      unpaidBreakSeconds,
-      paidSeconds: workSeconds + paidBreakSeconds,
-      totalSeconds: workSeconds + breakSeconds,
-    };
-  });
+  interface RawEntry extends WorkdayBoundaryEntry {
+    employeeId: string;
+    employeeName: string;
+  }
+  const rawEntries: RawEntry[] = rawRows.map((r) => ({
+    employeeId: r.employee_id,
+    employeeName: `${r.first_name} ${r.last_name}`,
+    entryType: r.entry_type,
+    startedAt: r.started_at,
+    endedAt: r.ended_at,
+    isPaid: r.is_paid,
+  }));
+
+  const rows: PayrollReportRow[] = [...groupByEmployeeDay(rawEntries).entries()]
+    .map(([key, entries]) => {
+      const [employeeId, date] = [entries[0].employeeId, key.slice(key.indexOf(":") + 1)];
+      const totals = computeWorkdayTotals(entries);
+      const workSeconds = toSeconds(totals.workedSeconds);
+      const breakSeconds = toSeconds(totals.breakSeconds);
+      const paidBreakSeconds = toSeconds(totals.paidBreakSeconds);
+      const unpaidBreakSeconds = toSeconds(totals.unpaidBreakSeconds);
+      return {
+        employeeId,
+        employeeName: entries[0].employeeName,
+        date,
+        startedAt: totals.workStartTime ? totals.workStartTime.toISOString() : null,
+        endedAt: totals.workEndTime ? totals.workEndTime.toISOString() : null,
+        workSeconds,
+        breakSeconds,
+        paidBreakSeconds,
+        unpaidBreakSeconds,
+        // Paid breaks are already folded into workSeconds (the span-based
+        // formula only ever subtracts UNPAID break time — see
+        // workdayTotals.ts) — "paid time" is therefore identical to
+        // "worked time" under the new model, not a separate add-on the way
+        // it was when workSeconds excluded every break, paid or not.
+        paidSeconds: workSeconds,
+        // The full authoritative span, not work + naively-summed breaks
+        // (which, pre-fix, silently excluded any untracked transition
+        // gap) — equal to workSeconds + unpaidBreakSeconds by construction.
+        totalSeconds: workSeconds + unpaidBreakSeconds,
+      };
+    })
+    .sort((a, b) => a.date.localeCompare(b.date) || a.employeeName.localeCompare(b.employeeName));
 
   const { rows: daysWorkedRows } = await pool.query(
     `select te.employee_id, e.first_name, e.last_name,
@@ -738,32 +779,37 @@ export async function getPayrollReportData(
 
   // Aggregate (all employees combined) totals per calendar week — a
   // per-employee-per-week breakdown was judged out of scope for this pass;
-  // see the implementation report.
-  const { rows: weeklyRows } = await pool.query(
-    `select to_char(date_trunc('week', (te.started_at at time zone $3))::date, 'YYYY-MM-DD') as week_start,
-            sum(extract(epoch from (te.ended_at - te.started_at))) filter (where te.entry_type = 'work') as work_seconds,
-            sum(extract(epoch from (te.ended_at - te.started_at))) filter (where te.entry_type = 'break') as break_seconds,
-            sum(extract(epoch from (te.ended_at - te.started_at)))
-              filter (where te.entry_type = 'work' or (te.entry_type = 'break' and te.is_paid)) as paid_seconds
-     from time_entries te
-     where te.deleted_at is null and te.ended_at is not null
-       and te.started_at >= $1 and te.started_at < $2
-       and ($4::uuid[] is null or te.employee_id = any($4::uuid[]))
-     group by week_start
-     order by week_start`,
-    [start, end, APP_TIMEZONE, employeeIds]
-  );
-  const weeklyTotals: PayrollWeeklyTotalRow[] = weeklyRows.map((r) => {
-    const weekStart = new Date(r.week_start as string);
-    const weekEnd = new Date(weekStart.getTime() + 6 * 86400000);
-    return {
-      weekStart: weekStart.toISOString().slice(0, 10),
-      weekEnd: weekEnd.toISOString().slice(0, 10),
-      workSeconds: toSeconds(r.work_seconds),
-      breakSeconds: toSeconds(r.break_seconds),
-      paidSeconds: toSeconds(r.paid_seconds),
-    };
-  });
+  // see the implementation report. Derived from `rows` (already computed
+  // above via the shared workdayTotals.ts formula), not a separate raw-sum
+  // SQL query — a week total must equal the sum of its own days' rows, the
+  // same self-consistency reasoning this whole file's fix is about; a
+  // second, differently-computed aggregate here would silently reintroduce
+  // exactly the kind of disagreement this fix eliminates, just one level
+  // up.
+  const weekBuckets = new Map<string, { workSeconds: number; breakSeconds: number }>();
+  for (const r of rows) {
+    const weekStart = isoWeekStartDateStr(r.date);
+    const bucket = weekBuckets.get(weekStart) ?? { workSeconds: 0, breakSeconds: 0 };
+    bucket.workSeconds += r.workSeconds;
+    // r.breakSeconds is already paid+unpaid combined (same meaning as
+    // PayrollReportRow.breakSeconds) — kept that way here too so this
+    // column means the same thing at every level of the report, daily or
+    // weekly.
+    bucket.breakSeconds += r.breakSeconds;
+    weekBuckets.set(weekStart, bucket);
+  }
+  const weeklyTotals: PayrollWeeklyTotalRow[] = [...weekBuckets.entries()]
+    .map(([weekStart, b]) => ({
+      weekStart,
+      weekEnd: addDaysToDateStr(weekStart, 6),
+      workSeconds: b.workSeconds,
+      breakSeconds: b.breakSeconds,
+      // Paid break time is already folded into workSeconds under the new
+      // model (see rows' own paidSeconds comment above) — "paid seconds"
+      // is therefore identical to "worked seconds", not a separate add-on.
+      paidSeconds: b.workSeconds,
+    }))
+    .sort((a, b) => a.weekStart.localeCompare(b.weekStart));
 
   const totals = rows.reduce(
     (acc, r) => ({

@@ -17,6 +17,8 @@
     "cutoff:repair": "ts-node src/cli/repairStaleEntries.ts",
     "typecheck": "tsc --noEmit",
     "test:row-layout": "ts-node src/lib/rowLayout.test.ts",
+    "test:workday-totals": "ts-node src/lib/workdayTotals.test.ts",
+    "test:inputs-workday-totals": "ts-node src/routes/inputs.workdayTotals.test.ts",
     "test:carrier-bulk": "ts-node src/lib/carrierBulk.test.ts",
     "test:daily-cutoff": "ts-node src/lib/dailyCutoff.test.ts",
     "test:work-start-rounding": "ts-node src/lib/workStartRounding.test.ts",

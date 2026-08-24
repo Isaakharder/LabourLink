@@ -29,6 +29,8 @@ function makeBreak(overrides: Partial<BreakDto> = {}): BreakDto {
     endedAt: "2026-08-15T16:15:00.000Z",
     startedAtOriginalTime: null,
     endedAtOriginalTime: null,
+    startedAtCorrectedFrom: null,
+    endedAtCorrectedFrom: null,
     durationSeconds: 900,
     name: "Break",
     isPaid: false,
@@ -46,6 +48,7 @@ function renderCard(breaks: BreakDto[]) {
     <WorkdayDetailsCard
       workStartTime="2026-08-15T14:00:00.000Z"
       workStartOriginalTime={null}
+      workStartCorrectedFrom={null}
       workStartManualEntry={null}
       breaks={breaks}
       paidBreakSeconds={0}
