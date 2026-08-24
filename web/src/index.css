@@ -1787,33 +1787,6 @@ input {
   gap: 0.5rem;
 }
 
-.report-employee-filter-bar {
-  margin-bottom: 1rem;
-  padding: 1rem;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-}
-
-.report-employee-filter-toolbar {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  margin-bottom: 0.85rem;
-}
-
-.report-employee-filter-toolbar h2 {
-  margin: 0 0 0.15rem;
-  font-size: 0.95rem;
-}
-
-.report-employee-filter-toolbar p {
-  margin: 0;
-  color: var(--color-muted);
-  font-size: 0.82rem;
-}
-
 .report-employee-filter-actions {
   display: flex;
   gap: 0.55rem;
@@ -1834,14 +1807,6 @@ input {
   border-radius: 6px;
   font-size: 0.88rem;
   margin-bottom: 0.85rem;
-}
-
-.report-employee-filter-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 0.55rem 0.85rem;
-  max-height: 280px;
-  overflow-y: auto;
 }
 
 .report-employee-filter-item {
@@ -1866,6 +1831,112 @@ input {
   margin-left: auto;
   font-size: 0.72rem;
   color: var(--color-muted);
+}
+
+/* Compact single-row Employees control — replaces the old always-expanded
+   report-employee-filter-bar grid, which pushed the whole report down the
+   page. The trigger + Save sit inline near the header; the checklist itself
+   is an anchored position:absolute overlay (report-employee-select-panel
+   below) so opening it never reflows anything on the page. */
+.report-employee-select-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0.75rem 0 1rem;
+}
+
+.report-employee-select-label {
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.report-employee-select {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.report-employee-select-trigger,
+.report-employee-select-save {
+  padding: 0.5rem 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-size: 0.85rem;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.report-employee-select-trigger:hover {
+  border-color: var(--color-primary);
+}
+
+.report-employee-select-save:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.report-employee-select-panel {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  z-index: 60;
+  width: 340px;
+  max-width: 90vw;
+  padding: 0.85rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+}
+
+.report-employee-select-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.report-employee-select-mode label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.report-employee-select-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-bottom: 0.55rem;
+}
+
+.report-employee-select-toolbar .report-employee-search {
+  margin-bottom: 0;
+}
+
+.report-employee-include-inactive {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  color: var(--color-muted);
+  margin-bottom: 0.65rem;
+}
+
+.report-employee-select-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.report-employee-select-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.75rem;
 }
 
 .employee-form-photo-controls button {
@@ -2143,14 +2214,13 @@ input {
     border-radius: 0;
   }
 
-  .report-employee-filter-toolbar {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
   .report-employee-filter-actions {
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+
+  .report-employee-select-panel {
+    width: calc(100vw - 2rem);
   }
 }
 
@@ -5963,6 +6033,7 @@ input {
   .report-view-actions,
   .report-back-button,
   .report-filter-panel,
+  .report-employee-select-row,
   .report-pivot-metric-select,
   /* Defensive — the preview modal is always closed (setPreviewMode(null))
      before printReport() calls window.print(), but this keeps a stray

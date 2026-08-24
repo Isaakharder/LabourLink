@@ -92,12 +92,20 @@ export interface DateRange {
   end: string;
 }
 
+export type EmployeeSelectionMode = "all" | "selected";
+
 export interface SavedReportDetail {
   id: string;
   name: string;
   reportType: ReportType;
   activity: { id: string; name: string } | null;
   configuration: { metrics?: string[]; lastDateRange?: DateRange };
+  // Persisted server-side on the report itself — see
+  // server/migrations/046_saved_reports_employee_selection.sql. "all" is
+  // dynamic (includes newly eligible employees automatically); "selected"
+  // is the exact, explicit employeeIds list, never auto-extended.
+  employeeSelectionMode: EmployeeSelectionMode;
+  employeeIds: string[];
   createdAt: string;
   updatedAt: string;
 }

@@ -23,6 +23,8 @@ const report: SavedReportDetail = {
     metrics: ["employee", "date", "totalHours", "workTime", "daysWorked", "activityBreakdown", "weeklyTotals"],
     lastDateRange: { start: "2026-08-10", end: "2026-08-10" },
   },
+  employeeSelectionMode: "all",
+  employeeIds: [],
   createdAt: "2026-08-01T00:00:00.000Z",
   updatedAt: "2026-08-01T00:00:00.000Z",
 };
@@ -65,6 +67,12 @@ const payrollData: PayrollReportData = {
   totals: { workSeconds: 37500, breakSeconds: 0, paidBreakSeconds: 0, unpaidBreakSeconds: 0, paidSeconds: 37500, totalSeconds: 37500 },
 };
 
+let currentReport: SavedReportDetail = report;
+const employees = [
+  { id: "lester", firstName: "Lester", lastName: "Langaoen", isActive: true },
+  { id: "maria", firstName: "Maria", lastName: "Santos", isActive: true },
+];
+
 vi.mock("../../lib/api", () => {
   class ApiError extends Error {
     status: number;
@@ -75,10 +83,19 @@ vi.mock("../../lib/api", () => {
   }
   return {
     ApiError,
-    api: vi.fn((path: string) => {
-      if (path === "/api/reports/report-1") return Promise.resolve({ report });
+    api: vi.fn((path: string, options?: RequestInit) => {
+      if (path === "/api/reports/report-1" && (!options || options.method === undefined)) {
+        return Promise.resolve({ report: currentReport });
+      }
+      if (path === "/api/reports/report-1" && options?.method === "PATCH") {
+        const body = JSON.parse(options.body as string);
+        if (body.employeeSelectionMode !== undefined) {
+          currentReport = { ...currentReport, employeeSelectionMode: body.employeeSelectionMode, employeeIds: body.employeeIds };
+        }
+        return Promise.resolve({ ok: true });
+      }
       if (path === "/api/employees") {
-        return Promise.resolve({ employees: [{ id: "lester", firstName: "Lester", lastName: "Langaoen", isActive: true }] });
+        return Promise.resolve({ employees });
       }
       if (path.startsWith("/api/reports/report-1/data")) return Promise.resolve({ data: payrollData });
       return Promise.reject(new Error(`Unhandled mock api() call in test: ${path}`));
@@ -89,6 +106,7 @@ vi.mock("../../lib/api", () => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  currentReport = { ...report, employeeIds: [...report.employeeIds] };
 });
 
 function renderPage() {
@@ -126,18 +144,68 @@ describe("ReportViewPage — Payroll Report H:MM formatting", () => {
     expect(screen.getByText("Work hours (H:MM)")).toBeInTheDocument();
   });
 
-  it("reloads report data with employeeIds when an employee is selected from the top filter", async () => {
+  it("opens as a compact 'All employees' trigger, not the old always-expanded grid", async () => {
+    renderPage();
+    await screen.findAllByText("10:25");
+    expect(screen.getByRole("button", { name: /All employees/ })).toBeInTheDocument();
+    // The old giant grid rendered every employee's checkbox inline, with no
+    // click needed — none should be present until the dropdown is opened.
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  });
+
+  it("stages a selection and only persists it (PATCH) when Save is pressed", async () => {
     const user = userEvent.setup();
     const apiMock = vi.mocked(api);
 
     renderPage();
     await screen.findAllByText("10:25");
 
-    await user.click(screen.getByRole("button", { name: "Employees" }));
-    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: /All employees/ }));
+    await user.click(screen.getByRole("radio", { name: "Select specific employees" }));
+    await user.click(screen.getByRole("checkbox", { name: /Maria Santos/ }));
+
+    // Staged only — no PATCH yet, and the report's own data endpoint has
+    // not been re-fetched with a new selection.
+    expect(apiMock).not.toHaveBeenCalledWith("/api/reports/report-1", expect.objectContaining({ method: "PATCH" }));
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(apiMock).toHaveBeenCalledWith(
-      expect.stringContaining("/api/reports/report-1/data?start=2026-08-10&end=2026-08-10&employeeIds=lester")
+      "/api/reports/report-1",
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ employeeSelectionMode: "selected", employeeIds: ["maria"] }) })
     );
+    // Saving reloads the report's data (screen/print/CSV/PDF all read from
+    // this one refetch) — same endpoint, no employeeIds query param, since
+    // filtering is now entirely server-side off the saved definition.
+    await screen.findByRole("button", { name: /1 employee selected/ });
+  });
+
+  it("Cancel closes the dropdown without altering the saved setup", async () => {
+    const user = userEvent.setup();
+    const apiMock = vi.mocked(api);
+
+    renderPage();
+    await screen.findAllByText("10:25");
+
+    await user.click(screen.getByRole("button", { name: /All employees/ }));
+    await user.click(screen.getByRole("radio", { name: "Select specific employees" }));
+    await user.click(screen.getByRole("checkbox", { name: /Maria Santos/ }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(apiMock).not.toHaveBeenCalledWith("/api/reports/report-1", expect.objectContaining({ method: "PATCH" }));
+    expect(screen.getByRole("button", { name: /All employees/ })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  });
+
+  it("does not allow saving an explicit selection with zero employees", async () => {
+    const user = userEvent.setup();
+
+    renderPage();
+    await screen.findAllByText("10:25");
+
+    await user.click(screen.getByRole("button", { name: /All employees/ }));
+    await user.click(screen.getByRole("radio", { name: "Select specific employees" }));
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
 });

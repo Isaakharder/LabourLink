@@ -60,12 +60,50 @@ function isValidDate(v: unknown): v is string {
   return typeof v === "string" && DATE_RE.test(v) && !isNaN(Date.parse(v));
 }
 
-function parseEmployeeIds(value: unknown): string[] | null {
-  if (value == null || value === "") return [];
-  const raw = Array.isArray(value) ? value.join(",") : String(value);
-  const ids = [...new Set(raw.split(",").map((part) => part.trim()).filter(Boolean))];
-  if (!ids.every((id) => UUID_RE.test(id))) return null;
-  return ids;
+// Validates a JSON body array of employee ids (POST/PATCH) — the
+// employee-select dropdown always sends a real JSON array, never a
+// comma-separated string.
+function parseEmployeeIdsArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const ids = [...new Set(value)];
+  if (!ids.every((id): id is string => typeof id === "string" && UUID_RE.test(id))) return null;
+  return ids as string[];
+}
+
+interface EmployeeSelectionInput {
+  employeeSelectionMode?: unknown;
+  employeeIds?: unknown;
+}
+
+// Validates a {employeeSelectionMode, employeeIds} pair as a unit — both
+// fields are only ever written together (see POST/PATCH below), so a
+// 'selected' mode can never be persisted without its own valid, non-empty,
+// real-employee id list, and an 'all' mode never carries a stale list. Every
+// id is checked against the employees table here — this app has no
+// multi-tenant organization concept (see 001_initial_schema.sql; every
+// employee belongs to the single org this deployment runs), so "belongs to
+// the report's organization" is enforced as "is a real employee id in this
+// system", which is the closest meaningful equivalent and is what rejects a
+// foreign/garbage id.
+async function resolveEmployeeSelection(
+  input: EmployeeSelectionInput
+): Promise<{ mode: "all" | "selected"; ids: string[] } | { error: string }> {
+  const mode = input.employeeSelectionMode;
+  if (mode !== "all" && mode !== "selected") {
+    return { error: "employeeSelectionMode must be 'all' or 'selected'" };
+  }
+  if (mode === "all") {
+    return { mode: "all", ids: [] };
+  }
+  const ids = parseEmployeeIdsArray(input.employeeIds);
+  if (!ids) return { error: "employeeIds must be an array of valid employee ids" };
+  if (ids.length === 0) return { error: "At least one employee must be selected" };
+
+  const { rows } = await pool.query("select id from employees where id = any($1::uuid[])", [ids]);
+  if (rows.length !== ids.length) {
+    return { error: "One or more selected employees could not be found" };
+  }
+  return { mode: "selected", ids };
 }
 
 function validateMetrics(reportType: "activity" | "payroll", metrics: unknown): string[] | null {
@@ -118,7 +156,7 @@ router.get(
 
     const { rows } = await pool.query(
       `select sr.id, sr.name, sr.report_type, sr.activity_id, a.name as activity_name,
-              sr.configuration, sr.created_at, sr.updated_at
+              sr.configuration, sr.employee_selection_mode, sr.employee_ids, sr.created_at, sr.updated_at
        from saved_reports sr
        left join activities a on a.id = sr.activity_id
        where sr.id = $1`,
@@ -134,6 +172,8 @@ router.get(
         reportType: row.report_type,
         activity: row.activity_id ? { id: row.activity_id, name: row.activity_name } : null,
         configuration: row.configuration,
+        employeeSelectionMode: row.employee_selection_mode,
+        employeeIds: row.employee_ids,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       },
@@ -146,11 +186,13 @@ router.post(
   requireAuth,
   requireRole(...MANAGE_ROLES),
   asyncHandler(async (req, res) => {
-    const { name, reportType, activityId, metrics } = req.body as {
+    const { name, reportType, activityId, metrics, employeeSelectionMode, employeeIds } = req.body as {
       name?: string;
       reportType?: string;
       activityId?: string | null;
       metrics?: unknown;
+      employeeSelectionMode?: unknown;
+      employeeIds?: unknown;
     };
 
     const trimmedName = trimOrNull(name);
@@ -174,6 +216,19 @@ router.post(
       return res.status(400).json({ error: "Invalid report", errors });
     }
 
+    // Every new report defaults to "all" employees unless the caller
+    // explicitly requests otherwise — matches the column default new
+    // report rows would get anyway (046_saved_reports_employee_selection.sql),
+    // made explicit here so a caller that DOES send a selection at create
+    // time gets it validated the same way PATCH does.
+    const employeeSelection =
+      employeeSelectionMode !== undefined || employeeIds !== undefined
+        ? await resolveEmployeeSelection({ employeeSelectionMode, employeeIds })
+        : ({ mode: "all" as const, ids: [] as string[] });
+    if ("error" in employeeSelection) {
+      return res.status(400).json({ error: "Invalid report", errors: { employeeIds: employeeSelection.error } });
+    }
+
     if (resolvedActivityId) {
       const activityCheck = await pool.query("select id from activities where id = $1", [resolvedActivityId]);
       if (!activityCheck.rows[0]) {
@@ -182,10 +237,18 @@ router.post(
     }
 
     const { rows } = await pool.query(
-      `insert into saved_reports (name, report_type, activity_id, configuration, created_by)
-       values ($1, $2, $3, $4, $5)
+      `insert into saved_reports (name, report_type, activity_id, configuration, employee_selection_mode, employee_ids, created_by)
+       values ($1, $2, $3, $4, $5, $6, $7)
        returning id`,
-      [trimmedName, reportType, resolvedActivityId, JSON.stringify({ metrics: validMetrics }), req.employee!.id]
+      [
+        trimmedName,
+        reportType,
+        resolvedActivityId,
+        JSON.stringify({ metrics: validMetrics }),
+        employeeSelection.mode,
+        employeeSelection.ids,
+        req.employee!.id,
+      ]
     );
     res.status(201).json({ id: rows[0].id });
   })
@@ -203,11 +266,13 @@ router.patch(
     const existing = existingRes.rows[0];
     if (!existing) return res.status(404).json({ error: "Report not found" });
 
-    const { name, activityId, metrics, lastDateRange } = req.body as {
+    const { name, activityId, metrics, lastDateRange, employeeSelectionMode, employeeIds } = req.body as {
       name?: string;
       activityId?: string | null;
       metrics?: unknown;
       lastDateRange?: { start?: string; end?: string } | null;
+      employeeSelectionMode?: unknown;
+      employeeIds?: unknown;
     };
 
     const updates: string[] = [];
@@ -256,6 +321,20 @@ router.patch(
       updates.push(`configuration = $${params.length}`);
     }
 
+    // Written together as a pair, never independently — a lone
+    // employeeIds with no mode (or vice versa) is a client bug, not a
+    // partial update to accept; see resolveEmployeeSelection's comment.
+    if (employeeSelectionMode !== undefined || employeeIds !== undefined) {
+      const employeeSelection = await resolveEmployeeSelection({ employeeSelectionMode, employeeIds });
+      if ("error" in employeeSelection) {
+        return res.status(400).json({ error: "Invalid report", errors: { employeeIds: employeeSelection.error } });
+      }
+      params.push(employeeSelection.mode);
+      updates.push(`employee_selection_mode = $${params.length}`);
+      params.push(employeeSelection.ids);
+      updates.push(`employee_ids = $${params.length}`);
+    }
+
     if (updates.length === 0) return res.json({ ok: true });
 
     updates.push(`updated_at = now()`);
@@ -288,29 +367,40 @@ router.get(
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid report id" });
 
-    const { start, end, employeeIds } = req.query as { start?: string; end?: string; employeeIds?: string | string[] };
+    const { start, end } = req.query as { start?: string; end?: string };
     if (!isValidDate(start) || !isValidDate(end)) {
       return res.status(400).json({ error: "A valid start and end date (YYYY-MM-DD) are required" });
     }
     if (start > end) {
       return res.status(400).json({ error: "start must not be after end" });
     }
-    const selectedEmployeeIds = parseEmployeeIds(employeeIds);
-    if (selectedEmployeeIds === null) {
-      return res.status(400).json({ error: "employeeIds must be a comma-separated list of valid employee ids" });
-    }
 
-    const reportRes = await pool.query("select report_type, activity_id from saved_reports where id = $1", [id]);
+    const reportRes = await pool.query(
+      "select report_type, activity_id, employee_selection_mode, employee_ids from saved_reports where id = $1",
+      [id]
+    );
     const report = reportRes.rows[0];
     if (!report) return res.status(404).json({ error: "Report not found" });
 
+    // The employee filter always comes from THIS report's own saved
+    // definition, never from the request — a client-supplied employeeIds
+    // query param was the pre-persistence design (component state only,
+    // reset on every page load) and is deliberately no longer accepted
+    // here: trusting a client-sent id list would let a request for one
+    // report's data apply a different report's (or an arbitrary) selection,
+    // and would let screen/print/CSV/PDF silently disagree with what's
+    // actually saved. This is also what makes screen, print, CSV, and PDF
+    // export automatically consistent — they all fetch from this same
+    // endpoint, so there is exactly one place employee filtering happens.
+    const employeeIdsFilter = report.employee_selection_mode === "selected" ? (report.employee_ids as string[]) : undefined;
+
     if (report.report_type === "activity") {
-      const data = await getActivityReportData(report.activity_id, start, end, { employeeIds: selectedEmployeeIds });
+      const data = await getActivityReportData(report.activity_id, start, end, { employeeIds: employeeIdsFilter });
       if (!data) return res.status(404).json({ error: "The activity this report was saved with no longer exists" });
       return res.json({ data });
     }
 
-    const data = await getPayrollReportData(start, end, { employeeIds: selectedEmployeeIds });
+    const data = await getPayrollReportData(start, end, { employeeIds: employeeIdsFilter });
     res.json({ data });
   })
 );

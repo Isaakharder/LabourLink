@@ -18,6 +18,7 @@
     "typecheck": "tsc --noEmit",
     "test:row-layout": "ts-node src/lib/rowLayout.test.ts",
     "test:workday-totals": "ts-node src/lib/workdayTotals.test.ts",
+    "test:reports-employee-selection": "ts-node src/routes/reports.employeeSelection.test.ts",
     "test:inputs-workday-totals": "ts-node src/routes/inputs.workdayTotals.test.ts",
     "test:carrier-bulk": "ts-node src/lib/carrierBulk.test.ts",
     "test:daily-cutoff": "ts-node src/lib/dailyCutoff.test.ts",
