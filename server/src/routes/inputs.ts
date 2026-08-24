@@ -58,6 +58,12 @@ const BREAK_DELETION_REASON = "Break deleted from Inputs page";
 // same "system-generated string, not trusted client text" convention as
 // AUTO_CORRECTION_REASON/BREAK_DELETION_REASON above.
 const BREAK_SPLIT_DELETION_REASON = "Removed — fully covered by a manually added break";
+// POST /breaks (below) no longer collects a typed reason from the caller —
+// the Add Break modal's "Reason" field was removed. Same "fixed,
+// server-generated string" convention as AUTO_CORRECTION_REASON and the
+// others above, so the audit trail (creation_reason is still non-null on
+// every row) is preserved without trusting client-supplied text.
+const BREAK_MANUAL_ADD_REASON = "Break manually added from Inputs page.";
 
 function trimOrNull(v: unknown): string | null {
   if (typeof v !== "string") return null;
@@ -1476,23 +1482,19 @@ router.post(
   requireAuth,
   requireRole(...EDIT_ROLES),
   asyncHandler(async (req, res) => {
-    const { employeeId, date, breakProfileItemId, isPaid, startTime, endTime, reason } = req.body as {
+    const { employeeId, date, breakProfileItemId, isPaid, startTime, endTime } = req.body as {
       employeeId?: string;
       date?: string;
       breakProfileItemId?: string | null;
       isPaid?: boolean;
       startTime?: string;
       endTime?: string;
-      reason?: string;
     };
     if (!employeeId || !UUID_RE.test(employeeId)) {
       return res.status(400).json({ error: "A valid employeeId is required" });
     }
     if (!isValidDate(date)) {
       return res.status(400).json({ error: "A valid date (YYYY-MM-DD) is required" });
-    }
-    if (!isValidReason(reason)) {
-      return res.status(400).json({ error: `A reason of at least ${MIN_REASON_LENGTH} characters is required` });
     }
     if (!startTime || isNaN(Date.parse(startTime)) || !endTime || isNaN(Date.parse(endTime))) {
       return res.status(400).json({ error: "A valid startTime and endTime are required" });
@@ -1591,11 +1593,10 @@ router.post(
         );
       }
 
-      // The break's own typed reason doubles as the continuation entry's
-      // creation reason — the split exists BECAUSE of this break, so "why
-      // was this second half created" and "why was this break added" are
-      // the same answer, unlike the trims above (an automatic side effect,
-      // not something the admin directly typed a reason for).
+      // The continuation entry's creation reason mirrors the break's own —
+      // the split exists BECAUSE of this break, so "why was this second
+      // half created" and "why was this break added" are the same answer —
+      // both now the same fixed, server-generated string.
       for (const cont of plan.continuations) {
         await client.query(
           `insert into time_entries
@@ -1613,7 +1614,7 @@ router.post(
             cont.densityType,
             cont.densityCountPerRow,
             req.employee!.id,
-            reason.trim(),
+            BREAK_MANUAL_ADD_REASON,
           ]
         );
       }
@@ -1624,7 +1625,7 @@ router.post(
             break_profile_item_id, scheduled_break_date, is_paid,
             created_by_employee_id, creation_reason)
          values ($1, null, 'break', gen_random_uuid(), $2, $3, 'manual', $4, $5, $6, $7, $8)`,
-        [employeeId, start, end, validatedItemId, date, resolvedIsPaid, req.employee!.id, reason.trim()]
+        [employeeId, start, end, validatedItemId, date, resolvedIsPaid, req.employee!.id, BREAK_MANUAL_ADD_REASON]
       );
 
       await client.query("commit");

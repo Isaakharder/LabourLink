@@ -210,7 +210,7 @@ async function main() {
       return r[0];
     }
 
-    async function addBreak(employeeId: string, date: string, startedAt: Date, endedAt: Date, extra: { isPaid?: boolean; reason?: string } = {}) {
+    async function addBreak(employeeId: string, date: string, startedAt: Date, endedAt: Date, extra: { isPaid?: boolean } = {}) {
       return call("POST", "/api/inputs/breaks", {
         token: adminToken,
         body: {
@@ -219,7 +219,6 @@ async function main() {
           isPaid: extra.isPaid ?? false,
           startTime: startedAt.toISOString(),
           endTime: endedAt.toISOString(),
-          reason: extra.reason ?? "QA: forgot to log this break",
         },
       });
     }
@@ -243,10 +242,7 @@ async function main() {
 
       const breakStart = zonedWallTimeToUtc(2017, 5, 1, 12, 0, 0);
       const breakEnd = zonedWallTimeToUtc(2017, 5, 1, 13, 0, 0);
-      const res = await addBreak(dave!.id, DATE_MAIN, breakStart, breakEnd, {
-        isPaid: false,
-        reason: "QA: Dave forgot to log his lunch break",
-      });
+      const res = await addBreak(dave!.id, DATE_MAIN, breakStart, breakEnd, { isPaid: false });
       check(res.status === 201, "1) Add Break for 12:00-1:00 succeeds instead of rejecting", res.body);
 
       const original = await fetchEntry(entryId);
@@ -317,8 +313,9 @@ async function main() {
       check(bystanderBreaks.rows.length === 0, "14) no break was created for the bystander employee", bystanderBreaks.rows);
 
       // 13) Audit records: trim attributed to the admin with the automatic
-      //     reason, continuation attributed to the admin with Dave's own
-      //     typed break reason, break itself attributed to the admin.
+      //     reason, continuation attributed to the admin with the fixed
+      //     system-generated break reason, break itself attributed to the
+      //     admin.
       const { rows: corrections } = await pool.query(
         `select field_name, old_value, new_value, changed_by_employee_id, reason from time_entry_corrections where time_entry_id = $1`,
         [entryId]
@@ -334,8 +331,8 @@ async function main() {
       );
       check(
         continuation.created_by_employee_id === adminActor!.id &&
-          continuation.creation_reason === "QA: Dave forgot to log his lunch break",
-        "13) the continuation entry's audit fields identify the admin and Dave's own typed reason",
+          continuation.creation_reason === "Break manually added from Inputs page.",
+        "13) the continuation entry's audit fields identify the admin and the fixed system-generated reason",
         continuation
       );
       const breakAudit = await pool.query(
@@ -344,8 +341,8 @@ async function main() {
       );
       check(
         breakAudit.rows[0].created_by_employee_id === adminActor!.id &&
-          breakAudit.rows[0].creation_reason === "QA: Dave forgot to log his lunch break",
-        "13) the break entry's own audit fields identify the admin and the typed reason",
+          breakAudit.rows[0].creation_reason === "Break manually added from Inputs page.",
+        "13) the break entry's own audit fields identify the admin and the fixed system-generated reason",
         breakAudit.rows[0]
       );
     }

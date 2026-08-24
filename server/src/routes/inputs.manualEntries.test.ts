@@ -537,7 +537,6 @@ async function main() {
           breakProfileItemId: lunchItem.id,
           startTime: zonedWallTimeToUtc(2019, 5, 9, 12, 0, 0).toISOString(),
           endTime: zonedWallTimeToUtc(2019, 5, 9, 12, 30, 0).toISOString(),
-          reason: "QA: forgot to start lunch break on phone",
         },
       });
       check(lunch.status === 201, "POST /breaks creates the unpaid Lunch break (201)", lunch.body);
@@ -550,7 +549,6 @@ async function main() {
           breakProfileItemId: coffeeItem.id,
           startTime: zonedWallTimeToUtc(2019, 5, 9, 15, 0, 0).toISOString(),
           endTime: zonedWallTimeToUtc(2019, 5, 9, 15, 15, 0).toISOString(),
-          reason: "QA: forgot to start coffee break on phone",
         },
       });
       check(coffee.status === 201, "POST /breaks creates the paid Coffee break (201)", coffee.body);
@@ -563,7 +561,6 @@ async function main() {
           breakProfileItemId: lunchItem.id,
           startTime: zonedWallTimeToUtc(2019, 5, 9, 12, 10, 0).toISOString(),
           endTime: zonedWallTimeToUtc(2019, 5, 9, 12, 20, 0).toISOString(),
-          reason: "QA: overlaps existing lunch break",
         },
       });
       check(
@@ -591,6 +588,24 @@ async function main() {
         "The Lunch break DTO carries isPaid=false (inherited) and manualEntry attribution",
         lunchDto
       );
+
+      // No reason was submitted for either break above — the server must
+      // still record the acting admin and a fixed, system-generated reason
+      // (not a null/empty one) on every break it creates.
+      const { rows: breakAuditRows } = await pool.query(
+        `select created_by_employee_id, creation_reason from time_entries
+         where employee_id = $1 and entry_type = 'break' and scheduled_break_date = $2
+         order by started_at`,
+        [target.id, DATE_BREAKS]
+      );
+      check(
+        breakAuditRows.length === 2 &&
+          breakAuditRows.every(
+            (r) => r.created_by_employee_id === adminActor.id && r.creation_reason === "Break manually added from Inputs page."
+          ),
+        "POST /breaks records the admin and a fixed system-generated reason without a client-supplied reason",
+        breakAuditRows
+      );
     }
 
     // -----------------------------------------------------------------
@@ -604,7 +619,6 @@ async function main() {
           date: DATE_CUSTOM_BREAK,
           startTime: zonedWallTimeToUtc(2019, 5, 10, 10, 0, 0).toISOString(),
           endTime: zonedWallTimeToUtc(2019, 5, 10, 10, 10, 0).toISOString(),
-          reason: "QA: custom break, no isPaid supplied",
         },
       });
       check(
@@ -621,7 +635,6 @@ async function main() {
           isPaid: true,
           startTime: zonedWallTimeToUtc(2019, 5, 10, 10, 0, 0).toISOString(),
           endTime: zonedWallTimeToUtc(2019, 5, 10, 10, 10, 0).toISOString(),
-          reason: "QA: custom paid break",
         },
       });
       check(customPaid.status === 201, "POST /breaks creates a Custom break with explicit isPaid=true (201)");

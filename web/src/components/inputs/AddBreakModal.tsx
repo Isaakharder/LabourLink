@@ -5,7 +5,6 @@ import { formatDateLong, combineDateAndTimeToUtcIso, toTimeInputValue } from "..
 import { EmployeeBreakItemOption } from "../../lib/inputsTypes";
 import { BreakPreviewRun, describeBreakSplitEffect } from "../../lib/breakSplitPreview";
 
-const MIN_REASON_LENGTH = 3;
 // Sentinel <select> value for "not one of the assigned profile's scheduled
 // items" — a real break_profile_items id is always a uuid, so this can
 // never collide with one.
@@ -39,7 +38,6 @@ export function AddBreakModal({ employeeId, employeeName, date, runs, onClose, o
   const [customIsPaid, setCustomIsPaid] = useState<"paid" | "unpaid">("unpaid");
   const [startTime, setStartTime] = useState(() => toTimeInputValue(new Date().toISOString()));
   const [endTime, setEndTime] = useState("");
-  const [reason, setReason] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -56,9 +54,7 @@ export function AddBreakModal({ employeeId, employeeName, date, runs, onClose, o
 
   const selectedItem = items?.find((i) => i.id === selectedValue);
   const isCustom = selectedValue === CUSTOM_VALUE;
-  const reasonValid = reason.trim().length >= MIN_REASON_LENGTH;
-  const canSubmit =
-    Boolean(selectedValue) && Boolean(startTime) && Boolean(endTime) && reasonValid && !submitting;
+  const canSubmit = Boolean(selectedValue) && Boolean(startTime) && Boolean(endTime) && !submitting;
 
   // Non-blocking preview of what this break will do to today's activities
   // (split/trim/remove one, or nothing at all) — recomputed live as the
@@ -84,7 +80,6 @@ export function AddBreakModal({ employeeId, employeeName, date, runs, onClose, o
           isPaid: isCustom ? customIsPaid === "paid" : undefined,
           startTime: combineDateAndTimeToUtcIso(date, startTime),
           endTime: combineDateAndTimeToUtcIso(date, endTime),
-          reason: reason.trim(),
         }),
       });
       onCreated();
@@ -169,18 +164,6 @@ export function AddBreakModal({ employeeId, employeeName, date, runs, onClose, o
               step={1}
               value={endTime}
               onChange={(e) => setEndTime(e.target.value)}
-              disabled={submitting}
-              required
-            />
-          </label>
-
-          <label>
-            Reason *
-            <input
-              type="text"
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="e.g. Employee forgot to start their break on their phone"
               disabled={submitting}
               required
             />
