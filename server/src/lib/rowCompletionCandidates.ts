@@ -1,11 +1,22 @@
 // Finds every not-yet-completed work run touching a given greenhouse row +
-// density type, across every employee — the shared logic behind both the
-// "is this row ambiguous" check on every Inputs load (server/src/routes/
-// inputs.ts) and the admin review modal's candidate list (server/src/routes/
-// rowCompletions.ts). Reuses groupIntoActivityRuns per-employee-day (see
-// below for why "per day", not just "per employee") so a break-split visit
-// (two time_entries rows, one real visit) is correctly collapsed into one
-// run, never miscounted as two separate visits to the row.
+// activity + density type, across every employee — the shared logic behind
+// both the "is this row ambiguous" check on every Inputs load (server/src/
+// routes/inputs.ts) and the admin review modal's candidate list (server/src/
+// routes/rowCompletions.ts). Reuses groupIntoActivityRuns per-employee-day
+// (see below for why "per day", not just "per employee") so a break-split
+// visit (two time_entries rows, one real visit) is correctly collapsed into
+// one run, never miscounted as two separate visits to the row.
+//
+// Scoped by activity_id as well as row+density — NOT just the physical row
+// and frozen density type. An ActivityRun (activityRuns.ts) is always
+// single-activity by construction (an activity change starts a new run), so
+// this is a safe, always-available third key. Without it, two completely
+// independent activities that happen to share a row and density type (e.g.
+// Picking Peppers and Winding & Pruning both freezing 'stems' on the same
+// physical row) would be lumped into one ambiguity group: one activity's
+// work could show up in the other's review modal, and confirming one could
+// make the other's genuinely-separate, otherwise-unambiguous visit vanish
+// from auto-counting (see 045_row_completion_activity_id.sql).
 import { pool } from "../db";
 import { groupIntoActivityRuns, RunSegment } from "./activityRuns";
 import { calendarDateInAppTimezone, getDayBoundsUtc } from "./timezone";
@@ -25,25 +36,80 @@ export interface CandidateRun {
   durationSeconds: number;
 }
 
-export async function getUnresolvedRunsForRow(
-  greenhouseRowId: string,
-  densityType: "plants" | "stems"
-): Promise<CandidateRun[]> {
-  // Step 1: which employee+day pairs even have an unresolved work segment
-  // touching this row+type — small, targeted (a physical row is visited by
-  // a handful of employees on a handful of days, never thousands), same
-  // "bounded, not per-employee-day-of-the-whole-app" reasoning the caller in
-  // inputs.ts already documents for its own per-pair loop.
+export interface RowActivityDensityKey {
+  greenhouseRowId: string;
+  activityId: string;
+  densityType: "plants" | "stems";
+}
+
+function pairKey(k: RowActivityDensityKey): string {
+  return `${k.greenhouseRowId}:${k.activityId}:${k.densityType}`;
+}
+
+interface DayFetchRow {
+  id: string;
+  entry_type: "work" | "break";
+  activity_id: string | null;
+  started_at: Date;
+  ended_at: Date | null;
+  greenhouse_row_id: string | null;
+  carrier_id: string | null;
+  density_type: "plants" | "stems" | null;
+  density_count_per_row: number | null;
+  is_resolved: boolean;
+}
+
+// Batched form: computes candidates for MANY row+activity+density pairs in
+// one pass. This is what getUnresolvedRunsForRow (below) is now a thin
+// single-pair wrapper around.
+//
+// The single-pair version this replaced had a real N+1: called once per
+// unresolved pair (inputs.ts's ambiguity check, reportQueries.ts's Reports/
+// Stats/Dashboard attribution), and EVERY call independently re-ran its own
+// "fetch this employee's whole day" query — even when several pairs shared
+// the exact same employee+day (the common case: one busy employee's one
+// busy day touching a dozen-plus rows). Measured against a real production
+// day (60 entries, 14 unresolved row+activity+density pairs, all the same
+// employee/day), that was 14 redundant whole-day fetches (plus 14 redundant
+// row-label and employee-name lookups) where exactly 1 of each would do —
+// GET /api/inputs/daily took ~5.6s, almost entirely spent on those
+// redundant round trips (EXPLAIN ANALYZE confirmed each query itself runs
+// in ~1ms; the cost is round-trip count, not query plan).
+//
+// Fixed here by computing every pair in one shot: one combined query finds
+// every unresolved touch across every pair at once (a row-value IN list,
+// not one query per pair), row-label/employee-name/activity-name lookups
+// are each batched across every distinct row/employee/activity involved,
+// and each distinct employee+day is fetched — and its runs computed — at
+// most ONCE no matter how many requested pairs touch it, then every pair's
+// candidates are filtered from that shared, already-computed run list.
+export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): Promise<Map<string, CandidateRun[]>> {
+  const result = new Map<string, CandidateRun[]>();
+  if (pairs.length === 0) return result;
+
+  // Dedupe defensively — callers may already dedupe (inputs.ts's own
+  // unresolvedPairs is a Map), but this must never do 2x the work if one
+  // doesn't.
+  const byKey = new Map<string, RowActivityDensityKey>();
+  for (const p of pairs) byKey.set(pairKey(p), p);
+  const dedupedPairs = [...byKey.values()];
+  for (const p of dedupedPairs) result.set(pairKey(p), []);
+
+  // Step 1: every unresolved work segment touching ANY of the requested
+  // pairs, in a single round trip — the row-value form of "= ANY" lets
+  // Postgres match all three columns together per candidate row, the same
+  // way a single-pair query would, just for every pair at once.
   const { rows: touchRows } = await pool.query(
     `select te.employee_id, te.started_at
      from time_entries te
      left join row_completion_segments rcs on rcs.time_entry_id = te.id
      where te.entry_type = 'work' and te.deleted_at is null
-       and te.greenhouse_row_id = $1 and te.density_type = $2
-       and rcs.time_entry_id is null`,
-    [greenhouseRowId, densityType]
+       and rcs.time_entry_id is null
+       and (te.greenhouse_row_id, te.activity_id, te.density_type)
+         in (select * from unnest($1::uuid[], $2::uuid[], $3::text[]))`,
+    [dedupedPairs.map((p) => p.greenhouseRowId), dedupedPairs.map((p) => p.activityId), dedupedPairs.map((p) => p.densityType)]
   );
-  if (touchRows.length === 0) return [];
+  if (touchRows.length === 0) return result; // every pair already seeded to [] above
 
   const daysByEmployee = new Map<string, Set<string>>();
   for (const r of touchRows) {
@@ -53,48 +119,78 @@ export async function getUnresolvedRunsForRow(
     daysByEmployee.set(r.employee_id, set);
   }
 
+  // Step 2: row-label / employee-name / activity-name lookups, each batched
+  // across every distinct id involved — once each, never once per pair.
+  const distinctRowIds = [...new Set(dedupedPairs.map((p) => p.greenhouseRowId))];
   const rowInfoRes = await pool.query(
-    `select gr.row_number, gp.name as phase_name from greenhouse_rows gr
-     join greenhouse_phases gp on gp.id = gr.phase_id where gr.id = $1`,
-    [greenhouseRowId]
+    `select gr.id, gr.row_number, gp.name as phase_name from greenhouse_rows gr
+     join greenhouse_phases gp on gp.id = gr.phase_id where gr.id = any($1::uuid[])`,
+    [distinctRowIds]
   );
-  const rowInfo = rowInfoRes.rows[0];
-  const rowLabel = rowInfo ? `${rowInfo.phase_name} · Row ${rowInfo.row_number}` : "Unknown row";
+  const rowLabelById = new Map(rowInfoRes.rows.map((r) => [r.id, `${r.phase_name} · Row ${r.row_number}`]));
 
   const employeeIds = [...daysByEmployee.keys()];
   const empRes = await pool.query(`select id, first_name, last_name from employees where id = any($1::uuid[])`, [employeeIds]);
   const employeeNameById = new Map(empRes.rows.map((r) => [r.id, `${r.first_name} ${r.last_name}`]));
 
-  const candidates: CandidateRun[] = [];
+  // Only ever looked up for a run whose root already matches one of the
+  // requested pairs (see the final filter below), so the requested pairs'
+  // own activity ids are the complete set this needs — never one query per
+  // employee-day like the old per-day `left join activities` did.
+  const distinctActivityIds = [...new Set(dedupedPairs.map((p) => p.activityId))];
+  const activityRes = await pool.query(`select id, name from activities where id = any($1::uuid[])`, [distinctActivityIds]);
+  const activityNameById = new Map(activityRes.rows.map((r) => [r.id, r.name]));
+
+  // Step 3: fetch each distinct employee+day EXACTLY ONCE, concurrently — a
+  // Map of in-flight promises keyed by employee+day is the dedup: a second
+  // request for the same day while the first is still in flight reuses the
+  // same promise instead of firing a second query.
+  const dayFetches = new Map<string, Promise<DayFetchRow[]>>();
+  function fetchDay(employeeId: string, date: string): Promise<DayFetchRow[]> {
+    const dayKey = `${employeeId}:${date}`;
+    let p = dayFetches.get(dayKey);
+    if (!p) {
+      // Step 3's own query — the exact same shape GET /daily's own run
+      // computation uses (work AND break, never just the work segments
+      // touching one row): a row-scoped, work-only fetch can never see the
+      // break entry that bridges a break-split visit back into one run,
+      // since a break always has greenhouse_row_id = null. No `activities`
+      // join here (unlike the old per-day query) — activity names are
+      // already batched once in Step 2 above, from the requested pairs'
+      // own activity ids.
+      p = (async () => {
+        const { start, end } = getDayBoundsUtc(date);
+        const { rows } = await pool.query(
+          `select te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
+                  te.greenhouse_row_id, te.carrier_id, te.density_type, te.density_count_per_row,
+                  (rcs.time_entry_id is not null) as is_resolved
+           from time_entries te
+           left join row_completion_segments rcs on rcs.time_entry_id = te.id
+           where te.employee_id = $1 and te.deleted_at is null
+             and te.started_at >= $2 and te.started_at < $3
+           order by te.started_at asc`,
+          [employeeId, start, end]
+        );
+        return rows;
+      })();
+      dayFetches.set(dayKey, p);
+    }
+    return p;
+  }
+  for (const [employeeId, dates] of daysByEmployee) {
+    for (const date of dates) fetchDay(employeeId, date); // kicks off concurrently; Map above dedupes
+  }
+  await Promise.all(dayFetches.values());
+
+  // Step 4: for each employee+day, compute its runs ONCE, then hand every
+  // resulting root to whichever requested pair(s) it actually matches — the
+  // exact same per-run filtering the single-pair version did, just run once
+  // per employee-day instead of once per (pair, employee-day).
   for (const [employeeId, dates] of daysByEmployee) {
     for (const date of dates) {
-      // Step 2: fetch the employee's WHOLE day — work AND break, the exact
-      // same shape GET /daily's own run computation uses (see inputs.ts) —
-      // never just the work segments touching this one row. A row-scoped,
-      // work-only fetch (the previous approach here) can never see the
-      // break entry that bridges a break-split visit back into one run,
-      // since a break always has greenhouse_row_id = null and so can never
-      // match a `greenhouse_row_id = $1` filter — feeding groupIntoActivityRuns
-      // an incomplete segment list made it miscount "worked this row, took
-      // a break, resumed the same row" as two spuriously ambiguous runs
-      // instead of the one real visit it actually was.
-      const { start, end } = getDayBoundsUtc(date);
-      const { rows: dayRows } = await pool.query(
-        `select te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
-                te.greenhouse_row_id, te.carrier_id, te.density_type, te.density_count_per_row,
-                a.name as activity_name,
-                (rcs.time_entry_id is not null) as is_resolved
-         from time_entries te
-         left join activities a on a.id = te.activity_id
-         left join row_completion_segments rcs on rcs.time_entry_id = te.id
-         where te.employee_id = $1 and te.deleted_at is null
-           and te.started_at >= $2 and te.started_at < $3
-         order by te.started_at asc`,
-        [employeeId, start, end]
-      );
+      const dayRows = await fetchDay(employeeId, date); // already resolved — Step 3 awaited every entry above
 
       const resolvedSegmentIds = new Set(dayRows.filter((r) => r.is_resolved).map((r) => r.id));
-      const activityNameById = new Map(dayRows.map((r) => [r.activity_id, r.activity_name]));
       const segments: RunSegment[] = dayRows.map((r) => ({
         id: r.id,
         entry_type: r.entry_type,
@@ -150,8 +246,9 @@ export async function getUnresolvedRunsForRow(
       for (const run of runs) {
         const root = visitRoot(run);
         if (run.id !== root.id) continue; // non-root chain members are folded into their root above, never an independent candidate
-        if (root.greenhouseRowId !== greenhouseRowId) continue;
-        if (root.densityType !== densityType) continue;
+        if (!root.greenhouseRowId) continue;
+        const key = `${root.greenhouseRowId}:${root.activityId}:${root.densityType}`;
+        if (!result.has(key)) continue; // this root isn't one of the requested pairs — irrelevant here
         const combinedSegmentIds = chainSegmentIdsByRootId.get(root.id)!;
         // A completion is always confirmed for a run's FULL segment set —
         // the review modal only ever lets an admin select whole candidate
@@ -162,15 +259,15 @@ export async function getUnresolvedRunsForRow(
         // combined chain, not just the root's own segments.
         if (combinedSegmentIds.some((id) => resolvedSegmentIds.has(id))) continue;
 
-        candidates.push({
+        result.get(key)!.push({
           runId: root.id,
           segmentIds: combinedSegmentIds,
           employeeId,
           employeeName: employeeNameById.get(employeeId) ?? "Unknown employee",
           activityId: root.activityId,
           activityName: activityNameById.get(root.activityId) ?? "Unknown activity",
-          greenhouseRowId,
-          rowLabel,
+          greenhouseRowId: root.greenhouseRowId,
+          rowLabel: rowLabelById.get(root.greenhouseRowId) ?? "Unknown row",
           date: calendarDateInAppTimezone(root.startedAt),
           startedAt: root.startedAt.toISOString(),
           endedAt: (chainEndedAtByRootId.get(root.id) ?? root.endedAt)?.toISOString() ?? null,
@@ -180,6 +277,22 @@ export async function getUnresolvedRunsForRow(
     }
   }
 
-  candidates.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-  return candidates;
+  for (const list of result.values()) {
+    list.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  }
+  return result;
+}
+
+// Thin single-pair wrapper, kept for callers that only ever need one pair
+// at a time (rowCompletions.ts's GET /candidates — exactly the one modal an
+// admin has open) — see getUnresolvedRunsForRows above for the batched form
+// and the N+1 it replaced.
+export async function getUnresolvedRunsForRow(
+  greenhouseRowId: string,
+  activityId: string,
+  densityType: "plants" | "stems"
+): Promise<CandidateRun[]> {
+  const key: RowActivityDensityKey = { greenhouseRowId, activityId, densityType };
+  const map = await getUnresolvedRunsForRows([key]);
+  return map.get(pairKey(key)) ?? [];
 }

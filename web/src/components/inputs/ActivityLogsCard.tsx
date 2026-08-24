@@ -64,6 +64,8 @@ export function ActivityLogsCard({
 }: ActivityLogsCardProps) {
   const [reviewTarget, setReviewTarget] = useState<{
     greenhouseRowId: string;
+    activityId: string;
+    activityName: string;
     densityType: "plants" | "stems";
     rowLabel: string;
   } | null>(null);
@@ -83,8 +85,18 @@ export function ActivityLogsCard({
     // "Needs review" badge itself was computed server-side from the frozen
     // value, so querying candidates with anything else can silently return
     // zero results for a row the badge just flagged (see inputsTypes.ts).
+    // run.activityId is always included too — the badge's own ambiguity
+    // check is scoped by row+activity+density (see rowCompletionCandidates.ts),
+    // so a different activity sharing this row and density type must never
+    // leak into this run's own review group.
     if (!run.row || !run.densityType) return;
-    setReviewTarget({ greenhouseRowId: run.row.id, densityType: run.densityType, rowLabel: run.row.label });
+    setReviewTarget({
+      greenhouseRowId: run.row.id,
+      activityId: run.activityId,
+      activityName: run.activityName,
+      densityType: run.densityType,
+      rowLabel: run.row.label,
+    });
   }
 
   return (
@@ -259,6 +271,8 @@ export function ActivityLogsCard({
       {reviewTarget && (
         <RowCompletionReviewModal
           greenhouseRowId={reviewTarget.greenhouseRowId}
+          activityId={reviewTarget.activityId}
+          activityName={reviewTarget.activityName}
           densityType={reviewTarget.densityType}
           rowLabel={reviewTarget.rowLabel}
           onClose={() => setReviewTarget(null)}

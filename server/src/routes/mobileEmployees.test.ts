@@ -187,10 +187,10 @@ async function main() {
       return rows[0].id;
     }
 
-    async function confirmRowCompletion(rowId: string, quantityPerRow: number, confirmedBy: string, segmentIds: string[]): Promise<void> {
+    async function confirmRowCompletion(rowId: string, activityId: string, quantityPerRow: number, confirmedBy: string, segmentIds: string[]): Promise<void> {
       const { rows } = await pool.query(
-        `insert into row_completions (greenhouse_row_id, density_type, quantity_per_row, confirmed_by_employee_id) values ($1, 'stems', $2, $3) returning id`,
-        [rowId, quantityPerRow, confirmedBy]
+        `insert into row_completions (greenhouse_row_id, activity_id, density_type, quantity_per_row, confirmed_by_employee_id) values ($1, $2, 'stems', $3, $4) returning id`,
+        [rowId, activityId, quantityPerRow, confirmedBy]
       );
       for (const segId of segmentIds) {
         await pool.query(`insert into row_completion_segments (time_entry_id, row_completion_id) values ($1, $2)`, [segId, rows[0].id]);
@@ -243,7 +243,7 @@ async function main() {
       const rowOpen = await insertRow(2);
       await insertDensity(500, [rowA]);
       const completedEntry = await insertWork(empRowStem, rowStemActivity, hoursAgo(3), hoursAgo(2), { rowId: rowA, densityCountPerRow: 500 });
-      await confirmRowCompletion(rowA, 500, adminId, [completedEntry]);
+      await confirmRowCompletion(rowA, rowStemActivity, 500, adminId, [completedEntry]);
       await insertWork(empRowStem, rowStemActivity, hoursAgo(1), null, { rowId: rowOpen });
     }
 
@@ -281,7 +281,7 @@ async function main() {
       await insertDensity(100, [rowShort]);
       await insertDensity(99999, [rowDeleted]);
       const shortEntry = await insertWork(empNotEnoughData, rowStemActivity, hoursAgo(0.05), hoursAgo(0.0167), { rowId: rowShort, densityCountPerRow: 100 }); // ~5 minutes, well under the 15-minute floor
-      await confirmRowCompletion(rowShort, 100, adminId, [shortEntry]);
+      await confirmRowCompletion(rowShort, rowStemActivity, 100, adminId, [shortEntry]);
       // A deleted work entry with a huge completed quantity — if this were
       // wrongly included, it would swamp the ratio and produce a large
       // speed instead of null.
@@ -290,7 +290,7 @@ async function main() {
         densityCountPerRow: 99999,
         deleted: true,
       });
-      await confirmRowCompletion(rowDeleted, 99999, adminId, [deletedEntry]);
+      await confirmRowCompletion(rowDeleted, rowStemActivity, 99999, adminId, [deletedEntry]);
       await insertWork(empNotEnoughData, rowStemActivity, hoursAgo(0.01), null, { rowId: rowOpen });
     }
 

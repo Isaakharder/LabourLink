@@ -7,7 +7,7 @@ import { calendarDateInAppTimezone, getDayBoundsUtc } from "../lib/timezone";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { aggregateDensitySpeed } from "../lib/densitySpeed";
-import { getUnresolvedRunsForRow } from "../lib/rowCompletionCandidates";
+import { getUnresolvedRunsForRows } from "../lib/rowCompletionCandidates";
 import {
   loadCarrierOptions,
   loadEmployeeActivitiesWithQuestions,
@@ -206,6 +206,7 @@ router.get(
   requireAuth,
   requireRole(...EDIT_ROLES),
   asyncHandler(async (req, res) => {
+    const __t0 = Date.now();
     const employeeId = req.query.employeeId as string | undefined;
     const date = req.query.date as string | undefined;
     if (!employeeId || !UUID_RE.test(employeeId)) {
@@ -252,6 +253,7 @@ router.get(
         breakProfileId: employee.break_profile_id,
       });
     }
+    console.log(`[timing] daily reconcile+empRes done: ${Date.now() - __t0}ms`);
 
     const { start, end } = getDayBoundsUtc(date);
     // Not filtered on activities.is_active — activities are never
@@ -281,6 +283,7 @@ router.get(
        order by te.started_at asc`,
       [employeeId, start, end]
     );
+    console.log(`[timing] daily entryRows fetch: ${Date.now() - __t0}ms (${entryRows.length} rows)`);
 
     const segments: RunSegment[] = entryRows.map((r) => ({
       id: r.id,
@@ -390,7 +393,7 @@ router.get(
     //     resulting speed is shown on every run belonging to that
     //     completion, on every day it touches.
     //  2. It's the *only* not-yet-completed run anywhere for that row+type
-    //     (checked via getUnresolvedRunsForRow) — unambiguous, so it
+    //     (checked via getUnresolvedRunsForRows) — unambiguous, so it
     //     auto-counts exactly like the original (pre-row-completions)
     //     behavior, no admin action required.
     //
@@ -464,26 +467,36 @@ router.get(
     // VISIT ROOT, not the run's own row/type — a later segment of a
     // density-type-split visit must never contribute its own (spurious)
     // key here, or it would be checked for ambiguity under the wrong type.
-    const unresolvedPairs = new Map<string, { greenhouseRowId: string; densityType: "plants" | "stems" }>();
+    // Also keyed by activityId — two different activities sharing a row and
+    // density type are independent ambiguity groups, never checked or
+    // combined together (see rowCompletionCandidates.ts / 045_row_completion_
+    // activity_id.sql).
+    const unresolvedPairs = new Map<
+      string,
+      { greenhouseRowId: string; activityId: string; densityType: "plants" | "stems" }
+    >();
     for (const r of densityEligibleRuns) {
       if (runCompletionId.has(r.id)) continue;
       const root = runById.get(visitRootByRunId.get(r.id)!)!;
-      const key = `${root.greenhouseRowId}:${root.densityType}`;
+      const key = `${root.greenhouseRowId}:${root.activityId}:${root.densityType}`;
       if (!unresolvedPairs.has(key)) {
         unresolvedPairs.set(key, {
           greenhouseRowId: root.greenhouseRowId!,
+          activityId: root.activityId,
           densityType: root.densityType as "plants" | "stems",
         });
       }
     }
 
-    // Proven independent (see comment above) — run concurrently rather
-    // than one after the other. The ambiguity check itself is still one
-    // sequential getUnresolvedRunsForRow call per unresolved pair, exactly
-    // as before: only *when* this whole loop runs relative to the
-    // completion-totals query changed, not how it works internally. See
-    // rowCompletionCandidates.ts for the documented future-batching
-    // concern with that per-pair query, left unchanged here.
+    // Proven independent (see comment above) — run concurrently rather than
+    // one after the other. The ambiguity check itself is one single batched
+    // getUnresolvedRunsForRows call for every unresolved pair at once (not
+    // one getUnresolvedRunsForRow call per pair) — see that function's own
+    // comment for the N+1 this fixes: on a real busy day (14 unresolved
+    // row+activity+density pairs, one employee), the old per-pair loop
+    // redundantly re-fetched that SAME employee's whole day 14 times over,
+    // and GET /daily took ~5.6s; batched, it's one round trip regardless of
+    // how many pairs this day has.
     const [completionTotals, ambiguousPairKeys] = await Promise.all([
       (async () => {
         const map = new Map<string, { quantity: number; durationSeconds: number; segmentCount: number }>();
@@ -510,9 +523,15 @@ router.get(
       })(),
       (async () => {
         const keys = new Set<string>();
-        for (const [key, pair] of unresolvedPairs) {
-          const candidates = await getUnresolvedRunsForRow(pair.greenhouseRowId, pair.densityType);
-          if (candidates.length > 1) keys.add(key);
+        const candidatesByKey = await getUnresolvedRunsForRows(
+          [...unresolvedPairs.values()].map((pair) => ({
+            greenhouseRowId: pair.greenhouseRowId,
+            activityId: pair.activityId,
+            densityType: pair.densityType,
+          }))
+        );
+        for (const key of unresolvedPairs.keys()) {
+          if ((candidatesByKey.get(key)?.length ?? 0) > 1) keys.add(key);
         }
         return keys;
       })(),
@@ -545,7 +564,7 @@ router.get(
     for (const r of densityEligibleRuns) {
       if (runCompletionId.has(r.id)) continue;
       const root = runById.get(visitRootByRunId.get(r.id)!)!;
-      const key = `${root.greenhouseRowId}:${root.densityType}`;
+      const key = `${root.greenhouseRowId}:${root.activityId}:${root.densityType}`;
       if (ambiguousPairKeys.has(key)) {
         isUnresolvedByRunId.set(r.id, true);
       }
@@ -561,7 +580,7 @@ router.get(
     const speedByRootId = new Map<string, number | null>();
     for (const [rootId, durationSeconds] of chainDurationByRootId) {
       const root = runById.get(rootId)!;
-      const key = `${root.greenhouseRowId}:${root.densityType}`;
+      const key = `${root.greenhouseRowId}:${root.activityId}:${root.densityType}`;
       if (ambiguousPairKeys.has(key)) continue;
       speedByRootId.set(rootId, aggregateDensitySpeed([{ quantityPerRow: root.densityCountPerRow!, durationSeconds }]));
     }
@@ -582,6 +601,7 @@ router.get(
     }
 
     const photoUrl = await photoUrlPromise;
+    console.log(`[timing] daily total (before res.json): ${Date.now() - __t0}ms`);
 
     res.json({
       employee: {

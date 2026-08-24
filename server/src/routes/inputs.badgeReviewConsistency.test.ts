@@ -199,9 +199,13 @@ async function main() {
       check(runB?.isUnresolvedRowCompletion === true, "5) employee B's run ALSO shows the badge for the same ambiguity", runB);
       check(runA?.densityType === runB?.densityType && runA?.densityType === "stems", "5) both runs agree on the same frozen densityType", { a: runA?.densityType, b: runB?.densityType });
 
-      // The modal must be opened with run.densityType, exactly reproducing
-      // ActivityLogsCard.tsx's fixed openReview() call.
-      const candidatesRes = await call("GET", `/api/row-completions/candidates?greenhouseRowId=${rowAmbiguous}&densityType=${runA.densityType}`, { token: adminToken });
+      // The modal must be opened with run.densityType and run.activityId,
+      // exactly reproducing ActivityLogsCard.tsx's fixed openReview() call.
+      const candidatesRes = await call(
+        "GET",
+        `/api/row-completions/candidates?greenhouseRowId=${rowAmbiguous}&activityId=${runA.activityId}&densityType=${runA.densityType}`,
+        { token: adminToken }
+      );
       check(
         candidatesRes.status === 200 && candidatesRes.body?.candidates?.length === 2,
         "5) the modal (queried with the badge's own densityType) shows exactly the 2 candidates the badge's ambiguity implies",

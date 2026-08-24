@@ -40,6 +40,8 @@
     "test:dashboard-settings": "ts-node src/routes/dashboard.settings.test.ts",
     "test:dashboard": "ts-node src/routes/dashboard.test.ts",
     "test:row-completion-candidates": "ts-node src/lib/rowCompletionCandidates.test.ts",
+    "test:row-completion-activity-scoping": "ts-node src/routes/rowCompletions.activityScoping.test.ts",
+    "test:inputs-delete-performance": "ts-node src/routes/inputs.deletePerformance.test.ts",
     "test:inputs-badge-review-consistency": "ts-node src/routes/inputs.badgeReviewConsistency.test.ts",
     "test:inputs-density-speed-per-row": "ts-node src/routes/inputs.densitySpeedPerRow.test.ts",
     "test:activities-density-speed-unit": "ts-node src/routes/activities.densitySpeedUnit.test.ts",

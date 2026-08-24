@@ -161,10 +161,10 @@ async function main() {
       return rows[0].id;
     }
 
-    async function confirmRowCompletion(rowId: string, quantityPerRow: number, confirmedBy: string, segmentIds: string[]): Promise<void> {
+    async function confirmRowCompletion(rowId: string, activityId: string, quantityPerRow: number, confirmedBy: string, segmentIds: string[]): Promise<void> {
       const { rows } = await pool.query(
-        `insert into row_completions (greenhouse_row_id, density_type, quantity_per_row, confirmed_by_employee_id) values ($1, 'stems', $2, $3) returning id`,
-        [rowId, quantityPerRow, confirmedBy]
+        `insert into row_completions (greenhouse_row_id, activity_id, density_type, quantity_per_row, confirmed_by_employee_id) values ($1, $2, 'stems', $3, $4) returning id`,
+        [rowId, activityId, quantityPerRow, confirmedBy]
       );
       for (const segId of segmentIds) {
         await pool.query(`insert into row_completion_segments (time_entry_id, row_completion_id) values ($1, $2)`, [segId, rows[0].id]);
@@ -210,7 +210,7 @@ async function main() {
       await insertDensity(300, [rowC]);
 
       const completedEntry = await insertWork(empRowStem, rowStemActivity, hoursAgo(3), hoursAgo(2), { rowId: rowA, densityCountPerRow: 500 });
-      await confirmRowCompletion(rowA, 500, adminId, [completedEntry]);
+      await confirmRowCompletion(rowA, rowStemActivity, 500, adminId, [completedEntry]);
       await insertWork(empRowStem, rowStemActivity, hoursAgo(1), null, { rowId: rowOpen }); // currently open
 
       const { rows: blockRows } = await pool.query(
@@ -232,7 +232,7 @@ async function main() {
       const rowOpen = await insertRow(5);
       await insertDensity(100, [rowShort]);
       const shortEntry = await insertWork(empNotEnoughData, rowStemActivity, hoursAgo(0.1), hoursAgo(0.0167), { rowId: rowShort, densityCountPerRow: 100 }); // ~5 minutes
-      await confirmRowCompletion(rowShort, 100, adminId, [shortEntry]);
+      await confirmRowCompletion(rowShort, rowStemActivity, 100, adminId, [shortEntry]);
       await insertWork(empNotEnoughData, rowStemActivity, hoursAgo(0.01), null, { rowId: rowOpen });
     }
 

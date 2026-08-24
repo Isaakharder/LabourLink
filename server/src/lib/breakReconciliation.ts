@@ -79,51 +79,95 @@ export async function reconcileEmployeeBreaks(
     const [y, mo, d] = dateStr.split("-").map(Number);
     const now = Date.now();
 
-    let savepointIndex = 0;
-    for (const item of itemsRes.rows) {
+    // Every item's own scheduled window, computed up front — needed below
+    // both to filter out items that haven't fully passed yet (unchanged
+    // rule) and to batch the three pre-checks that follow.
+    const itemWindows = itemsRes.rows.map((item) => {
       const [sh, sm, ss] = parseTimeParts(item.start_time);
       const [eh, em, es] = parseTimeParts(item.end_time);
-      const scheduledStart = zonedWallTimeToUtc(y, mo, d, sh, sm, ss);
-      const scheduledEnd = zonedWallTimeToUtc(y, mo, d, eh, em, es);
+      return {
+        item,
+        scheduledStart: zonedWallTimeToUtc(y, mo, d, sh, sm, ss),
+        scheduledEnd: zonedWallTimeToUtc(y, mo, d, eh, em, es),
+      };
+    });
+    // The scheduled time must have fully passed — same rule as before, just
+    // filtered once up front instead of as the first line of the per-item
+    // loop, so the batched pre-checks below never waste a lookup on an item
+    // that's going to be skipped regardless of what they'd find.
+    const eligible = itemWindows.filter(({ scheduledEnd }) => scheduledEnd.getTime() <= now);
 
-      // The scheduled time must have fully passed.
-      if (scheduledEnd.getTime() > now) continue;
-
+    // The three pre-checks every item used to run one query each for (up to
+    // 3 x itemsRes.rows.length round trips even when — the common case,
+    // once a day's breaks are already reconciled — every item turns out to
+    // need no write at all) are batched here into exactly 3 queries total,
+    // covering every eligible item at once. Still run via `client` inside
+    // this same transaction at the same point (right after BEGIN) the old
+    // per-item queries ran at — this changes ROUND-TRIP COUNT only, never
+    // which rows are visible or when (same READ COMMITTED semantics either
+    // way), and the existing unique-constraint race handling below (the
+    // `23505` catch) remains the real correctness backstop against any
+    // concurrent reconciliation pass regardless of how these are fetched.
+    const suppressedItemIds = new Set<string>();
+    const alreadyItemIds = new Set<string>();
+    const overlappingItemIds = new Set<string>();
+    if (eligible.length > 0) {
+      const itemIds = eligible.map(({ item }) => item.id);
+      // Sequential, not Promise.all — a single pg Client processes one
+      // query at a time over one connection regardless (concurrent calls on
+      // the same client just queue internally, and pg now warns this usage
+      // is deprecated), so there's no real concurrency to gain here; the
+      // win is purely in round-trip COUNT (3 total, not 3 x itemsRes.rows.length),
+      // which sequential awaits on the same client already achieves.
+      //
       // A supervisor deleted a previously auto-added break for this exact
       // item/date via the Inputs page — respect that and never re-add it.
-      // Without this check, reconciliation would just recreate the break on
-      // the very next status fetch or Inputs load (it re-derives from the
-      // schedule and the covering work entry every time, neither of which
-      // a deletion changes), making the deletion pointless.
-      const suppressed = await client.query(
-        `select id from break_schedule_exceptions
-         where employee_id = $1 and break_profile_item_id = $2 and scheduled_date = $3
-         limit 1`,
-        [employeeId, item.id, dateStr]
+      // Without this check, reconciliation would just recreate the break
+      // on the very next status fetch or Inputs load (it re-derives from
+      // the schedule and the covering work entry every time, neither of
+      // which a deletion changes), making the deletion pointless.
+      const suppressedRes = await client.query(
+        `select break_profile_item_id from break_schedule_exceptions
+         where employee_id = $1 and break_profile_item_id = any($2::uuid[]) and scheduled_date = $3`,
+        [employeeId, itemIds, dateStr]
       );
-      if (suppressed.rows[0]) continue;
-
       // Already recorded for this profile item/date, whether by a prior
-      // auto-add pass or a manual fixed-match — either way, never add again.
-      const already = await client.query(
-        `select id from time_entries
-         where employee_id = $1 and break_profile_item_id = $2 and scheduled_break_date = $3
-           and deleted_at is null
-         limit 1`,
-        [employeeId, item.id, dateStr]
+      // auto-add pass or a manual fixed-match — either way, never add
+      // again.
+      const alreadyRes = await client.query(
+        `select break_profile_item_id from time_entries
+         where employee_id = $1 and break_profile_item_id = any($2::uuid[]) and scheduled_break_date = $3
+           and deleted_at is null`,
+        [employeeId, itemIds, dateStr]
       );
-      if (already.rows[0]) continue;
-
       // Any break at all (matched to this item or not) already overlapping
-      // the scheduled window — don't double up on top of it.
-      const overlapping = await client.query(
-        `select id from time_entries
-         where employee_id = $1 and entry_type = 'break' and deleted_at is null
-           and started_at < $2 and (ended_at is null or ended_at > $3)
-         limit 1`,
-        [employeeId, scheduledEnd, scheduledStart]
+      // the scheduled window — don't double up on top of it. One row per
+      // eligible item, each correlated (via EXISTS) against that item's
+      // OWN [scheduledStart, scheduledEnd) window — the exact same
+      // per-item overlap test as before (unbounded on started_at, so a
+      // still-open break from an earlier day is still caught), just
+      // evaluated for every item in one round trip instead of one query
+      // each.
+      const overlappingRes = await client.query(
+        `select x.item_id
+         from unnest($2::uuid[], $3::timestamptz[], $4::timestamptz[]) as x(item_id, scheduled_start, scheduled_end)
+         where exists (
+           select 1 from time_entries te
+           where te.employee_id = $1 and te.entry_type = 'break' and te.deleted_at is null
+             and te.started_at < x.scheduled_end and (te.ended_at is null or te.ended_at > x.scheduled_start)
+         )`,
+        [employeeId, itemIds, eligible.map((e) => e.scheduledStart), eligible.map((e) => e.scheduledEnd)]
       );
-      if (overlapping.rows[0]) continue;
+      for (const r of suppressedRes.rows) suppressedItemIds.add(r.break_profile_item_id);
+      for (const r of alreadyRes.rows) alreadyItemIds.add(r.break_profile_item_id);
+      for (const r of overlappingRes.rows) overlappingItemIds.add(r.item_id);
+    }
+
+    let savepointIndex = 0;
+    for (const { item, scheduledStart, scheduledEnd } of eligible) {
+      if (suppressedItemIds.has(item.id)) continue;
+      if (alreadyItemIds.has(item.id)) continue;
+      if (overlappingItemIds.has(item.id)) continue;
 
       // A single work entry must fully cover the scheduled window — partial
       // coverage (started mid-window, or ended before the window closed) is

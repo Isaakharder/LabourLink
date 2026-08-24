@@ -10,23 +10,31 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const DENSITY_TYPES = new Set(["plants", "stems"]);
 
 // Every unresolved (not yet part of a confirmed row_completions record) run
-// touching this row+type, across every employee — powers the review modal
-// an admin opens from the "needs review" warning on Inputs.
+// touching this row+activity+type, across every employee — powers the
+// review modal an admin opens from the "needs review" warning on Inputs.
+// activityId is required, not optional — a row+type pair alone is not a
+// complete ambiguity scope (see getUnresolvedRunsForRow's own comment /
+// 045_row_completion_activity_id.sql): a different activity sharing this
+// row and density type must never appear in this list.
 router.get(
   "/candidates",
   requireAuth,
   requireRole("Administrator", "Manager"),
   asyncHandler(async (req, res) => {
     const greenhouseRowId = req.query.greenhouseRowId as string | undefined;
+    const activityId = req.query.activityId as string | undefined;
     const densityType = req.query.densityType as string | undefined;
     if (!greenhouseRowId || !UUID_RE.test(greenhouseRowId)) {
       return res.status(400).json({ error: "A valid greenhouseRowId is required" });
+    }
+    if (!activityId || !UUID_RE.test(activityId)) {
+      return res.status(400).json({ error: "A valid activityId is required" });
     }
     if (!densityType || !DENSITY_TYPES.has(densityType)) {
       return res.status(400).json({ error: "densityType must be 'plants' or 'stems'" });
     }
 
-    const candidates = await getUnresolvedRunsForRow(greenhouseRowId, densityType as "plants" | "stems");
+    const candidates = await getUnresolvedRunsForRow(greenhouseRowId, activityId, densityType as "plants" | "stems");
     res.json({ candidates });
   })
 );
@@ -56,7 +64,7 @@ router.post(
       await client.query("begin");
 
       const { rows } = await client.query(
-        `select te.id, te.entry_type, te.deleted_at, te.ended_at, te.greenhouse_row_id,
+        `select te.id, te.entry_type, te.deleted_at, te.ended_at, te.greenhouse_row_id, te.activity_id,
                 te.density_type, te.density_count_per_row, rcs.time_entry_id as already_completed
          from time_entries te
          left join row_completion_segments rcs on rcs.time_entry_id = te.id
@@ -89,19 +97,22 @@ router.post(
       const consistent = rows.every(
         (r) =>
           r.greenhouse_row_id === first.greenhouse_row_id &&
+          r.activity_id === first.activity_id &&
           r.density_type === first.density_type &&
           Number(r.density_count_per_row) === Number(first.density_count_per_row)
       );
       if (!consistent) {
         await client.query("rollback");
-        return res.status(400).json({ error: "Selected entries do not all refer to the same row and density" });
+        return res
+          .status(400)
+          .json({ error: "Selected entries do not all refer to the same row, activity, and density" });
       }
 
       const { rows: created } = await client.query(
-        `insert into row_completions (greenhouse_row_id, density_type, quantity_per_row, confirmed_by_employee_id)
-         values ($1, $2, $3, $4)
-         returning id, greenhouse_row_id, density_type, quantity_per_row, completed_at`,
-        [first.greenhouse_row_id, first.density_type, first.density_count_per_row, req.employee!.id]
+        `insert into row_completions (greenhouse_row_id, activity_id, density_type, quantity_per_row, confirmed_by_employee_id)
+         values ($1, $2, $3, $4, $5)
+         returning id, greenhouse_row_id, activity_id, density_type, quantity_per_row, completed_at`,
+        [first.greenhouse_row_id, first.activity_id, first.density_type, first.density_count_per_row, req.employee!.id]
       );
       const completion = created[0];
 
@@ -116,6 +127,7 @@ router.post(
         rowCompletion: {
           id: completion.id,
           greenhouseRowId: completion.greenhouse_row_id,
+          activityId: completion.activity_id,
           densityType: completion.density_type,
           quantityPerRow: Number(completion.quantity_per_row),
           completedAt: completion.completed_at,

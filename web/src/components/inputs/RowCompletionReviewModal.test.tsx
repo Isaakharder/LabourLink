@@ -12,7 +12,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RowCompletionReviewModal } from "./RowCompletionReviewModal";
-import { ApiError } from "../../lib/api";
+import { api, ApiError } from "../../lib/api";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -80,6 +80,8 @@ function renderModal(props: Partial<ComponentProps<typeof RowCompletionReviewMod
   render(
     <RowCompletionReviewModal
       greenhouseRowId="row-92"
+      activityId="activity-winding-pruning"
+      activityName="Winding & Pruning"
       densityType="stems"
       rowLabel="Phase 1 · Row 92"
       onClose={onClose}
@@ -95,6 +97,14 @@ describe("RowCompletionReviewModal", () => {
   it("shows a loading state before candidates arrive", () => {
     renderModal();
     expect(screen.getByText("Loading...")).toBeInTheDocument();
+  });
+
+  it("queries candidates scoped by activityId, not just the row and density type — a different activity's work must never be requested", () => {
+    renderModal({ activityId: "activity-picking-peppers" });
+    const calledPath = vi.mocked(api).mock.calls[0][0] as string;
+    expect(calledPath).toContain("greenhouseRowId=row-92");
+    expect(calledPath).toContain("activityId=activity-picking-peppers");
+    expect(calledPath).toContain("densityType=stems");
   });
 
   it("6) never shows an enabled Combine button when there are no candidates — explains the stale badge instead", async () => {
@@ -131,7 +141,11 @@ describe("RowCompletionReviewModal", () => {
 
     await screen.findByText("Marcelino Besa");
     expect(screen.getByText("Reynaldo Dela Cruz")).toBeInTheDocument();
-    expect(screen.getAllByText("Winding & Pruning")).toHaveLength(2);
+    expect(screen.getAllByText("Winding & Pruning")).toHaveLength(2); // each candidate row's Activity column
+    // The modal's own title names the scoped activity too — reassurance that
+    // this review group is Winding & Pruning's own, never mixed with another
+    // activity's work.
+    expect(screen.getByRole("heading", { name: /Winding & Pruning/ })).toBeInTheDocument();
 
     const combineButton = screen.getByRole("button", { name: /combine as one completed row/i });
     expect(combineButton).toBeDisabled();

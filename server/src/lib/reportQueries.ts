@@ -9,7 +9,7 @@
 import { pool } from "../db";
 import { APP_TIMEZONE, calendarDateInAppTimezone, getRangeBoundsUtc } from "./timezone";
 import { aggregateDensitySpeed } from "./densitySpeed";
-import { getUnresolvedRunsForRow } from "./rowCompletionCandidates";
+import { getUnresolvedRunsForRows } from "./rowCompletionCandidates";
 
 export interface ActivityReportRow {
   employeeId: string;
@@ -94,9 +94,11 @@ function toSeconds(v: unknown): number {
 //     than guessing an allocation (same "exclude when not cleanly
 //     attributable" caution Inputs already applies to ambiguous runs).
 //  2. A not-yet-completed row is auto-counted only when it's the *only*
-//     candidate anywhere for that row+density type (checked via the same
-//     getUnresolvedRunsForRow Inputs uses) — reused directly rather than
-//     reimplemented, so this can never drift from Inputs' own resolution.
+//     candidate anywhere for that row+activity+density type (checked via the
+//     same getUnresolvedRunsForRows Inputs uses) — reused directly rather
+//     than reimplemented, so this can never drift from Inputs' own
+//     resolution. A different activity sharing this row+density type is
+//     never itself a candidate here, and never suppresses this one either.
 export interface DensityTotals {
   quantity: number;
   durationSeconds: number;
@@ -221,20 +223,24 @@ export async function getActivityDensityAttribution(
        and rcs.time_entry_id is null`,
      [activityId, rangeStart, rangeEnd, employeeIds]
   );
-  // Resolved CONCURRENTLY (Promise.all), not one-row-at-a-time — a
-  // sequential await here was a genuine N+1 against a remote pooled
-  // database (confirmed: ~17s for a single busy activity with dozens of
-  // candidate rows this week), which violates this file's own header
-  // invariant ("never one query per employee or per day") and made the
-  // mobile Employees live screen (server/src/routes/mobileEmployees.ts,
-  // which calls this once per distinct activity on every poll) unusably
-  // slow. getUnresolvedRunsForRow has no shared mutable state between
-  // calls, and addTo's Map accumulation is commutative, so resolving
-  // every candidate row's runs concurrently — then filtering/aggregating
-  // in the original deterministic order below — produces byte-identical
-  // totals to the old sequential loop, just far faster.
-  const candidateResults = await Promise.all(
-    candidateRowsRes.map((pair) => getUnresolvedRunsForRow(pair.greenhouse_row_id, pair.density_type))
+  // Resolved as ONE batched call, not one-per-candidate-row (even
+  // concurrently) — a previous fix here moved from a sequential per-row
+  // loop to Promise.all (confirmed: ~17s for a single busy activity with
+  // dozens of candidate rows, down to something tolerable), but each
+  // concurrent call still independently re-fetched any employee-day shared
+  // by more than one candidate row — the common case for one busy employee
+  // touching many rows in a day. getUnresolvedRunsForRows (see its own
+  // comment) fetches each distinct employee-day at most once no matter how
+  // many candidate rows here share it, cutting the query count (not just
+  // wall-clock time) down to roughly the number of distinct employee-days
+  // involved, not the number of candidate rows. Same "byte-identical
+  // totals, just far faster" guarantee — the underlying per-run selection
+  // logic is unchanged, only how many times it's computed from scratch.
+  const candidatesByKey = await getUnresolvedRunsForRows(
+    candidateRowsRes.map((pair) => ({ greenhouseRowId: pair.greenhouse_row_id, activityId, densityType: pair.density_type }))
+  );
+  const candidateResults = candidateRowsRes.map(
+    (pair) => candidatesByKey.get(`${pair.greenhouse_row_id}:${activityId}:${pair.density_type}`) ?? []
   );
 
   interface AcceptedRun {
@@ -246,6 +252,9 @@ export async function getActivityDensityAttribution(
   for (const candidates of candidateResults) {
     if (candidates.length !== 1) continue; // ambiguous (2+) — excluded, same as Inputs
     const only = candidates[0];
+    // Belt-and-suspenders: getUnresolvedRunsForRows is itself called with
+    // activityId (see above), so this can never actually be false — kept as
+    // a cheap invariant check rather than trusted-but-unverified.
     if (only.activityId !== activityId) continue;
     // Attribute only the portion of this run's own recorded segments that
     // fall inside the range — a run can't be split by quantity (there's
@@ -260,17 +269,24 @@ export async function getActivityDensityAttribution(
 
   // Reuses the frozen density_count_per_row already resolved onto each
   // run's segments — refetched here (not carried on CandidateRun) since
-  // getUnresolvedRunsForRow doesn't expose it; the query pattern mirrors
+  // getUnresolvedRunsForRows doesn't expose it; the query pattern mirrors
   // Inputs' own densityContributionsByActivity lookup. Also concurrent —
   // only as many of these fire as there are ACCEPTED (unambiguous,
   // in-range) candidates, typically far fewer than candidateRowsRes.
+  //
+  // Reads only segmentIds[0] — the chain's OWN root's first segment (see
+  // getUnresolvedRunsForRows: chainSegmentIdsByRootId always accumulates the
+  // root run's own segments first) — never `= any(segmentIds) limit 1`
+  // across the WHOLE chain. A density-type-split visit's chain can contain
+  // segments with two DIFFERENT frozen density_count_per_row values (the
+  // original type's, and whatever a later config change froze on the
+  // continuation) — `limit 1` with no ORDER BY picks whichever one Postgres
+  // happens to visit first (index/physical order, unrelated to which is the
+  // chain's actual originally-frozen quantity), silently misattributing the
+  // wrong number some of the time. segmentIds[0] is deterministic and is
+  // always the value that belongs to `only`'s own densityType.
   const densityResults = await Promise.all(
-    accepted.map(({ only }) =>
-      pool.query(
-        `select density_count_per_row from time_entries where id = any($1::uuid[]) and density_count_per_row is not null limit 1`,
-        [only.segmentIds]
-      )
-    )
+    accepted.map(({ only }) => pool.query(`select density_count_per_row from time_entries where id = $1`, [only.segmentIds[0]]))
   );
 
   accepted.forEach(({ only, startedAt, endedAt }, i) => {

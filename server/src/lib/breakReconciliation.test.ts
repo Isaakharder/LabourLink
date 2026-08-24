@@ -189,6 +189,173 @@ async function main() {
         "the no-argument fallback path correctly no-ops for an employee with no break profile"
       );
     }
+
+    // -----------------------------------------------------------------
+    // Multiple auto-add items on one profile, each with a DIFFERENT reason
+    // to skip (or not) — proves the batched pre-checks (suppressed/already/
+    // overlapping, each now one query covering every item instead of one
+    // query per item) still discriminate correctly PER ITEM rather than
+    // accidentally applying one item's verdict to all of them:
+    //   Item A (08:00-08:15): nothing in the way — must be created.
+    //   Item B (10:00-10:15): suppressed via break_schedule_exceptions —
+    //     must NOT be created.
+    //   Item C (14:00-14:15): a manually-added break (not tied to any
+    //     break_profile_item_id) already overlaps its window — must NOT be
+    //     created, and the manual break itself must be left untouched.
+    // -----------------------------------------------------------------
+    let multiItemEmployee: { id: string } | undefined;
+    let multiItemProfile: { id: string } | undefined;
+    try {
+      multiItemProfile = (
+        await pool.query(`insert into break_profiles (name, is_active) values ($1, true) returning id`, [
+          `QA Break Reconciliation Multi-Item Profile ${RUN_ID}`,
+        ])
+      ).rows[0];
+      const itemA = (
+        await pool.query(
+          `insert into break_profile_items (break_profile_id, name, start_time, end_time, is_paid, auto_add, sort_order)
+           values ($1, 'QA Item A', '08:00:00', '08:15:00', false, true, 1) returning id`,
+          [multiItemProfile!.id]
+        )
+      ).rows[0].id;
+      const itemB = (
+        await pool.query(
+          `insert into break_profile_items (break_profile_id, name, start_time, end_time, is_paid, auto_add, sort_order)
+           values ($1, 'QA Item B', '10:00:00', '10:15:00', false, true, 2) returning id`,
+          [multiItemProfile!.id]
+        )
+      ).rows[0].id;
+      const itemC = (
+        await pool.query(
+          `insert into break_profile_items (break_profile_id, name, start_time, end_time, is_paid, auto_add, sort_order)
+           values ($1, 'QA Item C', '14:00:00', '14:15:00', false, true, 3) returning id`,
+          [multiItemProfile!.id]
+        )
+      ).rows[0].id;
+
+      const multiItemRows = await pool.query(
+        `insert into employees (first_name, last_name, email, security_role_id, team_role_id, settings_pin_hash, is_active, break_profile_id)
+         values ($1, $2, $3, $4, $5, $6, true, $7)
+         returning id`,
+        [
+          "QA",
+          `Break Recon Multi ${RUN_ID}`,
+          `qa-break-recon-multi-${RUN_ID}@test.local`,
+          employeeRoleId,
+          teamRoleId,
+          fakePinHash,
+          multiItemProfile!.id,
+        ]
+      );
+      multiItemEmployee = multiItemRows.rows[0];
+
+      // One work entry covering the whole day — enough for item A (the only
+      // one that should ever reach the "find a covering work entry" step;
+      // B and C are both skipped by an earlier pre-check).
+      await pool.query(
+        `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
+         values ($1, null, 'work', $2, gen_random_uuid(), $3, $4, 'manual')`,
+        [
+          multiItemEmployee!.id,
+          activity!.id,
+          zonedWallTimeToUtc(2019, 6, 3, 7, 0, 0).toISOString(),
+          zonedWallTimeToUtc(2019, 6, 3, 15, 0, 0).toISOString(),
+        ]
+      );
+      // Item B's suppression.
+      await pool.query(
+        `insert into break_schedule_exceptions (employee_id, break_profile_item_id, scheduled_date, reason, created_by_employee_id)
+         values ($1, $2, $3, 'QA test suppression', $1)`,
+        [multiItemEmployee!.id, itemB, TEST_DATE]
+      );
+      // A manual break overlapping item C's window, unrelated to any
+      // profile item.
+      await pool.query(
+        `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
+         values ($1, null, 'break', null, gen_random_uuid(), $2, $3, 'manual')`,
+        [
+          multiItemEmployee!.id,
+          zonedWallTimeToUtc(2019, 6, 3, 14, 5, 0).toISOString(),
+          zonedWallTimeToUtc(2019, 6, 3, 14, 10, 0).toISOString(),
+        ]
+      );
+
+      await reconcileEmployeeBreaks(multiItemEmployee!.id, TEST_DATE, { isActive: true, breakProfileId: multiItemProfile!.id });
+
+      const { rows: breaksAfter } = await pool.query(
+        `select break_profile_item_id, source, started_at, ended_at from time_entries
+         where employee_id = $1 and entry_type = 'break' and deleted_at is null
+         order by started_at asc`,
+        [multiItemEmployee!.id]
+      );
+      check(
+        breaksAfter.length === 2,
+        "exactly 2 break rows exist after reconciliation: the pre-existing manual one (item C's window) and the new auto one (item A) — item B stayed suppressed",
+        breaksAfter
+      );
+      check(
+        breaksAfter.some((b) => b.break_profile_item_id === itemA && b.source === "auto"),
+        "item A (nothing in the way) was auto-created",
+        breaksAfter
+      );
+      check(
+        !breaksAfter.some((b) => b.break_profile_item_id === itemB),
+        "item B (suppressed via break_schedule_exceptions) was NOT created",
+        breaksAfter
+      );
+      check(
+        !breaksAfter.some((b) => b.break_profile_item_id === itemC),
+        "item C (its window already overlapped by an unrelated manual break) was NOT created as its own auto row",
+        breaksAfter
+      );
+      const manualBreak = breaksAfter.find((b) => b.break_profile_item_id === null);
+      check(
+        manualBreak !== undefined &&
+          new Date(manualBreak.started_at).getTime() === zonedWallTimeToUtc(2019, 6, 3, 14, 5, 0).getTime() &&
+          new Date(manualBreak.ended_at).getTime() === zonedWallTimeToUtc(2019, 6, 3, 14, 10, 0).getTime(),
+        "the pre-existing manual break (item C's overlap) is completely untouched — same start/end as inserted",
+        manualBreak
+      );
+
+      // The covering work entry was split around item A only — item C was
+      // skipped by the overlapping pre-check before reconciliation ever
+      // looked for a work entry to split around IT, so the pre-existing
+      // manual break at 14:05-14:10 is never "carved out" of the work
+      // entry the way an auto-add split would be; the day's work rows are
+      // exactly the before/after halves of item A's own split:
+      // 7:00-8:00 and 8:15-15:00 (the latter simply overlapping the
+      // untouched manual break inside it, same as the fixture set up).
+      const { rows: workAfter } = await pool.query(
+        `select started_at, ended_at from time_entries
+         where employee_id = $1 and entry_type = 'work' and deleted_at is null
+         order by started_at asc`,
+        [multiItemEmployee!.id]
+      );
+      check(workAfter.length === 2, "the covering work entry is split into exactly 2 rows around item A only — item C's window was never touched", workAfter);
+    } finally {
+      if (multiItemEmployee) {
+        // break_schedule_exceptions references both the employee and the
+        // profile item — must go first, or deleting either FK target below
+        // fails.
+        await pool
+          .query(`delete from break_schedule_exceptions where employee_id = $1`, [multiItemEmployee.id])
+          .catch((err) => console.error("cleanup step failed (multi-item exceptions):", err));
+        await pool
+          .query(`delete from time_entries where employee_id = $1`, [multiItemEmployee.id])
+          .catch((err) => console.error("cleanup step failed (multi-item time_entries):", err));
+        await pool
+          .query(`delete from employees where id = $1`, [multiItemEmployee.id])
+          .catch((err) => console.error("cleanup step failed (multi-item employee):", err));
+      }
+      if (multiItemProfile) {
+        await pool
+          .query(`delete from break_profile_items where break_profile_id = $1`, [multiItemProfile.id])
+          .catch((err) => console.error("cleanup step failed (multi-item items):", err));
+        await pool
+          .query(`delete from break_profiles where id = $1`, [multiItemProfile.id])
+          .catch((err) => console.error("cleanup step failed (multi-item profile):", err));
+      }
+    }
   } finally {
     async function tryDelete(label: string, fn: () => Promise<unknown>) {
       try {

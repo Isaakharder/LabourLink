@@ -6,6 +6,12 @@ import { formatDateLong, formatDurationHMS, formatTimeInAppTimezone } from "../.
 
 interface RowCompletionReviewModalProps {
   greenhouseRowId: string;
+  // Scopes candidates to this one activity, not just the row+density — a
+  // different activity sharing this row and density type is never a
+  // candidate here (see rowCompletionCandidates.ts / ActivityLogsCard.tsx's
+  // openReview).
+  activityId: string;
+  activityName: string;
   densityType: "plants" | "stems";
   rowLabel: string;
   onClose: () => void;
@@ -21,6 +27,8 @@ interface RowCompletionReviewModalProps {
 
 export function RowCompletionReviewModal({
   greenhouseRowId,
+  activityId,
+  activityName,
   densityType,
   rowLabel,
   onClose,
@@ -34,11 +42,11 @@ export function RowCompletionReviewModal({
 
   useEffect(() => {
     api<{ candidates: RowCompletionCandidateRun[] }>(
-      `/api/row-completions/candidates?greenhouseRowId=${greenhouseRowId}&densityType=${densityType}`
+      `/api/row-completions/candidates?greenhouseRowId=${greenhouseRowId}&activityId=${activityId}&densityType=${densityType}`
     )
       .then((res) => setCandidates(res.candidates))
       .catch((err) => setError(err instanceof ApiError ? err.message : "Could not load pending row work"));
-  }, [greenhouseRowId, densityType]);
+  }, [greenhouseRowId, activityId, densityType]);
 
   function toggle(runId: string) {
     setSelected((prev) => {
@@ -79,7 +87,7 @@ export function RowCompletionReviewModal({
 
   return (
     <Modal
-      title={`Review row work — ${rowLabel}`}
+      title={`Review row work — ${rowLabel} · ${activityName}`}
       onClose={onClose}
       wide
       footer={

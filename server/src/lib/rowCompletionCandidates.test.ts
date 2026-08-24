@@ -114,10 +114,10 @@ async function main() {
       return rows[0].id;
     }
 
-    async function confirmCompletion(rowId: string, densityType: "plants" | "stems", quantityPerRow: number, confirmedBy: string, segmentIds: string[]): Promise<void> {
+    async function confirmCompletion(rowId: string, activityId: string, densityType: "plants" | "stems", quantityPerRow: number, confirmedBy: string, segmentIds: string[]): Promise<void> {
       const { rows } = await pool.query(
-        `insert into row_completions (greenhouse_row_id, density_type, quantity_per_row, confirmed_by_employee_id) values ($1, $2, $3, $4) returning id`,
-        [rowId, densityType, quantityPerRow, confirmedBy]
+        `insert into row_completions (greenhouse_row_id, activity_id, density_type, quantity_per_row, confirmed_by_employee_id) values ($1, $2, $3, $4, $5) returning id`,
+        [rowId, activityId, densityType, quantityPerRow, confirmedBy]
       );
       for (const segId of segmentIds) {
         await pool.query(`insert into row_completion_segments (time_entry_id, row_completion_id) values ($1, $2)`, [segId, rows[0].id]);
@@ -138,7 +138,7 @@ async function main() {
       const e1 = await insertWork(emp1, activity, rowA, 8, 0, 9, 0, "stems", 500);
       const e2 = await insertWork(emp1, activity, rowA, 9, 0, 10, 0, "stems", 500);
 
-      const candidates = await getUnresolvedRunsForRow(rowA, "stems");
+      const candidates = await getUnresolvedRunsForRow(rowA, activity, "stems");
       check(
         candidates.length === 1 && candidates[0].segmentIds.length === 2 && candidates[0].durationSeconds === 7200,
         "1) two bit-contiguous segments (no break) combine into exactly one candidate run",
@@ -157,7 +157,7 @@ async function main() {
       await insertBreak(emp1, 12, 0, 12, 15);
       const e2 = await insertWork(emp1, activity, rowB, 12, 15, 13, 0, "stems", 400);
 
-      const candidates = await getUnresolvedRunsForRow(rowB, "stems");
+      const candidates = await getUnresolvedRunsForRow(rowB, activity, "stems");
       check(
         candidates.length === 1 && candidates[0].segmentIds.length === 2 && candidates[0].segmentIds.includes(e1) && candidates[0].segmentIds.includes(e2),
         "2) a break-split visit to the same row auto-combines into one candidate — the reported bug",
@@ -176,7 +176,7 @@ async function main() {
       await insertWork(emp1, activity, rowC, 8, 0, 9, 0, "stems", 300);
       await insertWork(emp2, activity, rowC, 10, 0, 11, 0, "stems", 300);
 
-      const candidates = await getUnresolvedRunsForRow(rowC, "stems");
+      const candidates = await getUnresolvedRunsForRow(rowC, activity, "stems");
       check(candidates.length === 2, "3) two different employees' visits to the same row remain genuinely ambiguous (2 candidates)", candidates);
       check(
         new Set(candidates.map((c) => c.employeeId)).size === 2,
@@ -192,9 +192,9 @@ async function main() {
     const rowD = await insertRow(4);
     {
       const e1 = await insertWork(emp1, activity, rowD, 8, 0, 9, 0, "stems", 600);
-      await confirmCompletion(rowD, "stems", 600, emp1, [e1]);
+      await confirmCompletion(rowD, activity, "stems", 600, emp1, [e1]);
 
-      const candidates = await getUnresolvedRunsForRow(rowD, "stems");
+      const candidates = await getUnresolvedRunsForRow(rowD, activity, "stems");
       check(candidates.length === 0, "4) already-resolved work (confirmed row_completions) never appears as a pending candidate", candidates);
     }
 
@@ -223,7 +223,7 @@ async function main() {
       // same row_number.
       const activeEntry = await insertWork(emp2, activity, activeRowId, 8, 0, 9, 0, "stems", 700);
 
-      const candidates = await getUnresolvedRunsForRow(activeRowId, "stems");
+      const candidates = await getUnresolvedRunsForRow(activeRowId, activity, "stems");
       check(
         candidates.length === 1 && candidates[0].segmentIds[0] === activeEntry && candidates[0].employeeId === emp2,
         "7) querying the active row by its own UUID never picks up the deleted duplicate row_number's historical entries",
@@ -241,16 +241,86 @@ async function main() {
     {
       const changeableActivity = await insertActivity("Changeable", "plants");
       const e1 = await insertWork(emp1, changeableActivity, rowF, 8, 0, 9, 0, "plants", 250);
-      await confirmCompletion(rowF, "plants", 250, emp1, [e1]);
+      await confirmCompletion(rowF, changeableActivity, "plants", 250, emp1, [e1]);
 
       // Simulate an admin later changing this activity's density_source.
       await pool.query(`update activities set density_source = 'stems' where id = $1`, [changeableActivity]);
 
-      const candidatesOldType = await getUnresolvedRunsForRow(rowF, "plants");
+      const candidatesOldType = await getUnresolvedRunsForRow(rowF, changeableActivity, "plants");
       check(candidatesOldType.length === 0, "8) the old (frozen) density type still correctly recognizes the completion as resolved after the activity's density_source changes", candidatesOldType);
 
-      const candidatesNewType = await getUnresolvedRunsForRow(rowF, "stems");
+      const candidatesNewType = await getUnresolvedRunsForRow(rowF, changeableActivity, "stems");
       check(candidatesNewType.length === 0, "8) the new density type finds no false candidates either — nothing was orphaned or wrongly flagged", candidatesNewType);
+    }
+
+    // -----------------------------------------------------------------
+    // 9-11) Activity scoping — the real row-82 scenario (Picking Peppers /
+    //    Winding & Pruning, same physical row, same 'stems' density type):
+    //    two entirely independent activities must never be grouped into one
+    //    ambiguity check, never appear in each other's candidate list, and
+    //    resolving one must never affect the other. Winding & Pruning also
+    //    genuinely revisits the row twice (no bridging) — that ambiguity
+    //    must still trigger review, on its own, regardless of Picking
+    //    Peppers' presence on the same row+type.
+    // -----------------------------------------------------------------
+    const pickingActivity = await insertActivity("Picking Peppers", "stems");
+    const windingActivity = await insertActivity("Winding and Pruning", "stems");
+    const rowG = await insertRow(82);
+    {
+      const pickingEntry = await insertWork(emp1, pickingActivity, rowG, 8, 0, 9, 0, "stems", 636);
+      const windingEntry1 = await insertWork(emp2, windingActivity, rowG, 8, 0, 9, 0, "stems", 636);
+      const windingEntry2 = await insertWork(emp2, windingActivity, rowG, 10, 0, 11, 0, "stems", 636);
+
+      // 9) Picking Peppers' own review group is unambiguous (exactly one
+      //    candidate) DESPITE Winding & Pruning also touching this row+type
+      //    twice — the two activities never share an ambiguity check.
+      const pickingCandidates = await getUnresolvedRunsForRow(rowG, pickingActivity, "stems");
+      check(
+        pickingCandidates.length === 1 &&
+          pickingCandidates[0].segmentIds.length === 1 &&
+          pickingCandidates[0].segmentIds[0] === pickingEntry,
+        "9) Picking Peppers has exactly one unambiguous candidate, unaffected by Winding & Pruning's own visits to the same row+type",
+        pickingCandidates
+      );
+
+      // 10) Winding & Pruning's own genuine multi-visit ambiguity (same
+      //     activity, two separate unbridged visits) still triggers review —
+      //     and its candidate list is exactly its own two segments, never
+      //     Picking Peppers' entry.
+      const windingCandidates = await getUnresolvedRunsForRow(rowG, windingActivity, "stems");
+      check(
+        windingCandidates.length === 2,
+        "10) Winding & Pruning's genuine two-visit ambiguity (same activity) still triggers review",
+        windingCandidates
+      );
+      const windingSegmentIds = new Set(windingCandidates.flatMap((c) => c.segmentIds));
+      check(
+        windingSegmentIds.has(windingEntry1) && windingSegmentIds.has(windingEntry2) && !windingSegmentIds.has(pickingEntry),
+        "The modal never displays another activity's candidates — Winding & Pruning's group contains only its own two segments, never Reynaldo-style Picking Peppers entry",
+        [...windingSegmentIds]
+      );
+      check(
+        windingCandidates.every((c) => c.activityId === windingActivity),
+        "10) every Winding & Pruning candidate is correctly attributed to Winding & Pruning, never Picking Peppers",
+        windingCandidates.map((c) => c.activityId)
+      );
+
+      // 11) Resolving Picking Peppers' completion must leave Winding &
+      //     Pruning's own still-genuinely-ambiguous group completely
+      //     untouched.
+      await confirmCompletion(rowG, pickingActivity, "stems", 636, emp1, [pickingEntry]);
+
+      const pickingAfter = await getUnresolvedRunsForRow(rowG, pickingActivity, "stems");
+      check(pickingAfter.length === 0, "11) Picking Peppers is now resolved (no pending candidates)", pickingAfter);
+
+      const windingAfter = await getUnresolvedRunsForRow(rowG, windingActivity, "stems");
+      check(
+        windingAfter.length === 2 &&
+          new Set(windingAfter.flatMap((c) => c.segmentIds)).has(windingEntry1) &&
+          new Set(windingAfter.flatMap((c) => c.segmentIds)).has(windingEntry2),
+        "11) Winding & Pruning's own ambiguity is completely untouched by resolving Picking Peppers' unrelated completion",
+        windingAfter
+      );
     }
   } finally {
     async function tryDelete(label: string, fn: () => Promise<unknown>) {

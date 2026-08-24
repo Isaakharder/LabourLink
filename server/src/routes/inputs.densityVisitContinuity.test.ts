@@ -181,12 +181,12 @@ async function main() {
     //    duration is the combined 4644s; querying under the spurious type
     //    finds NO candidate at all (it's not an independent visit).
     // -----------------------------------------------------------------
-    const plantsCandidates = await getUnresolvedRunsForRow(row107, "plants");
+    const plantsCandidates = await getUnresolvedRunsForRow(row107, activity, "plants");
     check(plantsCandidates.length === 1, "5) exactly one candidate for row107+plants (the combined visit)", plantsCandidates);
     check(plantsCandidates[0]?.durationSeconds === 4644, "5) that one candidate's duration is the combined 4620+24=4644s", plantsCandidates[0]);
     check(plantsCandidates[0]?.segmentIds?.length === 2, "5) that one candidate includes BOTH underlying time_entries segments", plantsCandidates[0]);
 
-    const stemsCandidates = await getUnresolvedRunsForRow(row107, "stems");
+    const stemsCandidates = await getUnresolvedRunsForRow(row107, activity, "stems");
     check(stemsCandidates.length === 0, "5) NO independent candidate for row107+stems — the 24s segment is not a separate stems visit", stemsCandidates);
 
     // -----------------------------------------------------------------

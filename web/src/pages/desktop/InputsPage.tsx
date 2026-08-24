@@ -131,6 +131,16 @@ export function InputsPage() {
   const requestSeqRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isMountedRef = useRef(true);
+  // Set whenever a FOREGROUND (explicit, non-background) loadDaily call
+  // lands successfully while the page is paused (mid-edit/mid-submit) — a
+  // delete/correction handler's own "await loadDaily()" after its mutation
+  // succeeds is exactly this case. Checked (and cleared) by the falling-edge
+  // effect just below: without it, that effect's own "fire one background
+  // refresh the moment paused goes false" would double up with the reload
+  // the handler that just unpaused things already did itself, one call
+  // after the other — this is what keeps it to the one reload the handler
+  // performed, not two.
+  const explicitReloadDuringPauseRef = useRef(false);
   useEffect(() => {
     // Reset (not just initialize via useRef's default) on every effect run,
     // not only the cleanup below — React.StrictMode's dev-only double-invoke
@@ -220,6 +230,12 @@ export function InputsPage() {
             setSelectedRunId((prev) => (prev && res.runs.some((r) => r.id === prev) ? prev : null));
             setSelectedBreakId((prev) => (prev && res.breaks.some((b) => b.id === prev) ? prev : null));
           } else {
+            // This explicit reload landed while the page was still paused
+            // (mid-delete/mid-correction) — the falling-edge effect below is
+            // about to fire its own "unpaused, refresh once" the moment that
+            // pause clears a few state updates from now; flagging that this
+            // handler already reloaded lets it skip its own redundant one.
+            if (pausedRef.current) explicitReloadDuringPauseRef.current = true;
             // Server truth just replaced everything derived — never keep a
             // selection or in-flight edit pointed at a row that may have
             // moved, merged, or disappeared as a result of the change that
@@ -252,10 +268,17 @@ export function InputsPage() {
   // background refresh on the falling edge (was paused, now isn't) — the
   // moment an edit is cancelled/saved or a modal closes, rather than
   // waiting up to POLL_INTERVAL_MS for the next natural trigger. A
-  // successful direct save already triggers its own explicit reload in the
-  // handler that made it, so this mainly covers a plain Cancel out of an
-  // edit (or a save that failed validation, which never reaches its own
-  // reload).
+  // successful direct save/delete already triggers its own explicit reload
+  // in the handler that made it (e.g. handleConfirmDeletion's own "await
+  // loadDaily()") — without the explicitReloadDuringPauseRef check below,
+  // THIS effect would then fire a second, redundant background reload right
+  // after (deletionSubmitting/actionInFlight flipping back to false is
+  // itself a falling edge), one network round trip after the other, for
+  // every successful save/delete. The check skips that specific case
+  // (something already reloaded while paused) while still covering what
+  // this effect actually exists for: a plain Cancel out of an edit, or a
+  // save that failed validation before ever reaching its own reload —
+  // neither of which sets the flag, so this still fires normally for those.
   useEffect(() => {
     const nowPaused =
       editingRunId !== null ||
@@ -268,7 +291,11 @@ export function InputsPage() {
     const wasPaused = pausedRef.current;
     pausedRef.current = nowPaused;
     if (wasPaused && !nowPaused) {
-      loadDaily({ background: true });
+      if (explicitReloadDuringPauseRef.current) {
+        explicitReloadDuringPauseRef.current = false;
+      } else {
+        loadDaily({ background: true });
+      }
     }
   }, [
     editingRunId,

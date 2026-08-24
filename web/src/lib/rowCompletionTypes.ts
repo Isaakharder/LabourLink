@@ -18,6 +18,7 @@ export interface RowCompletionCandidateRun {
 export interface RowCompletionSummary {
   id: string;
   greenhouseRowId: string;
+  activityId: string;
   densityType: "plants" | "stems";
   quantityPerRow: number;
   completedAt: string;

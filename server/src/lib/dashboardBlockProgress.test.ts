@@ -23,6 +23,7 @@ const RUN_ID = Date.now();
 async function main() {
   const fakePinHash = "$2a$10$QAplaceholderQAplaceholderQAplaceholderQAplaceholde";
   const employeeIds: string[] = [];
+  const activityIds: string[] = [];
   const blockIds: string[] = [];
   const rowIds: string[] = [];
   const densityIds: string[] = [];
@@ -32,6 +33,17 @@ async function main() {
   try {
     const teamRoleId = (await pool.query(`select id from team_roles where name = 'Team Member'`)).rows[0].id;
     const employeeRoleId = (await pool.query(`select id from security_roles where name = 'Employee'`)).rows[0].id;
+
+    // row_completions requires an activity_id (045_row_completion_activity_id.sql)
+    // — this test is activity-agnostic (getBlockProgressForEmployees itself
+    // doesn't care which activity completed a row), so one throwaway
+    // activity is enough for every insertCompletion call below.
+    const activityId = (
+      await pool.query(`insert into activities (name, is_active, density_source) values ($1, true, 'stems') returning id`, [
+        `QA Block Progress Activity ${RUN_ID}`,
+      ])
+    ).rows[0].id;
+    activityIds.push(activityId);
 
     async function insertEmployee(label: string): Promise<string> {
       const { rows } = await pool.query(
@@ -95,8 +107,8 @@ async function main() {
 
     async function insertCompletion(rowId: string, densityType: "plants" | "stems", quantityPerRow: number, confirmedBy: string): Promise<void> {
       await pool.query(
-        `insert into row_completions (greenhouse_row_id, density_type, quantity_per_row, confirmed_by_employee_id) values ($1, $2, $3, $4)`,
-        [rowId, densityType, quantityPerRow, confirmedBy]
+        `insert into row_completions (greenhouse_row_id, activity_id, density_type, quantity_per_row, confirmed_by_employee_id) values ($1, $2, $3, $4, $5)`,
+        [rowId, activityId, densityType, quantityPerRow, confirmedBy]
       );
     }
 
@@ -280,6 +292,7 @@ async function main() {
     if (rowIds.length) await tryDelete("greenhouse_rows", () => pool.query(`delete from greenhouse_rows where id = any($1::uuid[])`, [rowIds]));
     if (phaseId) await tryDelete("greenhouse_phases", () => pool.query(`delete from greenhouse_phases where id = $1`, [phaseId]));
     if (landId) await tryDelete("greenhouse_lands", () => pool.query(`delete from greenhouse_lands where id = $1`, [landId]));
+    if (activityIds.length) await tryDelete("activities", () => pool.query(`delete from activities where id = any($1::uuid[])`, [activityIds]));
     if (employeeIds.length) await tryDelete("employees", () => pool.query(`delete from employees where id = any($1::uuid[])`, [employeeIds]));
   }
 
