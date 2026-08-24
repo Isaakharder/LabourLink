@@ -44,13 +44,13 @@ function isValidReason(v: unknown): v is string {
 // downstream reporting both still expect a non-empty reason on every
 // time_entry_corrections row) is preserved by always writing this fixed,
 // server-generated string instead of trusting client-supplied text.
-// Deletion is a separate, unrelated flow from the corrections above (POST
-// .../delete below) — an activity-log deletion still requires and stores a
-// real typed reason, but a break deletion no longer collects one from the
-// caller (the Inputs page's break-deletion modal only asks for
-// confirmation now), so it uses this same "fixed, server-generated string"
-// approach instead.
+// Deletion (POST .../delete below, both activity-run and break) is a
+// separate, unrelated flow from the corrections above, but neither the
+// Inputs page's activity-log nor break deletion modal collects a typed
+// reason from the caller anymore (confirmation only) — both use this same
+// "fixed, server-generated string" approach instead.
 const AUTO_CORRECTION_REASON = "Time corrected from Inputs page";
+const ACTIVITY_LOG_DELETION_REASON = "Activity log deleted from Inputs page";
 const BREAK_DELETION_REASON = "Break deleted from Inputs page";
 // A work entry a manually-added break turned out to completely cover (see
 // planBreakInsertion) is removed the same way any other admin-initiated
@@ -1140,11 +1140,9 @@ router.post(
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid activity run id" });
 
-    const { reason } = req.body as { reason?: string };
-    const trimmedReason = typeof reason === "string" ? reason.trim() : "";
-    if (trimmedReason.length < 3) {
-      return res.status(400).json({ error: "A deletion reason of at least 3 characters is required" });
-    }
+    // No typed reason collected from the caller here — see
+    // ACTIVITY_LOG_DELETION_REASON's own comment above.
+    const trimmedReason = ACTIVITY_LOG_DELETION_REASON;
 
     // Unlocked peek: the client only ever knows a run by its last segment's
     // id (ActivityRun.id — see activityRuns.ts), never the full set of

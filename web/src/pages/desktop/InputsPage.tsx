@@ -50,9 +50,6 @@ interface PendingDeletion {
   title: string;
   message: string;
   confirmLabel: string;
-  // See DeleteTimeEntryModal's own comment — break deletion no longer
-  // collects a typed reason.
-  requireReason: boolean;
 }
 
 export function InputsPage() {
@@ -471,7 +468,6 @@ export function InputsPage() {
       message:
         "This will remove this recorded activity from the employee's day. The deletion will remain in the audit history.",
       confirmLabel: "Delete Log",
-      requireReason: true,
     });
   }
 
@@ -484,11 +480,10 @@ export function InputsPage() {
       message:
         "This will remove this break from the employee's day and reconnect the surrounding work time. The deletion will remain in the audit history.",
       confirmLabel: "Delete Break",
-      requireReason: false,
     });
   }
 
-  async function handleConfirmDeletion(reason: string) {
+  async function handleConfirmDeletion() {
     // Belt-and-suspenders against a double-fire (e.g. a fast repeat Enter):
     // the modal's own submit guard already disables the button while
     // submitting, this just makes the same guarantee at the handler level.
@@ -500,7 +495,7 @@ export function InputsPage() {
         pendingDeletion.kind === "activity-run"
           ? `/api/inputs/activity-runs/${pendingDeletion.id}/delete`
           : `/api/inputs/breaks/${pendingDeletion.id}/delete`;
-      await api(path, { method: "POST", body: JSON.stringify({ reason }) });
+      await api(path, { method: "POST" });
       const deletedKind = pendingDeletion.kind;
       setPendingDeletion(null);
       await loadDaily();
@@ -662,7 +657,6 @@ export function InputsPage() {
           title={pendingDeletion.title}
           message={pendingDeletion.message}
           confirmLabel={pendingDeletion.confirmLabel}
-          requireReason={pendingDeletion.requireReason}
           submitting={deletionSubmitting}
           error={deletionError}
           onConfirm={handleConfirmDeletion}

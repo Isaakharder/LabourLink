@@ -182,8 +182,8 @@ async function main() {
       return rows[0];
     }
 
-    async function deleteRun(id: string, reason: string) {
-      return call("POST", `/api/inputs/activity-runs/${id}/delete`, { token: adminToken, body: { reason } });
+    async function deleteRun(id: string) {
+      return call("POST", `/api/inputs/activity-runs/${id}/delete`, { token: adminToken });
     }
 
     async function getDaily(employeeId: string, date: string) {
@@ -239,16 +239,15 @@ async function main() {
         beforeDaily.body?.workStartTime
       );
 
-      const delRes = await deleteRun(aId, "QA: delete the first activity, expect the second to extend backward");
+      const delRes = await deleteRun(aId);
       check(delRes.status === 200, "1) deleting the first activity succeeds", delRes.body);
 
       const aAfter = await fetchEntry(aId);
       check(
         aAfter.deleted_at !== null &&
           aAfter.deleted_by_employee_id === adminActor!.id &&
-          typeof aAfter.deletion_reason === "string" &&
-          aAfter.deletion_reason.length > 0,
-        "1) the deleted activity is soft-deleted with a full audit trail",
+          aAfter.deletion_reason === "Activity log deleted from Inputs page",
+        "1) the deleted activity is soft-deleted with the admin and a fixed system-generated reason, no reason submitted by the caller",
         aAfter
       );
 
@@ -345,7 +344,7 @@ async function main() {
       const aId = await insertWork(target!.id, activityOne!.id, aStart, aEnd);
       const bId = await insertWork(target!.id, activityTwo!.id, aEnd, null);
 
-      const delRes = await deleteRun(aId, "QA: delete first activity while the second is still in progress");
+      const delRes = await deleteRun(aId);
       check(delRes.status === 200, "2) deleting the first activity succeeds", delRes.body);
 
       const bAfter = await fetchEntry(bId);
@@ -381,7 +380,7 @@ async function main() {
       const bId = await insertWork(target!.id, activityOne!.id, aEnd, bEnd);
       const cId = await insertWork(target!.id, activityTwo!.id, bEnd, cEnd);
 
-      const delRes = await deleteRun(bId, "QA: delete a middle-of-day activity");
+      const delRes = await deleteRun(bId);
       check(delRes.status === 200, "3) deleting the middle activity succeeds", delRes.body);
 
       const cAfter = await fetchEntry(cId);
@@ -431,7 +430,7 @@ async function main() {
       const breakId = await insertBreak(target!.id, aEnd, breakEnd);
       const bId = await insertWork(target!.id, activityOne!.id, breakEnd, bEnd);
 
-      const delRes = await deleteRun(aId, "QA: delete an activity immediately followed by a break");
+      const delRes = await deleteRun(aId);
       check(delRes.status === 200, "5) deleting the activity before a break succeeds", delRes.body);
 
       const breakAfter = await pool.query(`select started_at, ended_at, deleted_at from time_entries where id = $1`, [
@@ -476,7 +475,7 @@ async function main() {
       const aId = await insertWork(target!.id, activityOne!.id, aStart, aEnd);
       const bId = await insertWork(target!.id, activityTwo!.id, aEnd, bEnd);
 
-      const delRes = await deleteRun(bId, "QA: delete the final activity of the day");
+      const delRes = await deleteRun(bId);
       check(delRes.status === 200, "6) deleting the final activity of the day succeeds", delRes.body);
 
       const aAfter = await fetchEntry(aId);
