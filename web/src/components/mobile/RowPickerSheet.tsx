@@ -61,6 +61,60 @@ interface RowPickerSheetProps {
 // (.mobile-sheet* classes) for consistency. Two-step select-then-confirm
 // (tap highlights, Confirm submits) rather than submit-on-tap — this opens
 // a real work entry, so a tap should be reviewable before it commits.
+// One phase, flattened out of whichever land it belongs to, plus enough of
+// that land's identity to disambiguate it on screen — see flattenPhases
+// below. The land itself is never a separate navigation step; it's resolved
+// automatically (this record, and ultimately the row's own greenhouse_row_id
+// FK) rather than asked about.
+interface FlatPhase {
+  id: string;
+  name: string;
+  landId: string;
+  landName: string;
+  // True only when another phase (in a different land) shares this exact
+  // name — see flattenPhases. When false, the land name is redundant
+  // information (there's nothing to disambiguate) and stays hidden.
+  showLandName: boolean;
+  rows: RowPickerRow[];
+}
+
+// Activity -> Phase -> Row, with Land resolved internally rather than
+// presented as its own screen (see this file's header comment for why: the
+// employee only ever cares which physical phase/row they're at, never which
+// land contains it — a Land-selection step was pure extra navigation for
+// zero decision value, even in the single-land case this app runs today).
+// One combined, flat phase list is built here regardless of how many lands
+// exist; a phase name that's unique across every land renders on its own,
+// and one that collides with a same-named phase in a different land gets
+// " — <land name>" appended so the two are never ambiguous on screen (e.g.
+// "Phase 1 — First Light Greenhouse" vs "Phase 1 — Second Property").
+function flattenPhases(lands: RowPickerLand[]): FlatPhase[] {
+  const nameCounts = new Map<string, number>();
+  for (const land of lands) {
+    for (const phase of land.phases) {
+      nameCounts.set(phase.name, (nameCounts.get(phase.name) ?? 0) + 1);
+    }
+  }
+  const flat: FlatPhase[] = [];
+  for (const land of lands) {
+    for (const phase of land.phases) {
+      flat.push({
+        id: phase.id,
+        name: phase.name,
+        landId: land.id,
+        landName: land.name,
+        showLandName: (nameCounts.get(phase.name) ?? 0) > 1,
+        rows: phase.rows,
+      });
+    }
+  }
+  return flat;
+}
+
+function phaseDisplayName(phase: FlatPhase): string {
+  return phase.showLandName ? `${phase.name} — ${phase.landName}` : phase.name;
+}
+
 export function RowPickerSheet({
   activityName,
   questionLabel,
@@ -77,24 +131,25 @@ export function RowPickerSheet({
   language,
   onNfcScan,
 }: RowPickerSheetProps) {
-  const [selectedLandId, setSelectedLandId] = useState<string | null>(null);
   const [expandedPhaseId, setExpandedPhaseId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selectedRowId, setSelectedRowId] = useState<string | null>(initialSelectedRowId ?? null);
   const [nfcActive, setNfcActive] = useState(false);
   const [nfcHint, setNfcHint] = useState<string | null>(null);
 
-  // Read inside the NFC scan callback below instead of `lands` directly —
+  const phases = useMemo(() => (lands ? flattenPhases(lands) : null), [lands]);
+
+  // Read inside the NFC scan callback below instead of `phases` directly —
   // the callback is registered once (see the scan effect's `[]` deps, so a
   // held-open scan session survives `lands` finishing its async load
-  // without being torn down and restarted) but still needs whichever lands
-  // value is current at the moment a tag actually resolves.
-  const landsRef = useRef(lands);
+  // without being torn down and restarted) but still needs whichever
+  // flattened phase list is current at the moment a tag actually resolves.
+  const phasesRef = useRef(phases);
   useEffect(() => {
-    landsRef.current = lands;
-  }, [lands]);
+    phasesRef.current = phases;
+  }, [phases]);
 
-  // Same reasoning as landsRef — onNfcScan is typically a fresh closure
+  // Same reasoning as phasesRef — onNfcScan is typically a fresh closure
   // every render (it captures HomeScreen's current questionFlow/busy/etc.),
   // but the scan effect below only runs once per mount.
   const onNfcScanRef = useRef(onNfcScan);
@@ -102,34 +157,19 @@ export function RowPickerSheet({
     onNfcScanRef.current = onNfcScan;
   }, [onNfcScan]);
 
-  // Auto-select the only land once loaded — most greenhouses have exactly
-  // one, and there's no reason to make the employee tap through an extra
-  // screen for it.
-  useEffect(() => {
-    if (lands && lands.length === 1 && !selectedLandId) {
-      setSelectedLandId(lands[0].id);
-    }
-  }, [lands, selectedLandId]);
-
   // Navigating back to this step (Back, from a later question) restores not
   // just the highlighted row but the drill-down that makes it visible —
   // otherwise "Back preserves prior answer" would be true only in state, not
-  // on screen, for anyone who'd drilled into a specific land/phase to pick
-  // it. Runs once lands finish loading; a no-op on first visit (no prior
-  // selection) or once already drilled in.
+  // on screen, for anyone who'd drilled into a specific phase to pick it.
+  // Runs once lands finish loading; a no-op on first visit (no prior
+  // selection) or once already drilled in. Land is never part of this
+  // restoration — there's no land-level navigation state to restore.
   useEffect(() => {
-    if (!lands || !initialSelectedRowId || expandedPhaseId) return;
-    for (const l of lands) {
-      for (const p of l.phases) {
-        if (p.rows.some((r) => r.id === initialSelectedRowId)) {
-          setSelectedLandId(l.id);
-          setExpandedPhaseId(p.id);
-          return;
-        }
-      }
-    }
+    if (!phases || !initialSelectedRowId || expandedPhaseId) return;
+    const phase = phases.find((p) => p.rows.some((r) => r.id === initialSelectedRowId));
+    if (phase) setExpandedPhaseId(phase.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lands]);
+  }, [phases]);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -177,15 +217,8 @@ export function RowPickerSheet({
         }
 
         setSelectedRowId(resolved.targetId);
-        for (const l of landsRef.current ?? []) {
-          for (const p of l.phases) {
-            if (p.rows.some((r) => r.id === resolved.targetId)) {
-              setSelectedLandId(l.id);
-              setExpandedPhaseId(p.id);
-              return;
-            }
-          }
-        }
+        const phase = (phasesRef.current ?? []).find((p) => p.rows.some((r) => r.id === resolved.targetId));
+        if (phase) setExpandedPhaseId(phase.id);
       }, undefined, "RowPickerSheet");
     })();
 
@@ -200,29 +233,29 @@ export function RowPickerSheet({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const land = lands?.find((l) => l.id === selectedLandId) ?? null;
-
   const searchResults = useMemo(() => {
-    if (!land || !search.trim()) return null;
+    if (!phases || !search.trim()) return null;
     const q = search.trim();
     const results: { phaseName: string; row: RowPickerRow }[] = [];
-    for (const phase of land.phases) {
+    for (const phase of phases) {
       for (const row of phase.rows) {
         if (String(row.rowNumber).startsWith(q)) {
-          results.push({ phaseName: phase.name, row });
+          results.push({ phaseName: phaseDisplayName(phase), row });
         }
       }
     }
     return results;
-  }, [land, search]);
+  }, [phases, search]);
 
-  const expandedPhase = land?.phases.find((p) => p.id === expandedPhaseId) ?? null;
-  const multiLand = Boolean(lands && lands.length > 1);
-  const showBack = Boolean(expandedPhase) || (multiLand && land && !expandedPhase);
+  const expandedPhase = phases?.find((p) => p.id === expandedPhaseId) ?? null;
+  // Only one navigation level ever needs backing out of now — Phase -> Row.
+  // There's no Land level to back out of (Activity -> Phase -> Row, per this
+  // file's header comment), so Back only ever appears once a phase is
+  // expanded into its row grid.
+  const showBack = Boolean(expandedPhase);
 
   function handleBack() {
-    if (expandedPhase) setExpandedPhaseId(null);
-    else if (multiLand) setSelectedLandId(null);
+    setExpandedPhaseId(null);
   }
 
   function handleConfirm() {
@@ -272,24 +305,10 @@ export function RowPickerSheet({
           <p className="mobile-row-picker-subtitle">{busy ? t(language, "starting") : nfcHint ?? t(language, "tapRowTag")}</p>
         )}
 
-        {!lands ? (
+        {!phases ? (
           <p className="mobile-sheet-empty">{t(language, "loadingRows")}</p>
-        ) : lands.length === 0 ? (
+        ) : phases.length === 0 ? (
           <p className="mobile-sheet-empty">{t(language, "noRowsMessage")}</p>
-        ) : !land ? (
-          // Only reached when there's more than one land.
-          <div className="mobile-sheet-list">
-            {lands.map((l) => (
-              <button
-                key={l.id}
-                type="button"
-                className="mobile-action-button mobile-sheet-item"
-                onClick={() => setSelectedLandId(l.id)}
-              >
-                <span className="mobile-sheet-item-name">{l.name}</span>
-              </button>
-            ))}
-          </div>
         ) : (
           <>
             <div className="mobile-row-search">
@@ -323,11 +342,12 @@ export function RowPickerSheet({
               ) : (
                 <div className="mobile-row-grid">{expandedPhase.rows.map((row) => rowButton(row))}</div>
               )
-            ) : land.phases.length === 0 ? (
-              <p className="mobile-sheet-empty">{t(language, "noRowsMessage")}</p>
             ) : (
+              // The combined phase list — every active phase from every
+              // active land, flattened (see flattenPhases above). Never a
+              // land-selection screen, regardless of how many lands exist.
               <div className="mobile-sheet-list">
-                {land.phases.map((phase) => (
+                {phases.map((phase) => (
                   <button
                     key={phase.id}
                     type="button"
@@ -335,7 +355,7 @@ export function RowPickerSheet({
                     disabled={busy}
                     onClick={() => setExpandedPhaseId(phase.id)}
                   >
-                    <span className="mobile-sheet-item-name">{phase.name}</span>
+                    <span className="mobile-sheet-item-name">{phaseDisplayName(phase)}</span>
                     <span className="mobile-sheet-item-secondary">
                       {t(language, "rowsCount", { count: phase.rows.length })}
                     </span>
@@ -346,11 +366,11 @@ export function RowPickerSheet({
           </>
         )}
 
-        {/* Rendered regardless of loading/empty/land-selection state — Skip
-            never depends on rows having loaded, and Cancel must always be
-            reachable. Confirm only makes sense once a row can be selected. */}
+        {/* Rendered regardless of loading/empty state — Skip never depends
+            on rows having loaded, and Cancel must always be reachable.
+            Confirm only makes sense once there's something to select from. */}
         <div className="mobile-confirm-actions">
-          {land && (
+          {phases && phases.length > 0 && (
             <button
               type="button"
               className="mobile-action-button mobile-action-primary"
