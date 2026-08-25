@@ -11,6 +11,10 @@ interface ReportPreviewModalProps {
   grid: PivotGrid;
   metricLabel: string;
   mode: "print" | "pdf";
+  // The Average-Speed unit-abbreviation explanation (see
+  // reportTypes.ts's speedUnitAbbreviationNote) — null whenever the
+  // selected metric isn't Average Speed or the unit has no abbreviation.
+  note?: string | null;
   onClose: () => void;
   onConfirm: (orientation: ReportOrientation) => void;
 }
@@ -20,7 +24,7 @@ interface ReportPreviewModalProps {
 // from (no separate report-rendering engine), just wrapped in a
 // page-shaped container so switching Portrait/Landscape gives an
 // approximate sense of how the table will fit, per the brief.
-export function ReportPreviewModal({ report, dateRange, grid, metricLabel, mode, onClose, onConfirm }: ReportPreviewModalProps) {
+export function ReportPreviewModal({ report, dateRange, grid, metricLabel, mode, note, onClose, onConfirm }: ReportPreviewModalProps) {
   // Wide reports (many date columns) default to landscape, since that's
   // almost always the better fit — the user can still switch either way.
   const [orientation, setOrientation] = useState<ReportOrientation>(grid.dates.length > 7 ? "landscape" : "portrait");
@@ -73,6 +77,7 @@ export function ReportPreviewModal({ report, dateRange, grid, metricLabel, mode,
 
       <div className={`report-preview-page report-preview-page-${orientation}`}>
         <div className="report-preview-page-inner">
+          {note && <p className="report-pivot-unit-note">{note}</p>}
           <ReportPivotTable grid={grid} />
         </div>
       </div>

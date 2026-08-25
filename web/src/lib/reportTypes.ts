@@ -359,3 +359,38 @@ export function secondsToHoursMinutes(seconds: number): string {
 export function formatSpeedValue(value: number, unit: string | null): string {
   return unit ? `${value.toFixed(1)} ${unit}` : value.toFixed(1);
 }
+
+// Display-only compaction of a speed unit already spelled out into a
+// formatted pivot cell string (e.g. "12.3 stems/hour") — this never touches
+// the underlying number or the stored activities.speed_unit value, only how
+// the cell text is shown on screen/print/PDF. Only the two units this app
+// actually derives from activities.density_source ("stems"/"plants" ->
+// "stems/hour"/"plants/hour", see ActivityFormModal.tsx) have a defined
+// abbreviation; any other (free-text) speed_unit is returned unchanged —
+// there's nothing to abbreviate it to, and abbreviating an unknown unit
+// would just be confusing. CSV export deliberately does NOT call this (see
+// reportExport.ts's exportPivotCsv) so its exported unit stays fully
+// spelled out and unambiguous outside the app's own visual context.
+const SPEED_UNIT_ABBREVIATIONS: [full: string, short: string][] = [
+  ["stems/hour", "st/hr"],
+  ["plants/hour", "pl/hr"],
+];
+
+export function abbreviateSpeedCellText(text: string): string {
+  let result = text;
+  for (const [full, short] of SPEED_UNIT_ABBREVIATIONS) {
+    result = result.replace(full, short);
+  }
+  return result;
+}
+
+// The exact explanatory note to show above the pivot table (screen, print,
+// and PDF) when the selected metric is Average Speed and the activity's
+// speed unit is one of the two abbreviated forms above — null for any other
+// unit, including a free-text speed_unit with no defined abbreviation, so
+// the note is never shown for a unit that wasn't actually shortened.
+export function speedUnitAbbreviationNote(speedUnit: string | null): string | null {
+  if (speedUnit === "stems/hour") return "Speed shown as st/hr (stems per hour).";
+  if (speedUnit === "plants/hour") return "pl/hr means plants per hour.";
+  return null;
+}

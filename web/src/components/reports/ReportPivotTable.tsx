@@ -1,4 +1,5 @@
 import { PivotGrid, formatPivotDateHeader, formatPivotWeekday } from "../../lib/reportPivot";
+import { abbreviateSpeedCellText } from "../../lib/reportTypes";
 
 interface ReportPivotTableProps {
   grid: PivotGrid;
@@ -13,6 +14,13 @@ interface ReportPivotTableProps {
 // column and the Employee Total column stay pinned (sticky) while the date
 // columns scroll horizontally — a long date range stays usable by
 // scrolling instead of shrinking every cell to illegibility.
+//
+// Every cell is passed through abbreviateSpeedCellText — a harmless no-op
+// for any non-speed metric's text, since only an Average Speed cell can
+// ever contain "stems/hour"/"plants/hour" as a literal substring. This is
+// display-only: PivotGrid itself (and therefore CSV export, which reads
+// grid values directly rather than through this component) keeps the full
+// spelled-out unit — see reportTypes.ts's abbreviateSpeedCellText comment.
 export function ReportPivotTable({ grid }: ReportPivotTableProps) {
   return (
     <div className="report-pivot-wrap">
@@ -35,10 +43,10 @@ export function ReportPivotTable({ grid }: ReportPivotTableProps) {
               <td className="report-pivot-employee-col">{row.employeeName}</td>
               {row.cells.map((cell, i) => (
                 <td key={grid.dates[i]} className="report-pivot-cell">
-                  {cell}
+                  {abbreviateSpeedCellText(cell)}
                 </td>
               ))}
-              <td className="report-pivot-grand-col report-pivot-grand-cell">{row.grandTotal}</td>
+              <td className="report-pivot-grand-col report-pivot-grand-cell">{abbreviateSpeedCellText(row.grandTotal)}</td>
             </tr>
           ))}
         </tbody>
@@ -47,10 +55,10 @@ export function ReportPivotTable({ grid }: ReportPivotTableProps) {
             <td className="report-pivot-employee-col">DAY TOTAL</td>
             {grid.columnTotals.map((total, i) => (
               <td key={grid.dates[i]} className="report-pivot-cell">
-                {total}
+                {abbreviateSpeedCellText(total)}
               </td>
             ))}
-            <td className="report-pivot-grand-col report-pivot-grand-cell">{grid.grandTotal}</td>
+            <td className="report-pivot-grand-col report-pivot-grand-cell">{abbreviateSpeedCellText(grid.grandTotal)}</td>
           </tr>
         </tfoot>
       </table>

@@ -11,6 +11,7 @@ import {
   PIVOT_ELIGIBLE_PAYROLL_METRICS,
   SavedReportDetail,
   formatPayrollDuration,
+  speedUnitAbbreviationNote,
 } from "../../lib/reportTypes";
 import { ReportDateFilterPanel } from "../../components/reports/ReportDateFilterPanel";
 import { ReportPivotTable } from "../../components/reports/ReportPivotTable";
@@ -166,6 +167,14 @@ export function ReportViewPage() {
 
   const payrollData = !isActivity ? (data as PayrollReportData | null) : null;
 
+  // Only ever set for an Activity report currently showing the Average
+  // Speed pivot column, and only when the activity's speed_unit is one of
+  // the two units this app abbreviates — see reportTypes.ts's
+  // speedUnitAbbreviationNote. null otherwise, which is exactly when the
+  // note (and the cell abbreviation it explains) should be hidden.
+  const activitySpeedUnit = isActivity && data ? (data as ActivityReportData).activity.speedUnit : null;
+  const speedUnitNote = pivotMetric === "averageSpeed" ? speedUnitAbbreviationNote(activitySpeedUnit) : null;
+
   function handleExportCsv() {
     // CSV has no page orientation, so it stays a direct action — no preview
     // step, per the brief.
@@ -178,7 +187,7 @@ export function ReportViewPage() {
     if (previewMode === "print") {
       printReport(orientation);
     } else if (previewMode === "pdf") {
-      exportPivotPdf(report, dateRange, pivotGrid, metricLabels[pivotMetric], orientation);
+      exportPivotPdf(report, dateRange, pivotGrid, metricLabels[pivotMetric], orientation, speedUnitNote);
     }
     setPreviewMode(null);
   }
@@ -277,6 +286,9 @@ export function ReportViewPage() {
               {!isActivity && pivotGrid && pivotGrid.employees.length > 0 && (
                 <p className="report-pivot-unit-note">Hours shown as H:MM (hours:minutes) — not decimal.</p>
               )}
+              {isActivity && pivotGrid && pivotGrid.employees.length > 0 && speedUnitNote && (
+                <p className="report-pivot-unit-note">{speedUnitNote}</p>
+              )}
               {pivotGrid && pivotGrid.employees.length === 0 ? (
                 <p className="placeholder-page">No data for this date range.</p>
               ) : (
@@ -374,6 +386,7 @@ export function ReportViewPage() {
           grid={pivotGrid}
           metricLabel={metricLabels[pivotMetric]}
           mode={previewMode}
+          note={speedUnitNote}
           onClose={() => setPreviewMode(null)}
           onConfirm={handlePreviewConfirm}
         />

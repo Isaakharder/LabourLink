@@ -7,7 +7,7 @@
 // both — no per-report-type export code to keep in sync.
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { DateRange, SavedReportDetail } from "./reportTypes";
+import { abbreviateSpeedCellText, DateRange, SavedReportDetail } from "./reportTypes";
 import { PivotGrid, formatPivotDateHeader } from "./reportPivot";
 
 function triggerDownload(blob: Blob, filename: string) {
@@ -30,6 +30,11 @@ function csvEscape(value: string): string {
 // renders from, so CSV/PDF/screen can never disagree about a value. One
 // employee per row (employeeId is PivotGrid.employees' key), one column per
 // selected date, Employee Total on the right, DAY TOTAL on the bottom.
+// Deliberately reads grid values as-is, never through
+// abbreviateSpeedCellText — an Average Speed CSV must stay unambiguous
+// outside the app's own visual context (no accompanying note column/row
+// exists in a CSV the way there is above the on-screen/PDF table), so the
+// unit stays fully spelled out ("stems/hour"/"plants/hour") here.
 export function exportPivotCsv(report: SavedReportDetail, grid: PivotGrid, metricLabel: string) {
   const lines: string[] = [];
   lines.push(["Employee", ...grid.dates.map(formatPivotDateHeader), "Employee Total"].map(csvEscape).join(","));
@@ -48,7 +53,14 @@ export function exportPivotPdf(
   dateRange: DateRange,
   grid: PivotGrid,
   metricLabel: string,
-  orientation: ReportOrientation = "landscape"
+  orientation: ReportOrientation = "landscape",
+  // The Average-Speed unit-abbreviation explanation (see
+  // reportTypes.ts's speedUnitAbbreviationNote) — null whenever the
+  // selected metric isn't Average Speed or the unit has no abbreviation.
+  // Unlike CSV, the PDF (like the on-screen table) DOES abbreviate its
+  // speed cells below, so it needs this note printed alongside them for
+  // the same reason the screen does.
+  speedUnitNote: string | null = null
 ) {
   const doc = new jsPDF({ orientation });
 
@@ -66,12 +78,23 @@ export function exportPivotPdf(
   ].filter(Boolean);
   doc.text(subtitleParts.join(" · "), 14, 30);
 
+  let tableStartY = 36;
+  if (speedUnitNote) {
+    doc.setFontSize(9);
+    doc.text(speedUnitNote, 14, 35);
+    tableStartY = 40;
+  }
+
   const head = ["Employee", ...grid.dates.map(formatPivotDateHeader), "Employee Total"];
-  const body = grid.employees.map((row) => [row.employeeName, ...row.cells, row.grandTotal]);
-  body.push(["DAY TOTAL", ...grid.columnTotals, grid.grandTotal]);
+  // Abbreviated the same way the on-screen table is (abbreviateSpeedCellText
+  // is a no-op for any non-speed cell) — the PDF is a visual document like
+  // the screen, not a data interchange format like CSV, so it gets the
+  // compact form plus the note above, not the full spelled-out unit.
+  const body = grid.employees.map((row) => [row.employeeName, ...row.cells.map(abbreviateSpeedCellText), abbreviateSpeedCellText(row.grandTotal)]);
+  body.push(["DAY TOTAL", ...grid.columnTotals.map(abbreviateSpeedCellText), abbreviateSpeedCellText(grid.grandTotal)]);
 
   autoTable(doc, {
-    startY: 36,
+    startY: tableStartY,
     head: [head],
     body,
     styles: { fontSize: 7 },
