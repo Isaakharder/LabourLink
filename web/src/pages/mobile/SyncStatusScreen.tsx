@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useWorkSession } from "../../context/WorkSessionContext";
+import { useDevicePairing } from "../../context/DevicePairingContext";
 import { getLocalEventStore, LocalEvent } from "../../lib/localEventStore";
 import { getOrCreateDeviceIdentifier } from "../../lib/device";
 import { computeSyncIndicatorState } from "../../lib/syncIndicator";
+import { DiagnosticsSnapshot, getDiagnosticsSnapshot } from "../../lib/diagnostics";
 
 const EVENT_TYPE_LABELS: Record<string, string> = {
   work_start: "Start work",
@@ -52,11 +54,13 @@ function parseConflictReason(event: LocalEvent): string | null {
 // page, which this screen doesn't attempt to duplicate).
 export function SyncStatusScreen() {
   const { online, pending, syncProblem, flush } = useWorkSession();
+  const { serverReachable } = useDevicePairing();
   const [lastSuccessfulSyncAt, setLastSuccessfulSyncAt] = useState<string | null>(null);
   const [lastAttemptedSyncAt, setLastAttemptedSyncAt] = useState<string | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
   const [conflicts, setConflicts] = useState<ConflictedEventView[]>([]);
   const [retrying, setRetrying] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsSnapshot | null>(null);
 
   const load = useCallback(async () => {
     const deviceId = getOrCreateDeviceIdentifier();
@@ -78,6 +82,18 @@ export function SyncStatusScreen() {
   useEffect(() => {
     void load();
   }, [load, pending]);
+
+  const loadDiagnostics = useCallback(async () => {
+    try {
+      setDiagnostics(await getDiagnosticsSnapshot(serverReachable));
+    } catch (err) {
+      console.error("[sync-status] failed to build diagnostics snapshot:", err);
+    }
+  }, [serverReachable]);
+
+  useEffect(() => {
+    void loadDiagnostics();
+  }, [loadDiagnostics, pending]);
 
   async function handleRetry() {
     setRetrying(true);
@@ -152,6 +168,45 @@ export function SyncStatusScreen() {
             ))}
           </ul>
         )}
+      </section>
+
+      {/* Read-only, no tokens/PINs/employee payloads — every field below is
+          either a boolean, a timestamp, or this device's own installed-app
+          identity. Added to give a supervisor or engineer standing next to
+          an affected phone something concrete to check without adb — see
+          the mobile offline investigation this exists to make visible. */}
+      <section className="mobile-settings-device-section">
+        <h2>Diagnostics</h2>
+        {!diagnostics ? (
+          <p className="mobile-settings-device-note">Loading...</p>
+        ) : (
+          <>
+            <p className="mobile-settings-device-note">
+              App version: {diagnostics.appVersion ?? "—"}
+              {diagnostics.appBuild ? ` (build ${diagnostics.appBuild})` : ""}
+            </p>
+            <p className="mobile-settings-device-note">API URL: {diagnostics.apiUrl}</p>
+            <p className="mobile-settings-device-note">
+              Network: {diagnostics.networkConnected ? "Connected" : "Disconnected"} ({diagnostics.connectionType})
+            </p>
+            <p className="mobile-settings-device-note">API reachable: {diagnostics.apiReachable ? "Yes" : "No"}</p>
+            <p className="mobile-settings-device-note">Local database ready: {diagnostics.sqliteReady ? "Yes" : "No"}</p>
+            <p className="mobile-settings-device-note">
+              Reference data cached — Activities: {formatDateTime(diagnostics.referenceCache.activities)}, Rows:{" "}
+              {formatDateTime(diagnostics.referenceCache.rows)}, Carriers: {formatDateTime(diagnostics.referenceCache.carriers)}
+            </p>
+            <p className="mobile-settings-device-note">Pending events: {diagnostics.pendingCount}</p>
+            <p className="mobile-settings-device-note">
+              Last local action:{" "}
+              {diagnostics.lastLocalAction
+                ? `${EVENT_TYPE_LABELS[diagnostics.lastLocalAction.eventType] ?? diagnostics.lastLocalAction.eventType} at ${formatDateTime(diagnostics.lastLocalAction.occurredAtUtc)} (Diagnostic ID: ${diagnostics.lastLocalAction.diagnosticId})`
+                : "None yet"}
+            </p>
+          </>
+        )}
+        <button type="button" className="mobile-action-button mobile-action-secondary" onClick={() => void loadDiagnostics()}>
+          Refresh diagnostics
+        </button>
       </section>
     </div>
   );

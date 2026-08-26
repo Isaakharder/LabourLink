@@ -1,11 +1,17 @@
-import { createContext, ReactNode, useCallback, useContext, useEffect, useState } from "react";
+import { createContext, ReactNode, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useDevicePairing } from "./DevicePairingContext";
 import { api, ApiError, getPermanentDeviceAuthErrorCode, isServerUnreachableError } from "../lib/api";
 import { getCachedEmployeeSummary, getOrCreateDeviceIdentifier } from "../lib/device";
 import { Language, resolveLanguage, t, translateServerMessage } from "../lib/i18n";
 import { detectReassignment } from "../lib/reassignment";
 import { getLocalEventStore, LocalEventType, logCheckpoint } from "../lib/localEventStore";
-import { applyLocalEventToMe, foldPendingEventsOntoMe, LocalDisplayInfo } from "../lib/localSessionState";
+import {
+  applyLocalEventToMe,
+  foldPendingEventsOntoMe,
+  LocalDisplayInfo,
+  persistServerMeSnapshot,
+  restoreLocalSessionState,
+} from "../lib/localSessionState";
 import { resolveDisplayLabels } from "../lib/referenceDataCache";
 import { hasSyncProblem, onSyncSettled, trySyncSoon } from "../lib/syncEngine";
 import { QuestionAnswer } from "../lib/activityQuestionTypes";
@@ -134,8 +140,14 @@ interface WorkSessionContextValue {
   // Stats component reads instead of each re-deriving it from
   // DevicePairingContext itself.
   language: Language;
-  // True once a real /api/mobile/me response has been received this
-  // session — gates every server-dependent action.
+  // True once this device has SOME usable session state to act on — either
+  // a real /api/mobile/me response this session, or (as of the cold-start
+  // local-restore fix) state rebuilt entirely from durable local storage
+  // before the server was ever reached. Gates the activity/row/carrier
+  // controls; deliberately NOT gated on serverReachable/online, since a
+  // locally-restored session is exactly what lets those controls work
+  // fully offline. False only when neither exists yet — genuinely nothing
+  // to show (never paired on this device, or paired with nothing cached).
   verified: boolean;
   busy: boolean;
   online: boolean;
@@ -243,6 +255,41 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     void refreshPendingCount();
   }, [refreshPendingCount]);
 
+  // Cold-start / Android-process-restart local restore — populates `me`
+  // (and unblocks every activity/row/carrier control gated on `verified`)
+  // entirely from durable local storage, before /api/mobile/me has even
+  // been attempted this session, let alone succeeded. This is the direct
+  // fix for the reported bug: a backgrounded app killed by Android and
+  // reopened at a weak-signal spot used to show a name and an
+  // "offlineReconnecting" banner with NO action buttons at all (see
+  // HomeScreen's `!me && cachedEmployee` branch) until the first /me
+  // round trip finally landed — even though everything needed to keep
+  // working was already sitting in SQLite/the local event ledger.
+  //
+  // Runs once per mount: a previously-paired device's cachedEmployee is
+  // usually available within a tick (DevicePairingProvider's own boot
+  // recovery, occasionally awaiting an IndexedDB-backup read), and this
+  // effect fires again the moment it appears — so it naturally covers both
+  // "already available on first render" and "became available a moment
+  // later" without restoring twice. loadMe() (see the mount effect below)
+  // still runs independently and unawaited in the background to reconcile
+  // the full authoritative picture; this just means the screen no longer
+  // has to wait for it first.
+  const hasRestoredLocallyRef = useRef(false);
+  useEffect(() => {
+    if (hasRestoredLocallyRef.current) return;
+    if (!cachedEmployee) return; // nothing durable to restore from yet (never paired on this device)
+    hasRestoredLocallyRef.current = true;
+    const deviceId = getOrCreateDeviceIdentifier();
+    restoreLocalSessionState(deviceId, cachedEmployee)
+      .then((restored) => {
+        if (!restored) return;
+        setMe(restored);
+        setVerified(true);
+      })
+      .catch((err) => console.error("[work-session] local session restore failed:", err));
+  }, [cachedEmployee]);
+
   // The single place every server response carrying an `employee` gets
   // applied — loadMe and acknowledgeReassignment funnel through this
   // rather than each setting me/verified/the cached employee directly, so
@@ -321,23 +368,50 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     [markUnpaired, setServerReachable]
   );
 
+  // Monotonic request counter — the guard against a delayed/reordered
+  // response ever winning over a more recently issued request's own
+  // response. Only the response whose seq still matches the latest issued
+  // request is ever applied; every other response (older request, arrived
+  // late — e.g. after a background sync round fired its own newer loadMe())
+  // is discarded, since a strictly-newer request's response (once it
+  // lands) already reflects everything the older one could have shown, and
+  // more. A ref, not state — issuing a request must never itself trigger a
+  // re-render.
+  const meRequestSeqRef = useRef(0);
+
   // RECONCILIATION — fetches the server's own authoritative view, then
   // re-applies (folds) any still-unsynced local events on top of it before
   // committing to `me`. The fold is what stops a stale server response
-  // (anything that predates a pending local event — today, that's
-  // EVERYTHING, since Stage 4's real sync endpoint doesn't exist yet) from
-  // clobbering genuine in-progress local work, e.g. on a cold app restart
-  // where `me` starts null and this is the very first thing that sets it.
-  // Never blocks/gates a local action; called after a successful sync
-  // (Stage 4) and on the same mount/reconnect/foreground triggers as before.
+  // (anything that predates a pending local event) from clobbering genuine
+  // in-progress local work. Never blocks/gates a local action; called after
+  // a successful sync and on the same mount/reconnect/foreground triggers
+  // as before — and, as of the cold-start local-restore fix, always in the
+  // BACKGROUND relative to the screen already being interactive (see the
+  // restore effect below, which populates `me`/`verified` from durable
+  // local storage before this is ever awaited by anything).
+  //
+  // The raw response (never the folded `merged`) is what gets persisted as
+  // this device's next cold-start restore base (persistServerMeSnapshot) —
+  // persisting the folded value instead would double-apply any event still
+  // pending at persist time on the NEXT restore's own fold, since that
+  // event's effect would already be baked into the snapshot as well as
+  // replayed again from the ledger. See localSessionState.ts's own comment
+  // on SERVER_ME_SNAPSHOT_CACHE_KEY.
   const loadMe = useCallback(() => {
+    const mySeq = ++meRequestSeqRef.current;
     api<MeResponse>("/api/mobile/me")
       .then(async (res) => {
+        if (mySeq !== meRequestSeqRef.current) return; // superseded by a newer request already issued
+        void persistServerMeSnapshot(res).catch((err) =>
+          console.error("[work-session] failed to persist server /me snapshot:", err)
+        );
         const deviceId = getOrCreateDeviceIdentifier();
         const merged = await foldPendingEventsOntoMe(deviceId, res);
+        if (mySeq !== meRequestSeqRef.current) return; // a newer request's response may have landed while folding
         applyMeResponse(merged);
       })
       .catch((err) => {
+        if (mySeq !== meRequestSeqRef.current) return;
         if (!handleApiError(err)) setError(t(language, "couldNotLoadStatus"));
       });
   }, [applyMeResponse, handleApiError, language]);

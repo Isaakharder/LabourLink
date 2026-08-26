@@ -13,6 +13,7 @@ import {
   CarriersResponse,
   RowsResponse,
 } from "./referenceDataCache";
+import { CachedEmployeeSummary } from "./device";
 import { CurrentActivity, MeResponse, PreviousActivity } from "../context/WorkSessionContext";
 
 // What the caller already knows for display purposes at the moment it
@@ -205,4 +206,78 @@ export async function foldPendingEventsOntoMe(deviceId: string, base: MeResponse
     result = applyLocalEventToMe(result, event, display);
   }
   return result;
+}
+
+// The durable "last known base" a cold start folds pending events onto —
+// deliberately the RAW server snapshot (never itself folded/optimistic),
+// so a restart always rebuilds today's actual status from the durable
+// local event ledger on top of it, rather than trusting a possibly-stale
+// pre-folded snapshot that could have been written moments before an OS
+// process kill and never updated again. Single global key, same convention
+// as CACHE_KEYS above (one physical device, one active session).
+const SERVER_ME_SNAPSHOT_CACHE_KEY = "last-server-me";
+
+// Called every time a real server /me response is applied (see
+// WorkSessionContext.tsx's applyMeResponse/acknowledgeReassignment) — the
+// one place a cold start's restore base gets refreshed. Fire-and-forget by
+// convention (same as fetchWithCache's cache write above): a slow/failed
+// write here must never delay or fail the live UI update that already
+// happened from the response itself.
+export async function persistServerMeSnapshot(me: MeResponse): Promise<void> {
+  await getLocalEventStore().setCachedJson(SERVER_ME_SNAPSHOT_CACHE_KEY, me);
+}
+
+// Reconstructs "what is happening right now" entirely from durable local
+// storage — no network call, no wait on /api/mobile/me — for use at cold
+// start / after an Android process restart, before the server has been
+// reached this session at all. Folds every still-pending local event
+// (work/break/row changes made before the restart, not yet synced) on top
+// of the last real server snapshot this device ever received, using the
+// exact same fold used to reconcile a live server response
+// (foldPendingEventsOntoMe) — so a restart can never show a status that's
+// missing an action the employee already durably committed.
+//
+// Falls back to a bare idle snapshot built from the cached employee
+// identity (device.ts) when this device has never received a real server
+// response yet (e.g. paired, then killed before the first /me landed) —
+// still folds pending events on top, so even that first-ever session's
+// local actions aren't lost. Returns null only when there is truly nothing
+// to restore (never paired on this device) — the caller's existing
+// "Loading..." state is the honest answer there.
+export async function restoreLocalSessionState(
+  deviceId: string,
+  cachedEmployee: CachedEmployeeSummary | null
+): Promise<MeResponse | null> {
+  const store = getLocalEventStore();
+  let base: MeResponse | null = null;
+  try {
+    const cached = await store.getCachedJson<MeResponse>(SERVER_ME_SNAPSHOT_CACHE_KEY);
+    base = cached?.value ?? null;
+  } catch (err) {
+    console.error("[local-session-state] restoreLocalSessionState: failed reading last server snapshot:", err);
+  }
+
+  if (!base) {
+    if (!cachedEmployee) return null;
+    base = {
+      employee: {
+        id: cachedEmployee.employeeId,
+        firstName: cachedEmployee.firstName,
+        lastName: cachedEmployee.lastName,
+        preferredLanguage: cachedEmployee.preferredLanguage ?? null,
+        securityRole: "Employee",
+      },
+      status: "idle",
+      currentActivity: null,
+      since: null,
+      previousActivity: null,
+      recentJobs: [],
+    };
+  }
+
+  // Bounded by foldPendingEventsOntoMe's own LOCAL_STORE_FOLD_TIMEOUT_MS —
+  // a broken local store here falls back to `base` (still perfectly usable:
+  // just missing whatever's pending, exactly like the base case fold
+  // already handles) rather than leaving the caller waiting.
+  return foldPendingEventsOntoMe(deviceId, base);
 }

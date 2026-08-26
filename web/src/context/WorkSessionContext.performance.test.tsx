@@ -20,6 +20,7 @@ const {
   mockGetPendingEvents,
   mockGetLatestWorkEvent,
   mockGetCachedJson,
+  mockSetCachedJson,
   mockMarkSyncResult,
   mockGetSyncMeta,
   mockSetSyncMeta,
@@ -30,6 +31,7 @@ const {
   mockGetPendingEvents: vi.fn(),
   mockGetLatestWorkEvent: vi.fn(),
   mockGetCachedJson: vi.fn(),
+  mockSetCachedJson: vi.fn(),
   mockMarkSyncResult: vi.fn(),
   mockGetSyncMeta: vi.fn(),
   mockSetSyncMeta: vi.fn(),
@@ -45,6 +47,7 @@ vi.mock("../lib/localEventStore", () => ({
     getSyncMeta: mockGetSyncMeta,
     setSyncMeta: mockSetSyncMeta,
     getCachedJson: mockGetCachedJson,
+    setCachedJson: mockSetCachedJson,
   }),
   // A real (module-level, not per-store-instance) named export as of the
   // timestamped-checkpoint instrumentation added alongside the bounded
@@ -113,6 +116,7 @@ beforeEach(() => {
   ]);
   mockGetLatestWorkEvent.mockReset().mockResolvedValue(null);
   mockGetCachedJson.mockReset().mockResolvedValue(null);
+  mockSetCachedJson.mockReset().mockResolvedValue(undefined);
   mockMarkSyncResult.mockReset().mockResolvedValue(undefined);
   mockGetSyncMeta.mockReset().mockResolvedValue({ lastSuccessfulSyncAt: null, lastAttemptedSyncAt: null, lastError: null });
   mockSetSyncMeta.mockReset().mockResolvedValue(undefined);

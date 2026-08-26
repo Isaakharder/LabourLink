@@ -84,4 +84,44 @@ describe("LocalEventStoreImpl on the web platform", () => {
     const latestWork = await store.getLatestWorkEventForDevice("device-1");
     expect(latestWork?.activityId).toBe("activity-general");
   });
+
+  // "Preserve the existing... conflict review" — a permanent rejection
+  // (e.g. this device was reassigned/deactivated, or the target row/
+  // activity no longer exists by the time it synced) must stay reviewable,
+  // never silently dropped, and must never take any OTHER still-pending
+  // local event down with it.
+  it("a permanently rejected event stays reviewable via getConflictedEvents, and never touches an unrelated pending event", async () => {
+    const store = getLocalEventStore();
+    const rejected = await store.appendEvent({
+      deviceId: "device-1",
+      employeeId: "emp-1",
+      eventType: "activity_switch",
+      occurredAtUtc: "2026-01-01T00:00:00.000Z",
+      activityId: "activity-stale",
+    });
+    const stillPending = await store.appendEvent({
+      deviceId: "device-1",
+      employeeId: "emp-1",
+      eventType: "break_start",
+      occurredAtUtc: "2026-01-01T00:05:00.000Z",
+    });
+
+    await store.markSyncResult(rejected.clientEventId, {
+      clientEventId: rejected.clientEventId,
+      status: "permanent_conflict",
+      detail: { reason: "Activity is no longer active" },
+    });
+
+    const conflicts = await store.getConflictedEvents("device-1");
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0].clientEventId).toBe(rejected.clientEventId);
+    expect(conflicts[0].serverResultJson).toContain("Activity is no longer active");
+
+    // The unrelated event is completely unaffected — still pending, not
+    // marked as a conflict, not lost.
+    const pending = await store.getPendingEvents("device-1");
+    expect(pending).toHaveLength(1);
+    expect(pending[0].clientEventId).toBe(stillPending.clientEventId);
+    expect(pending[0].syncStatus).toBe("pending");
+  });
 });

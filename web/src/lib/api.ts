@@ -22,6 +22,39 @@ function resolveApiUrl(): string {
 }
 
 const API_URL = resolveApiUrl();
+// Exposed for on-device diagnostics (Settings > Sync details) — reading
+// which API host a build actually talks to is otherwise invisible on a
+// physical phone. Not used for any request logic outside this file.
+export { API_URL };
+
+// A weak-signal connection (still associated with the AP, but losing most
+// packets) can leave a bare fetch() hanging far longer than a clean refusal
+// would — long enough that a cold-start reconnect loop never even gets a
+// chance to start (see DEFAULT_TIMEOUT_MS below and the mobile offline
+// investigation this fixes). AbortController bounds every call so a hung
+// request always surfaces as a prompt, ordinary network failure instead of
+// an indefinite wait. 15s comfortably exceeds legitimate slow-but-working
+// calls (proven elsewhere in this codebase against a real 5-second
+// simulated delay) while still being "prompt" for a genuinely dead
+// connection.
+const DEFAULT_TIMEOUT_MS = 15000;
+
+// Deliberately a TypeError subclass: isNetworkError()/isServerUnreachableError()
+// (offlineQueue.ts) already treat `err instanceof TypeError` as "network
+// problem, safe to retry, never data loss" — subclassing means an
+// intentional timeout is automatically classified exactly the same way
+// (offline/reconnecting, pending events untouched) with no changes needed
+// to that shared classification logic. `timeout` distinguishes it from an
+// ordinary fetch() TypeError (e.g. a malformed URL) for callers/diagnostics
+// that care specifically about "this was a timeout," without changing how
+// it's treated by anything that doesn't.
+export class ApiTimeoutError extends TypeError {
+  timeout = true;
+  constructor(timeoutMs: number) {
+    super(`Request timed out after ${timeoutMs}ms`);
+    this.name = "ApiTimeoutError";
+  }
+}
 
 export class ApiError extends Error {
   status: number;
@@ -48,26 +81,55 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+export interface ApiOptions extends RequestInit {
+  // Overrides DEFAULT_TIMEOUT_MS for one call — no caller in this codebase
+  // needs this today, but a genuinely long-running endpoint added later can
+  // opt into a longer bound without changing the default for everything
+  // else.
+  timeoutMs?: number;
+}
+
+export async function api<T>(path: string, options: ApiOptions = {}): Promise<T> {
   const deviceId = localStorage.getItem(DEVICE_ID_KEY);
   // FormData bodies must NOT get an explicit Content-Type — the browser sets
   // one itself (including the multipart boundary), which fetch can't do if
   // we've already set the header ourselves.
   const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, signal: callerSignal, ...fetchOptions } = options;
+
+  const controller = new AbortController();
+  // A caller-supplied signal (none exist today, but api() shouldn't silently
+  // drop one added later) aborts the same request the timeout would.
+  callerSignal?.addEventListener("abort", () => controller.abort());
+  const timer = setTimeout(() => controller.abort(new ApiTimeoutError(timeoutMs)), timeoutMs);
+
   // TEMPORARY — End Work ~1min delay investigation. Elapsed-time-only, no
   // secrets (no token/PIN/body content logged). Remove once the slow hop is
   // identified.
   const __t0 = performance.now();
   console.log(`[timing] fetch start: ${options.method ?? "GET"} ${path}`);
-  const res = await fetch(`${API_URL}${path}`, {
-    ...options,
-    credentials: "include",
-    headers: {
-      ...(isFormData ? {} : { "Content-Type": "application/json" }),
-      ...(deviceId ? { "X-Device-Id": deviceId } : {}),
-      ...options.headers,
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      ...fetchOptions,
+      credentials: "include",
+      signal: controller.signal,
+      headers: {
+        ...(isFormData ? {} : { "Content-Type": "application/json" }),
+        ...(deviceId ? { "X-Device-Id": deviceId } : {}),
+        ...options.headers,
+      },
+    });
+  } catch (err) {
+    // Not every environment honors AbortController's reason argument (older
+    // WebViews may still throw a bare DOMException "AbortError") — normalize
+    // either shape to the same ApiTimeoutError so callers/classification
+    // never need to special-case it.
+    if (controller.signal.aborted) throw new ApiTimeoutError(timeoutMs);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   console.log(`[timing] fetch response received: ${path} status=${res.status} elapsed=${Math.round(performance.now() - __t0)}ms`);
 
   if (!res.ok) {

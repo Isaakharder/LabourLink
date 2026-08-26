@@ -15,13 +15,14 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { ReactNode } from "react";
 
-const { mockAppendEvent, mockApi, mockGetPendingCount, mockGetPendingEvents, mockGetCachedJson, mockMarkSyncResult, mockGetSyncMeta, mockSetSyncMeta } =
+const { mockAppendEvent, mockApi, mockGetPendingCount, mockGetPendingEvents, mockGetCachedJson, mockSetCachedJson, mockMarkSyncResult, mockGetSyncMeta, mockSetSyncMeta } =
   vi.hoisted(() => ({
     mockAppendEvent: vi.fn(),
     mockApi: vi.fn(),
     mockGetPendingCount: vi.fn(),
     mockGetPendingEvents: vi.fn(),
     mockGetCachedJson: vi.fn(),
+    mockSetCachedJson: vi.fn(),
     mockMarkSyncResult: vi.fn(),
     mockGetSyncMeta: vi.fn(),
     mockSetSyncMeta: vi.fn(),
@@ -37,6 +38,7 @@ vi.mock("../lib/localEventStore", () => ({
     getSyncMeta: mockGetSyncMeta,
     setSyncMeta: mockSetSyncMeta,
     getCachedJson: mockGetCachedJson,
+    setCachedJson: mockSetCachedJson,
   }),
   logCheckpoint: vi.fn(),
 }));
@@ -81,6 +83,7 @@ beforeEach(() => {
   mockGetPendingCount.mockReset().mockResolvedValue(0);
   mockGetPendingEvents.mockReset().mockResolvedValue([]);
   mockGetCachedJson.mockReset().mockResolvedValue(null);
+  mockSetCachedJson.mockReset().mockResolvedValue(undefined);
   mockMarkSyncResult.mockReset().mockResolvedValue(undefined);
   mockGetSyncMeta.mockReset().mockResolvedValue({ lastSuccessfulSyncAt: null, lastAttemptedSyncAt: null, lastError: null });
   mockSetSyncMeta.mockReset().mockResolvedValue(undefined);
