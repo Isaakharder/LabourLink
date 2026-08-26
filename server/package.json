@@ -57,6 +57,7 @@
     "test:mobile-time-density-resume": "ts-node src/routes/mobileTime.densityResume.test.ts",
     "test:inputs-density-visit-continuity": "ts-node src/routes/inputs.densityVisitContinuity.test.ts",
     "test:add-break-split": "ts-node src/routes/inputs.addBreakSplit.test.ts",
+    "test:break-correction": "ts-node src/routes/inputs.breakCorrection.test.ts",
     "test:break-rounding-safety": "ts-node src/routes/mobileTime.breakRoundingSafety.test.ts",
     "test:employee-blocks": "ts-node src/routes/employeeBlocks.test.ts",
     "test:greenhouse-live-block-colors": "ts-node src/routes/greenhouseLive.blockColors.test.ts",

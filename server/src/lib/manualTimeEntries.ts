@@ -216,6 +216,15 @@ export interface BreakSplitContinuation {
   carrierId: string | null;
   densityType: "plants" | "stems" | null;
   densityCountPerRow: number | null;
+  // Same physical visit, same device it was recorded on — carried forward
+  // exactly like activity/row/carrier/density above, not re-resolved to
+  // "whichever device happens to be making this request" (there usually
+  // isn't one; this row is created by an admin's desktop correction, not a
+  // phone). Was previously dropped (hardcoded null) by this function's
+  // only caller before break correction (PATCH /breaks/:id) needed it
+  // preserved too — carrying it here benefits both callers equally, since
+  // a continuation losing its device attribution was never intentional.
+  deviceId: string | null;
   startedAt: Date;
   endedAt: Date;
 }
@@ -279,22 +288,32 @@ export type BreakInsertionPlan =
 // lockEmployeeForManualEntry — this function itself takes `for update`
 // locks on every returned row (`order by started_at asc`, matching every
 // other multi-row-locking route in this file, so it can never deadlock).
+//
+// excludeEntryId lets a CORRECTION to an existing break (PATCH
+// /breaks/:id) reuse this exact same classification against its own new
+// [start, end) range without the break's own (not-yet-updated) row
+// showing up as a conflict against itself — Add Break's create-only call
+// site has no existing row to exclude and passes undefined. Excluded from
+// the query entirely (not locked, not classified) — the caller is
+// expected to have already locked and be updating that row separately.
 export async function planBreakInsertion(
   client: PoolClient,
   employeeId: string,
   start: Date,
-  end: Date
+  end: Date,
+  excludeEntryId?: string
 ): Promise<BreakInsertionPlan> {
   const { rows } = await client.query(
     `select id, entry_type, activity_id, started_at, ended_at,
-            greenhouse_row_id, carrier_id, density_type, density_count_per_row
+            greenhouse_row_id, carrier_id, density_type, density_count_per_row, device_id
      from time_entries
      where employee_id = $1 and deleted_at is null
+       and ($4::uuid is null or id <> $4)
        and started_at < $3::timestamptz
        and (ended_at is null or ended_at > $2::timestamptz)
      order by started_at asc
      for update`,
-    [employeeId, start, end]
+    [employeeId, start, end, excludeEntryId ?? null]
   );
 
   const trims: ActivityTrim[] = [];
@@ -325,6 +344,7 @@ export async function planBreakInsertion(
         carrierId: row.carrier_id,
         densityType: row.density_type,
         densityCountPerRow: row.density_count_per_row,
+        deviceId: row.device_id,
         startedAt: end,
         endedAt: rowEnd,
       });

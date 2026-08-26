@@ -3,7 +3,7 @@ import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { getSignedPhotoUrl, getSignedPhotoUrls } from "../lib/storage";
-import { calendarDateInAppTimezone, getDayBoundsUtc } from "../lib/timezone";
+import { calendarDateInAppTimezone, getDayBoundsUtc, APP_TIMEZONE } from "../lib/timezone";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { aggregateDensitySpeed } from "../lib/densitySpeed";
@@ -22,7 +22,9 @@ import {
   lockEmployeeForManualEntry,
   planActivityInsertion,
   planBreakInsertion,
+  BreakInsertionPlan,
 } from "../lib/manualTimeEntries";
+import { PoolClient } from "pg";
 
 const router = Router();
 
@@ -65,6 +67,14 @@ const BREAK_SPLIT_DELETION_REASON = "Removed — fully covered by a manually add
 // others above, so the audit trail (creation_reason is still non-null on
 // every row) is preserved without trusting client-supplied text.
 const BREAK_MANUAL_ADD_REASON = "Break manually added from Inputs page.";
+// PATCH /breaks/:id (below) reuses planBreakInsertion's own trim/split/
+// delete classification against the CORRECTED [start, end) range — these
+// mirror BREAK_SPLIT_DELETION_REASON/BREAK_MANUAL_ADD_REASON above with
+// wording specific to a correction rather than a new break, so an admin
+// reading the audit trail can tell which action actually caused a given
+// row's trim/split/deletion.
+const BREAK_CORRECTION_SPLIT_DELETION_REASON = "Removed — fully covered by a corrected break";
+const BREAK_CORRECTION_SPLIT_REASON = "Activity continuation created by a break correction";
 
 function trimOrNull(v: unknown): string | null {
   if (typeof v !== "string") return null;
@@ -1687,9 +1697,10 @@ router.post(
              (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source,
               greenhouse_row_id, carrier_id, density_type, density_count_per_row,
               created_by_employee_id, creation_reason)
-           values ($1, null, 'work', $2, gen_random_uuid(), $3, $4, 'manual', $5, $6, $7, $8, $9, $10)`,
+           values ($1, $2, 'work', $3, gen_random_uuid(), $4, $5, 'manual', $6, $7, $8, $9, $10, $11)`,
           [
             employeeId,
+            cont.deviceId,
             cont.activityId,
             cont.startedAt,
             cont.endedAt,
@@ -1724,6 +1735,113 @@ router.post(
   })
 );
 
+interface BreakCorrectionPlanOk {
+  ok: true;
+  breakId: string;
+  employeeId: string;
+  oldStart: Date;
+  oldEnd: Date;
+  newStart: Date;
+  newEnd: Date;
+  startChanged: boolean;
+  endChanged: boolean;
+  trims: Extract<BreakInsertionPlan, { ok: true }>["trims"];
+  continuations: Extract<BreakInsertionPlan, { ok: true }>["continuations"];
+  deletions: Extract<BreakInsertionPlan, { ok: true }>["deletions"];
+}
+type BreakCorrectionPlanResult = BreakCorrectionPlanOk | { ok: false; status: number; error: string };
+
+// Shared by PATCH /breaks/:id (applies the plan) and POST
+// /breaks/:id/correction-preview (describes it, then always rolls back) —
+// having exactly one function compute what a correction WOULD do is what
+// guarantees the preview the admin sees before Save can never disagree
+// with what Save actually does.
+//
+// Reuses planBreakInsertion — the same trim/split/delete classification
+// POST /breaks (Add Break) already uses — against the break's CORRECTED
+// [newStart, newEnd) range, with the break's own row excluded from its own
+// overlap check (planBreakInsertion's excludeEntryId). This is what
+// replaces the old single-adjacent-entry-only reattachment logic: any
+// number of work entries the corrected range now reaches into are each
+// individually trimmed, split, or (if entirely covered) soft-deleted,
+// exactly like a brand-new break would resolve against the same schedule.
+// A shrinking correction naturally touches nothing — the work entries that
+// used to sit at the OLD, wider boundary were already trimmed away from it
+// by whatever action produced that boundary; nothing here ever GROWS an
+// existing entry, so shortening a break can never invent work time.
+//
+// Caller must run this inside a transaction, immediately after
+// lockEmployeeForManualEntry(client, <the break's own employee_id>) — this
+// function (via planBreakInsertion) takes `for update` locks on every row
+// it examines, including the break's own.
+async function computeBreakCorrectionPlan(
+  client: PoolClient,
+  breakId: string,
+  startTime: string | undefined,
+  endTime: string | undefined
+): Promise<BreakCorrectionPlanResult> {
+  if (startTime === undefined && endTime === undefined) {
+    return { ok: false, status: 400, error: "startTime and/or endTime is required" };
+  }
+  if (startTime !== undefined && (typeof startTime !== "string" || isNaN(Date.parse(startTime)))) {
+    return { ok: false, status: 400, error: "A valid startTime is required" };
+  }
+  if (endTime !== undefined && (typeof endTime !== "string" || isNaN(Date.parse(endTime)))) {
+    return { ok: false, status: 400, error: "A valid endTime is required" };
+  }
+
+  const targetRes = await client.query(
+    `select id, employee_id, entry_type, started_at, ended_at, deleted_at
+     from time_entries where id = $1 for update`,
+    [breakId]
+  );
+  const target = targetRes.rows[0];
+  if (!target || target.deleted_at) return { ok: false, status: 404, error: "Break not found" };
+  if (target.entry_type !== "break") return { ok: false, status: 409, error: "Only a break can be corrected here" };
+  if (target.ended_at === null) return { ok: false, status: 409, error: "An in-progress break cannot be corrected here" };
+
+  const oldStart = new Date(target.started_at);
+  const oldEnd = new Date(target.ended_at);
+  const newStart = startTime !== undefined ? new Date(startTime) : oldStart;
+  const newEnd = endTime !== undefined ? new Date(endTime) : oldEnd;
+
+  if (newStart.getTime() >= newEnd.getTime()) {
+    return { ok: false, status: 422, error: "Start time must be before end time" };
+  }
+  if (
+    calendarDateInAppTimezone(oldStart) !== calendarDateInAppTimezone(newStart) ||
+    calendarDateInAppTimezone(oldStart) !== calendarDateInAppTimezone(newEnd)
+  ) {
+    return { ok: false, status: 422, error: "The corrected times must stay on the same date as the break" };
+  }
+
+  // Excludes this break's own (not-yet-updated) row from its own overlap
+  // check — without this, a break being corrected would always appear to
+  // conflict with itself. Any OTHER break found overlapping [newStart,
+  // newEnd) still rejects outright (planBreakInsertion never merges two
+  // breaks), and any open-ended work entry overlapping it also still
+  // rejects — both unchanged from before.
+  const plan = await planBreakInsertion(client, target.employee_id, newStart, newEnd, breakId);
+  if (!plan.ok) {
+    return { ok: false, status: 409, error: plan.error };
+  }
+
+  return {
+    ok: true,
+    breakId: target.id,
+    employeeId: target.employee_id,
+    oldStart,
+    oldEnd,
+    newStart,
+    newEnd,
+    startChanged: newStart.getTime() !== oldStart.getTime(),
+    endChanged: newEnd.getTime() !== oldEnd.getTime(),
+    trims: plan.trims,
+    continuations: plan.continuations,
+    deletions: plan.deletions,
+  };
+}
+
 router.patch(
   "/breaks/:id",
   requireAuth,
@@ -1731,212 +1849,107 @@ router.patch(
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid break id" });
-
     const { startTime, endTime } = req.body as { startTime?: string; endTime?: string };
-    if (startTime === undefined && endTime === undefined) {
-      return res.status(400).json({ error: "startTime and/or endTime is required" });
-    }
-    if (startTime !== undefined && (typeof startTime !== "string" || isNaN(Date.parse(startTime)))) {
-      return res.status(400).json({ error: "A valid startTime is required" });
-    }
-    if (endTime !== undefined && (typeof endTime !== "string" || isNaN(Date.parse(endTime)))) {
-      return res.status(400).json({ error: "A valid endTime is required" });
-    }
 
     const client = await pool.connect();
     try {
       await client.query("begin");
 
-      // Unlocked peek, needed to know which adjacent work rows (if any)
-      // must also be locked, and in the right chronological order, before
-      // any row is actually locked. Re-validated against the real locked
-      // read of the break itself below.
-      const peek = await client.query(
-        `select employee_id, entry_type, started_at, ended_at, deleted_at
-         from time_entries where id = $1`,
-        [id]
-      );
-      const peekRow = peek.rows[0];
-      if (!peekRow || peekRow.deleted_at) {
+      // The advisory employee lock must be taken before ANY row lock
+      // (including computeBreakCorrectionPlan's own, via
+      // planBreakInsertion) — same ordering every other manual-entry
+      // mutation in this file uses (POST /breaks, POST /activities), so a
+      // concurrent Add Break / Add Activity / break correction for the
+      // same employee can never race past each other's overlap checks.
+      // Unlocked peek first, purely to learn which employee to lock —
+      // re-validated for real inside computeBreakCorrectionPlan's own
+      // `for update` read.
+      const ownerPeek = await client.query(`select employee_id from time_entries where id = $1`, [id]);
+      if (!ownerPeek.rows[0]) {
         await client.query("rollback");
         return res.status(404).json({ error: "Break not found" });
       }
-      if (peekRow.entry_type !== "break") {
-        await client.query("rollback");
-        return res.status(409).json({ error: "Only a break can be corrected here" });
-      }
-      if (peekRow.ended_at === null) {
-        await client.query("rollback");
-        return res.status(409).json({ error: "An in-progress break cannot be corrected here" });
-      }
+      await lockEmployeeForManualEntry(client, ownerPeek.rows[0].employee_id);
 
-      // The nearest work entry ending at or before this break's current
-      // start — not required to be exactly contiguous (started_at = the
-      // other's ended_at). Live mobile rounding always produces an exactly
-      // contiguous chain (see mobileTime.ts's openEntry, which resolves
-      // both boundaries from the same transaction-frozen now()), but a
-      // break recorded before break rounding existed, or one that's
-      // otherwise picked up a small gap from earlier corrections, may not
-      // be — an admin correcting it should still be able to drag the
-      // shared boundary and reconcile the adjacent work entry exactly the
-      // way the live mobile path already does, not just when the two
-      // happen to already be bit-identical. Bounded to the break's own
-      // calendar day so a sparse timeline (no work entries at all
-      // adjacent to this break) can never reach across into an unrelated
-      // day's entry.
-      const { start: dayStart, end: dayEnd } = getDayBoundsUtc(calendarDateInAppTimezone(new Date(peekRow.started_at)));
-      const precedingPeek = await client.query(
-        `select id from time_entries
-         where employee_id = $1 and entry_type = 'work' and deleted_at is null
-           and ended_at is not null and ended_at >= $3
-           and ended_at <= (select started_at from time_entries where id = $2)
-         order by ended_at desc
-         limit 1`,
-        [peekRow.employee_id, id, dayStart]
-      );
+      const planResult = await computeBreakCorrectionPlan(client, id, startTime, endTime);
+      if (!planResult.ok) {
+        await client.query("rollback");
+        return res.status(planResult.status).json({ error: planResult.error });
+      }
+      const { employeeId, oldStart, oldEnd, newStart, newEnd, startChanged, endChanged, trims, continuations, deletions } =
+        planResult;
 
-      // Chronological lock order: preceding work entry (if any) first, then
-      // the break itself, then the following work entry (if any) last —
-      // the same order every code path in this file uses whenever it might
-      // lock more than one time_entries row, so two concurrent corrections
-      // can never deadlock against each other over lock order.
-      let preceding: { id: string; started_at: string; ended_at: string } | null = null;
-      if (precedingPeek.rows[0]) {
-        const r = await client.query(
-          `select id, started_at, ended_at from time_entries where id = $1 and deleted_at is null for update`,
-          [precedingPeek.rows[0].id]
+      const auditInsert = (entryId: string, field: "started_at" | "ended_at", oldVal: Date, newVal: Date) =>
+        client.query(
+          `insert into time_entry_corrections
+             (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+           values ($1, $2, $3, $4, $5, $6, $7)`,
+          [entryId, employeeId, req.employee!.id, field, oldVal.toISOString(), newVal.toISOString(), AUTO_CORRECTION_REASON]
         );
-        preceding = r.rows[0] ?? null;
+
+      // Trims — each clears its OWN changed boundary's actual_* value too
+      // (same "an admin correction supersedes rounding/schedule-match
+      // evidence" reasoning the break's own update below already applies,
+      // and every other correction route in this file already applies to
+      // itself) — a work entry trimmed as a side effect of this break
+      // correction is exact-administrator-entered from that moment on,
+      // not still carrying stale evidence for a "Rounded" badge that no
+      // longer describes its new boundary.
+      for (const trim of trims) {
+        const actualColumn = trim.field === "started_at" ? "actual_started_at" : "actual_ended_at";
+        await client.query(`update time_entries set ${trim.field} = $1, ${actualColumn} = null where id = $2`, [
+          trim.newValue,
+          trim.id,
+        ]);
+        await auditInsert(trim.id, trim.field, trim.oldValue, trim.newValue);
       }
 
-      const targetRes = await client.query(
-        `select id, employee_id, started_at, ended_at from time_entries
-         where id = $1 and entry_type = 'break' and deleted_at is null for update`,
-        [id]
-      );
-      const target = targetRes.rows[0];
-      if (!target || target.ended_at === null) {
-        await client.query("rollback");
-        return res
-          .status(409)
-          .json({ error: "This break changed since it was loaded — please refresh and try again" });
-      }
-
-      // Same "nearest, not necessarily exactly contiguous" reasoning as
-      // precedingPeek above, mirrored for the work entry immediately
-      // after this break — the earliest one starting at or after the
-      // break's current end, bounded to the same calendar day.
-      const followingPeek = await client.query(
-        `select id from time_entries
-         where employee_id = $1 and entry_type = 'work' and deleted_at is null
-           and started_at < $3
-           and started_at >= (select ended_at from time_entries where id = $2)
-         order by started_at asc
-         limit 1`,
-        [target.employee_id, id, dayEnd]
-      );
-      let following: { id: string; started_at: string; ended_at: string | null } | null = null;
-      if (followingPeek.rows[0]) {
-        const r = await client.query(
-          `select id, started_at, ended_at from time_entries where id = $1 and deleted_at is null for update`,
-          [followingPeek.rows[0].id]
+      // Fully-covered work entries — soft-deleted with the same audit
+      // convention every other admin-initiated deletion in this file uses.
+      for (const del of deletions) {
+        await client.query(
+          `update time_entries set deleted_at = now(), deleted_by_employee_id = $1, deletion_reason = $2 where id = $3`,
+          [req.employee!.id, BREAK_CORRECTION_SPLIT_DELETION_REASON, del.id]
         );
-        following = r.rows[0] ?? null;
+        await client.query(
+          `insert into time_entry_deletions
+             (employee_id, deleted_by_employee_id, deletion_type, affected_time_entry_ids, reason)
+           values ($1, $2, 'activity_run', $3, $4)`,
+          [employeeId, req.employee!.id, [del.id], BREAK_CORRECTION_SPLIT_DELETION_REASON]
+        );
       }
 
-      const oldStart = new Date(target.started_at);
-      const oldEnd = new Date(target.ended_at);
-      const newStart = startTime !== undefined ? new Date(startTime) : oldStart;
-      const newEnd = endTime !== undefined ? new Date(endTime) : oldEnd;
-
-      if (newStart.getTime() >= newEnd.getTime()) {
-        await client.query("rollback");
-        return res.status(422).json({ error: "Start time must be before end time" });
-      }
-      if (
-        calendarDateInAppTimezone(oldStart) !== calendarDateInAppTimezone(newStart) ||
-        calendarDateInAppTimezone(oldStart) !== calendarDateInAppTimezone(newEnd)
-      ) {
-        await client.query("rollback");
-        return res.status(422).json({ error: "The corrected times must stay on the same date as the break" });
-      }
-
-      // No overlap with any OTHER break.
-      const overlap = await client.query(
-        `select id from time_entries
-         where employee_id = $1 and entry_type = 'break' and deleted_at is null and id <> $2
-           and started_at < $3 and (ended_at is null or ended_at > $4)
-         limit 1`,
-        [target.employee_id, id, newEnd, newStart]
-      );
-      if (overlap.rows[0]) {
-        await client.query("rollback");
-        return res.status(409).json({ error: "Corrected break overlaps another break" });
+      // Split continuations — the "resumes after the break" second half,
+      // preserving activity/row/carrier/density/device exactly as the
+      // original entry had them (see BreakSplitContinuation's own
+      // comment), attributed to this correction.
+      for (const cont of continuations) {
+        await client.query(
+          `insert into time_entries
+             (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source,
+              greenhouse_row_id, carrier_id, density_type, density_count_per_row,
+              created_by_employee_id, creation_reason)
+           values ($1, $2, 'work', $3, gen_random_uuid(), $4, $5, 'manual', $6, $7, $8, $9, $10, $11)`,
+          [
+            employeeId,
+            cont.deviceId,
+            cont.activityId,
+            cont.startedAt,
+            cont.endedAt,
+            cont.greenhouseRowId,
+            cont.carrierId,
+            cont.densityType,
+            cont.densityCountPerRow,
+            req.employee!.id,
+            BREAK_CORRECTION_SPLIT_REASON,
+          ]
+        );
       }
 
-      // No overlap with any work entry either — preceding/following are
-      // excluded since they're the two entries this correction is allowed
-      // to legitimately touch/reattach to (validated separately below).
-      // This is a safety net beyond the preceding/following-specific checks
-      // — e.g. if a gap already existed further out (from an earlier
-      // deletion), a large correction shouldn't be able to reach into it.
-      const workOverlap = await client.query(
-        `select id from time_entries
-         where employee_id = $1 and entry_type = 'work' and deleted_at is null
-           and id <> all($2::uuid[])
-           and started_at < $3 and (ended_at is null or ended_at > $4)
-         limit 1`,
-        [target.employee_id, [preceding?.id, following?.id].filter((v): v is string => Boolean(v)), newEnd, newStart]
-      );
-      if (workOverlap.rows[0]) {
-        await client.query("rollback");
-        return res.status(409).json({ error: "Corrected break overlaps a work entry" });
-      }
-
-      // Timeline repair validation: a moved boundary can't erase the
-      // adjacent activity segment it would reattach to.
-      if (preceding && newStart.getTime() !== oldStart.getTime()) {
-        if (newStart.getTime() <= new Date(preceding.started_at).getTime()) {
-          await client.query("rollback");
-          return res
-            .status(422)
-            .json({ error: "Corrected start time would leave no time for the preceding activity" });
-        }
-      }
-      if (following && following.ended_at !== null && newEnd.getTime() !== oldEnd.getTime()) {
-        if (newEnd.getTime() >= new Date(following.ended_at).getTime()) {
-          await client.query("rollback");
-          return res
-            .status(422)
-            .json({ error: "Corrected end time would leave no time for the following activity" });
-        }
-      }
-      // The following work entry is still open (in progress) — there's no
-      // ended_at to bound the correction against above, but pushing its
-      // started_at into the future would still corrupt it: an in-progress
-      // entry whose clock hasn't started yet breaks its own live timer and
-      // every duration computed from it.
-      if (following && following.ended_at === null && newEnd.getTime() !== oldEnd.getTime()) {
-        if (newEnd.getTime() > Date.now()) {
-          await client.query("rollback");
-          return res
-            .status(422)
-            .json({ error: "Corrected end time cannot be in the future while the following activity is still in progress" });
-        }
-      }
-
-      // Clears auto_closed_at unconditionally on the break's own row (see
-      // the same reasoning on the end-time correction route above) — even
-      // when only started_at actually changed, the row is being touched by
-      // a real correction now, so any stale cutoff-placeholder marker no
-      // longer applies. actual_started_at/actual_ended_at are cleared only
-      // on whichever side actually changed — an admin's manual correction
-      // supersedes whatever break rounding or fixed-item schedule matching
-      // previously recorded, so a stale "Rounded" badge should no longer
-      // show against it (same convention as the work-start/work-end
-      // correction routes above).
-      const startChanged = newStart.getTime() !== oldStart.getTime();
-      const endChanged = newEnd.getTime() !== oldEnd.getTime();
+      // The break's own row — exact administrator-entered times, never
+      // rounded (auto_closed_at and whichever actual_* side actually
+      // changed are cleared, same as before), so it now displays
+      // "Corrected," not a stale "Rounded."
       await client.query(
         `update time_entries
          set started_at = $1, ended_at = $2, auto_closed_at = null,
@@ -1945,61 +1958,8 @@ router.patch(
          where id = $3`,
         [newStart, newEnd, id, startChanged, endChanged]
       );
-
-      // Every affected timestamp — the break's own boundary plus whichever
-      // adjacent work entry got dragged along with it — gets its own audit
-      // row, same shape as the existing end-time correction. Metadata this
-      // break carries (break_profile_item_id, scheduled_break_date, source,
-      // is_paid) is never touched here, preserving it exactly as the task
-      // requires for an auto-added/fixed-matched break.
-      const auditInsert = (entryId: string, field: "started_at" | "ended_at", oldVal: Date, newVal: Date) =>
-        client.query(
-          `insert into time_entry_corrections
-             (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
-           values ($1, $2, $3, $4, $5, $6, $7)`,
-          [entryId, target.employee_id, req.employee!.id, field, oldVal.toISOString(), newVal.toISOString(), AUTO_CORRECTION_REASON]
-        );
-
-      if (startChanged) {
-        await auditInsert(id, "started_at", oldStart, newStart);
-        // Only drag `preceding` along if doing so is actually warranted:
-        // either the two were already exactly contiguous going in (the
-        // live-mobile-rounding case — always keep them sharing one
-        // boundary, shrink or grow, exactly as before) or this correction
-        // reaches back far enough to genuinely overlap it (the historical-
-        // gap case this route's nearest-by-time lookup above now also
-        // finds — only reconcile when the new boundary actually collides
-        // with it). A `preceding` found with a real, untouched gap that
-        // this correction doesn't reach into is left alone — stretching
-        // it to close a gap the correction never actually crossed would
-        // silently fabricate work time that was never recorded.
-        if (preceding) {
-          const precedingEndedAt = new Date(preceding.ended_at).getTime();
-          const wasContiguous = oldStart.getTime() === precedingEndedAt;
-          const wouldOverlap = newStart.getTime() < precedingEndedAt;
-          if (wasContiguous || wouldOverlap) {
-            await client.query(`update time_entries set ended_at = $1, auto_closed_at = null where id = $2`, [
-              newStart,
-              preceding.id,
-            ]);
-            await auditInsert(preceding.id, "ended_at", new Date(preceding.ended_at), newStart);
-          }
-        }
-      }
-      if (endChanged) {
-        await auditInsert(id, "ended_at", oldEnd, newEnd);
-        // Same "only when warranted" guard as preceding above, mirrored
-        // for the other direction.
-        if (following) {
-          const followingStartedAt = new Date(following.started_at).getTime();
-          const wasContiguous = oldEnd.getTime() === followingStartedAt;
-          const wouldOverlap = newEnd.getTime() > followingStartedAt;
-          if (wasContiguous || wouldOverlap) {
-            await client.query(`update time_entries set started_at = $1 where id = $2`, [newEnd, following.id]);
-            await auditInsert(following.id, "started_at", new Date(following.started_at), newEnd);
-          }
-        }
-      }
+      if (startChanged) await auditInsert(id, "started_at", oldStart, newStart);
+      if (endChanged) await auditInsert(id, "ended_at", oldEnd, newEnd);
 
       await client.query("commit");
     } catch (err) {
@@ -2010,6 +1970,122 @@ router.patch(
     }
 
     res.json({ ok: true });
+  })
+);
+
+// "This correction will shorten Winding & Pruning from 3:12 PM to 3:00 PM
+// and remove 12 minutes from worked time." — one sentence per affected
+// work entry, built from the exact same plan PATCH /breaks/:id would
+// apply (computeBreakCorrectionPlan), inside a transaction that's ALWAYS
+// rolled back (this never writes anything) so the modal's preview can
+// never drift from what Save actually does. Locks the same rows the real
+// PATCH would, briefly, purely to get a consistent read — never held past
+// this request.
+router.post(
+  "/breaks/:id/correction-preview",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid break id" });
+    const { startTime, endTime } = req.body as { startTime?: string; endTime?: string };
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const ownerPeek = await client.query(`select employee_id from time_entries where id = $1`, [id]);
+      if (!ownerPeek.rows[0]) {
+        await client.query("rollback");
+        return res.status(404).json({ error: "Break not found" });
+      }
+      await lockEmployeeForManualEntry(client, ownerPeek.rows[0].employee_id);
+
+      const planResult = await computeBreakCorrectionPlan(client, id, startTime, endTime);
+      if (!planResult.ok) {
+        await client.query("rollback");
+        return res.status(planResult.status).json({ error: planResult.error });
+      }
+
+      // Activity names for every trimmed/deleted row (continuations
+      // already carry activityId directly) — one extra read-only query,
+      // never blocking on anything this transaction doesn't already hold.
+      const affectedIds = [...planResult.trims.map((t) => t.id), ...planResult.deletions.map((d) => d.id)];
+      const nameByEntryId = new Map<string, string>();
+      if (affectedIds.length > 0) {
+        const { rows } = await client.query(
+          `select te.id, a.name from time_entries te join activities a on a.id = te.activity_id where te.id = any($1::uuid[])`,
+          [affectedIds]
+        );
+        for (const r of rows) nameByEntryId.set(r.id, r.name);
+      }
+      const activityNameById = new Map<string, string>();
+      if (planResult.continuations.length > 0) {
+        const { rows } = await client.query(`select id, name from activities where id = any($1::uuid[])`, [
+          [...new Set(planResult.continuations.map((c) => c.activityId))],
+        ]);
+        for (const r of rows) activityNameById.set(r.id, r.name);
+      }
+
+      // Minute precision (no seconds) — a natural-language preview
+      // sentence, not the precise-to-the-second display elsewhere on the
+      // page. Reuses formatTimeInAppTimezone's own APP_TIMEZONE default
+      // implicitly by not overriding it.
+      const fmt = (d: Date) =>
+        new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: APP_TIMEZONE }).format(d);
+
+      const messages: string[] = [];
+      let workedSecondsRemoved = 0;
+      for (const trim of planResult.trims) {
+        const name = nameByEntryId.get(trim.id) ?? "this activity";
+        const removedMinutes = Math.abs(trim.newValue.getTime() - trim.oldValue.getTime()) / 60000;
+        workedSecondsRemoved += Math.abs(trim.newValue.getTime() - trim.oldValue.getTime()) / 1000;
+        if (trim.field === "ended_at") {
+          messages.push(
+            `This correction will shorten ${name} from ${fmt(trim.oldValue)} to ${fmt(trim.newValue)} and remove ${Math.round(removedMinutes)} minutes from worked time.`
+          );
+        } else {
+          messages.push(
+            `This correction will move the start of ${name} from ${fmt(trim.oldValue)} to ${fmt(trim.newValue)} and remove ${Math.round(removedMinutes)} minutes from worked time.`
+          );
+        }
+      }
+      for (const cont of planResult.continuations) {
+        // A continuation always accompanies exactly one trim on the same
+        // original entry — its own duration is given back out of that
+        // trim's naive delta above, so workedSecondsRemoved is corrected
+        // here to reflect only the portion the break genuinely covers
+        // (see this function's own header comment for the derivation).
+        workedSecondsRemoved -= (cont.endedAt.getTime() - cont.startedAt.getTime()) / 1000;
+        const name = activityNameById.get(cont.activityId) ?? "this activity";
+        messages.push(`${name} will resume at ${fmt(cont.startedAt)} after the break, ending at ${fmt(cont.endedAt)}.`);
+      }
+      for (const del of planResult.deletions) {
+        const name = nameByEntryId.get(del.id) ?? "this activity";
+        const removedMinutes = (del.endedAt.getTime() - del.startedAt.getTime()) / 60000;
+        workedSecondsRemoved += (del.endedAt.getTime() - del.startedAt.getTime()) / 1000;
+        messages.push(
+          `This correction will remove the entire ${name} entry from ${fmt(del.startedAt)} to ${fmt(del.endedAt)} (${Math.round(removedMinutes)} minutes) — it's fully covered by the corrected break.`
+        );
+      }
+
+      const breakSecondsDelta =
+        planResult.newEnd.getTime() - planResult.newStart.getTime() - (planResult.oldEnd.getTime() - planResult.oldStart.getTime());
+
+      await client.query("rollback");
+      res.json({
+        messages,
+        workedMinutesRemoved: Math.round(workedSecondsRemoved / 60),
+        breakMinutesDelta: Math.round(breakSecondsDelta / 60),
+        trimCount: planResult.trims.length,
+        deletionCount: planResult.deletions.length,
+        splitCount: planResult.continuations.length,
+      });
+    } catch (err) {
+      await client.query("rollback").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
   })
 );
 

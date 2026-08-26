@@ -83,6 +83,15 @@ vi.mock("../../lib/api", () => {
         }
         return deferred.promise;
       }
+      if (path.endsWith("/correction-preview") && options?.method === "POST") {
+        // Same simulated failure surfaces here now — the preview computes
+        // the identical plan PATCH would apply, so an invalid correction
+        // is now rejected at preview time, before any commit.
+        if (breakPatchFailure) {
+          return Promise.reject(new ApiError(breakPatchFailure.status, breakPatchFailure.message));
+        }
+        return Promise.resolve({ messages: [], workedMinutesRemoved: 0 });
+      }
       if (path.startsWith("/api/inputs/breaks/") && options?.method === "PATCH") {
         if (breakPatchFailure) {
           return Promise.reject(new ApiError(breakPatchFailure.status, breakPatchFailure.message));

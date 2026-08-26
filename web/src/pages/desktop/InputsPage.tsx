@@ -10,6 +10,7 @@ import { DeleteTimeEntryModal } from "../../components/inputs/DeleteTimeEntryMod
 import { AddWorkStartModal } from "../../components/inputs/AddWorkStartModal";
 import { AddBreakModal } from "../../components/inputs/AddBreakModal";
 import { AddActivityModal } from "../../components/inputs/AddActivityModal";
+import { BreakCorrectionPreviewModal } from "../../components/inputs/BreakCorrectionPreviewModal";
 import { api, ApiError } from "../../lib/api";
 import { useAuth } from "../../context/AuthContext";
 import { ActivityRunDto, BreakDto, DailyInputsResponse, InputsEmployee } from "../../lib/inputsTypes";
@@ -84,6 +85,20 @@ export function InputsPage() {
   const [selectedBreakId, setSelectedBreakId] = useState<string | null>(null);
   const [editingBreak, setEditingBreak] = useState<EditingBreakField | null>(null);
   const [editBreakTimeValue, setEditBreakTimeValue] = useState("");
+  // Only populated when correcting a break would trim/split/delete another
+  // entry — computed by the server (POST .../correction-preview, the exact
+  // same plan PATCH would apply) so this can never disagree with what
+  // Save actually does. A break-only correction with no such side effect
+  // skips this and saves directly, same as every other correction on this
+  // page — this is a deliberate, narrow exception to that "no confirmation
+  // modal" convention, not a reintroduction of one generally.
+  const [breakCorrectionPreview, setBreakCorrectionPreview] = useState<{
+    breakId: string;
+    field: "start" | "end";
+    newTimeIso: string;
+    messages: string[];
+    workedMinutesRemoved: number;
+  } | null>(null);
 
   const [editingWorkStart, setEditingWorkStart] = useState(false);
   const [editWorkStartTimeValue, setEditWorkStartTimeValue] = useState("");
@@ -439,7 +454,31 @@ export function InputsPage() {
     setActionInFlight(true);
     setActionError(null);
     try {
-      await api(`/api/inputs/breaks/${brk.id}`, {
+      const preview = await api<{ messages: string[]; workedMinutesRemoved: number }>(
+        `/api/inputs/breaks/${brk.id}/correction-preview`,
+        { method: "POST", body: JSON.stringify(field === "start" ? { startTime: newTimeIso } : { endTime: newTimeIso }) }
+      );
+      if (preview.messages.length > 0) {
+        // Expands into at least one other entry — pause for an explicit
+        // confirmation showing exactly what will happen (the same plan
+        // Save below applies), rather than silently trimming/splitting/
+        // deleting something the admin didn't realize was in the way.
+        setBreakCorrectionPreview({ breakId: brk.id, field, newTimeIso, ...preview });
+        setActionInFlight(false);
+        return;
+      }
+      await applyBreakCorrection(brk.id, field, newTimeIso);
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
+      setActionInFlight(false);
+    }
+  }
+
+  async function applyBreakCorrection(breakId: string, field: "start" | "end", newTimeIso: string) {
+    setActionInFlight(true);
+    setActionError(null);
+    try {
+      await api(`/api/inputs/breaks/${breakId}`, {
         method: "PATCH",
         body: JSON.stringify(field === "start" ? { startTime: newTimeIso } : { endTime: newTimeIso }),
       });
@@ -449,6 +488,7 @@ export function InputsPage() {
       setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
     } finally {
       setActionInFlight(false);
+      setBreakCorrectionPreview(null);
     }
   }
 
@@ -689,6 +729,19 @@ export function InputsPage() {
           error={deletionError}
           onConfirm={handleConfirmDeletion}
           onCancel={handleCancelDeletion}
+        />
+      )}
+
+      {breakCorrectionPreview && (
+        <BreakCorrectionPreviewModal
+          messages={breakCorrectionPreview.messages}
+          workedMinutesRemoved={breakCorrectionPreview.workedMinutesRemoved}
+          submitting={actionInFlight}
+          error={actionError}
+          onConfirm={() =>
+            applyBreakCorrection(breakCorrectionPreview.breakId, breakCorrectionPreview.field, breakCorrectionPreview.newTimeIso)
+          }
+          onCancel={() => setBreakCorrectionPreview(null)}
         />
       )}
 
