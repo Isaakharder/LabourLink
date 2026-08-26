@@ -441,6 +441,10 @@ async function main() {
       check(Array.isArray(res.body?.messages) && res.body.messages.length === 1, "12b) preview describes exactly one affected entry", res.body);
       check(/shorten/i.test(res.body?.messages?.[0] ?? "") && /QA Picking/.test(res.body?.messages?.[0] ?? ""), "12c) preview message names the activity and describes shortening it", res.body?.messages);
       check(res.body?.workedMinutesRemoved === 8, "12d) preview reports the correct worked-minutes-removed (8 minutes)", res.body);
+      // Break grows from 5 minutes (21:30-21:35) to 31 minutes (21:04-21:35)
+      // — a 26 minute delta. Regression check for a units bug where this
+      // was computed as milliseconds/60 instead of milliseconds/60000.
+      check(res.body?.breakMinutesDelta === 26, "12f) preview reports the correct break-minutes-delta (26 minutes, not a units-bug value)", res.body);
       const wPAfter = await entry(wP);
       check(new Date(wPAfter.ended_at).getTime() === zonedWallTimeToUtc(2018, 3, 10, 21, 12, 0).getTime(), "12e) preview never actually applies anything — entry unchanged", wPAfter);
     }

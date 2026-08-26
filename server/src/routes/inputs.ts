@@ -2068,14 +2068,14 @@ router.post(
         );
       }
 
-      const breakSecondsDelta =
+      const breakMillisDelta =
         planResult.newEnd.getTime() - planResult.newStart.getTime() - (planResult.oldEnd.getTime() - planResult.oldStart.getTime());
 
       await client.query("rollback");
       res.json({
         messages,
         workedMinutesRemoved: Math.round(workedSecondsRemoved / 60),
-        breakMinutesDelta: Math.round(breakSecondsDelta / 60),
+        breakMinutesDelta: Math.round(breakMillisDelta / 60000),
         trimCount: planResult.trims.length,
         deletionCount: planResult.deletions.length,
         splitCount: planResult.continuations.length,
