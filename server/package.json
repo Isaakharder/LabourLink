@@ -23,6 +23,8 @@
     "qa:cleanup": "ts-node src/scripts/cleanupOrphanedQaFixtures.ts",
     "test:qa-fixture-cleanup": "ts-node src/scripts/cleanupOrphanedQaFixtures.test.ts",
     "test:qa-cleanup-after-failure": "ts-node src/scripts/qaCleanupAfterFailure.test.ts",
+    "test:work-permits": "ts-node src/lib/workPermits.test.ts",
+    "test:work-permits-routes": "ts-node src/routes/workPermits.routes.test.ts",
     "test:inputs-workday-totals": "ts-node src/routes/inputs.workdayTotals.test.ts",
     "test:carrier-bulk": "ts-node src/lib/carrierBulk.test.ts",
     "test:daily-cutoff": "ts-node src/lib/dailyCutoff.test.ts",

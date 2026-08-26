@@ -4,6 +4,7 @@ import { Avatar } from "./Avatar";
 import { api, ApiError } from "../../lib/api";
 import { Employee, EmployeeBreakProfile, GENDERS, LANGUAGES, NATIONALITIES } from "../../lib/employeeTypes";
 import { ActivityGroup } from "../../lib/activityTypes";
+import { DEFAULT_WORK_PERMIT_LEAD_MONTHS, WORK_PERMIT_LEAD_MONTH_OPTIONS } from "../../lib/workPermitTypes";
 
 interface EmployeeFormModalProps {
   employee: Employee | null; // null = create mode
@@ -29,6 +30,12 @@ interface FormState {
   phoneNumber: string;
   notes: string;
   activityGroupIds: Set<string>;
+  workPermitExpiryDate: string;
+  // "6" | "1" | "2" | "3" | "12" | "custom" — kept as the select's own
+  // string value rather than splitting into two booleans, same reasoning
+  // BreakProfileEditor.tsx's direction select uses.
+  workPermitLeadChoice: string;
+  workPermitLeadCustomDays: string;
 }
 
 const SECURITY_ROLES = [
@@ -66,6 +73,12 @@ function toFormState(employee: Employee | null): FormState {
     phoneNumber: employee?.phoneNumber ?? "",
     notes: employee?.notes ?? "",
     activityGroupIds: new Set(employee?.activityGroups.map((g) => g.id) ?? []),
+    workPermitExpiryDate: employee?.workPermitExpiryDate ?? "",
+    workPermitLeadChoice:
+      employee?.workPermitNotifyLeadDays != null
+        ? "custom"
+        : String(employee?.workPermitNotifyLeadMonths ?? DEFAULT_WORK_PERMIT_LEAD_MONTHS),
+    workPermitLeadCustomDays: employee?.workPermitNotifyLeadDays != null ? String(employee.workPermitNotifyLeadDays) : "",
   };
 }
 
@@ -158,6 +171,12 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
     if (form.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) {
       next.email = "Email address is not valid";
     }
+    if (form.workPermitExpiryDate && form.workPermitLeadChoice === "custom") {
+      const n = Number(form.workPermitLeadCustomDays);
+      if (!form.workPermitLeadCustomDays || !Number.isInteger(n) || n < 1 || n > 3650) {
+        next.workPermitNotifyLeadDays = "Enter a whole number of days between 1 and 3650";
+      }
+    }
     setErrors(next);
     return Object.keys(next).length === 0;
   }
@@ -197,6 +216,15 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
         email: form.email.trim() || null,
         phoneNumber: form.phoneNumber.trim() || null,
         notes: form.notes.trim() || null,
+        workPermitExpiryDate: form.workPermitExpiryDate || null,
+        // Server clears both when workPermitExpiryDate is null regardless
+        // of what's sent here — see employees.ts's resolveWorkPermitUpdate
+        // — so these are only meaningful when a date is present.
+        ...(form.workPermitExpiryDate
+          ? form.workPermitLeadChoice === "custom"
+            ? { workPermitNotifyLeadDays: Number(form.workPermitLeadCustomDays) }
+            : { workPermitNotifyLeadMonths: Number(form.workPermitLeadChoice) }
+          : {}),
       };
 
       let employeeId: string;
@@ -394,6 +422,41 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
               />
               {errors.startDate && <span className="field-error">{errors.startDate}</span>}
             </label>
+            <label>
+              Work Permit Expiry Date
+              <input
+                type="date"
+                value={form.workPermitExpiryDate}
+                onChange={(e) => set("workPermitExpiryDate", e.target.value)}
+              />
+              {errors.workPermitExpiryDate && <span className="field-error">{errors.workPermitExpiryDate}</span>}
+            </label>
+            {form.workPermitExpiryDate && (
+              <label>
+                Notify me before
+                <select value={form.workPermitLeadChoice} onChange={(e) => set("workPermitLeadChoice", e.target.value)}>
+                  {WORK_PERMIT_LEAD_MONTH_OPTIONS.map((m) => (
+                    <option key={m} value={m}>
+                      {m} month{m === 1 ? "" : "s"}
+                    </option>
+                  ))}
+                  <option value="custom">Custom number of days</option>
+                </select>
+              </label>
+            )}
+            {form.workPermitExpiryDate && form.workPermitLeadChoice === "custom" && (
+              <label>
+                Custom lead time (days)
+                <input
+                  type="number"
+                  min={1}
+                  max={3650}
+                  value={form.workPermitLeadCustomDays}
+                  onChange={(e) => set("workPermitLeadCustomDays", e.target.value)}
+                />
+                {errors.workPermitNotifyLeadDays && <span className="field-error">{errors.workPermitNotifyLeadDays}</span>}
+              </label>
+            )}
             <label>
               Job group
               <input type="text" value={form.jobGroup} onChange={(e) => set("jobGroup", e.target.value)} />

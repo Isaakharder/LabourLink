@@ -8,6 +8,14 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { normalizePhoneNumber } from "../lib/phone";
 import { deleteEmployeePhoto, getSignedPhotoUrl, getSignedPhotoUrls, uploadEmployeePhoto } from "../lib/storage";
 import { addEmployeeToActivityGroup, removeEmployeeFromActivityGroup } from "../lib/activityGroupAssignment";
+import {
+  DEFAULT_WORK_PERMIT_LEAD_MONTHS,
+  MAX_WORK_PERMIT_LEAD_DAYS,
+  MIN_WORK_PERMIT_LEAD_DAYS,
+  isValidWorkPermitLeadDays,
+  isValidWorkPermitLeadMonths,
+  recordWorkPermitHistory,
+} from "../lib/workPermits";
 
 const router = Router();
 
@@ -276,6 +284,137 @@ function validateUpdate(body: Record<string, unknown>):
   return { data };
 }
 
+// -- work permit fields -------------------------------------------------
+//
+// Deliberately kept separate from EmployeeFields/columnMap above — unlike
+// every other field, these three have real cross-field behavior (a
+// changed expiry date must write an audit history row; the notify lead
+// must default server-side when an expiry is entered with none; clearing
+// the expiry must also clear the lead settings, per
+// chk_employees_work_permit_lead_set_with_expiry) that a generic
+// "whatever keys are present become SET clauses" loop can't express.
+
+interface WorkPermitPatch {
+  // Absent = "not touched by this request." Present-and-null = "clear it."
+  expiryDate?: string | null;
+  leadMonths?: number | null;
+  leadDays?: number | null;
+}
+
+// Shape-only validation (is this a valid date / one of the allowed month
+// presets / a sensible day count, and not both a preset AND custom days at
+// once) — independent of any existing row, so usable by both create
+// (no prior row) and update.
+function parseWorkPermitFields(body: Record<string, unknown>): { errors: Record<string, string> } | { data: WorkPermitPatch } {
+  const errors: Record<string, string> = {};
+  const data: WorkPermitPatch = {};
+
+  if ("workPermitExpiryDate" in body) {
+    const raw = body.workPermitExpiryDate;
+    if (raw == null || String(raw).trim() === "") {
+      data.expiryDate = null;
+    } else if (!isValidDate(raw)) {
+      errors.workPermitExpiryDate = "Work permit expiry date is not a valid date";
+    } else {
+      data.expiryDate = raw as string;
+    }
+  }
+  if ("workPermitNotifyLeadMonths" in body) {
+    const raw = body.workPermitNotifyLeadMonths;
+    if (raw == null || raw === "") {
+      data.leadMonths = null;
+    } else {
+      const n = Number(raw);
+      if (!isValidWorkPermitLeadMonths(n)) errors.workPermitNotifyLeadMonths = "Lead time must be 1, 2, 3, 6, or 12 months";
+      else data.leadMonths = n;
+    }
+  }
+  if ("workPermitNotifyLeadDays" in body) {
+    const raw = body.workPermitNotifyLeadDays;
+    if (raw == null || raw === "") {
+      data.leadDays = null;
+    } else {
+      const n = Number(raw);
+      if (!isValidWorkPermitLeadDays(n)) {
+        errors.workPermitNotifyLeadDays = `Custom lead time must be a whole number of days between ${MIN_WORK_PERMIT_LEAD_DAYS} and ${MAX_WORK_PERMIT_LEAD_DAYS}`;
+      } else {
+        data.leadDays = n;
+      }
+    }
+  }
+  if (data.leadMonths != null && data.leadDays != null) {
+    errors.workPermitNotifyLeadDays = "Choose either a preset lead time or a custom number of days, not both";
+  }
+
+  if (Object.keys(errors).length) return { errors };
+  return { data };
+}
+
+interface CurrentWorkPermit {
+  expiryDate: string | null;
+  leadMonths: number | null;
+  leadDays: number | null;
+}
+
+// Resolves a shape-validated WorkPermitPatch (parseWorkPermitFields above)
+// against whatever the row currently has (null current = a brand-new
+// employee being created) into the actual columns to write plus, if the
+// expiry date is actually changing, the history row to record — every
+// caller (create and update) shares this exact resolution so "the server
+// defaults to 6 months" and "every expiry change gets history" can never
+// drift between the two entry points.
+function resolveWorkPermitUpdate(
+  patch: WorkPermitPatch,
+  current: CurrentWorkPermit | null
+): { errors: Record<string, string> } | { columns: Record<string, unknown>; historyWrite: { old: string | null; new: string | null } | null } {
+  const columns: Record<string, unknown> = {};
+  let historyWrite: { old: string | null; new: string | null } | null = null;
+
+  const touchesExpiry = "expiryDate" in patch;
+  const touchesLead = "leadMonths" in patch || "leadDays" in patch;
+  const currentExpiry = current?.expiryDate ?? null;
+
+  if (touchesExpiry) {
+    const newExpiry = patch.expiryDate ?? null;
+    columns.work_permit_expiry_date = newExpiry;
+    if (newExpiry !== currentExpiry) {
+      historyWrite = { old: currentExpiry, new: newExpiry };
+    }
+
+    if (newExpiry === null) {
+      // Clearing the (optional) expiry date stops alerts and clears the
+      // now-meaningless lead settings alongside it — required by
+      // chk_employees_work_permit_lead_set_with_expiry regardless.
+      columns.work_permit_notify_lead_months = null;
+      columns.work_permit_notify_lead_days = null;
+    } else if (touchesLead && (patch.leadMonths != null || patch.leadDays != null)) {
+      columns.work_permit_notify_lead_months = patch.leadMonths ?? null;
+      columns.work_permit_notify_lead_days = patch.leadDays ?? null;
+    } else if (currentExpiry == null) {
+      // First time an expiry is ever being set on this employee, with no
+      // explicit lead in this same request — server-side default.
+      columns.work_permit_notify_lead_months = DEFAULT_WORK_PERMIT_LEAD_MONTHS;
+      columns.work_permit_notify_lead_days = null;
+    }
+    // else: an already-tracked permit's date is being corrected and lead
+    // wasn't touched — leave the existing lead columns alone entirely
+    // (not included in `columns`), preserving whatever was already set.
+  } else if (touchesLead) {
+    // Changing only the lead preference, expiry date untouched.
+    if (patch.leadMonths == null && patch.leadDays == null) {
+      if (currentExpiry != null) {
+        return { errors: { workPermitNotifyLeadDays: "A lead time is required while a work permit expiry date is set" } };
+      }
+      // No expiry either way — nothing meaningful to store.
+    } else {
+      columns.work_permit_notify_lead_months = patch.leadMonths ?? null;
+      columns.work_permit_notify_lead_days = patch.leadDays ?? null;
+    }
+  }
+
+  return { columns, historyWrite };
+}
+
 // -- shared query pieces -----------------------------------------------------
 
 // settings_pin_hash is deliberately never selected — not just omitted at
@@ -291,6 +430,8 @@ const SELECT_COLUMNS = `
   e.is_active, e.employee_number, e.nationality,
   e.preferred_language, e.notes, e.profile_photo_path, e.security_role_id, e.team_role_id,
   e.break_profile_id, bp.name as break_profile_name, bp.is_active as break_profile_is_active,
+  to_char(e.work_permit_expiry_date, 'YYYY-MM-DD') as work_permit_expiry_date,
+  e.work_permit_notify_lead_months, e.work_permit_notify_lead_days,
   e.created_at, e.updated_at,
   sr.name as security_role, tr.name as team_role,
   dev.device_id, dev.device_name,
@@ -346,6 +487,13 @@ function serializeEmployee(row: any, photoUrl: string | null, includeNotes: bool
       : null,
     device: row.device_id ? { id: row.device_id, name: row.device_name } : null,
     activityGroups: row.activity_groups,
+    // Viewing is already Administrator/Manager-only on every route this
+    // serializer feeds (see the requireRole gates on GET / and GET /:id) —
+    // the same restriction the brief asks permit fields to share, so no
+    // separate includePermit flag is needed the way includeNotes has one.
+    workPermitExpiryDate: row.work_permit_expiry_date,
+    workPermitNotifyLeadMonths: row.work_permit_notify_lead_months,
+    workPermitNotifyLeadDays: row.work_permit_notify_lead_days,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -450,6 +598,17 @@ router.post(
     if ("errors" in result) return res.status(400).json({ errors: result.errors });
     const d = result.data;
 
+    const permitParse = parseWorkPermitFields(req.body ?? {});
+    if ("errors" in permitParse) return res.status(400).json({ errors: permitParse.errors });
+    // A brand-new employee has no prior row — resolveWorkPermitUpdate's
+    // "first time being set" branch is what supplies the 6-month default
+    // here too, the exact same resolution PATCH uses.
+    const permitResolved = resolveWorkPermitUpdate(permitParse.data, null);
+    if ("errors" in permitResolved) return res.status(400).json({ errors: permitResolved.errors });
+    const permitExpiryDate = (permitResolved.columns.work_permit_expiry_date as string | null | undefined) ?? null;
+    const permitLeadMonths = (permitResolved.columns.work_permit_notify_lead_months as number | null | undefined) ?? null;
+    const permitLeadDays = (permitResolved.columns.work_permit_notify_lead_days as number | null | undefined) ?? null;
+
     if (d.breakProfileId) {
       const profileCheck = await pool.query("select is_active from break_profiles where id = $1", [
         d.breakProfileId,
@@ -464,12 +623,13 @@ router.post(
         `insert into employees
            (first_name, last_name, gender, date_of_birth, email, phone_number, job_group,
             start_date, is_active, employee_number, nationality, preferred_language, notes,
-            security_role_id, team_role_id, settings_pin_hash, break_profile_id)
+            security_role_id, team_role_id, settings_pin_hash, break_profile_id,
+            work_permit_expiry_date, work_permit_notify_lead_months, work_permit_notify_lead_days)
          values
            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
             coalesce($14, (select id from security_roles where name = 'Employee')),
             coalesce($15, (select id from team_roles where name = 'Team Member')),
-            null, $16)
+            null, $16, $17, $18, $19)
          returning id`,
         [
           d.firstName,
@@ -488,8 +648,15 @@ router.post(
           d.securityRoleId,
           d.teamRoleId,
           d.breakProfileId,
+          permitExpiryDate,
+          permitLeadMonths,
+          permitLeadDays,
         ]
       );
+
+      if (permitExpiryDate) {
+        await recordWorkPermitHistory(pool, rows[0].id, null, permitExpiryDate, req.employee!.id, null);
+      }
 
       const { rows: full } = await pool.query(
         `select ${SELECT_COLUMNS} ${FROM_JOINS} where e.id = $1`,
@@ -527,6 +694,10 @@ router.patch(
     if ("errors" in result) return res.status(400).json({ errors: result.errors });
     const d = result.data;
 
+    const permitParse = parseWorkPermitFields(req.body ?? {});
+    if ("errors" in permitParse) return res.status(400).json({ errors: permitParse.errors });
+    const touchesWorkPermit = Object.keys(permitParse.data).length > 0;
+
     // A *new* break profile assignment (different from what's already
     // stored) must reference an active profile — leaving the value
     // unchanged is always allowed even if that profile has since gone
@@ -544,6 +715,31 @@ router.patch(
           return res.status(400).json({ errors: { breakProfileId: "Break profile is not active" } });
         }
       }
+    }
+
+    // Resolved against the CURRENT row (needed for the server-side 6-month
+    // default, and to know whether the expiry date is actually changing —
+    // only a real change gets a history row) — see resolveWorkPermitUpdate's
+    // own comment for why this can't be a generic columnMap entry.
+    let permitColumns: Record<string, unknown> = {};
+    let permitHistoryWrite: { old: string | null; new: string | null } | null = null;
+    if (touchesWorkPermit) {
+      const currentRes = await pool.query(
+        `select to_char(work_permit_expiry_date, 'YYYY-MM-DD') as expiry_date,
+                work_permit_notify_lead_months, work_permit_notify_lead_days
+         from employees where id = $1`,
+        [id]
+      );
+      if (!currentRes.rows[0]) return res.status(404).json({ error: "Employee not found" });
+      const current = {
+        expiryDate: currentRes.rows[0].expiry_date as string | null,
+        leadMonths: currentRes.rows[0].work_permit_notify_lead_months as number | null,
+        leadDays: currentRes.rows[0].work_permit_notify_lead_days as number | null,
+      };
+      const resolved = resolveWorkPermitUpdate(permitParse.data, current);
+      if ("errors" in resolved) return res.status(400).json({ errors: resolved.errors });
+      permitColumns = resolved.columns;
+      permitHistoryWrite = resolved.historyWrite;
     }
 
     const columnMap: Record<keyof EmployeeFields, string> = {
@@ -566,12 +762,16 @@ router.patch(
     };
 
     const keys = Object.keys(d) as (keyof EmployeeFields)[];
-    if (keys.length === 0) {
+    const permitColumnNames = Object.keys(permitColumns);
+    if (keys.length === 0 && permitColumnNames.length === 0) {
       return res.status(400).json({ error: "No fields to update" });
     }
 
-    const setClauses = keys.map((k, i) => `${columnMap[k]} = $${i + 1}`);
-    const values = keys.map((k) => d[k]);
+    const values: unknown[] = [...keys.map((k) => d[k]), ...permitColumnNames.map((c) => permitColumns[c])];
+    const setClauses = [
+      ...keys.map((k, i) => `${columnMap[k]} = $${i + 1}`),
+      ...permitColumnNames.map((c, i) => `${c} = $${keys.length + i + 1}`),
+    ];
     setClauses.push("updated_at = now()");
 
     const client = await pool.connect();
@@ -579,12 +779,16 @@ router.patch(
       await client.query("begin");
 
       const { rows } = await client.query(
-        `update employees set ${setClauses.join(", ")} where id = $${keys.length + 1} returning id`,
+        `update employees set ${setClauses.join(", ")} where id = $${values.length + 1} returning id`,
         [...values, id]
       );
       if (!rows[0]) {
         await client.query("rollback");
         return res.status(404).json({ error: "Employee not found" });
+      }
+
+      if (permitHistoryWrite) {
+        await recordWorkPermitHistory(client, id, permitHistoryWrite.old, permitHistoryWrite.new, req.employee!.id, null);
       }
 
       // Deactivating an employee must not leave them reachable through a

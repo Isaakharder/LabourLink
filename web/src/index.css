@@ -6219,3 +6219,195 @@ input {
 .dashboard-settings-activity-inactive {
   opacity: 0.6;
 }
+
+/* ---------- Work Permit Alerts (Dashboard) ---------- */
+
+.work-permit-alerts-section {
+  margin-bottom: 1.25rem;
+}
+
+.work-permit-alerts-section h2 {
+  margin: 0 0 0.65rem;
+  font-size: 1.05rem;
+}
+
+.work-permit-alerts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.work-permit-alert-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  border-left-width: 5px;
+}
+
+/* More than 90 days remaining: neutral/amber. */
+.work-permit-alert-amber {
+  border-left-color: #f59e0b;
+}
+/* 30-90 days remaining: orange. */
+.work-permit-alert-orange {
+  border-left-color: #ea580c;
+}
+/* Less than 30 days remaining, and expired: red. */
+.work-permit-alert-red,
+.work-permit-alert-expired {
+  border-left-color: var(--color-danger);
+}
+.work-permit-alert-expired {
+  background: color-mix(in srgb, var(--color-danger) 6%, var(--color-surface));
+}
+
+.work-permit-alert-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.work-permit-alert-headline {
+  margin: 0 0 0.15rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+.work-permit-alert-expired .work-permit-alert-headline {
+  color: var(--color-danger);
+}
+
+.work-permit-alert-detail {
+  margin: 0 0 0.15rem;
+  font-size: 0.88rem;
+}
+
+.work-permit-alert-meta {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--color-muted);
+}
+
+.work-permit-alert-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.work-permit-alert-actions button {
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.work-permit-alert-actions button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+@media (max-width: 700px) {
+  .work-permit-alert-card {
+    flex-direction: column;
+  }
+  .work-permit-alert-actions {
+    flex-direction: row;
+    width: 100%;
+  }
+  .work-permit-alert-actions button {
+    flex: 1;
+  }
+}
+
+.work-permit-renew-form,
+.work-permit-cancel-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.work-permit-renew-form label,
+.work-permit-cancel-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.work-permit-renew-form input,
+.work-permit-cancel-form textarea {
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+
+/* ---------- Work Permit compact status (employee profile) ---------- */
+
+.work-permit-status {
+  font-size: 0.85rem;
+}
+
+.work-permit-status-none {
+  color: var(--color-muted);
+}
+
+.work-permit-status-valid {
+  margin: 0;
+}
+
+.work-permit-status-expired {
+  margin: 0;
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.work-permit-status-acknowledged,
+.work-permit-status-cancelled {
+  margin: 0.15rem 0 0;
+  color: var(--color-muted);
+  font-size: 0.8rem;
+}
+
+.work-permit-history-toggle {
+  margin-top: 0.4rem;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-primary);
+  font-size: 0.8rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.work-permit-history-list {
+  margin-top: 0.5rem;
+}
+
+.work-permit-history-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.work-permit-history-list li {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.8rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.work-permit-history-meta {
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}

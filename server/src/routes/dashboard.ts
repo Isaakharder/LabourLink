@@ -9,6 +9,7 @@ import { getBlockProgressForEmployees, BlockProgress } from "../lib/dashboardBlo
 import { aggregateDensitySpeed } from "../lib/densitySpeed";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { getSignedPhotoUrls } from "../lib/storage";
+import { getActiveWorkPermitAlerts } from "../lib/workPermits";
 
 const router = Router();
 
@@ -59,6 +60,50 @@ router.get("/", requireAuth, asyncHandler(async (_req, res) => {
     devicesWaitingForSetup: Number(row.devices_waiting_for_setup),
   });
 }));
+
+// Work Permit Alerts — sensitive HR/immigration-status data, so unlike the
+// summary counts above (GET /, requireAuth only), this is restricted to
+// Administrator/Manager server-side, not just hidden in the Dashboard UI —
+// per the brief's explicit "only Administrators and Managers may view or
+// act on Work Permit Alerts."
+router.get(
+  "/work-permit-alerts",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (_req, res) => {
+    const today = calendarDateInAppTimezone(new Date());
+    const alerts = await getActiveWorkPermitAlerts(pool, today);
+
+    // getActiveWorkPermitAlerts never resolves signed photo URLs itself
+    // (it's a pure data-computation layer, no storage dependency) — this
+    // route resolves them, same "route resolves storage, lib computes
+    // data" split employees.ts already uses.
+    const employeeIdToPath = new Map<string, string>();
+    if (alerts.length > 0) {
+      const { rows } = await pool.query(
+        `select id, profile_photo_path from employees where id = any($1::uuid[])`,
+        [alerts.map((a) => a.employeeId)]
+      );
+      for (const r of rows) {
+        if (r.profile_photo_path) employeeIdToPath.set(r.id, r.profile_photo_path);
+      }
+    }
+    const urlMap = await getSignedPhotoUrls([...employeeIdToPath.values()]);
+
+    res.json({
+      alerts: alerts.map((a) => ({
+        employeeId: a.employeeId,
+        employeeName: `${a.firstName} ${a.lastName}`,
+        photoUrl: employeeIdToPath.has(a.employeeId) ? urlMap.get(employeeIdToPath.get(a.employeeId)!) ?? null : null,
+        expiryDate: a.expiryDate,
+        remainingDays: a.remainingDays,
+        severity: a.severity,
+        leadMonths: a.leadMonths,
+        leadDays: a.leadDays,
+      })),
+    });
+  })
+);
 
 // -----------------------------------------------------------------------
 // Dashboard settings: which activities' currently-active employees appear

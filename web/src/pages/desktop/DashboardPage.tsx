@@ -4,6 +4,7 @@ import { RowStemCard } from "../../components/dashboard/RowStemCard";
 import { PickingCard } from "../../components/dashboard/PickingCard";
 import { DashboardSettingsPanel } from "../../components/dashboard/DashboardSettingsPanel";
 import { BinCompletionsPanel } from "../../components/dashboard/BinCompletionsPanel";
+import { WorkPermitAlertsSection } from "../../components/dashboard/WorkPermitAlertsSection";
 import { useAuth } from "../../context/AuthContext";
 import { api, ApiError } from "../../lib/api";
 import { DashboardCard, GetDashboardCardsResponse } from "../../lib/dashboardTypes";
@@ -88,6 +89,8 @@ export function DashboardPage() {
           )}
         </div>
       </div>
+
+      {canEdit && <WorkPermitAlertsSection />}
 
       {loadError && <p className="error-text">{loadError}</p>}
 

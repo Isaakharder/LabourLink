@@ -9,6 +9,7 @@ import { PageHeader } from "../../components/layout/PageHeader";
 import { useNavigate } from "react-router-dom";
 import { Avatar } from "../../components/employees/Avatar";
 import { EmployeeFormModal } from "../../components/employees/EmployeeFormModal";
+import { WorkPermitStatus } from "../../components/employees/WorkPermitStatus";
 import { api, ApiError } from "../../lib/api";
 import { Employee } from "../../lib/employeeTypes";
 import { useAuth } from "../../context/AuthContext";
@@ -357,6 +358,12 @@ export function EmployeesPage() {
                         <div>
                           <dt>Work Start Date</dt>
                           <dd>{formatDate(selectedEmployee.startDate)}</dd>
+                        </div>
+                        <div>
+                          <dt>Work Permit</dt>
+                          <dd>
+                            <WorkPermitStatus employee={selectedEmployee} />
+                          </dd>
                         </div>
                       </dl>
                     </section>
