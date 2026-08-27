@@ -14,7 +14,6 @@ import {
 } from "../lib/localSessionState";
 import { resolveDisplayLabels } from "../lib/referenceDataCache";
 import { hasSyncProblem, onSyncSettled, trySyncSoon } from "../lib/syncEngine";
-import { QuestionAnswer } from "../lib/activityQuestionTypes";
 import { RecentJob } from "../components/mobile/RecentJobsCard";
 import { uuid } from "../lib/uuid";
 
@@ -29,6 +28,15 @@ import { uuid } from "../lib/uuid";
 // for those, and generous enough (well above the journal's own worst-case
 // ~6s) that it only ever fires when something is genuinely stuck.
 const LOCAL_COMMIT_TIMEOUT_MS = 8000;
+
+// The wire shape submitQuestionFlow actually sends and the server actually
+// expects (see performInternal's own comment on the extraction bug this
+// fixes) — an array of { questionId, greenhouseRowId } / { questionId,
+// carrierId } entries, no questionType field. Opaque JSON storage from
+// here on (localEventStore.ts's own answers column is untyped) — this
+// alias exists so commitLocalEvent's signature and endBreak's passthrough
+// read accurately, not because anything downstream parses the shape.
+type StoredAnswers = { questionId: string; greenhouseRowId?: string; carrierId?: string }[] | null;
 
 class LocalCommitTimeoutError extends Error {
   constructor() {
@@ -512,7 +520,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         activityId?: string | null;
         greenhouseRowId?: string | null;
         carrierId?: string | null;
-        answers?: Record<string, QuestionAnswer> | null;
+        answers?: StoredAnswers;
       },
       display: LocalDisplayInfo,
       clientEventId: string
@@ -561,7 +569,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         activityId?: string | null;
         greenhouseRowId?: string | null;
         carrierId?: string | null;
-        answers?: Record<string, QuestionAnswer> | null;
+        answers?: StoredAnswers;
       },
       display: LocalDisplayInfo,
       clientEventId: string = uuid()
@@ -580,9 +588,25 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
       setError(null);
       logCheckpoint(clientEventId, "perform:tap-handler-entered", { path });
       try {
-        const answers = (body.answers as Record<string, QuestionAnswer> | undefined) ?? {};
-        const rowAnswer = Object.values(answers).find((a) => a.questionType === "greenhouse_row");
-        const carrierAnswer = Object.values(answers).find((a) => a.questionType === "carrier");
+        // body.answers is the WIRE shape submitQuestionFlow builds
+        // (answersPayload) and the server itself expects (see
+        // mobileTime.ts's own answers type): an array of
+        // { questionId, greenhouseRowId } / { questionId, carrierId }
+        // entries with NO questionType field — the type is inferred from
+        // which id property is present, both client and server side. Real
+        // bug this fixes: this extraction used to look for `a.questionType
+        // === "greenhouse_row"`, a field that is never present on the
+        // actual wire payload, so greenhouseRowId/carrierId here were
+        // ALWAYS null regardless of what was actually answered — every
+        // offline job start (not just a same-activity single-question
+        // edit) showed the raw "Where?"/"Which Carrier?" placeholders
+        // instead of the just-picked row/carrier, correcting itself only
+        // once a real /api/mobile/me response arrived.
+        const answers = Array.isArray(body.answers)
+          ? (body.answers as { questionId: string; greenhouseRowId?: string; carrierId?: string }[])
+          : [];
+        const rowAnswer = answers.find((a) => typeof a.greenhouseRowId === "string");
+        const carrierAnswer = answers.find((a) => typeof a.carrierId === "string");
         const activityId = (body.activityId as string | undefined) ?? null;
         const greenhouseRowId = rowAnswer?.greenhouseRowId ?? null;
         const carrierId = carrierAnswer?.carrierId ?? null;
@@ -703,11 +727,11 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
                 greenhouseRowId: interrupted?.greenhouseRowId ?? null,
                 carrierId: interrupted?.carrierId ?? null,
                 // Carried over verbatim from the interrupted run's own event —
-                // already a Record<string, QuestionAnswer> when it came from a
+                // already the StoredAnswers wire shape when it came from a
                 // work_start/activity_switch, just typed generically on
                 // LocalEvent (localEventStore.ts has no reason to know about
-                // QuestionAnswer's shape).
-                answers: (interrupted?.answers as Record<string, QuestionAnswer> | null | undefined) ?? null,
+                // this shape).
+                answers: (interrupted?.answers as StoredAnswers | undefined) ?? null,
               },
               display,
               clientEventId

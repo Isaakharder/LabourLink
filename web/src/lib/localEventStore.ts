@@ -34,7 +34,12 @@ export interface NewLocalEvent {
   activityId?: string | null;
   greenhouseRowId?: string | null;
   carrierId?: string | null;
-  answers?: Record<string, unknown> | null;
+  // Opaque JSON storage — this store never parses it, just round-trips it
+  // (JSON.stringify on write, JSON.parse on read). The actual runtime shape
+  // is an array of { questionId, greenhouseRowId } / { questionId,
+  // carrierId } entries (see WorkSessionContext.tsx's StoredAnswers) —
+  // typed loosely here since nothing in this file cares.
+  answers?: Record<string, unknown> | unknown[] | null;
   densitySnapshot?: { densityType: "plants" | "stems"; densityCountPerRow: number } | null;
   configRevision?: string | null;
   // Caller-supplied stable id for retry-safety — see WorkSessionContext.tsx's

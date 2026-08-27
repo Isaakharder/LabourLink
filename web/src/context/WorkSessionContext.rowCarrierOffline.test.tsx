@@ -11,6 +11,21 @@
 // out specifically: same-render-cycle display, a hanging /me, a failed
 // background reconciliation, and reconnection not disturbing the locally
 // selected assignment or timestamps.
+//
+// A SECOND, deeper defect surfaced during physical device testing of the
+// v1.4 build above: even the very FIRST offline selection (a complete
+// row+carrier pick, not a same-activity edit) showed the placeholders —
+// on real hardware, the very first pending event's own greenhouse_row_id/
+// carrier_id columns were null despite the full answers array being
+// correct. Root cause (see WorkSessionContext.tsx's performInternal): the
+// extraction looked for `a.questionType === "greenhouse_row"` on each
+// answers entry, but the actual wire shape submitQuestionFlow sends (and
+// the server itself expects) never carries a questionType field — the
+// type is inferred from which id property is present. The `.find()` never
+// matched, so greenhouseRowId/carrierId were unconditionally null on
+// EVERY row/carrier-based activity_switch/work_start, not just a
+// follow-up edit. The last describe block below locks this in directly
+// against performInternal's own extraction, not just its downstream fold.
 // @vitest-environment jsdom
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -377,5 +392,85 @@ describe("offline row/carrier assignment stays visible without a server round tr
     expect(result.current.me?.currentActivity?.row?.id).toBe(ROW_644_ID);
     expect(result.current.me?.currentActivity?.carrier?.id).toBe(BIN_14_ID);
     expect(result.current.me?.currentActivity?.startedAt).toBe("2026-08-27T14:05:00.000Z");
+  });
+});
+
+describe("performInternal correctly extracts row/carrier from the REAL wire-format answers array", () => {
+  it("the very first offline selection (Row 644, Bin 11) — a complete pick, not an edit — stores the real ids on the local event, not null", async () => {
+    const { result } = renderHook(() => useWorkSession(), { wrapper });
+    await waitFor(() => expect(result.current.verified).toBe(true));
+
+    mockAppendEvent.mockResolvedValueOnce({
+      deviceId: "dev-1",
+      employeeId: "emp-1",
+      eventType: "work_start",
+      occurredAtUtc: "2026-08-27T14:00:00.000Z",
+      activityId: ACTIVITY_ID,
+      greenhouseRowId: ROW_644_ID,
+      carrierId: BIN_11_ID,
+      clientEventId: "evt-first-pick",
+      deviceSeq: 1,
+      localTzOffsetMinutes: 0,
+      createdAtLocal: "2026-08-27T14:00:00.000Z",
+      syncStatus: "pending",
+      syncAttempts: 0,
+      lastSyncError: null,
+      serverResultJson: null,
+    });
+
+    // The exact wire shape submitQuestionFlow's answersPayload builds and
+    // POST /api/mobile/time-entries/work actually expects — no
+    // questionType field on either entry.
+    await act(async () => {
+      await result.current.perform("/api/mobile/time-entries/work", {
+        activityId: ACTIVITY_ID,
+        answers: [
+          { questionId: "q-row", greenhouseRowId: ROW_644_ID },
+          { questionId: "q-carrier", carrierId: BIN_11_ID },
+        ],
+      });
+    });
+
+    // Asserts on what performInternal actually COMPUTED and handed to the
+    // store, not just what a mocked return value says — this is what
+    // catches the real bug (the extraction silently produced null/null
+    // here before the fix, even though appendEvent would have happily
+    // stored whatever it was given).
+    expect(mockAppendEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ greenhouseRowId: ROW_644_ID, carrierId: BIN_11_ID })
+    );
+    expect(result.current.me?.currentActivity?.row?.id).toBe(ROW_644_ID);
+    expect(result.current.me?.currentActivity?.carrier?.id).toBe(BIN_11_ID);
+  });
+
+  it("an answers payload that is not an array (e.g. {}) is treated as no answers, never throws, and still commits the event", async () => {
+    const { result } = renderHook(() => useWorkSession(), { wrapper });
+    await waitFor(() => expect(result.current.verified).toBe(true));
+
+    mockAppendEvent.mockResolvedValueOnce({
+      deviceId: "dev-1",
+      employeeId: "emp-1",
+      eventType: "work_start",
+      occurredAtUtc: "2026-08-27T14:00:00.000Z",
+      activityId: "activity-no-questions",
+      greenhouseRowId: null,
+      carrierId: null,
+      clientEventId: "evt-no-questions",
+      deviceSeq: 1,
+      localTzOffsetMinutes: 0,
+      createdAtLocal: "2026-08-27T14:00:00.000Z",
+      syncStatus: "pending",
+      syncAttempts: 0,
+      lastSyncError: null,
+      serverResultJson: null,
+    });
+
+    await act(async () => {
+      await result.current.perform("/api/mobile/time-entries/work", { activityId: "activity-no-questions", answers: {} });
+    });
+
+    expect(result.current.error).toBeNull();
+    expect(result.current.me?.status).toBe("work");
+    expect(mockAppendEvent).toHaveBeenCalledWith(expect.objectContaining({ greenhouseRowId: null, carrierId: null }));
   });
 });

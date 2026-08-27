@@ -48,7 +48,9 @@ export interface NewJournalEvent {
   activityId?: string | null;
   greenhouseRowId?: string | null;
   carrierId?: string | null;
-  answers?: Record<string, unknown> | null;
+  // Opaque JSON storage — see localEventStore.ts's NewLocalEvent.answers
+  // for why this accepts the array shape too.
+  answers?: Record<string, unknown> | unknown[] | null;
   densitySnapshot?: { densityType: "plants" | "stems"; densityCountPerRow: number } | null;
   configRevision?: string | null;
   // Optional, caller-supplied stable id for retry-safety: if a tap times
