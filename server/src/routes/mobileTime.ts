@@ -1066,11 +1066,24 @@ router.post(
     // is genuinely the same physical visit resuming, not a new logical run,
     // so it must never re-read the activity's current density config even
     // if an admin changed it while this employee was on break.
+    //
+    // `deleted_at is null or deletion_reason = PRE_ROUNDING_VOID_REASON`
+    // (not just `deleted_at is null`): a Start Break arriving before a
+    // just-rounded work-start voids that never-actually-paid work
+    // placeholder (openEntry's own void branch) — but it's still exactly
+    // what the employee was doing the instant before they tapped Start
+    // Break, so it must still be resumable. Without this, the query would
+    // silently skip the voided entry and fall back to whatever OLDER work
+    // entry happens to be next by started_at (a prior, already-finished
+    // job) — resuming the wrong activity/row/carrier entirely. Any OTHER
+    // kind of deletion (an admin's real correction) is deliberately
+    // excluded — that data was actually removed, not just relocated by a
+    // rounding artifact, so it must never come back via a break/end.
     const { rows } = await pool.query(
       `select activity_id, greenhouse_row_id, carrier_id, density_type, density_count_per_row from time_entries
-       where employee_id = $1 and entry_type = 'work' and deleted_at is null
+       where employee_id = $1 and entry_type = 'work' and (deleted_at is null or deletion_reason = $2)
        order by started_at desc limit 1`,
-      [d.employeeId]
+      [d.employeeId, PRE_ROUNDING_VOID_REASON]
     );
     const resumeActivityId = rows[0]?.activity_id ?? null;
     const resumeRowId = rows[0]?.greenhouse_row_id ?? null;
@@ -1451,11 +1464,16 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
       return { status: "accepted", timeEntryId: entry.id, conflictReason: entry.boundaryNote ?? null };
     }
     case "break_end": {
+      // See the identical comment on POST /time-entries/break/end's own
+      // resume-lookup above: a Start Break arriving before a just-rounded
+      // work-start voids (soft-deletes) that never-actually-paid work
+      // placeholder, but it's still what the employee was actually doing —
+      // must stay resumable, unlike a real admin deletion.
       const { rows } = await pool.query(
         `select activity_id, greenhouse_row_id, carrier_id, density_type, density_count_per_row from time_entries
-         where employee_id = $1 and entry_type = 'work' and deleted_at is null
+         where employee_id = $1 and entry_type = 'work' and (deleted_at is null or deletion_reason = $2)
          order by started_at desc limit 1`,
-        [employeeId]
+        [employeeId, PRE_ROUNDING_VOID_REASON]
       );
       const resumeActivityId = rows[0]?.activity_id ?? null;
       const resumeRowId = rows[0]?.greenhouse_row_id ?? null;

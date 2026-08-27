@@ -678,6 +678,87 @@ async function main() {
     }
 
     // -----------------------------------------------------------------
+    // F2) Same as F, but with an OLDER, already-finished work session
+    //    still sitting in the employee's history (non-deleted, closed
+    //    normally) before the boundary-crossing one. Reproduces a real
+    //    production bug found via a live smoke check: break/end's
+    //    resume-lookup only looked at `deleted_at is null` rows, so once
+    //    the NEW (interrupted) session got voided by the boundary fix, the
+    //    lookup silently fell through to the OLDER, unrelated session
+    //    instead — resuming the wrong activity/row/carrier entirely.
+    // -----------------------------------------------------------------
+    {
+      await resetIdle();
+      const deviceIdentifier = await pairDevice();
+
+      // An older, ordinary, already-finished work session — row2/carrierB,
+      // nothing to do with the boundary case below, just real history.
+      // Explicitly anchored 3 hours in the past (clientStartedAt) so its
+      // own rounded started_at can never coincidentally land in the same
+      // 15-minute bucket as the near-"now" boundary case below — a real
+      // tie there would make the resume-lookup's `order by started_at
+      // desc` non-deterministic between the two candidates, which is a
+      // test-construction hazard, not the thing under test.
+      const olderRawTap = new Date(Date.now() - 3 * 60 * 60 * 1000);
+      const olderStart = await call("/time-entries/work", deviceIdentifier, {
+        activityId: activityAId,
+        idempotencyKey: randomUUID(),
+        clientStartedAt: olderRawTap.toISOString(),
+        answers: [
+          { questionId: questionRowId, greenhouseRowId: row2 },
+          { questionId: questionCarrierId, carrierId: carrierB },
+        ],
+      });
+      check(olderStart.status === 200, "F2) older, unrelated work session starts", olderStart.body);
+      const endOlder = await call("/time-entries/end-day", deviceIdentifier, { idempotencyKey: randomUUID() });
+      check(endOlder.status === 200, "F2) older work session ends normally (real, non-deleted history)", endOlder.body);
+
+      // Now the real scenario: a NEW session on row1/carrierA, rounded
+      // forward, interrupted by Start Break before its own boundary.
+      const { rawTap, rounded } = pickFutureBoundary(30 * 1000);
+      const before = midpoint(rawTap, rounded);
+
+      const start = await call("/time-entries/work", deviceIdentifier, {
+        activityId: activityAId,
+        idempotencyKey: randomUUID(),
+        clientStartedAt: rawTap.toISOString(),
+        answers: [
+          { questionId: questionRowId, greenhouseRowId: row1 },
+          { questionId: questionCarrierId, carrierId: carrierA },
+        ],
+      });
+      check(start.status === 200, "F2) new work-start (rounded forward) succeeds", start.body);
+      const openedWork = await fetchOpen();
+
+      const breakStart = await call("/time-entries/break/start", deviceIdentifier, {
+        idempotencyKey: randomUUID(),
+        clientStartedAt: before.toISOString(),
+      });
+      check(breakStart.status === 200, "F2) break-start before the rounded boundary succeeds", breakStart.body);
+      const voidedWork = await fetchEntry(openedWork.id);
+      check(voidedWork.deleted_at !== null, "F2) the new session's placeholder was voided", voidedWork);
+
+      const breakEnd = await call("/time-entries/break/end", deviceIdentifier, { idempotencyKey: randomUUID() });
+      check(breakEnd.status === 200, "F2) ending the break succeeds", breakEnd.body);
+      const resumed = await fetchOpen();
+      check(
+        resumed?.entry_type === "work" &&
+          resumed.activity_id === activityAId &&
+          resumed.greenhouse_row_id === row1 &&
+          resumed.carrier_id === carrierA,
+        "F2) resumes the NEW (voided) session's row1/carrierA — not the older row2/carrierB session",
+        { resumed, voidedId: openedWork.id }
+      );
+      check(resumed?.id !== openedWork.id, "F2) the resumed entry is a genuinely new row, not the voided one restored", {
+        resumedId: resumed?.id,
+        voidedId: openedWork.id,
+      });
+      check(!(await anyNegativeOrPermanentConflictExists()), "F2) no negative-duration entry or permanent_conflict throughout");
+
+      await resetIdle();
+    }
+
+    // -----------------------------------------------------------------
     // G) End-day (Finish Work) — already independently guarded (its own
     //    two-step fallback against rounding an end before its own start);
     //    re-confirmed unaffected by this change: closing a rounded-forward
@@ -726,11 +807,16 @@ async function main() {
       // bug), so counting ALL of the employee's rows would always fail
       // here regardless of correctness. created_at (default now(), set at
       // insert time) is what distinguishes "created by this block" from
-      // "pre-existing history."
-      const hBlockStart = new Date();
+      // "pre-existing history." Sourced from the DB's OWN now() (not a
+      // local `new Date()`) — comparing a local clock reading against a
+      // DB-generated created_at is exactly the kind of few-hundred-ms
+      // clock-skew race that can put a genuinely-in-this-block row on the
+      // wrong side of the cutoff.
+      const hBlockStart = (await pool.query(`select now() as now`)).rows[0].now as Date;
       const deviceIdentifier = await pairDevice();
-      // maxGapMs kept tighter here (3.5 min, not 4) so that `after` (rounded
-      // + 60s below) still stays under the 5-minute forward-skew tolerance.
+      // pickPastBoundary keeps `rounded` safely in the past, so `after`
+      // (rounded + 60s below) stays well under the 5-minute forward-skew
+      // tolerance regardless.
       const { rawTap, rounded } = pickPastBoundary(7 * 17 * 60 * 1000);
       const before = midpoint(rawTap, rounded);
       const after = new Date(rounded.getTime() + 60000);
