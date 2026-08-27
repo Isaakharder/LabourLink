@@ -55,6 +55,23 @@ export function applyLocalEventToMe(
   switch (event.eventType) {
     case "work_start":
     case "activity_switch": {
+      // Whether this event is an in-place edit of the SAME ongoing job
+      // (e.g. HomeScreen's confirmSingleQuestionEdit changing only the
+      // carrier, or only the row) rather than a genuinely new work_start/
+      // activity_switch onto a different activity. A single-question edit
+      // deliberately submits only the question that changed — see
+      // currentAnswersFor's own comment — so an absent greenhouseRowId/
+      // carrierId here means "unspecified, carry forward whatever was
+      // already active," never "clear it." Real production bug this fixes:
+      // an offline carrier-only edit (Row 644, Bin 11 -> Bin 14) wiped the
+      // still-current row from local state — HomeScreen's
+      // currentAnswerDisplay then fell back to the raw question label
+      // ("Where?") for a row the employee never touched, until the next
+      // real /me response reconciled it. A genuine switch to a DIFFERENT
+      // activity (or from idle/break) is unaffected: sameOngoingJob is
+      // false there, so this event's own row/carrier (however null) are
+      // authoritative, exactly as before.
+      const sameOngoingJob = base.status === "work" && base.currentActivity?.id === event.activityId;
       const currentActivity: CurrentActivity = {
         id: event.activityId ?? "",
         name: display.activityName ?? base.currentActivity?.name ?? "",
@@ -69,8 +86,16 @@ export function applyLocalEventToMe(
         // recomputed locally).
         accumulatedWorkedSecondsBeforeCurrentEntry: 0,
         minimumDurationMinutes: display.minimumDurationMinutes ?? base.currentActivity?.minimumDurationMinutes ?? 0,
-        row: event.greenhouseRowId ? { id: event.greenhouseRowId, label: display.rowLabel ?? "" } : null,
-        carrier: event.carrierId ? { id: event.carrierId, name: display.carrierName ?? "" } : null,
+        row: event.greenhouseRowId
+          ? { id: event.greenhouseRowId, label: display.rowLabel ?? "" }
+          : sameOngoingJob
+            ? base.currentActivity!.row
+            : null,
+        carrier: event.carrierId
+          ? { id: event.carrierId, name: display.carrierName ?? "" }
+          : sameOngoingJob
+            ? base.currentActivity!.carrier
+            : null,
       };
       return { ...base, status: "work", currentActivity, since: null, previousActivity: null };
     }

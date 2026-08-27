@@ -236,4 +236,47 @@ describe("restoreLocalSessionState", () => {
     const stillPending = await store.getPendingEvents(DEVICE_ID);
     expect(stillPending).toHaveLength(1);
   });
+
+  // Real reported v1.3 defect (Marshall Dela Cruz, offline): after
+  // selecting Row 644/Bin 11 then changing only the carrier to Bin 14,
+  // force-closing and reopening before either event synced must still show
+  // Row 644/Bin 14 — not the "Where?"/"Which Carrier?" placeholders a
+  // wiped row/carrier would fall back to. Uses the real IndexedDB-backed
+  // store end to end, same as the other restart scenarios in this file.
+  it("force-close/reopen before sync: Row 644/Bin 11 -> Bin 14 (carrier-only edit) restores as Row 644/Bin 14, not blank", async () => {
+    const store = getLocalEventStore();
+    await store.appendEvent({
+      deviceId: DEVICE_ID,
+      employeeId: EMPLOYEE_ID,
+      eventType: "activity_switch",
+      occurredAtUtc: "2026-08-27T14:00:00.000Z",
+      activityId: "activity-picking-peppers",
+      greenhouseRowId: "row-644",
+      carrierId: "carrier-bin-11",
+    });
+    await store.appendEvent({
+      deviceId: DEVICE_ID,
+      employeeId: EMPLOYEE_ID,
+      eventType: "activity_switch",
+      occurredAtUtc: "2026-08-27T14:05:00.000Z",
+      activityId: "activity-picking-peppers",
+      greenhouseRowId: null, // row unchanged — not resubmitted, exactly like a real carrier-only edit
+      carrierId: "carrier-bin-14",
+    });
+
+    await simulateRestart();
+
+    const restored = await restoreLocalSessionState(DEVICE_ID, {
+      employeeId: EMPLOYEE_ID,
+      firstName: "Redacted",
+      lastName: "Employee",
+      lastVerifiedAt: "2026-08-27T08:00:00.000Z",
+    });
+
+    expect(restored?.status).toBe("work");
+    expect(restored?.currentActivity?.row?.id).toBe("row-644");
+    expect(restored?.currentActivity?.carrier?.id).toBe("carrier-bin-14");
+    const pending = await store.getPendingEvents(DEVICE_ID);
+    expect(pending).toHaveLength(2); // both events survive the restart untouched
+  });
 });
