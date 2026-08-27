@@ -68,6 +68,7 @@
     "test:mobile-time-sync-events-clock-anomaly": "ts-node src/routes/mobileTime.syncEvents.clockAnomaly.test.ts",
     "test:mobile-time-sync-events-scenarios": "ts-node src/routes/mobileTime.syncEvents.scenarios.test.ts",
     "test:mobile-time-sync-events-concurrent-load": "ts-node src/routes/mobileTime.syncEvents.concurrentLoad.test.ts",
+    "test:mobile-time-rounding-boundary": "ts-node src/routes/mobileTime.roundingBoundary.test.ts",
     "test:pairing": "ts-node src/routes/pairing.test.ts"
   },
   "dependencies": {

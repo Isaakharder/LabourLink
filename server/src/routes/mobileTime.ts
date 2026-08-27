@@ -110,16 +110,37 @@ async function getOpenEntryExcluding(employeeId: string, idempotencyKey: string)
   return rows[0] ?? null;
 }
 
+// Reason text for the two forward-rounding boundary resolutions below —
+// shared so both branches (and their tests) read the identical string.
+const PRE_ROUNDING_COLLAPSE_REASON =
+  "Applied before the rounded work-start boundary — the previous zero-duration assignment on this entry was collapsed into this event instead of being closed with an invalid (pre-start) end time.";
+const PRE_ROUNDING_VOID_REASON =
+  "A zero-duration entry that started before its own rounded boundary was voided (never fabricated as paid time) to make way for this event.";
+
 // Opens a new row and closes whatever else is open for this employee — used
 // for both "start work" and "change activity" (closing the prior entry and
-// opening the next is the same operation either way). The close step
-// excludes rows already carrying this idempotency_key — the only row that
-// could ever match is one a concurrent replay of this exact request already
-// created, so excluding it is what stops a duplicate tap from closing the
-// very row it was supposed to return. Closing must run before inserting:
-// insert-first would briefly have two open rows for the same employee
-// (the old one, still open, plus the new one), which the partial unique
-// index on "one open row per employee" rejects outright.
+// opening the next is the same operation either way). Closing must run
+// before inserting: insert-first would briefly have two open rows for the
+// same employee (the old one, still open, plus the new one), which the
+// partial unique index on "one open row per employee" rejects outright.
+//
+// Forward-rounding boundary handling: work-start rounding (roundWorkStart,
+// clockwise direction) can leave the currently-open entry's own started_at
+// LATER than a subsequent event's real occurrence time — e.g. a raw tap at
+// 12:52:03 rounds to a logical/paid start of 13:00:00, and a genuine
+// carrier change at 12:52:41 (after the raw tap, but before the rounded
+// boundary) would otherwise try to close that entry with ended_at before
+// its own started_at — a physically impossible, DB-constraint-rejected
+// state (chk_time_entries_ended_after_started) purely because rounding
+// moved the paid-work boundary into the future, not because of anything
+// wrong with the event itself. Confirmed in real production data (two
+// separate employees, both via 'This event's timestamp would close an
+// existing entry before it started'). The required behavior: such an event
+// must never become a permanent conflict solely for this reason, but
+// nothing paid ever actually started under the still-open entry either, so
+// no time may be fabricated for it and no negative-duration row may ever
+// be written. See the two branches below for how each case (same kind of
+// entry vs. a different kind) resolves that without doing either.
 async function openEntry(
   employeeId: string,
   deviceId: string,
@@ -127,18 +148,149 @@ async function openEntry(
   activityId: string | null,
   idempotencyKey: string,
   overrides: OpenEntryOverrides = {}
-): Promise<OpenEntry> {
+): Promise<OpenEntry & { boundaryNote?: string }> {
   const client = await pool.connect();
   try {
     await client.query("begin");
-
-    await client.query(
-      `update time_entries
-       set ended_at = coalesce($3, now()),
-           actual_ended_at = coalesce($4, actual_ended_at)
-       where employee_id = $1 and ended_at is null and deleted_at is null and idempotency_key <> $2`,
-      [employeeId, idempotencyKey, overrides.startedAt ?? null, overrides.actualEndedAt ?? null]
+    // Locked peek at whatever's currently open (if anything) — needed up
+    // front, not just implicitly during a blind close UPDATE, because the
+    // boundary comparison below needs its started_at before deciding how
+    // to proceed.
+    const openRes = await client.query(
+      `select id, entry_type, activity_id, started_at, greenhouse_row_id, carrier_id,
+              density_type, density_count_per_row, idempotency_key
+       from time_entries
+       where employee_id = $1 and ended_at is null and deleted_at is null
+       for update`,
+      [employeeId]
     );
+    const open = openRes.rows[0] as
+      | { id: string; entry_type: "work" | "break"; started_at: string; idempotency_key: string }
+      | undefined;
+
+    if (open && open.idempotency_key === idempotencyKey) {
+      // This exact event already produced whatever's currently open —
+      // either a normal open or a boundary collapse below — on a previous
+      // attempt (a retry after a lost response, or a duplicate concurrent
+      // request). Fully idempotent: return it as-is, no further mutation,
+      // the same guarantee the insert's own on-conflict-do-nothing already
+      // gives the non-boundary case.
+      await client.query("commit");
+      const full = await pool.query(
+        `select id, entry_type, activity_id, started_at, greenhouse_row_id, carrier_id from time_entries where id = $1`,
+        [open.id]
+      );
+      return full.rows[0];
+    }
+
+    const closeBoundary = overrides.startedAt ?? new Date();
+    let boundaryNote: string | undefined;
+    const openStartedAtMs = open ? new Date(open.started_at).getTime() : 0;
+    // work_start_rounding_interval_minutes is capped at 60 (migrations/030_work_start_rounding.sql),
+    // so rounding alone can never push the boundary more than an hour past the raw tap. A gap
+    // bigger than that isn't a rounding artifact — it's a real backward clock jump and must fall
+    // through to the existing close attempt so detectClockAnomaly/permanent_conflict still catch it.
+    const MAX_ROUNDING_BOUNDARY_GAP_MS = 60 * 60 * 1000;
+
+    // <= (not just <): an event landing EXACTLY on the rounded boundary
+    // would otherwise fall to the ordinary close-then-reopen path below and
+    // try to set ended_at === started_at — a zero-duration close, which
+    // chk_time_entries_ended_after_started rejects unconditionally (see
+    // migration 040's own "equal timestamps also rejected" case). Folding
+    // the exact-boundary case into collapse/void alongside the
+    // before-boundary case is the only way to accept it at all; it can
+    // never regress a previously-succeeding case, since the ordinary path
+    // was guaranteed to fail the DB constraint here regardless.
+    if (
+      open &&
+      closeBoundary.getTime() <= openStartedAtMs &&
+      openStartedAtMs - closeBoundary.getTime() <= MAX_ROUNDING_BOUNDARY_GAP_MS
+    ) {
+      if (open.entry_type === entryType) {
+        // Same kind of entry (e.g. an activity/row/carrier change arriving
+        // before its own just-rounded work-start): collapse — update the
+        // still-open, still-zero-duration row's own assignment in place
+        // rather than closing-then-reopening. started_at (the rounded
+        // paid-work boundary) and actual_started_at (its own audit trail
+        // of the ORIGINAL raw tap that produced that boundary) are left
+        // completely untouched; the latest assignment simply becomes what
+        // is active at that already-established boundary, exactly as if
+        // the earlier (never actually paid) assignment had never been
+        // separately recorded. idempotency_key moves to this event's own
+        // key so a retry of precisely this event is what the check above
+        // catches next time — a different, later event that also lands
+        // before the same boundary collapses again on top of this one,
+        // same as intended.
+        const { densityType, densityCountPerRow } =
+          entryType === "work" && activityId
+            ? overrides.densitySnapshot !== undefined
+              ? overrides.densitySnapshot
+              : await resolveDensitySnapshot(client, activityId, overrides.greenhouseRowId ?? null)
+            : { densityType: null, densityCountPerRow: null };
+        const updated = await client.query(
+          `update time_entries
+           set idempotency_key = $2,
+               activity_id = $3,
+               greenhouse_row_id = $4,
+               carrier_id = $5,
+               density_type = $6,
+               density_count_per_row = $7,
+               break_profile_item_id = $8,
+               scheduled_break_date = $9,
+               is_paid = $10
+           where id = $1
+           returning id, entry_type, activity_id, started_at, greenhouse_row_id, carrier_id`,
+          [
+            open.id,
+            idempotencyKey,
+            activityId,
+            overrides.greenhouseRowId ?? null,
+            overrides.carrierId ?? null,
+            densityType,
+            densityCountPerRow,
+            overrides.breakProfileItemId ?? null,
+            overrides.scheduledBreakDate ?? null,
+            overrides.isPaid ?? null,
+          ]
+        );
+        await client.query("commit");
+        return { ...updated.rows[0], boundaryNote: PRE_ROUNDING_COLLAPSE_REASON };
+      }
+
+      // Different kind of entry (e.g. Start Break, or resuming work after
+      // a break, arriving before the OTHER kind's own just-rounded start):
+      // `open` never represented any real paid time under either
+      // interpretation, so it is voided (soft-deleted, the same audited
+      // convention as any other deletion in this app — deleted_by is the
+      // employee themselves, since this is a direct, automatic consequence
+      // of their own next tap, not an admin action) rather than closed
+      // with an invalid boundary. This call then proceeds exactly as if
+      // nothing had been open at all.
+      await client.query(
+        `update time_entries set deleted_at = now(), deleted_by_employee_id = $2, deletion_reason = $3 where id = $1`,
+        [open.id, employeeId, PRE_ROUNDING_VOID_REASON]
+      );
+      await client.query(
+        `insert into time_entry_deletions (employee_id, deleted_by_employee_id, deletion_type, affected_time_entry_ids, reason)
+         values ($1, $2, $3, $4, $5)`,
+        [employeeId, employeeId, open.entry_type === "work" ? "activity_run" : "break", [open.id], PRE_ROUNDING_VOID_REASON]
+      );
+      boundaryNote = PRE_ROUNDING_VOID_REASON;
+    } else {
+      // Ordinary case, unchanged from before: close whatever's open (if
+      // anything) at this new event's own boundary. Excludes rows already
+      // carrying this idempotency_key — the only row that could ever match
+      // is one a concurrent replay of this exact request already created,
+      // so excluding it is what stops a duplicate tap from closing the
+      // very row it was supposed to return.
+      await client.query(
+        `update time_entries
+         set ended_at = coalesce($3, now()),
+             actual_ended_at = coalesce($4, actual_ended_at)
+         where employee_id = $1 and ended_at is null and deleted_at is null and idempotency_key <> $2`,
+        [employeeId, idempotencyKey, overrides.startedAt ?? null, overrides.actualEndedAt ?? null]
+      );
+    }
 
     // Frozen at the moment this work entry is opened (see
     // resolveDensitySnapshot's own comment for why it's never re-read
@@ -194,7 +346,7 @@ async function openEntry(
     }
 
     await client.query("commit");
-    return row;
+    return boundaryNote ? { ...row, boundaryNote } : row;
   } catch (err) {
     await client.query("rollback").catch(() => {});
     if ((err as { code?: string }).code === "23505") {
@@ -1078,29 +1230,30 @@ router.post(
         let actualEndedAt: Date | null = null;
 
         if (settings?.enabled) {
-          let rounded = roundWorkEnd(original, settings.intervalMinutes, settings.direction);
-          const startedAt = new Date(open.started_at);
-          // Never let rounding push the effective end at or before this
-          // entry's own start — a counter-clockwise round on a very short
-          // workday could otherwise land before it even began. Falling
-          // back to the unrounded tap time is the safe degradation (it's
-          // still a real, employee-reported moment, just not rounded),
-          // not a silently zero/negative-duration row.
-          if (rounded.getTime() <= startedAt.getTime()) {
-            rounded = original;
-          }
-          // Only reachable if even the unrounded tap time doesn't clear
-          // the entry's own start — a pathological clock-skew edge case,
-          // not a real rounding outcome (resolveOriginalEndedAt already
-          // falls back to `now` for grossly invalid client timestamps,
-          // and `now` can't itself be before a start already recorded in
-          // the past). Guarantees a strictly positive duration is always
-          // recorded rather than ever risking zero or negative.
-          if (rounded.getTime() <= startedAt.getTime()) {
-            rounded = new Date(startedAt.getTime() + 1000);
-          }
-          effectiveEnd = rounded;
+          effectiveEnd = roundWorkEnd(original, settings.intervalMinutes, settings.direction);
           actualEndedAt = original;
+        }
+
+        // Never let the effective end land at or before this entry's own
+        // start — applied unconditionally, not just when work-end rounding
+        // is enabled: work-START rounding (a separate, independent
+        // setting) can by itself push started_at into the future, and a
+        // Finish Work tap arriving before that boundary has nothing to do
+        // with work-end rounding at all. This guard used to live only
+        // inside the `if (settings?.enabled)` block above, so an employee
+        // with work-start rounding enabled but work-end rounding disabled
+        // (a perfectly ordinary configuration) had zero protection here —
+        // confirmed by a real failing test finishing work moments after a
+        // rounded-forward start. The same two-step fallback as every other
+        // rounding guard in this file: first the unrounded tap (still a
+        // real, employee-reported moment), then a guaranteed-positive
+        // 1-second floor if even that doesn't clear it.
+        const startedAt = new Date(open.started_at);
+        if (effectiveEnd.getTime() <= startedAt.getTime()) {
+          effectiveEnd = original;
+        }
+        if (effectiveEnd.getTime() <= startedAt.getTime()) {
+          effectiveEnd = new Date(startedAt.getTime() + 1000);
         }
 
         await client.query(`update time_entries set ended_at = $2, actual_ended_at = $3 where id = $1`, [
@@ -1245,7 +1398,7 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
         }
       }
       const entry = await openEntry(employeeId, deviceId, "work", event.activityId, event.clientEventId, overrides);
-      return { status: "accepted", timeEntryId: entry.id };
+      return { status: "accepted", timeEntryId: entry.id, conflictReason: entry.boundaryNote ?? null };
     }
     case "break_start": {
       const originalTap = resolveOriginalStartedAt(event.occurredAtUtc, now);
@@ -1295,7 +1448,7 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
       }
 
       const entry = await openEntry(employeeId, deviceId, "break", null, event.clientEventId, overrides);
-      return { status: "accepted", timeEntryId: entry.id };
+      return { status: "accepted", timeEntryId: entry.id, conflictReason: entry.boundaryNote ?? null };
     }
     case "break_end": {
       const { rows } = await pool.query(
@@ -1361,7 +1514,7 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
       }
 
       const entry = await openEntry(employeeId, deviceId, "work", resumeActivityId, event.clientEventId, overrides);
-      return { status: "accepted", timeEntryId: entry.id };
+      return { status: "accepted", timeEntryId: entry.id, conflictReason: entry.boundaryNote ?? null };
     }
     case "end_day": {
       const client = await pool.connect();
@@ -1624,15 +1777,16 @@ router.post(
         // device's new "most recent real occurrence," so it shouldn't
         // factor into the next event's backward-jump baseline either —
         // only reached for a genuinely accepted event.
-        await recordSyncedEvent(
-          d.id,
-          d.employeeId,
-          event,
-          "accepted",
-          outcome.timeEntryId ?? null,
-          anomaly?.reason ?? null,
-          anomaly?.detail ?? null
-        );
+        //
+        // outcome.conflictReason here is never a rejection (this branch is
+        // "accepted") — it's openEntry()'s own optional boundaryNote, set
+        // only when a forward-rounding boundary collapse/void resolved
+        // this event (see openEntry's own comment). Merged with the
+        // device-clock anomaly flag on the same "accepted, but reviewable"
+        // convention — either, both, or neither can apply to one event.
+        const acceptedReason = anomaly?.reason ?? outcome.conflictReason ?? null;
+        const acceptedDetail = anomaly?.detail ?? (outcome.conflictReason ? { reason: outcome.conflictReason } : undefined) ?? null;
+        await recordSyncedEvent(d.id, d.employeeId, event, "accepted", outcome.timeEntryId ?? null, acceptedReason, acceptedDetail);
         lastAcceptedOccurredAtUtc = new Date(event.occurredAtUtc);
         lastProcessedSeq = event.deviceSeq;
         await pool.query(
@@ -1642,7 +1796,7 @@ router.post(
         results.push({
           clientEventId: event.clientEventId,
           status: "accepted",
-          detail: anomaly?.detail ?? undefined,
+          detail: acceptedDetail ?? undefined,
         });
       } else if (outcome.status === "permanent_conflict") {
         await recordSyncedEvent(
