@@ -52,18 +52,38 @@ function formatHours(totalDurationSeconds: number): string {
 }
 
 export function StatsScreen() {
-  const { language, handleApiError } = useWorkSession();
+  const { language, online, handleApiError } = useWorkSession();
   const [weeks, setWeeks] = useState<WeekStat[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Set only when the LAST load attempt failed specifically because the
+  // server couldn't be reached (handleApiError's own network-error case) —
+  // distinct from `error` (a real, specific rejection). Stats has no
+  // local-first computation at all (unlike Home's status, it's entirely
+  // server-driven — see this component's own loadStats), so the honest
+  // state offline is either "never loaded yet" or "showing what was last
+  // successfully loaded, which may now be stale" — never a locally
+  // recomputed total, and never silently presented as current. This is
+  // exactly the "final day totals aren't available until synchronization"
+  // case: a still-open, not-yet-midnight-reconciled entry is structurally
+  // excluded from every total here (getActivityDensityAttribution only
+  // ever sums CLOSED segments), so numbers shown can under-represent an
+  // in-progress day, never inflate one — but that under-representation
+  // must be visible, not silent.
+  const [offline, setOffline] = useState(false);
 
   const loadStats = useCallback(() => {
     api<StatsResponse>("/api/mobile/stats")
       .then((res) => {
         setWeeks(res.weeks);
         setError(null);
+        setOffline(false);
       })
       .catch((err) => {
-        if (!handleApiError(err)) setError(t(language, "statsLoadError"));
+        if (handleApiError(err)) {
+          setOffline(true);
+        } else {
+          setError(t(language, "statsLoadError"));
+        }
       });
   }, [handleApiError, language]);
 
@@ -92,7 +112,19 @@ export function StatsScreen() {
       </div>
 
       {error && !weeks && <p className="error-text">{error}</p>}
-      {!weeks && !error && <p className="mobile-stats-loading">{t(language, "loading")}</p>}
+      {/* Offline and never successfully loaded — the honest state is "not
+          available yet," never an indefinite unlabeled spinner (which reads
+          as broken/hung, not as "you're offline"). */}
+      {!weeks && !error && offline && <p className="mobile-offline-banner">{t(language, "statsOfflineNeverLoaded")}</p>}
+      {!weeks && !error && !offline && <p className="mobile-stats-loading">{t(language, "loading")}</p>}
+
+      {/* Offline but showing data from an earlier successful load — labeled
+          as possibly stale rather than presented as current. Never shows
+          inflated numbers either way: a still-open, not-yet-reconciled
+          entry is structurally excluded from every total here (see this
+          file's own header), so the risk is under-representing today, not
+          overstating it — but that has to be visible, not silent. */}
+      {weeks && !online && <p className="mobile-offline-banner">{t(language, "statsOfflineStale")}</p>}
 
       {weeks && (
         <div className="stats-week-list">

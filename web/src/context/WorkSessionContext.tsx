@@ -14,7 +14,7 @@ import {
 } from "../lib/localSessionState";
 import { resolveDisplayLabels } from "../lib/referenceDataCache";
 import { hasSyncProblem, onSyncSettled, trySyncSoon } from "../lib/syncEngine";
-import { foldLocalMidnightRollover } from "../lib/localMidnightRollover";
+import { FALLBACK_APP_TIMEZONE, foldLocalMidnightRollover, msUntilNextLocalMidnight } from "../lib/localMidnightRollover";
 import { RecentJob } from "../components/mobile/RecentJobsCard";
 import { uuid } from "../lib/uuid";
 
@@ -321,6 +321,40 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     }, MIDNIGHT_FOLD_CHECK_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, []);
+
+  // Primary mechanism: fires the fold at the EXACT calculated local-
+  // midnight instant via a scheduled setTimeout, then reschedules itself
+  // for the FOLLOWING midnight — so the timer/activity on screen flips
+  // over right on time, not up to 30s late. The interval above is
+  // deliberately kept as a recovery net, not replaced: a single scheduled
+  // timeout is NOT reliable on its own on a real device — a backgrounded/
+  // suspended WebView can have its timers frozen and fire late (or, on
+  // some platforms, not at all until foregrounded again), and a device
+  // clock change (manual adjustment, timezone travel, NTP correction)
+  // between scheduling and firing can make the originally-computed delay
+  // wrong. Both failure modes self-heal within one interval tick, since
+  // foldLocalMidnightRollover always re-derives from the current real
+  // clock rather than trusting elapsed setTimeout time. Re-scheduled
+  // whenever the known org timezone changes (in practice: once, the first
+  // time a real server response arrives) — appTimezone, not the whole
+  // `me` object, is the dependency, so this doesn't reschedule on every
+  // ordinary local-first action.
+  const appTimezone = me?.appTimezone;
+  useEffect(() => {
+    let timeoutId: number | null = null;
+    function fireAndReschedule() {
+      setMe((prev) => (prev ? foldLocalMidnightRollover(prev, new Date(), prev.appTimezone) : prev));
+      schedule();
+    }
+    function schedule() {
+      const delay = msUntilNextLocalMidnight(new Date(), appTimezone ?? FALLBACK_APP_TIMEZONE);
+      timeoutId = window.setTimeout(fireAndReschedule, delay);
+    }
+    schedule();
+    return () => {
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    };
+  }, [appTimezone]);
 
   // The single place every server response carrying an `employee` gets
   // applied — loadMe and acknowledgeReassignment funnel through this

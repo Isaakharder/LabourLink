@@ -891,10 +891,14 @@ router.post(
         (current.activityId !== activityId || current.rowId !== validatedRowId || current.carrierId !== validatedCarrierId);
 
       if (isRealSwitch) {
+        // Same started_at-can-tie tiebreaker as the break/end resume-lookup
+        // below (rounded boundaries collapse distinct real taps onto the
+        // same wall-clock mark) — created_at as a secondary sort keeps
+        // "most recent" deterministic here too.
         const { rows: mostRecentRows } = await pool.query(
           `select activity_id, greenhouse_row_id, carrier_id from time_entries
            where employee_id = $1 and entry_type = 'work' and ended_at is not null and deleted_at is null
-           order by started_at desc limit 1`,
+           order by started_at desc, created_at desc limit 1`,
           [d.employeeId]
         );
         const mostRecent = mostRecentRows[0];
@@ -1090,10 +1094,27 @@ router.post(
     // kind of deletion (an admin's real correction) is deliberately
     // excluded — that data was actually removed, not just relocated by a
     // rounding artifact, so it must never come back via a break/end.
+    //
+    // `order by started_at desc, created_at desc`: started_at ALONE is not
+    // a unique key here — work-start rounding (roundWorkStart) always
+    // rounds UP to the same next wall-clock 15-minute mark regardless of
+    // which real tap produced it, so several DIFFERENT voided placeholders
+    // (e.g. a rapid work-start -> break-start -> break-end -> break-start
+    // sequence, each cycle voiding the previous placeholder before ITS OWN
+    // rounding boundary) can genuinely share an identical started_at. Real
+    // bug this fixes: with a tie, plain `order by started_at desc limit 1`
+    // is whatever order Postgres happens to return matching rows in — not
+    // necessarily the most recent one — so break/end could silently resume
+    // a STALE voided placeholder from earlier in the same rounding bucket
+    // instead of the one that was actually just interrupted. created_at
+    // (insertion order, always unique and monotonic) is the correct,
+    // deterministic tiebreaker: the most recently CREATED candidate is
+    // always the most recently applicable one, even when several share the
+    // same rounded started_at.
     const { rows } = await pool.query(
       `select activity_id, greenhouse_row_id, carrier_id, density_type, density_count_per_row from time_entries
        where employee_id = $1 and entry_type = 'work' and (deleted_at is null or deletion_reason = $2)
-       order by started_at desc limit 1`,
+       order by started_at desc, created_at desc limit 1`,
       [d.employeeId, PRE_ROUNDING_VOID_REASON]
     );
     const resumeActivityId = rows[0]?.activity_id ?? null;
@@ -1499,11 +1520,14 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
       // resume-lookup above: a Start Break arriving before a just-rounded
       // work-start voids (soft-deletes) that never-actually-paid work
       // placeholder, but it's still what the employee was actually doing —
-      // must stay resumable, unlike a real admin deletion.
+      // must stay resumable, unlike a real admin deletion. The
+      // `, created_at desc` tiebreaker is the same fix too: started_at
+      // alone can tie across several distinct voided placeholders that all
+      // rounded to the same wall-clock boundary.
       const { rows } = await pool.query(
         `select activity_id, greenhouse_row_id, carrier_id, density_type, density_count_per_row from time_entries
          where employee_id = $1 and entry_type = 'work' and (deleted_at is null or deletion_reason = $2)
-         order by started_at desc limit 1`,
+         order by started_at desc, created_at desc limit 1`,
         [employeeId, PRE_ROUNDING_VOID_REASON]
       );
       const resumeActivityId = rows[0]?.activity_id ?? null;

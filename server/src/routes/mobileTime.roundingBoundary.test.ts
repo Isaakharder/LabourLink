@@ -759,6 +759,70 @@ async function main() {
     }
 
     // -----------------------------------------------------------------
+    // F3) Two voided placeholders sharing the IDENTICAL rounded started_at
+    //    (deterministic direct-SQL setup, not dependent on real-time
+    //    rounding luck) — reproduces the actual root cause behind F2's own
+    //    real-world flakiness: work-start rounding always rounds UP to the
+    //    same next wall-clock 15-minute mark, so several genuinely
+    //    different voided placeholders (a rapid work-start -> break-start
+    //    -> break-end -> break-start cycle, all inside one rounding
+    //    bucket) can share an identical started_at. Before the
+    //    `order by started_at desc, created_at desc` fix, a tie here left
+    //    break/end's resume-lookup free to pick either row — this locks in
+    //    that it always resumes the MOST RECENTLY CREATED one.
+    // -----------------------------------------------------------------
+    {
+      await resetIdle();
+      const deviceIdentifier = await pairDevice();
+      const deviceRowId = deviceIds[deviceIds.length - 1];
+      const tiedStartedAt = new Date();
+      const voidReason =
+        "A zero-duration entry that started before its own rounded boundary was voided (never fabricated as paid time) to make way for this event.";
+
+      // Older (wrong) placeholder — inserted first, so its created_at is
+      // strictly earlier despite sharing the exact same started_at as the
+      // one below.
+      await pool.query(
+        `insert into time_entries
+           (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, greenhouse_row_id, carrier_id, deleted_at, deleted_by_employee_id, deletion_reason)
+         values ($1, $2, 'work', $3, $4, $5, $6, $7, now(), $1, $8)`,
+        [employeeId, deviceRowId, activityBId, randomUUID(), tiedStartedAt, row2, carrierB, voidReason]
+      );
+
+      // Newer (correct) placeholder — same started_at, inserted after, so
+      // only created_at distinguishes it as the one that must resume.
+      await pool.query(
+        `insert into time_entries
+           (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, greenhouse_row_id, carrier_id, deleted_at, deleted_by_employee_id, deletion_reason)
+         values ($1, $2, 'work', $3, $4, $5, $6, $7, now(), $1, $8)`,
+        [employeeId, deviceRowId, activityAId, randomUUID(), tiedStartedAt, row1, carrierA, voidReason]
+      );
+
+      // The open break itself — its own started_at is irrelevant to the
+      // resume-lookup (which only ever considers `work` rows).
+      await pool.query(
+        `insert into time_entries (employee_id, device_id, entry_type, idempotency_key, started_at)
+         values ($1, $2, 'break', $3, now())`,
+        [employeeId, deviceRowId, randomUUID()]
+      );
+
+      const breakEnd = await call("/time-entries/break/end", deviceIdentifier, { idempotencyKey: randomUUID() });
+      check(breakEnd.status === 200, "F3) ending the break succeeds", breakEnd.body);
+      const resumed = await fetchOpen();
+      check(
+        resumed?.entry_type === "work" &&
+          resumed.activity_id === activityAId &&
+          resumed.greenhouse_row_id === row1 &&
+          resumed.carrier_id === carrierA,
+        "F3) with two voided placeholders tied on started_at, resumes the MOST RECENTLY CREATED one, deterministically",
+        resumed
+      );
+      check(!(await anyNegativeOrPermanentConflictExists()), "F3) no negative-duration entry or permanent_conflict");
+
+      await resetIdle();
+    }
+
+    // -----------------------------------------------------------------
     // G) End-day (Finish Work) — already independently guarded (its own
     //    two-step fallback against rounding an end before its own start);
     //    re-confirmed unaffected by this change: closing a rounded-forward

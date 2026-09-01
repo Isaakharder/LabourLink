@@ -4,7 +4,12 @@
 // exactly, so the two can never quietly drift apart on what "the next
 // local midnight" means.
 import { describe, expect, it } from "vitest";
-import { calendarDateInTimezone, foldLocalMidnightRollover, FALLBACK_APP_TIMEZONE } from "./localMidnightRollover";
+import {
+  calendarDateInTimezone,
+  foldLocalMidnightRollover,
+  msUntilNextLocalMidnight,
+  FALLBACK_APP_TIMEZONE,
+} from "./localMidnightRollover";
 import { MeResponse } from "../context/WorkSessionContext";
 
 const TZ = "America/Toronto";
@@ -127,5 +132,27 @@ describe("foldLocalMidnightRollover", () => {
     const result = foldLocalMidnightRollover(me, now); // no timezone arg — uses the default
     expect(FALLBACK_APP_TIMEZONE).toBe(TZ);
     expect(result.currentActivity!.startedAt).toBe("2026-08-06T04:00:00.000Z");
+  });
+});
+
+describe("msUntilNextLocalMidnight", () => {
+  it("computes the exact delay to the next local-midnight boundary", () => {
+    const now = new Date("2026-08-05T20:00:00.000Z"); // 4:00 PM EDT
+    const delay = msUntilNextLocalMidnight(now, TZ);
+    // Next boundary is 2026-08-06T04:00:00.000Z (matches the server's own
+    // known-good value for this date) — 8 hours away.
+    expect(delay).toBe(8 * 60 * 60 * 1000);
+  });
+
+  it("is never negative and never absurdly large (always within ~one day plus a DST hour)", () => {
+    const now = new Date("2026-03-08T04:00:01.000Z"); // 1 second after a boundary
+    const delay = msUntilNextLocalMidnight(now, TZ);
+    expect(delay).toBeGreaterThan(0);
+    expect(delay).toBeLessThan(26 * 60 * 60 * 1000);
+  });
+
+  it("is safe to pass straight into setTimeout (well under its ~24.8-day max)", () => {
+    const delay = msUntilNextLocalMidnight(new Date(), TZ);
+    expect(delay).toBeLessThan(2147483647);
   });
 });

@@ -102,6 +102,18 @@ function foldForward(startedAtIso: string, now: Date, tz: string): string {
   return cursor;
 }
 
+// Milliseconds from `now` until the next local-midnight boundary in `tz` —
+// used to schedule an exact setTimeout for the rollover fold (see
+// WorkSessionContext.tsx), rather than relying solely on a periodic poll.
+// Always positive and comfortably under setTimeout's ~24.8-day max delay
+// (at most ~24h + a DST hour), so it's always safe to pass straight
+// through with no clamping.
+export function msUntilNextLocalMidnight(now: Date, tz: string): number {
+  const todayLocal = calendarDateInTimezone(now, tz);
+  const boundary = nextLocalMidnightUtc(todayLocal, tz);
+  return Math.max(0, boundary.getTime() - now.getTime());
+}
+
 // Pure display transform, applied on top of whatever MeResponse is
 // currently known — a fresh server response, a locally-restored snapshot,
 // or a folded pending-event chain. Idempotent and cheap: a `me` already

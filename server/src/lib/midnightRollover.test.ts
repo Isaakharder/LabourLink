@@ -614,9 +614,18 @@ async function main() {
       });
       await reconcileMidnightRollover(empOver);
       const rolledOpen = await fetchOpenEntry(empOver);
+      // Was a hardcoded "< 16h" window — genuinely time-of-day-dependent:
+      // a just-rolled entry's own age since local midnight is however many
+      // hours have elapsed TODAY, which exceeds 16h for anyone running the
+      // suite in the evening (a real failure this exact bug caused, not a
+      // flake). Fixed to an exact equality against the computed boundary
+      // instead of a window — deterministic at any time of day, and a
+      // strictly stronger check than "recent" ever was.
+      const todayLocalForSanity = calendarDateInAppTimezone(new Date());
       check(
-        Date.now() - new Date(rolledOpen.started_at).getTime() < 16 * 60 * 60 * 1000,
-        "13) sanity check — the CURRENT row's own started_at is recent (just rolled), well under 16h on its own"
+        new Date(rolledOpen.started_at).getTime() === getDayBoundsUtc(todayLocalForSanity).start.getTime(),
+        "13) sanity check — the CURRENT row's own started_at is EXACTLY today's local-midnight boundary (just rolled), regardless of what time of day this runs",
+        { got: rolledOpen.started_at, expected: getDayBoundsUtc(todayLocalForSanity).start.toISOString() }
       );
 
       const overAlerts = await getLongOpenShiftAlerts(pool, 16, new Date());
