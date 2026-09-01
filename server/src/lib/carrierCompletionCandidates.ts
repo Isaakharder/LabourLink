@@ -60,6 +60,14 @@ export async function getUnresolvedRunsForCarrier(carrierId: string): Promise<Ca
       carrier_id: r.carrier_id,
       density_type: r.density_type,
       density_count_per_row: r.density_count_per_row,
+      // Unlike rowCompletionCandidates.ts, this query is NOT scoped to one
+      // calendar day at a time — it fetches every unresolved segment for
+      // this carrier+employee across all time in one go — so a midnight-
+      // rollover continuation is already in the same `segments` array as
+      // its predecessor and merges into one run via groupIntoActivityRuns'
+      // existing exact-boundary contiguity check with no extra handling
+      // needed. This field only matters to a per-day-scoped caller.
+      rollover_of_entry_id: null,
     }));
     const { runs } = groupIntoActivityRuns(segments);
     const activityNameById = new Map(empRows.map((r) => [r.activity_id, r.activity_name]));

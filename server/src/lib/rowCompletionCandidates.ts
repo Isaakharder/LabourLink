@@ -57,6 +57,7 @@ interface DayFetchRow {
   density_type: "plants" | "stems" | null;
   density_count_per_row: number | null;
   is_resolved: boolean;
+  rollover_of_entry_id: string | null;
 }
 
 // Batched form: computes candidates for MANY row+activity+density pairs in
@@ -163,6 +164,7 @@ export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): 
         const { rows } = await pool.query(
           `select te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
                   te.greenhouse_row_id, te.carrier_id, te.density_type, te.density_count_per_row,
+                  te.rollover_of_entry_id,
                   (rcs.time_entry_id is not null) as is_resolved
            from time_entries te
            left join row_completion_segments rcs on rcs.time_entry_id = te.id
@@ -186,7 +188,19 @@ export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): 
   // resulting root to whichever requested pair(s) it actually matches — the
   // exact same per-run filtering the single-pair version did, just run once
   // per employee-day instead of once per (pair, employee-day).
-  for (const [employeeId, dates] of daysByEmployee) {
+  //
+  // Days are processed in chronological order per employee (not Set
+  // insertion order) so that when a LATER day's root turns out to be a
+  // midnight-rollover continuation (rolloverContinuationFromEntryId set —
+  // see activityRuns.ts), the EARLIER day's own candidate for the same
+  // chain has always already been computed and is ready to be found and
+  // extended via rolloverTerminalToCandidate below, rather than pushed as a
+  // second, independent (and falsely ambiguous) candidate. This is what
+  // keeps one continuous visit spanning any number of local midnights as
+  // exactly one candidate.
+  const rolloverTerminalToCandidate = new Map<string, CandidateRun>();
+  for (const [employeeId, dateSet] of daysByEmployee) {
+    const dates = [...dateSet].sort();
     for (const date of dates) {
       const dayRows = await fetchDay(employeeId, date); // already resolved — Step 3 awaited every entry above
 
@@ -201,6 +215,7 @@ export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): 
         carrier_id: r.carrier_id,
         density_type: r.density_type,
         density_count_per_row: r.density_count_per_row,
+        rollover_of_entry_id: r.rollover_of_entry_id,
       }));
       const { runs } = groupIntoActivityRuns(segments);
       const runById = new Map(runs.map((r) => [r.id, r]));
@@ -243,6 +258,14 @@ export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): 
         }
       }
 
+      // Tracks, for THIS day only, which already-pushed-or-merged
+      // CandidateRun object each qualifying root produced — looked up again
+      // just below the loop to register this day's own chronologically-last
+      // run as a new rollover terminal, so a LATER day's continuation (if
+      // this shift is still open going into tomorrow) can find and extend
+      // the same object instead of creating a duplicate.
+      const candidateByRootId = new Map<string, CandidateRun>();
+
       for (const run of runs) {
         const root = visitRoot(run);
         if (run.id !== root.id) continue; // non-root chain members are folded into their root above, never an independent candidate
@@ -259,7 +282,29 @@ export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): 
         // combined chain, not just the root's own segments.
         if (combinedSegmentIds.some((id) => resolvedSegmentIds.has(id))) continue;
 
-        result.get(key)!.push({
+        const thisDayEndedAt = (chainEndedAtByRootId.get(root.id) ?? root.endedAt) ?? null;
+        const thisDayDuration = Math.round(chainDurationByRootId.get(root.id)!);
+
+        // This day's chain BEGINS with a midnight-rollover continuation of
+        // an earlier day's chain — merge into that earlier day's own
+        // candidate (already pushed, since days are processed chronologically
+        // above) instead of creating a second, falsely-independent one for
+        // the same physical visit. This is the fix for the false "Needs
+        // review" ambiguity a visit spanning local midnight would otherwise
+        // trigger (two separate unresolved candidates for the same
+        // row+activity+density).
+        const rolloverFromId = root.rolloverContinuationFromEntryId;
+        const priorCandidate = rolloverFromId ? rolloverTerminalToCandidate.get(rolloverFromId) : undefined;
+        if (priorCandidate && rolloverFromId) {
+          priorCandidate.segmentIds = [...priorCandidate.segmentIds, ...combinedSegmentIds];
+          priorCandidate.durationSeconds += thisDayDuration;
+          priorCandidate.endedAt = thisDayEndedAt ? thisDayEndedAt.toISOString() : null;
+          rolloverTerminalToCandidate.delete(rolloverFromId);
+          candidateByRootId.set(root.id, priorCandidate);
+          continue;
+        }
+
+        const candidate: CandidateRun = {
           runId: root.id,
           segmentIds: combinedSegmentIds,
           employeeId,
@@ -270,9 +315,24 @@ export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): 
           rowLabel: rowLabelById.get(root.greenhouseRowId) ?? "Unknown row",
           date: calendarDateInAppTimezone(root.startedAt),
           startedAt: root.startedAt.toISOString(),
-          endedAt: (chainEndedAtByRootId.get(root.id) ?? root.endedAt)?.toISOString() ?? null,
-          durationSeconds: Math.round(chainDurationByRootId.get(root.id)!),
-        });
+          endedAt: thisDayEndedAt?.toISOString() ?? null,
+          durationSeconds: thisDayDuration,
+        };
+        result.get(key)!.push(candidate);
+        candidateByRootId.set(root.id, candidate);
+      }
+
+      // Register this day's own chronologically-last run's terminal segment
+      // id, if it produced a tracked candidate, so a future day in this
+      // same batch (this shift still open, rolling into tomorrow) can find
+      // and extend it. `runs` is built in started_at order (callers always
+      // fetch `order by te.started_at asc`), so the last element is always
+      // the day's most recent run.
+      const lastRun = runs[runs.length - 1];
+      if (lastRun) {
+        const lastRunRoot = visitRoot(lastRun);
+        const candidate = candidateByRootId.get(lastRunRoot.id);
+        if (candidate) rolloverTerminalToCandidate.set(lastRun.id, candidate);
       }
     }
   }
@@ -295,4 +355,47 @@ export async function getUnresolvedRunsForRow(
   const key: RowActivityDensityKey = { greenhouseRowId, activityId, densityType };
   const map = await getUnresolvedRunsForRows([key]);
   return map.get(pairKey(key)) ?? [];
+}
+
+// The total duration (seconds) of every entry BEFORE `entryId` in its
+// midnight-rollover chain — i.e. every earlier day's contribution to a
+// visit that's continuing into the day `entryId` itself belongs to. Used
+// by inputs.ts's own per-day speed calculation: once getUnresolvedRunsForRows
+// (above) has correctly determined a rollover-spanning visit is NOT
+// ambiguous, the calculated speed shown for it must still divide the row's
+// full frozen quantity by the visit's FULL duration, not just today's
+// partial slice — this is what supplies the rest. A simple bounded
+// backward walk (rollover chains are, by construction, a single exact-
+// boundary link per day, so this is at most one hop per calendar day the
+// visit has spanned); capped well above any realistic chain length purely
+// as a defensive bound against a data anomaly, never expected to bind.
+const MAX_ROLLOVER_CHAIN_WALK = 60;
+
+interface RolloverChainHopRow {
+  id: string;
+  started_at: Date;
+  ended_at: Date | null;
+  rollover_of_entry_id: string | null;
+}
+
+async function fetchRolloverChainHop(id: string): Promise<RolloverChainHopRow | undefined> {
+  const result = await pool.query<RolloverChainHopRow>(
+    `select id, started_at, ended_at, rollover_of_entry_id from time_entries where id = $1`,
+    [id]
+  );
+  return result.rows[0];
+}
+
+export async function getRolloverPriorDurationSeconds(entryId: string): Promise<number> {
+  let totalSeconds = 0;
+  let cursorId: string | null = entryId;
+  let hops = 0;
+  while (cursorId && hops < MAX_ROLLOVER_CHAIN_WALK) {
+    hops++;
+    const row = await fetchRolloverChainHop(cursorId);
+    if (!row || !row.ended_at) break;
+    totalSeconds += (row.ended_at.getTime() - new Date(row.started_at).getTime()) / 1000;
+    cursorId = row.rollover_of_entry_id;
+  }
+  return Math.round(totalSeconds);
 }

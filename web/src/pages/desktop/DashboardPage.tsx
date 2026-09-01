@@ -5,6 +5,7 @@ import { PickingCard } from "../../components/dashboard/PickingCard";
 import { DashboardSettingsPanel } from "../../components/dashboard/DashboardSettingsPanel";
 import { BinCompletionsPanel } from "../../components/dashboard/BinCompletionsPanel";
 import { WorkPermitAlertsSection } from "../../components/dashboard/WorkPermitAlertsSection";
+import { LongOpenShiftAlertsSection } from "../../components/dashboard/LongOpenShiftAlertsSection";
 import { useAuth } from "../../context/AuthContext";
 import { api, ApiError } from "../../lib/api";
 import { DashboardCard, GetDashboardCardsResponse } from "../../lib/dashboardTypes";
@@ -91,6 +92,7 @@ export function DashboardPage() {
       </div>
 
       {canEdit && <WorkPermitAlertsSection />}
+      {canEdit && <LongOpenShiftAlertsSection onEnded={() => load(true)} />}
 
       {loadError && <p className="error-text">{loadError}</p>}
 

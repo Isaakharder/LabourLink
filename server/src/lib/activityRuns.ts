@@ -44,6 +44,20 @@ export interface RunSegment {
   // report attribution).
   density_type: "plants" | "stems" | null;
   density_count_per_row: number | null;
+  // Set only on a midnight-rollover-created continuation segment (see
+  // midnightRollover.ts) — points at the entry it continues, always on the
+  // OTHER side of a local-midnight boundary from this segment. Never set on
+  // an ordinary segment. Exists so callers that need to treat a visit
+  // spanning midnight as ONE visit (row-completion ambiguity/candidate
+  // resolution — see rowCompletionCandidates.ts) can detect and walk across
+  // that boundary; groupIntoActivityRuns itself doesn't need it; a rollover
+  // continuation is already boundary-contiguous with matching activity/row/
+  // carrier/densityType, so it merges into the same run as its predecessor
+  // for free WHENEVER both segments are in the same `entries` array — this
+  // field only matters to a caller (like rowCompletionCandidates.ts) that
+  // queries one calendar day at a time and therefore never has both halves
+  // in one `entries` array to begin with.
+  rollover_of_entry_id: string | null;
 }
 
 export interface ActivityRun {
@@ -81,6 +95,14 @@ export interface ActivityRun {
   // it has the full run list and completion state needed to know where to
   // stop.
   splitByDensityChangeFromRunId: string | null;
+  // Set from this run's FIRST underlying segment's rollover_of_entry_id
+  // (segmentIds[0] — see RunSegment's own comment) when that segment is a
+  // midnight-rollover continuation. A caller that queries one calendar day
+  // at a time (rowCompletionCandidates.ts, inputs.ts) uses this to resolve
+  // the run's true visit origin across the midnight boundary, the same way
+  // splitByDensityChangeFromRunId already lets it walk across a same-day
+  // density-type split.
+  rolloverContinuationFromEntryId: string | null;
 }
 
 export interface BreakSegment {
@@ -137,6 +159,7 @@ export function groupIntoActivityRuns(entries: RunSegment[]): {
         densityType: e.density_type,
         densityCountPerRow: e.density_count_per_row,
         splitByDensityChangeFromRunId: sameRowActivityCarrier ? current!.id : null,
+        rolloverContinuationFromEntryId: e.rollover_of_entry_id,
       };
       runs.push(current);
     }

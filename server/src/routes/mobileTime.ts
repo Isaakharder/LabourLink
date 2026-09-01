@@ -3,7 +3,9 @@ import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireDevice } from "../middleware/device";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
-import { calendarDateInAppTimezone, parseTimeParts, zonedWallTimeToUtc } from "../lib/timezone";
+import { reconcileMidnightRollover } from "../lib/midnightRollover";
+import { findMostRecentAdminEndCorrection } from "../lib/longShiftAdminEnd";
+import { APP_TIMEZONE, calendarDateInAppTimezone, parseTimeParts, zonedWallTimeToUtc } from "../lib/timezone";
 import {
   MAX_CLIENT_CLOCK_SKEW_FUTURE_MS,
   resolveOriginalEndedAt,
@@ -601,18 +603,22 @@ async function serializeStatus(
   employeePreferredLanguage: string | null,
   employeeSecurityRole: string
 ) {
-  // TEMPORARY — End Work ~1min delay investigation. Elapsed-time-only, no
-  // secrets. Remove once the slow hop is identified.
-  const __t0 = Date.now();
+  // Rolls a still-open entry forward across any local midnight(s) it's
+  // behind on BEFORE break reconciliation runs — break reconciliation
+  // reasons about "today," which only makes sense once a multi-day-stale
+  // open entry has actually been brought up to today. See
+  // midnightRollover.ts; runs on every status fetch and every mutating
+  // action for the same "never depends on a background worker" reason
+  // reconcileEmployeeBreaks below already does.
+  await reconcileMidnightRollover(employeeId);
+
   // Server-side reconciliation for scheduled breaks the employee worked
   // straight through — runs on every status fetch and every mutating
   // action (they all call this function), so it never depends on a
   // background worker. Idempotent: see breakReconciliation.ts.
   await reconcileEmployeeBreaks(employeeId, calendarDateInAppTimezone(new Date()));
-  console.log(`[timing] serializeStatus reconcileEmployeeBreaks: ${Date.now() - __t0}ms`);
 
   const open = await getOpenEntry(employeeId);
-  console.log(`[timing] serializeStatus getOpenEntry: ${Date.now() - __t0}ms`);
 
   // Bounded window used to walk the current job chain backward — work/break
   // segments are short-lived, so a day's worth of history is always enough;
@@ -772,7 +778,6 @@ async function serializeStatus(
     autoClosed: r.auto_closed_at !== null,
   }));
 
-  console.log(`[timing] serializeStatus total: ${Date.now() - __t0}ms`);
   return {
     employee: {
       id: employeeId,
@@ -789,6 +794,12 @@ async function serializeStatus(
     since: open?.started_at ?? null,
     previousActivity,
     recentJobs,
+    // Lets the client predict local midnight rollover while offline
+    // (lib/localMidnightRollover.ts) using the org's REAL configured
+    // timezone rather than guessing from the device's own locale — cached
+    // client-side (persistServerMeSnapshot) so it's still known at a fully
+    // offline cold start, long after this specific response.
+    appTimezone: APP_TIMEZONE,
   };
 }
 
@@ -1372,8 +1383,28 @@ interface SyncApplyOutcome {
 // reports what happened — never throws for an ordinary rejection (an
 // invalid/deleted activity, e.g.), only for a genuine unexpected failure
 // (caught by the caller, reported as retryable_failure).
+// An offline event genuinely queued on the device before an Administrator
+// used Dashboard's End Work action, only syncing afterward, must never
+// silently reopen the day it already closed — see longShiftAdminEnd.ts's
+// own header. Gated to the event types that would otherwise call
+// openEntry() and could reopen/backdate into that already-closed period;
+// end_day is unaffected (closing whatever's open, or a no-op, is safe
+// either way).
+const EVENTS_GUARDED_AGAINST_ADMIN_END = new Set(["work_start", "activity_switch", "break_start", "break_end"]);
+
 async function applySyncedEvent(employeeId: string, deviceId: string, event: SyncEventInput): Promise<SyncApplyOutcome> {
   const now = new Date();
+
+  if (EVENTS_GUARDED_AGAINST_ADMIN_END.has(event.eventType)) {
+    const adminEnd = await findMostRecentAdminEndCorrection(employeeId);
+    if (adminEnd && new Date(event.occurredAtUtc).getTime() <= new Date(adminEnd.endedAtIso).getTime()) {
+      return {
+        status: "permanent_conflict",
+        conflictReason: `event occurred before an administrator ended this shift at ${adminEnd.endedAtIso}`,
+      };
+    }
+  }
+
   switch (event.eventType) {
     case "work_start":
     case "activity_switch": {

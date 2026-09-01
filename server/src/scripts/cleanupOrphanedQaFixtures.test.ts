@@ -168,11 +168,30 @@ async function main() {
     landIds.splice(landIds.indexOf(orphanLand), 1);
     deviceIds.splice(deviceIds.indexOf(orphanDevice), 1);
   } finally {
-    for (const id of deviceIds) await pool.query(`delete from device_assignments where device_id = $1`, [id]).catch(() => {});
-    for (const id of deviceIds) await pool.query(`delete from devices where id = $1`, [id]).catch(() => {});
-    for (const id of landIds) await pool.query(`delete from greenhouse_lands where id = $1`, [id]).catch(() => {});
-    for (const id of activityIds) await pool.query(`delete from activities where id = $1`, [id]).catch(() => {});
-    for (const id of employeeIds) await pool.query(`delete from employees where id = $1`, [id]).catch(() => {});
+    // Same retry-then-fail-visibly convention as midnightRollover.test.ts's
+    // own tryDelete — a bare .catch(() => {}) here would silently hide a
+    // real leftover fixture exactly the way the 2026-08-31 leak went
+    // unnoticed.
+    async function tryDelete(label: string, fn: () => Promise<unknown>) {
+      const maxAttempts = 3;
+      let lastErr: unknown;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          await fn();
+          return;
+        } catch (err) {
+          lastErr = err;
+          if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 250 * attempt));
+        }
+      }
+      fail++;
+      console.error(`FAIL: cleanup step "${label}" failed after ${maxAttempts} attempts:`, lastErr);
+    }
+    for (const id of deviceIds) await tryDelete(`device_assignments ${id}`, () => pool.query(`delete from device_assignments where device_id = $1`, [id]));
+    for (const id of deviceIds) await tryDelete(`devices ${id}`, () => pool.query(`delete from devices where id = $1`, [id]));
+    for (const id of landIds) await tryDelete(`greenhouse_lands ${id}`, () => pool.query(`delete from greenhouse_lands where id = $1`, [id]));
+    for (const id of activityIds) await tryDelete(`activities ${id}`, () => pool.query(`delete from activities where id = $1`, [id]));
+    for (const id of employeeIds) await tryDelete(`employees ${id}`, () => pool.query(`delete from employees where id = $1`, [id]));
     await pool.end();
   }
 

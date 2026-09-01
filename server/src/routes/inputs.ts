@@ -6,9 +6,10 @@ import { getSignedPhotoUrl, getSignedPhotoUrls } from "../lib/storage";
 import { calendarDateInAppTimezone, getDayBoundsUtc, APP_TIMEZONE } from "../lib/timezone";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
+import { reconcileMidnightRollover } from "../lib/midnightRollover";
 import { aggregateDensitySpeed } from "../lib/densitySpeed";
 import { computeWorkdayTotals, WorkdayBoundaryEntry } from "../lib/workdayTotals";
-import { getUnresolvedRunsForRows } from "../lib/rowCompletionCandidates";
+import { getRolloverPriorDurationSeconds, getUnresolvedRunsForRows } from "../lib/rowCompletionCandidates";
 import {
   loadCarrierOptions,
   loadEmployeeActivitiesWithQuestions,
@@ -177,14 +178,39 @@ router.get(
 // Supervisor can't call GET /api/employees (Administrator/Manager only,
 // and it returns far more PII than a picker needs) — this is a minimal,
 // purpose-built list for the Inputs page's employee panel.
+//
+// Scoped to the selected date's actual time-entry data, not is_active —
+// deliberately NOT the same "active employees" list GET /api/employees
+// returns. Real incident this fixes: an admin reviewing a past date saw
+// every currently-active employee, including ones who never worked that
+// day, mixed in with (and outnumbering) the ones who actually had logs to
+// review; a since-deactivated employee who genuinely worked the selected
+// day disappeared from the list entirely, hiding real history behind their
+// current status. "Has at least one non-deleted time_entries row that day"
+// (open work, open break, or a completed entry — entry_type doesn't matter,
+// any of them means the employee showed up) is the only test now: is_active
+// plays no part, so a deactivated employee with logs on this date stays
+// visible, and an active employee with none for this date does not appear.
 router.get(
   "/employees",
   requireAuth,
   requireRole(...EDIT_ROLES),
   asyncHandler(async (req, res) => {
+    const date = req.query.date as string | undefined;
+    if (!isValidDate(date)) {
+      return res.status(400).json({ error: "A valid date (YYYY-MM-DD) is required" });
+    }
     const search = trimOrNull(req.query.search as string);
-    const conditions = ["e.is_active = true"];
-    const params: unknown[] = [];
+    const { start, end } = getDayBoundsUtc(date);
+    const params: unknown[] = [start, end];
+    const conditions = [
+      `exists (
+         select 1 from time_entries te
+         where te.employee_id = e.id
+           and te.started_at >= $1 and te.started_at < $2
+           and te.deleted_at is null
+       )`,
+    ];
     if (search) {
       params.push(`%${search.toLowerCase()}%`);
       conditions.push(`lower(e.first_name || ' ' || e.last_name) like $${params.length}`);
@@ -249,6 +275,25 @@ router.get(
     // performance investigation.
     const photoUrlPromise = employee.profile_photo_path ? getSignedPhotoUrl(employee.profile_photo_path) : null;
 
+    // Roll a still-open entry forward across any local midnight(s) it's
+    // behind on before break reconciliation (which reasons about "today")
+    // or the main time_entries query below runs — see midnightRollover.ts.
+    // Deliberately scoped to viewing TODAY specifically, not "any date <=
+    // today" (unlike reconcileEmployeeBreaks below, which legitimately
+    // reconciles whichever day is being viewed): reconcileMidnightRollover
+    // operates on whatever is GLOBALLY currently open for this employee,
+    // not on the viewed date, so running it while an admin reviews an
+    // unrelated old date would silently mutate the employee's live status
+    // as a side effect of looking at old history — a surprising effect
+    // with no real benefit, since the mobile app's own GET /me already
+    // reconciles current status on every request regardless. Only viewing
+    // today gets the extra request-time nudge here, matching what an admin
+    // watching a live/current day would actually expect.
+    const todayLocalForRollover = calendarDateInAppTimezone(new Date());
+    if (date === todayLocalForRollover) {
+      await reconcileMidnightRollover(employeeId);
+    }
+
     // Reconcile scheduled breaks the employee worked straight through before
     // reading the day back — never for a future date (nothing to reconcile
     // yet, and reconcileEmployeeBreaks would just no-op on future-dated
@@ -277,7 +322,7 @@ router.get(
       `select te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
               te.break_profile_item_id, te.source, te.is_paid, te.greenhouse_row_id, te.carrier_id,
               te.auto_closed_at, te.density_type, te.density_count_per_row, te.actual_started_at,
-              te.actual_ended_at, te.created_by_employee_id, te.creation_reason,
+              te.actual_ended_at, te.created_by_employee_id, te.creation_reason, te.rollover_of_entry_id,
               cb.first_name as created_by_first_name, cb.last_name as created_by_last_name,
               a.name as activity_name, a.normal_speed, a.speed_unit, a.density_source,
               bpi.name as break_item_name,
@@ -336,6 +381,7 @@ router.get(
       carrier_id: r.carrier_id,
       density_type: r.density_type,
       density_count_per_row: r.density_count_per_row,
+      rollover_of_entry_id: r.rollover_of_entry_id,
     }));
     const { runs, breaks } = groupIntoActivityRuns(segments);
 
@@ -618,6 +664,23 @@ router.get(
     // chain) is trivially its own root with a "chain" of just itself, so
     // this is also the single source of per-run speed math below — no
     // separate standalone-case calculation needed.
+    // A root whose OWN first segment is a midnight-rollover continuation
+    // (see activityRuns.ts) began on an earlier calendar day this query
+    // never fetched — chainDurationByRootId above only has TODAY's slice of
+    // what may be a longer visit. getUnresolvedRunsForRows (ambiguousPairKeys,
+    // above) already correctly treats the whole cross-day chain as one
+    // candidate; this fills in the matching missing duration so the speed
+    // shown here divides the row's full frozen quantity by the visit's FULL
+    // elapsed time, not just today's partial slice, which would otherwise
+    // silently overstate speed for any row whose visit happened to span a
+    // midnight.
+    for (const rootId of chainDurationByRootId.keys()) {
+      const root = runById.get(rootId)!;
+      if (!root.rolloverContinuationFromEntryId) continue;
+      const priorSeconds = await getRolloverPriorDurationSeconds(root.rolloverContinuationFromEntryId);
+      chainDurationByRootId.set(rootId, chainDurationByRootId.get(rootId)! + priorSeconds);
+    }
+
     const speedByRootId = new Map<string, number | null>();
     for (const [rootId, durationSeconds] of chainDurationByRootId) {
       const root = runById.get(rootId)!;
@@ -1281,6 +1344,9 @@ router.post(
       // locate and delete the right segments, never density figures.
       density_type: null,
       density_count_per_row: null,
+      // Not needed here — only rowCompletionCandidates.ts's cross-day
+      // visit-root resolution consults this field.
+      rollover_of_entry_id: null,
     }));
     const { runs } = groupIntoActivityRuns(segments);
     const run = runs.find((r) => r.id === id);

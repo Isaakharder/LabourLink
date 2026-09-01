@@ -146,6 +146,11 @@ function carrierOnlyEditEvent(deviceSeq: number, occurredAtUtc: string) {
 }
 
 beforeEach(() => {
+  // Restores real system time before every test, regardless of how the
+  // previous one ended (assertion failure, thrown error) — only one test
+  // below ever calls vi.setSystemTime, but this guarantees that mock can
+  // never leak into an unrelated later test in this file.
+  vi.useRealTimers();
   mockAppendEvent.mockReset();
   mockApi.mockReset().mockResolvedValue(idleMeResponse());
   mockGetPendingCount.mockReset().mockResolvedValue(0);
@@ -305,6 +310,15 @@ describe("offline row/carrier assignment stays visible without a server round tr
   });
 
   it("reconnection syncing both events successfully does not change the locally selected assignment or the events' own timestamps", async () => {
+    // Pinned to the same calendar day (America/Toronto) as this test's own
+    // fixture timestamps below — otherwise, run for real on any later date,
+    // the local midnight-rollover display fold (lib/localMidnightRollover.ts,
+    // a genuinely separate feature: an unsynced segment's on-screen timer
+    // must roll forward at local midnight even while offline) would
+    // correctly roll a multi-day-stale fixture forward, which is not what
+    // this test is about — it's specifically proving reconnection doesn't
+    // ALSO disturb an already-current-today assignment/timestamp.
+    vi.setSystemTime(new Date("2026-08-27T15:00:00.000Z"));
     const initialEvent = {
       clientEventId: "evt-initial",
       deviceId: "dev-1",
@@ -392,6 +406,7 @@ describe("offline row/carrier assignment stays visible without a server round tr
     expect(result.current.me?.currentActivity?.row?.id).toBe(ROW_644_ID);
     expect(result.current.me?.currentActivity?.carrier?.id).toBe(BIN_14_ID);
     expect(result.current.me?.currentActivity?.startedAt).toBe("2026-08-27T14:05:00.000Z");
+    vi.useRealTimers();
   });
 });
 

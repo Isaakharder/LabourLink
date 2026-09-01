@@ -178,8 +178,13 @@ export function InputsPage() {
     setSearchParams(params, { replace: true });
   }
 
+  // Scoped to `date` — the panel lists whoever has an actual time-entry log
+  // on the selected date (server-side, see GET /api/inputs/employees),
+  // never every active employee regardless of whether they worked that day.
+  // Re-runs on every date navigation, same as loadDaily.
   const loadEmployees = useCallback(() => {
     const params = new URLSearchParams();
+    params.set("date", date);
     if (employeeSearch.trim()) params.set("search", employeeSearch.trim());
     api<{ employees: InputsEmployee[] }>(`/api/inputs/employees?${params.toString()}`)
       .then((res) => {
@@ -189,7 +194,7 @@ export function InputsPage() {
       .catch((err) => {
         setEmployeesError(err instanceof ApiError ? err.message : "Could not load employees");
       });
-  }, [employeeSearch]);
+  }, [employeeSearch, date]);
 
   useEffect(() => {
     const t = window.setTimeout(loadEmployees, employeeSearch ? 300 : 0);

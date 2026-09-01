@@ -117,6 +117,9 @@ router.get(
         carrier_id: r.carrier_id,
         density_type: r.density_type,
         density_count_per_row: r.density_count_per_row,
+        // Not needed here — only rowCompletionCandidates.ts's cross-day
+        // visit-root resolution consults this field.
+        rollover_of_entry_id: null,
       }));
       const { runs } = groupIntoActivityRuns(segments);
       const openRun = runs.find((r) => r.isOpen);

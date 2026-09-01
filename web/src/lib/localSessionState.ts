@@ -8,6 +8,7 @@
 // means everything downstream keeps working unmodified, while still getting
 // a genuinely immediate, no-network-wait UI update.
 import { getLocalEventStore, LocalEvent } from "./localEventStore";
+import { foldLocalMidnightRollover } from "./localMidnightRollover";
 import {
   ActivitiesResponse,
   CarriersResponse,
@@ -217,7 +218,11 @@ export async function foldPendingEventsOntoMe(deviceId: string, base: MeResponse
     console.error("[local-session-state] foldPendingEventsOntoMe: local store unavailable, using server response as-is:", err);
     return base;
   }
-  if (pending.length === 0) return base;
+  // Even with nothing pending, the base itself (a server response that's
+  // aged while offline, or a cold-start restore of yesterday's last-known
+  // snapshot) can still be anchored to a prior calendar day — fold before
+  // returning either way, not just when there's something to replay.
+  if (pending.length === 0) return foldLocalMidnightRollover(base, new Date(), base.appTimezone);
 
   const lookup = await buildDisplayLookup();
   let result = base;
@@ -230,7 +235,7 @@ export async function foldPendingEventsOntoMe(deviceId: string, base: MeResponse
     };
     result = applyLocalEventToMe(result, event, display);
   }
-  return result;
+  return foldLocalMidnightRollover(result, new Date(), base.appTimezone);
 }
 
 // The durable "last known base" a cold start folds pending events onto —

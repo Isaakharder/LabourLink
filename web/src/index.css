@@ -6467,6 +6467,164 @@ input {
   font-size: 0.9rem;
 }
 
+/* ---------- Long Open Shift Alerts (Dashboard) ---------- */
+
+.long-shift-alerts-section {
+  margin-bottom: 1.25rem;
+}
+
+.long-shift-alerts-section h2 {
+  margin: 0 0 0.65rem;
+  font-size: 1.05rem;
+}
+
+.long-shift-alerts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.long-shift-alert-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  border-left-width: 5px;
+  border-left-color: var(--color-danger);
+}
+
+.long-shift-alert-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.long-shift-alert-headline {
+  margin: 0 0 0.15rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.long-shift-alert-detail {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.long-shift-alert-actions {
+  flex-shrink: 0;
+}
+
+.long-shift-alert-actions button {
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .long-shift-alert-card {
+    flex-direction: column;
+  }
+  .long-shift-alert-actions button {
+    width: 100%;
+  }
+}
+
+.long-shift-end-work-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.long-shift-end-work-summary {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.75rem;
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.long-shift-end-work-summary dt {
+  color: var(--color-muted);
+}
+
+.long-shift-end-work-summary dd {
+  margin: 0;
+  font-weight: 500;
+}
+
+.long-shift-end-work-time-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.long-shift-end-work-time-label input {
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+
+.long-shift-end-work-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--color-muted);
+}
+
+/* ---------- Settings page ---------- */
+
+.settings-section {
+  max-width: 32rem;
+}
+
+.settings-section h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+.settings-section-description {
+  margin: 0 0 0.85rem;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.settings-threshold-form {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.settings-threshold-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.settings-threshold-form input {
+  width: 6rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+
+.settings-view-only-note,
+.settings-saved-note {
+  font-size: 0.82rem;
+  color: var(--color-muted);
+}
+
 /* ---------- Work Permit compact status (employee profile) ---------- */
 
 .work-permit-status {

@@ -1,16 +1,38 @@
 import { pool } from "../db";
 import { calendarDateInAppTimezone, getDayBoundsUtc } from "./timezone";
+import { daysBetweenDateStrs } from "./workPermits";
 
-// Safety net for a forgotten "End Work"/"End Day" action — entirely
-// server-side, independent of any client (phone closed, charging
-// overnight, no internet, nobody opens the Inputs page, no mobile request
-// ever occurs again). Closes every open work/break entry whose LOCAL start
-// date (in APP_TIMEZONE) is strictly before today's local date, backdating
-// each to 23:59:59 local time on the day it actually started — never the
-// day this job happens to run, and never a later day than the entry
-// itself began. Never creates a new entry (no auto-resume): the employee
-// simply shows idle and picks a job again.
+// OUTER FALLBACK ONLY as of midnight rollover (see midnightRollover.ts) —
+// this used to be the primary "forgotten End Work" safety net, firing on
+// literally the next hourly sweep after ANY entry crossed local midnight.
+// That's now midnight rollover's job: it closes-and-immediately-reopens an
+// equivalent entry at each local midnight, both at request time and via its
+// own scheduled sweep, so a shift genuinely spanning midnight stays
+// continuous instead of landing here.
+//
+// This file now only fires on an entry whose local start date is more than
+// DAILY_CUTOFF_STALE_DAYS days before today — i.e. one midnight rollover
+// has, for whatever reason, failed to touch across MULTIPLE scheduled
+// sweeps and multiple employee app-opens. That should be effectively never;
+// this exists purely as a last-resort backstop so a genuinely broken/
+// undeployed rollover can't leave an entry open indefinitely. Entirely
+// server-side, independent of any client (phone closed, charging overnight,
+// no internet, nobody opens the Inputs page, no mobile request ever occurs
+// again). Closes the entry by backdating it to 23:59:59 local time on the
+// day it actually started — never the day this job happens to run, and
+// never a later day than the entry itself began. Never creates a new entry
+// (no auto-resume, unlike midnight rollover): the employee simply shows
+// idle and picks a job again — appropriate here specifically because
+// reaching this path already means something is badly wrong upstream, not
+// an ordinary overnight shift.
 export const CUTOFF_REASON = "Automatically closed at daily cutoff";
+
+// How many local calendar days behind "today" an entry's own start date
+// must be before this outer fallback will touch it. Midnight rollover
+// should never let a gap this wide accumulate; this is deliberately a wide
+// margin, not a tight one, so the two mechanisms can never race over the
+// same entry in the ordinary case (rollover always gets there first).
+export const DAILY_CUTOFF_STALE_DAYS = 3;
 
 export interface CutoffCandidate {
   id: string;
@@ -84,7 +106,10 @@ export async function runDailyCutoff(options: { dryRun?: boolean } = {}): Promis
     // still classifies every row correctly.
     const todayLocal = calendarDateInAppTimezone(new Date());
     const startedLocalDate = calendarDateInAppTimezone(new Date(candidate.started_at));
-    if (startedLocalDate >= todayLocal) continue; // still within its own current local day
+    // Outer-fallback threshold (see this file's own header comment) — only
+    // an entry midnight rollover should have long since caught reaches
+    // here at all.
+    if (daysBetweenDateStrs(startedLocalDate, todayLocal) < DAILY_CUTOFF_STALE_DAYS) continue;
 
     const client = await pool.connect();
     try {

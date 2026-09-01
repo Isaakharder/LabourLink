@@ -10,6 +10,14 @@ import { aggregateDensitySpeed } from "../lib/densitySpeed";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { getSignedPhotoUrls } from "../lib/storage";
 import { getActiveWorkPermitAlerts } from "../lib/workPermits";
+import {
+  getLongOpenShiftAlerts,
+  getOrgSettings,
+  isValidLongOpenShiftAlertThresholdHours,
+  setLongOpenShiftAlertThresholdHours,
+} from "../lib/longOpenShiftAlerts";
+import { endLongOpenShift, LongShiftAdminEndError } from "../lib/longShiftAdminEnd";
+import { APP_TIMEZONE } from "../lib/timezone";
 
 const router = Router();
 
@@ -102,6 +110,120 @@ router.get(
         leadDays: a.leadDays,
       })),
     });
+  })
+);
+
+// Long Open Shift Alerts — a workday (work or break, no idle gap — walked
+// across any midnight-rollover boundaries it crossed, see
+// longOpenShiftAlerts.ts) that's stayed open longer than the configurable
+// org-wide threshold below. Review-only: never closes/corrects anything.
+// Same Administrator/Manager restriction as work-permit alerts above (this
+// is also employee-specific operational data, not the anonymous summary
+// counts GET / exposes).
+router.get(
+  "/long-open-shift-alerts",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (_req, res) => {
+    const settings = await getOrgSettings();
+    const alerts = await getLongOpenShiftAlerts(pool, settings.longOpenShiftAlertThresholdHours, new Date());
+
+    // Current activity name for a working alert's End Work confirmation
+    // modal ("current activity/status") — batched once for every working
+    // alert, never per-alert. On-break alerts have no activity (breaks
+    // never carry one — see chk_time_entries_activity_matches_type).
+    const workingEmployeeIds = alerts.filter((a) => a.entryType === "work").map((a) => a.employeeId);
+    const activityByEmployee = new Map<string, string>();
+    if (workingEmployeeIds.length > 0) {
+      const { rows } = await pool.query(
+        `select te.employee_id, a.name as activity_name
+         from time_entries te join activities a on a.id = te.activity_id
+         where te.employee_id = any($1::uuid[]) and te.entry_type = 'work' and te.ended_at is null and te.deleted_at is null`,
+        [workingEmployeeIds]
+      );
+      for (const r of rows) activityByEmployee.set(r.employee_id, r.activity_name);
+    }
+
+    res.json({
+      thresholdHours: settings.longOpenShiftAlertThresholdHours,
+      timezone: APP_TIMEZONE,
+      alerts: alerts.map((a) => ({
+        employeeId: a.employeeId,
+        employeeName: `${a.firstName} ${a.lastName}`,
+        entryType: a.entryType,
+        activityName: activityByEmployee.get(a.employeeId) ?? null,
+        shiftStartedAt: a.shiftStartedAt,
+        openHours: a.openHours,
+      })),
+    });
+  })
+);
+
+// End Work — an Administrator/Manager closing a long-open-shift alert's
+// entry directly from the Dashboard, at an exact confirmed time, instead of
+// leaving it to the employee. Same Administrator/Manager role restriction
+// as the alert itself, enforced here server-side (not just a hidden button
+// client-side). All the actual rules (advisory lock, midnight-boundary
+// reconciliation first, no rounding, idempotent, audited) live in
+// longShiftAdminEnd.ts — this route only validates the request shape and
+// translates its typed error into a 400.
+router.post(
+  "/long-open-shift-alerts/:employeeId/end-work",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (req, res) => {
+    const { employeeId } = req.params;
+    if (!UUID_RE.test(employeeId)) {
+      return res.status(400).json({ error: "Invalid employeeId" });
+    }
+
+    const { endedAt } = req.body as { endedAt?: string };
+    if (typeof endedAt !== "string" || endedAt.trim() === "") {
+      return res.status(400).json({ error: "endedAt is required" });
+    }
+    const endedAtDate = new Date(endedAt);
+    if (Number.isNaN(endedAtDate.getTime())) {
+      return res.status(400).json({ error: "endedAt must be a valid date/time" });
+    }
+
+    try {
+      const result = await endLongOpenShift(employeeId, endedAtDate, req.employee!.id);
+      res.json({ ...result, timezone: APP_TIMEZONE });
+    } catch (err) {
+      if (err instanceof LongShiftAdminEndError) {
+        return res.status(400).json({ error: err.message });
+      }
+      throw err;
+    }
+  })
+);
+
+// Org-wide settings — currently just the long-open-shift alert threshold.
+// GET is Administrator/Manager (same read gate as the alert itself); PATCH
+// is Administrator-only, matching this codebase's convention of reserving
+// configuration changes (as opposed to viewing operational alerts) to the
+// stricter role.
+router.get(
+  "/org-settings",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (_req, res) => {
+    const settings = await getOrgSettings();
+    res.json({ longOpenShiftAlertThresholdHours: settings.longOpenShiftAlertThresholdHours });
+  })
+);
+
+router.patch(
+  "/org-settings",
+  requireAuth,
+  requireRole("Administrator"),
+  asyncHandler(async (req, res) => {
+    const { longOpenShiftAlertThresholdHours } = req.body as { longOpenShiftAlertThresholdHours?: number };
+    if (!isValidLongOpenShiftAlertThresholdHours(longOpenShiftAlertThresholdHours)) {
+      return res.status(400).json({ error: "longOpenShiftAlertThresholdHours must be an integer between 1 and 168" });
+    }
+    await setLongOpenShiftAlertThresholdHours(longOpenShiftAlertThresholdHours, req.employee!.id);
+    res.json({ longOpenShiftAlertThresholdHours });
   })
 );
 
@@ -288,6 +410,9 @@ router.get(
         carrier_id: r.carrier_id,
         density_type: r.density_type,
         density_count_per_row: r.density_count_per_row,
+        // Not needed here — only rowCompletionCandidates.ts's cross-day
+        // visit-root resolution consults this field.
+        rollover_of_entry_id: null,
       }));
       const { runs } = groupIntoActivityRuns(segments);
       const openRun = runs.find((r) => r.isOpen);
