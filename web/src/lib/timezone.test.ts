@@ -3,7 +3,26 @@
 // an empty string, garbage text, a non-finite number) must degrade to a
 // safe, labeled fallback — never throw during render.
 import { describe, expect, it, vi } from "vitest";
-import { formatDurationHMS, formatTimeInAppTimezone, toTimeInputValue } from "./timezone";
+import { combineDateAndTimeToUtcIso, formatDurationHMS, formatTimeInAppTimezone, toTimeInputValue } from "./timezone";
+
+describe("combineDateAndTimeToUtcIso", () => {
+  // <input type="time"> always emits 24-hour "HH:MM:SS" regardless of the
+  // browser locale's displayed AM/PM controls — there is no code path where
+  // a "5:00 PM" pick could reach this function as "05:00:00" instead of
+  // "17:00:00". These lock in that the 24-hour value converts correctly
+  // across a DST boundary (APP_TIMEZONE is America/Toronto).
+  it("converts a 24-hour evening time (5:00 PM) during EDT to the correct UTC instant", () => {
+    expect(combineDateAndTimeToUtcIso("2026-08-31", "17:00:00")).toBe("2026-08-31T21:00:00.000Z");
+  });
+
+  it("converts a 24-hour morning time (7:00 AM) during EDT to the correct UTC instant", () => {
+    expect(combineDateAndTimeToUtcIso("2026-08-31", "07:00:00")).toBe("2026-08-31T11:00:00.000Z");
+  });
+
+  it("converts correctly during EST (outside daylight saving)", () => {
+    expect(combineDateAndTimeToUtcIso("2026-01-15", "17:00:00")).toBe("2026-01-15T22:00:00.000Z");
+  });
+});
 
 describe("formatTimeInAppTimezone", () => {
   it("formats a real ISO instant normally", () => {

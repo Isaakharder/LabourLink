@@ -48,6 +48,10 @@ interface ActivityLogsCardProps {
   // Called after the admin combines segments in the row-completion review
   // modal — the parent reloads the day so the newly-resolved speed shows up.
   onRowCompletionChanged: () => void;
+  // True while an end-time correction's preview or PATCH request is in
+  // flight (InputsPage's actionInFlight) — disables Save/Cancel on the
+  // inline editor so a double-click can't fire two overlapping requests.
+  saving: boolean;
 }
 
 function ManualBadge({ meta }: { meta: NonNullable<ActivityRunDto["manualEntry"]> }) {
@@ -76,6 +80,7 @@ export function ActivityLogsCard({
   onCancelEdit,
   onDeleteRun,
   onRowCompletionChanged,
+  saving,
 }: ActivityLogsCardProps) {
   const [reviewTarget, setReviewTarget] = useState<{
     greenhouseRowId: string;
@@ -86,6 +91,12 @@ export function ActivityLogsCard({
   } | null>(null);
 
   function handleEndTimeCellClick(run: ActivityRunDto) {
+    // Blocked while a correction is already in flight for this card — a
+    // Save click closes the editor immediately (before the request
+    // resolves), so without this guard a quick second click on the same
+    // cell could re-open editing on the still-stale pre-correction value
+    // and race a second request against the first.
+    if (saving) return;
     if (run.id === selectedRunId && run.canEdit && editingRunId !== run.id) {
       onStartEdit(run);
     } else {
@@ -241,15 +252,16 @@ export function ActivityLogsCard({
                           value={editTimeValue}
                           onChange={(e) => onEditTimeChange(e.target.value)}
                           onKeyDown={(e) => {
-                            if (e.key === "Enter") onSaveEdit();
+                            if (e.key === "Enter" && !saving) onSaveEdit();
                             if (e.key === "Escape") onCancelEdit();
                           }}
+                          disabled={saving}
                           autoFocus
                         />
-                        <button type="button" onClick={onSaveEdit}>
-                          Save
+                        <button type="button" onClick={onSaveEdit} disabled={saving}>
+                          {saving ? "Saving..." : "Save"}
                         </button>
-                        <button type="button" onClick={onCancelEdit}>
+                        <button type="button" onClick={onCancelEdit} disabled={saving}>
                           Cancel
                         </button>
                       </div>

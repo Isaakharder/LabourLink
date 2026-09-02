@@ -10,7 +10,7 @@
 // call is fully controlled by the test (deferred promises resolved on
 // demand), rather than hitting a real server.
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -45,6 +45,14 @@ interface DailyCall {
 let employeesResponse: { employees: InputsEmployee[] } = { employees: [] };
 let dailyCalls: DailyCall[] = [];
 let breakPatchFailure: { status: number; message: string } | null = null;
+// Activity-run end-time correction preview/apply — mirrors breakPatchFailure
+// above, but for POST .../activity-runs/:id/end-time-preview and PATCH
+// .../activity-runs/:id/end-time. null messages (the default) short-circuits
+// straight to "no preview call configured" tests never needing it; an empty
+// array means "preview ran, nothing to confirm."
+let activityRunPreviewMessages: string[] | null = null;
+let activityRunPreviewDeferred: Deferred<{ messages: string[] }> | null = null;
+let activityRunEndTimePatchCalls = 0;
 
 vi.mock("../../lib/api", () => {
   class ApiError extends Error {
@@ -96,6 +104,14 @@ vi.mock("../../lib/api", () => {
         if (breakPatchFailure) {
           return Promise.reject(new ApiError(breakPatchFailure.status, breakPatchFailure.message));
         }
+        return Promise.resolve({ ok: true });
+      }
+      if (path.endsWith("/end-time-preview") && options?.method === "POST") {
+        if (activityRunPreviewDeferred) return activityRunPreviewDeferred.promise;
+        return Promise.resolve({ messages: activityRunPreviewMessages ?? [] });
+      }
+      if (/\/activity-runs\/[^/]+\/end-time$/.test(path) && options?.method === "PATCH") {
+        activityRunEndTimePatchCalls++;
         return Promise.resolve({ ok: true });
       }
       return Promise.reject(new Error(`Unhandled mock api() call in test: ${path}`));
@@ -193,6 +209,9 @@ beforeEach(() => {
   dailyCalls = [];
   employeesResponse = { employees: [empA, empB] };
   breakPatchFailure = null;
+  activityRunPreviewMessages = null;
+  activityRunPreviewDeferred = null;
+  activityRunEndTimePatchCalls = 0;
 });
 
 afterEach(() => {
@@ -429,5 +448,70 @@ describe("InputsPage employee switching", () => {
     expect(within(header as HTMLElement).getByText("Corrected break overlaps a work entry")).toBe(statusMessage);
     expect(statusMessage.closest(".inputs-section-header")).toBe(header);
     expect(statusMessage.closest(".inputs-workspace-placeholder")).toBeNull();
+  });
+
+  it("pauses on Save for a confirmation preview when the correction would remove hidden grouped segments, and only applies it after confirming", async () => {
+    activityRunPreviewMessages = ["This will end Alice's Activity at 5:00 PM and remove one later 1-second segment."];
+    const { container } = renderInputsPage();
+
+    await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
+    await act(async () => {
+      findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity"));
+    });
+    await screen.findByText("Alice's Activity");
+
+    const endTimeText = formatTimeInAppTimezone("2026-08-11T14:00:00.000Z");
+    const user = userEvent.setup();
+    await user.click(screen.getByText(endTimeText)); // select the run
+    await user.click(screen.getByText(endTimeText)); // enter edit mode
+    const timeInput = container.querySelector('input[type="time"]') as HTMLInputElement;
+    expect(timeInput).not.toBeNull();
+    fireEvent.change(timeInput, { target: { value: "17:00:00" } });
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    // The confirmation modal appears with the server's exact preview
+    // message — and the real PATCH must NOT have fired yet.
+    await screen.findByText(activityRunPreviewMessages[0]);
+    expect(activityRunEndTimePatchCalls).toBe(0);
+
+    await user.click(screen.getByRole("button", { name: "Save correction" }));
+    await waitFor(() => expect(activityRunEndTimePatchCalls).toBe(1));
+  });
+
+  it("disables Save while the correction request is in flight, and applies directly (no confirmation) when nothing hidden would be removed", async () => {
+    activityRunPreviewDeferred = createDeferred<{ messages: string[] }>();
+    const { container } = renderInputsPage();
+
+    await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
+    await act(async () => {
+      findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity"));
+    });
+    await screen.findByText("Alice's Activity");
+
+    const endTimeText = formatTimeInAppTimezone("2026-08-11T14:00:00.000Z");
+    const user = userEvent.setup();
+    await user.click(screen.getByText(endTimeText));
+    await user.click(screen.getByText(endTimeText));
+    const timeInput = container.querySelector('input[type="time"]') as HTMLInputElement;
+    fireEvent.change(timeInput, { target: { value: "13:30:00" } });
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    // Still waiting on the preview response — no PATCH has fired yet.
+    expect(activityRunEndTimePatchCalls).toBe(0);
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+
+    // A quick second click on the same cell while still processing must
+    // NOT reopen the editor on the stale pre-correction value (ActivityLogsCard's
+    // `saving` guard on handleEndTimeCellClick) — it stays a plain display.
+    await user.click(screen.getByText(endTimeText));
+    expect(container.querySelector('input[type="time"]')).toBeNull();
+
+    await act(async () => {
+      activityRunPreviewDeferred!.resolve({ messages: [] });
+    });
+
+    // No confirmation modal — applies directly.
+    await waitFor(() => expect(activityRunEndTimePatchCalls).toBe(1));
+    expect(screen.queryByText("Confirm activity correction")).not.toBeInTheDocument();
   });
 });

@@ -100,6 +100,17 @@ export function InputsPage() {
     messages: string[];
     workedMinutesRemoved: number;
   } | null>(null);
+  // Same narrow exception as breakCorrectionPreview above, for the activity
+  // end-time correction: only populated when the displayed run is actually
+  // a merge of multiple underlying segments AND the correction would remove
+  // one or more of them (POST .../end-time-preview, the exact same plan
+  // PATCH .../end-time would apply). An ordinary same-segment correction
+  // skips this and saves directly.
+  const [activityRunCorrectionPreview, setActivityRunCorrectionPreview] = useState<{
+    runId: string;
+    newTimeIso: string;
+    messages: string[];
+  } | null>(null);
 
   const [editingWorkStart, setEditingWorkStart] = useState(false);
   const [editWorkStartTimeValue, setEditWorkStartTimeValue] = useState("");
@@ -421,9 +432,34 @@ export function InputsPage() {
     setActionInFlight(true);
     setActionError(null);
     try {
-      await api(`/api/inputs/activity-runs/${run.id}/end-time`, {
-        method: "PATCH",
+      const preview = await api<{ messages: string[] }>(`/api/inputs/activity-runs/${run.id}/end-time-preview`, {
+        method: "POST",
         body: JSON.stringify({ endTime: newEndTimeIso }),
+      });
+      if (preview.messages.length > 0) {
+        // The displayed run is a merge of multiple underlying segments and
+        // this correction would remove one or more hidden ones — pause for
+        // an explicit confirmation showing exactly what will happen (the
+        // same plan Save below applies), rather than silently trimming and
+        // deleting something the admin couldn't see from this row alone.
+        setActivityRunCorrectionPreview({ runId: run.id, newTimeIso: newEndTimeIso, messages: preview.messages });
+        setActionInFlight(false);
+        return;
+      }
+      await applyActivityRunEndTimeCorrection(run.id, newEndTimeIso);
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
+      setActionInFlight(false);
+    }
+  }
+
+  async function applyActivityRunEndTimeCorrection(runId: string, newTimeIso: string) {
+    setActionInFlight(true);
+    setActionError(null);
+    try {
+      await api(`/api/inputs/activity-runs/${runId}/end-time`, {
+        method: "PATCH",
+        body: JSON.stringify({ endTime: newTimeIso }),
       });
       await loadDaily();
       setSuccessMessage("End time updated.");
@@ -431,6 +467,7 @@ export function InputsPage() {
       setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
     } finally {
       setActionInFlight(false);
+      setActivityRunCorrectionPreview(null);
     }
   }
 
@@ -708,6 +745,7 @@ export function InputsPage() {
                 onCancelEdit={handleCancelEdit}
                 onDeleteRun={handleDeleteRun}
                 onRowCompletionChanged={() => loadDaily()}
+                saving={actionInFlight}
               />
               <WorkdayDetailsCard
                 workStartTime={daily.workStartTime}
@@ -762,6 +800,19 @@ export function InputsPage() {
             applyBreakCorrection(breakCorrectionPreview.breakId, breakCorrectionPreview.field, breakCorrectionPreview.newTimeIso)
           }
           onCancel={() => setBreakCorrectionPreview(null)}
+        />
+      )}
+
+      {activityRunCorrectionPreview && (
+        <BreakCorrectionPreviewModal
+          title="Confirm activity correction"
+          messages={activityRunCorrectionPreview.messages}
+          submitting={actionInFlight}
+          error={actionError}
+          onConfirm={() =>
+            applyActivityRunEndTimeCorrection(activityRunCorrectionPreview.runId, activityRunCorrectionPreview.newTimeIso)
+          }
+          onCancel={() => setActivityRunCorrectionPreview(null)}
         />
       )}
 

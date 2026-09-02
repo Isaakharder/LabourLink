@@ -3,11 +3,18 @@ import { Modal } from "../ui/Modal";
 
 interface BreakCorrectionPreviewModalProps {
   messages: string[];
-  workedMinutesRemoved: number;
+  // Not every caller can compute this precisely (the activity-run preview
+  // below doesn't) — omitted entirely rather than shown as a misleading 0.
+  workedMinutesRemoved?: number;
   submitting: boolean;
   error: string | null;
   onConfirm: () => void;
   onCancel: () => void;
+  // Reused as-is for the activity-run grouped-segment correction preview
+  // (see InputsPage.tsx's handleSaveEdit) — same shape, same "server
+  // computed this from the exact plan Save applies" guarantee, just a
+  // different confirmation title.
+  title?: string;
 }
 
 // Shown only when correcting a break would trim/split/delete at least one
@@ -26,6 +33,7 @@ export function BreakCorrectionPreviewModal({
   error,
   onConfirm,
   onCancel,
+  title = "Confirm break correction",
 }: BreakCorrectionPreviewModalProps) {
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -34,12 +42,12 @@ export function BreakCorrectionPreviewModal({
   }
 
   return (
-    <Modal title="Confirm break correction" onClose={submitting ? () => {} : onCancel}>
+    <Modal title={title} onClose={submitting ? () => {} : onCancel}>
       <form onSubmit={handleSubmit} className="employee-form" noValidate>
         {messages.map((message, i) => (
           <p key={i}>{message}</p>
         ))}
-        {workedMinutesRemoved > 0 && (
+        {!!workedMinutesRemoved && workedMinutesRemoved > 0 && (
           <p className="field-hint">
             Worked time will decrease by {workedMinutesRemoved} minute{workedMinutesRemoved === 1 ? "" : "s"} in total.
           </p>
