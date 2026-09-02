@@ -4,8 +4,23 @@ import { ActivityTimer } from "../mobile/ActivityTimer";
 import { ActivityRunDto } from "../../lib/inputsTypes";
 import { formatDateLong, formatDurationHMS, formatTimeInAppTimezone } from "../../lib/timezone";
 import { RowCompletionReviewModal } from "./RowCompletionReviewModal";
+import { InputsErrorBoundary } from "./InputsErrorBoundary";
 
+// One row's worth of columns — 7 <th>s in the header above (Activity, Row,
+// Carrier, Speed, Duration, End Time, Actions). Kept as a plain constant
+// (not derived) since the fallback row below needs the same span whether
+// or not a real render ever gets far enough to count columns dynamically.
+const ACTIVITY_LOG_COLUMN_COUNT = 7;
+
+// Defensive against a non-finite/missing value reaching this — .toFixed
+// throws a TypeError outright on null/undefined (not just a bad-looking
+// result, an actual crash), same class of risk the Inputs blank-screen
+// investigation flagged for every duration/total display here.
 function formatSpeed(speed: { value: number; unit: string | null }): string {
+  if (typeof speed.value !== "number" || !Number.isFinite(speed.value)) {
+    console.error("[ActivityLogsCard] formatSpeed: non-finite speed value, showing a safe fallback instead", speed);
+    return "—";
+  }
   return speed.unit ? `${speed.value.toFixed(1)} ${speed.unit}` : speed.value.toFixed(1);
 }
 
@@ -148,8 +163,20 @@ export function ActivityLogsCard({
             </thead>
             <tbody>
               {runs.map((run) => (
-                <tr
+                <InputsErrorBoundary
                   key={run.id}
+                  resetKey={`${date}:${run.id}`}
+                  label={`activity log row (run ${run.id})`}
+                  renderFallback={(diagnosticId) => (
+                    <tr className="inputs-log-row inputs-log-row-needs-review">
+                      <td colSpan={ACTIVITY_LOG_COLUMN_COUNT}>
+                        <span className="inputs-needs-review-badge">Needs review</span> This entry couldn't be
+                        displayed due to a data issue. Reference: {diagnosticId} · Entry ID: {run.id}
+                      </td>
+                    </tr>
+                  )}
+                >
+                <tr
                   className={`inputs-log-row${run.id === selectedRunId ? " inputs-log-row-selected" : ""}`}
                   onClick={() => onSelectRun(run.id)}
                 >
@@ -272,6 +299,7 @@ export function ActivityLogsCard({
                     )}
                   </td>
                 </tr>
+                </InputsErrorBoundary>
               ))}
             </tbody>
           </table>

@@ -390,7 +390,16 @@ export async function getRolloverPriorDurationSeconds(entryId: string): Promise<
   let totalSeconds = 0;
   let cursorId: string | null = entryId;
   let hops = 0;
+  // Explicit cycle guard, independent of the MAX_ROLLOVER_CHAIN_WALK hop
+  // cap above: a genuine data anomaly where rollover_of_entry_id loops
+  // back on itself (A -> B -> A) would otherwise silently walk all 60
+  // capped hops, summing each edge of the cycle multiple times into a
+  // finite but WRONG (inflated) duration, rather than visibly stopping at
+  // the point the chain actually stops making sense.
+  const seen = new Set<string>();
   while (cursorId && hops < MAX_ROLLOVER_CHAIN_WALK) {
+    if (seen.has(cursorId)) break;
+    seen.add(cursorId);
     hops++;
     const row = await fetchRolloverChainHop(cursorId);
     if (!row || !row.ended_at) break;

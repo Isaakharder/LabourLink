@@ -3434,6 +3434,50 @@ input {
   cursor: help;
 }
 
+/* ---------- InputsErrorBoundary "Needs review" fallbacks ---------- */
+
+.inputs-needs-review {
+  padding: 1.25rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 6%, var(--color-surface));
+}
+
+.inputs-needs-review-title {
+  margin: 0 0 0.35rem;
+  font-weight: 600;
+  color: var(--color-danger);
+}
+
+.inputs-needs-review-detail {
+  margin: 0 0 0.5rem;
+  font-size: 0.88rem;
+}
+
+.inputs-needs-review-ref {
+  margin: 0;
+  font-size: 0.78rem;
+  font-family: monospace;
+  color: var(--color-muted);
+}
+
+.inputs-log-row-needs-review td {
+  padding: 0.6rem 0.75rem;
+  color: var(--color-danger);
+  font-size: 0.85rem;
+}
+
+.inputs-needs-review-badge {
+  display: inline-block;
+  margin-right: 0.4rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: var(--color-danger);
+  color: white;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
 .inputs-workday-table tfoot td {
   font-weight: 600;
   border-top: 1px solid var(--color-border);

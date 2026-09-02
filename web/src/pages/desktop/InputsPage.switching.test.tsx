@@ -295,6 +295,83 @@ describe("InputsPage employee switching", () => {
     expect(screen.queryByText("Beatriz's Activity")).not.toBeInTheDocument();
   });
 
+  it("never lets a slower, superseded response overwrite a faster, later selection (rapid date navigation)", async () => {
+    // Same requestSeqRef/AbortController protection loadDaily uses for
+    // employee switching (the test above) — this exercises the identical
+    // mechanism via DATE changes instead, per the Inputs blank-screen-crash
+    // investigation's explicit "out-of-order date-navigation requests"
+    // concern. Confirmed here rather than assumed to still hold: it's the
+    // same code path, but the trigger (Next day) is genuinely different
+    // from a click on a different employee row.
+    // Pinned via the URL, not left to default to "today" — the other
+    // tests in this file don't care what date they land on, but this one
+    // asserts on exact "Next day" results, which has to start from a known
+    // date.
+    renderInputsPage("/inputs?date=2026-08-11");
+    await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
+    await act(async () => {
+      findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Day 11 Activity"));
+    });
+    await screen.findByText("Day 11 Activity");
+
+    const user = userEvent.setup();
+    const callsSoFar = dailyCalls.length;
+    // Two "Next day" clicks in a row, before either request resolves —
+    // 08-12 then 08-13.
+    await user.click(screen.getByLabelText("Next day"));
+    await user.click(screen.getByLabelText("Next day"));
+    const dateCalls = dailyCalls.slice(callsSoFar);
+    expect(dateCalls.map((c) => c.date)).toEqual(["2026-08-12", "2026-08-13"]);
+    const [supersededCall, latestCall] = dateCalls;
+
+    // The FIRST (now-superseded) 08-12 request resolves after 08-13 was
+    // already issued — must never be applied, even though it arrives
+    // "successfully."
+    await act(async () => {
+      supersededCall.deferred.resolve(buildDaily(empA, "2026-08-12", "Day 12 Activity"));
+    });
+    expect(screen.queryByText("Day 12 Activity")).not.toBeInTheDocument();
+    expect(supersededCall.aborted).toBe(true);
+
+    await act(async () => {
+      latestCall.deferred.resolve(buildDaily(empA, "2026-08-13", "Day 13 Activity"));
+    });
+    await screen.findByText("Day 13 Activity");
+    expect(screen.queryByText("Day 12 Activity")).not.toBeInTheDocument();
+  });
+
+  it("survives the exact real-world malformed shape (endedAtCorrectedFrom: the string \"null\") without blanking or crashing", async () => {
+    // Reproduces the literal real-world shape (a server-computed
+    // *CorrectedFrom field carrying the string "null", not JSON null). The
+    // root cause is fixed server-side (inputs.ts no longer emits this) AND
+    // the client's own formatter is independently hardened (see
+    // lib/timezone.ts) — so this specific shape no longer even reaches the
+    // InputsErrorBoundary at all, it degrades gracefully inline. Both
+    // layers matter: this proves the inner one; InputsErrorBoundary.test.tsx
+    // proves the outer backstop for anything neither layer anticipated.
+    renderInputsPage("/inputs?date=2026-08-11");
+    await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
+
+    const goodRun = buildDaily(empA, "2026-08-11", "Healthy Activity").runs[0];
+    const malformedRun = { ...goodRun, id: "run-malformed", activityName: "Malformed Activity", endedAtCorrectedFrom: "null" };
+    await act(async () => {
+      findDailyCall(empA.id).deferred.resolve({
+        ...buildDaily(empA, "2026-08-11", "Healthy Activity"),
+        runs: [goodRun, malformedRun],
+      });
+    });
+
+    // Both rows render — nothing threw, nothing blanked.
+    await screen.findByText("Healthy Activity");
+    expect(screen.getByText("Malformed Activity")).toBeInTheDocument();
+    // The malformed field degrades to a labeled, honest fallback instead
+    // of a real (fabricated) time.
+    expect(screen.getByText("Corrected")).toBeInTheDocument();
+    // Navigation/admin controls are unaffected either way.
+    expect(screen.getByText("Beatriz Barrios")).toBeInTheDocument();
+    expect(screen.getByLabelText("Next day")).toBeEnabled();
+  });
+
   it("still refreshes the current employee in the background every 10 seconds, without clearing the display", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "setTimeout", "clearInterval", "clearTimeout", "Date"] });
     renderInputsPage();

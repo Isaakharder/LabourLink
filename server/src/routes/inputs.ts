@@ -367,6 +367,26 @@ router.get(
         [entryIds]
       );
       for (const c of correctionRows) {
+        // old_value is TEXT, and every SYSTEM-generated correction (a
+        // midnight-rollover close, a daily-cutoff close) writes the
+        // literal 4-character string "null" here — not SQL NULL — to keep
+        // a human-readable audit trail of "there was no previous value"
+        // (see midnightRollover.ts/dailyCutoff.ts's own inserts). That's
+        // correct for the audit log itself, but this map feeds
+        // *Corrected-From API fields the client formats as a date
+        // (formatTimeInAppTimezone) — passing the string "null" through
+        // produces `new Date("null")`, an Invalid Date, which throws
+        // RangeError: Invalid time value the moment the client tries to
+        // render it (no error boundary existed to catch it), blanking the
+        // whole Inputs page. Real incident: Marcelino Besa, Shaima Qasimi,
+        // Lester Langaoen's midnight-rollover-closed entries all hit this.
+        // There is also no coherent "corrected from X" to show when X was
+        // never a real timestamp in the first place — genuinely excluding
+        // the entry from this map (not just null-ing the value) is the
+        // correct fix, not a workaround: it stops the (accurate) "was this
+        // boundary set by a correction rather than a real tap" question
+        // from being answered with a nonsensical former-value string.
+        if (c.old_value === "null") continue;
         correctedFromMap.set(`${c.time_entry_id}:${c.field_name}`, c.old_value);
       }
     }

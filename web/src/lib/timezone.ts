@@ -130,8 +130,26 @@ export function formatDateLong(dateStr: string): string {
   }).format(new Date(Date.UTC(y, m - 1, d)));
 }
 
+// Guards every formatter below against a malformed/non-date-shaped input —
+// real incident: a server-computed "corrected from" value that was the
+// literal string "null" (not JSON null) reached formatTimeInAppTimezone,
+// producing `new Date("null")` (an Invalid Date); Intl.DateTimeFormat
+// throws RangeError: Invalid time value on an Invalid Date, uncaught
+// during render, blanking the whole Inputs page (no error boundary
+// existed). The server-side root cause is fixed at its source (inputs.ts
+// no longer emits that string), but every formatter here stays defensive
+// regardless — a display utility should never be the thing that turns one
+// bad field into a blank page, from this or any future data shape.
+function isValidDateInput(iso: unknown): iso is string {
+  return typeof iso === "string" && iso.length > 0 && !Number.isNaN(new Date(iso).getTime());
+}
+
 // "7:55:10 AM" display of an ISO instant in APP_TIMEZONE.
 export function formatTimeInAppTimezone(iso: string): string {
+  if (!isValidDateInput(iso)) {
+    console.error("[timezone] formatTimeInAppTimezone: invalid date input, showing a safe fallback instead", iso);
+    return "Unknown time";
+  }
   return new Intl.DateTimeFormat("en-US", {
     timeZone: APP_TIMEZONE,
     hour: "numeric",
@@ -142,8 +160,15 @@ export function formatTimeInAppTimezone(iso: string): string {
 }
 
 // "HH:MM:SS" (24-hour) rendering of an ISO instant in APP_TIMEZONE — the
-// value format <input type="time" step="1"> expects/produces.
+// value format <input type="time" step="1"> expects/produces. Empty string
+// on invalid input (never a throw) — the correct safe fallback for a time
+// input's own value prop, same defensive convention as
+// formatTimeInAppTimezone above.
 export function toTimeInputValue(iso: string): string {
+  if (!isValidDateInput(iso)) {
+    console.error("[timezone] toTimeInputValue: invalid date input, showing an empty value instead", iso);
+    return "";
+  }
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat("en-US", {
       timeZone: APP_TIMEZONE,
@@ -171,8 +196,13 @@ export function combineDateAndTimeToUtcIso(dateStr: string, timeStr: string): st
 
 // "H:MM:SS" duration display (e.g. "0:15:09", "1:02:03") — hours not
 // zero-padded, matching the Inputs page's requested fixed-width format.
+// NaN/Infinity (a malformed/missing upstream timestamp propagating into a
+// subtraction) is treated as zero rather than rendering "NaN:NaN:NaN".
 export function formatDurationHMS(totalSeconds: number): string {
-  const s = Math.max(0, Math.round(totalSeconds));
+  if (!Number.isFinite(totalSeconds)) {
+    console.error("[timezone] formatDurationHMS: non-finite duration, showing 0:00:00 instead", totalSeconds);
+  }
+  const s = Number.isFinite(totalSeconds) ? Math.max(0, Math.round(totalSeconds)) : 0;
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = s % 60;

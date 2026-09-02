@@ -6,6 +6,7 @@ import { EmployeeListPanel } from "../../components/inputs/EmployeeListPanel";
 import { InputsSkeleton } from "../../components/inputs/InputsSkeleton";
 import { ActivityLogsCard } from "../../components/inputs/ActivityLogsCard";
 import { WorkdayDetailsCard, EditingBreakField } from "../../components/inputs/WorkdayDetailsCard";
+import { InputsErrorBoundary } from "../../components/inputs/InputsErrorBoundary";
 import { DeleteTimeEntryModal } from "../../components/inputs/DeleteTimeEntryModal";
 import { AddWorkStartModal } from "../../components/inputs/AddWorkStartModal";
 import { AddBreakModal } from "../../components/inputs/AddBreakModal";
@@ -677,7 +678,21 @@ export function InputsPage() {
               <InputsSkeleton employee={employees?.find((e) => e.id === selectedEmployeeId) ?? null} />
             )
           ) : (
-            <>
+            <InputsErrorBoundary
+              resetKey={`${selectedEmployeeId}:${date}`}
+              label="Inputs daily detail"
+              renderFallback={(diagnosticId) => (
+                <div className="inputs-needs-review" role="alert">
+                  <p className="inputs-needs-review-title">Needs review</p>
+                  <p className="inputs-needs-review-detail">
+                    This day's activity logs couldn't be displayed due to an unexpected data issue. Date navigation,
+                    the employee list, and other admin controls are still usable — try a different date, or contact
+                    support with this reference.
+                  </p>
+                  <p className="inputs-needs-review-ref">Reference: {diagnosticId}</p>
+                </div>
+              )}
+            >
               <ActivityLogsCard
                 employee={daily.employee}
                 date={daily.date}
@@ -720,7 +735,7 @@ export function InputsPage() {
                 onAddWorkStart={daily.canEdit ? () => setAddModal("work-start") : undefined}
                 onAddBreak={daily.canEdit ? () => setAddModal("break") : undefined}
               />
-            </>
+            </InputsErrorBoundary>
           )}
         </div>
       </div>
