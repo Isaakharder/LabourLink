@@ -260,8 +260,10 @@ async function main() {
     }
 
     // -----------------------------------------------------------------
-    // 4) Duplicate preset — the same configured break can't be added twice
-    //    for the same employee/date.
+    // 4) Duplicate preset — a repeated submission is a genuine idempotent
+    //    no-op: 200 with the EXISTING break returned as an
+    //    "already_exists" success, never an error, and no second row is
+    //    ever created.
     // -----------------------------------------------------------------
     {
       const empId = await insertEmployee("Duplicate", true);
@@ -270,14 +272,16 @@ async function main() {
       check(first.status === 201, "4) first Lunch add succeeds", first.body);
 
       const second = await addBreak(empId, date, { breakProfileItemId: lunchId });
-      check(second.status === 409, "4) adding the same preset again for the same date is rejected", second);
-      check(/already/i.test(second.body?.error ?? ""), "4) rejection message says it's already added", second.body);
+      check(second.status === 200, "4) re-adding the same preset for the same date succeeds idempotently (200, not an error)", second);
+      check(second.body?.ok === true && second.body?.result === "already_exists", "4) response is a success shape identifying the no-op", second.body);
+      check(typeof second.body?.break?.id === "string", "4) the existing break's own id is returned", second.body);
 
       const { rows } = await pool.query(
         `select id from time_entries where employee_id = $1 and entry_type = 'break' and break_profile_item_id = $2`,
         [empId, lunchId]
       );
       check(rows.length === 1, "4) only one break row exists — the duplicate attempt created nothing", rows.length);
+      check(second.body?.break?.id === rows[0].id, "4) the returned break id matches the one real row", { returned: second.body?.break?.id, actual: rows[0].id });
 
       // A DIFFERENT preset (Morning) on the same date is unaffected — the
       // duplicate check is scoped per break type, not per date overall.
@@ -287,7 +291,8 @@ async function main() {
 
     // -----------------------------------------------------------------
     // 5) Duplicate against an entry from a DIFFERENT source (e.g. a real
-    //    phone tap / auto-add) is caught too — not just admin-added ones.
+    //    phone tap / auto-add) is caught too — not just admin-added ones —
+    //    and is the same idempotent success shape.
     // -----------------------------------------------------------------
     {
       const empId = await insertEmployee("DuplicateOtherSource", true);
@@ -298,12 +303,16 @@ async function main() {
         [empId, zonedWallTimeToUtc(2026, 8, 14, 12, 0, 0), zonedWallTimeToUtc(2026, 8, 14, 13, 0, 0), lunchId, date]
       );
       const res = await addBreak(empId, date, { breakProfileItemId: lunchId });
-      check(res.status === 409, "5) duplicate check catches an existing auto-added row too, not just manual ones", res);
+      check(res.status === 200 && res.body?.result === "already_exists", "5) duplicate check catches an existing auto-added row too, as the same idempotent success", res);
     }
 
     // -----------------------------------------------------------------
     // 6) Double Save idempotency: two concurrent identical Add-preset
-    //    requests — exactly one succeeds, only one row ever exists.
+    //    requests — BOTH succeed from the caller's point of view (one
+    //    genuinely creates, the other finds it already there and reports
+    //    the same idempotent success), and only one row ever exists. This
+    //    is what "truly idempotent" means for a double Save/re-submission
+    //    from an already-open Inputs page — never a visible error.
     // -----------------------------------------------------------------
     {
       const empId = await insertEmployee("DoubleSave", true);
@@ -313,7 +322,8 @@ async function main() {
         addBreak(empId, date, { breakProfileItemId: lunchId }),
       ]);
       const statuses = [r1.status, r2.status].sort();
-      check(statuses[0] === 201 && statuses[1] === 409, "6) exactly one of two concurrent identical Saves succeeds", { r1: r1.status, r2: r2.status });
+      check(statuses[0] === 200 && statuses[1] === 201, "6) both concurrent identical Saves report success — one created (201), one already_exists (200)", { r1: r1.status, r2: r2.status });
+      check([r1, r2].every((r) => r.body?.ok === true), "6) neither response is an error — both are success shapes", { r1: r1.body, r2: r2.body });
 
       const { rows } = await pool.query(
         `select id from time_entries where employee_id = $1 and entry_type = 'break' and break_profile_item_id = $2`,
@@ -409,6 +419,135 @@ async function main() {
         isPaid: false,
       });
       check(customRes.status === 201, "9) Custom still works for an employee with no assigned break profile", customRes.body);
+    }
+
+    // -----------------------------------------------------------------
+    // 10) HISTORICAL DATE regression: duplicate detection and "already
+    //     added" must be scoped to the SELECTED Inputs date — including a
+    //     date far in the past — never the computer's current date.
+    // -----------------------------------------------------------------
+    {
+      const empId = await insertEmployee("HistoricalDate", true);
+      const historicalDate = "2020-03-15"; // deliberately far in the past
+      const anotherHistoricalDate = "2019-11-02"; // a second, different past date
+
+      const first = await addBreak(empId, historicalDate, { breakProfileItemId: lunchId });
+      check(first.status === 201, "10) adding a preset on a historical date succeeds", first.body);
+
+      const duplicate = await addBreak(empId, historicalDate, { breakProfileItemId: lunchId });
+      check(
+        duplicate.status === 200 && duplicate.body?.result === "already_exists",
+        "10) re-adding the same preset on the SAME historical date is caught as a duplicate",
+        duplicate.body
+      );
+
+      // A DIFFERENT historical date must NOT be treated as a duplicate —
+      // this is exactly the case that would falsely pass if the check ever
+      // compared against "today" instead of the request's own date.
+      const differentDate = await addBreak(empId, anotherHistoricalDate, { breakProfileItemId: lunchId });
+      check(differentDate.status === 201, "10) the same preset on a DIFFERENT historical date is not a duplicate", differentDate.body);
+
+      const { rows } = await pool.query(
+        `select scheduled_break_date::text as date from time_entries
+         where employee_id = $1 and entry_type = 'break' and break_profile_item_id = $2
+         order by scheduled_break_date asc`,
+        [empId, lunchId]
+      );
+      check(rows.length === 2, "10) exactly two break rows exist — one per historical date, no cross-date false duplicate", rows.length);
+      check(
+        rows[0].date === anotherHistoricalDate && rows[1].date === historicalDate,
+        "10) each row's scheduled_break_date is the exact historical date requested, not today's date",
+        rows
+      );
+
+      // The "Already added" signal the client relies on (GET /daily's
+      // breaks array) reflects the historical date's own breaks — proving
+      // the end-to-end path an admin's browser would actually see is
+      // correct for a past day, not just the raw duplicate check.
+      const daily = await call("GET", `/api/inputs/daily?employeeId=${empId}&date=${historicalDate}`, adminToken);
+      check(
+        daily.body?.breaks?.some((b: any) => b.breakProfileItemId === lunchId),
+        "10) GET /daily for the historical date shows the break with its breakProfileItemId, letting the client mark it Already added",
+        daily.body?.breaks
+      );
+    }
+
+    // -----------------------------------------------------------------
+    // 11) Backward compatibility: an already-open/cached Inputs tab still
+    //     running the PREVIOUS client sends the old preset payload shape
+    //     (breakProfileItemId PLUS its own client-computed startTime/
+    //     endTime and isPaid: undefined) while Server and Web deploy
+    //     independently. The server must still accept it, and
+    //     authorization/overlap-planning/locking must still apply in full
+    //     — but the STORED break must use the server-resolved configured
+    //     time/paid status, never the legacy client's own guess.
+    // -----------------------------------------------------------------
+    {
+      const empId = await insertEmployee("LegacyPayload", true);
+      const date = "2026-08-19";
+      // A work entry the CONFIGURED Lunch time (12:00-1:00) actually
+      // overlaps, to prove planBreakInsertion still runs against the
+      // resolved range, not the legacy client's own guess.
+      await insertWork(empId, zonedWallTimeToUtc(2026, 8, 19, 7, 0, 0), zonedWallTimeToUtc(2026, 8, 19, 17, 0, 0));
+
+      // Exactly the shape the PREVIOUS AddBreakModal sent for a preset: id
+      // plus its own combined startTime/endTime, isPaid omitted.
+      const legacyRes = await call("POST", "/api/inputs/breaks", adminToken, {
+        employeeId: empId,
+        date,
+        breakProfileItemId: lunchId,
+        isPaid: undefined,
+        // Deliberately wrong — a legacy client's own (now-obsolete) guess,
+        // nowhere near the real configured 12:00-1:00 window.
+        startTime: zonedWallTimeToUtc(2026, 8, 19, 4, 0, 0).toISOString(),
+        endTime: zonedWallTimeToUtc(2026, 8, 19, 4, 30, 0).toISOString(),
+      });
+      check(legacyRes.status === 201, "11) the legacy preset payload shape still succeeds", legacyRes.body);
+
+      const { rows } = await pool.query(
+        `select started_at, ended_at, is_paid from time_entries where employee_id = $1 and entry_type = 'break'`,
+        [empId]
+      );
+      check(
+        new Date(rows[0].started_at).getTime() === zonedWallTimeToUtc(2026, 8, 19, 12, 0, 0).getTime() &&
+          new Date(rows[0].ended_at).getTime() === zonedWallTimeToUtc(2026, 8, 19, 13, 0, 0).getTime() &&
+          rows[0].is_paid === false,
+        "11) the stored break uses the server-resolved configured time/paid status, ignoring the legacy client's own guess entirely",
+        rows[0]
+      );
+
+      // Proves overlap planning ran against the RESOLVED range (12:00-
+      // 1:00), not the legacy client's bogus 4:00-4:30 AM guess — the work
+      // entry is split at the real boundary, not left untouched or split
+      // at the wrong time.
+      const { rows: workRows } = await pool.query(
+        `select started_at, ended_at from time_entries where employee_id = $1 and entry_type = 'work' order by started_at asc`,
+        [empId]
+      );
+      check(
+        workRows.length === 2 &&
+          new Date(workRows[0].ended_at).getTime() === zonedWallTimeToUtc(2026, 8, 19, 12, 0, 0).getTime() &&
+          new Date(workRows[1].started_at).getTime() === zonedWallTimeToUtc(2026, 8, 19, 13, 0, 0).getTime(),
+        "11) planBreakInsertion split the work entry at the REAL configured boundary, proving overlap planning wasn't bypassed by the legacy payload",
+        workRows
+      );
+
+      // Authorization still fully applies to a legacy-shaped request too.
+      const employeeToken = signSession({
+        id: "00000000-0000-0000-0000-000000000000",
+        firstName: "QA",
+        lastName: "NonPriv",
+        securityRole: "Employee",
+        teamRole: "Team Member",
+      });
+      const unauthorizedRes = await call("POST", "/api/inputs/breaks", employeeToken, {
+        employeeId: empId,
+        date: "2026-08-20",
+        breakProfileItemId: morningId,
+        startTime: zonedWallTimeToUtc(2026, 8, 20, 9, 0, 0).toISOString(),
+        endTime: zonedWallTimeToUtc(2026, 8, 20, 9, 15, 0).toISOString(),
+      });
+      check(unauthorizedRes.status === 403, "11) a legacy-shaped request from a non-privileged role is still rejected", unauthorizedRes);
     }
   } finally {
     async function tryDelete(label: string, fn: () => Promise<unknown>) {

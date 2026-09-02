@@ -20,6 +20,7 @@ import { EmployeeBreakItemOption } from "../../lib/inputsTypes";
 let employeeBreakItemsResponse: { breakProfile: { id: string; name: string } | null; items: EmployeeBreakItemOption[] };
 let postBreakStatus: number | null; // null = succeed; otherwise reject with this status
 let postBreakMessage: string;
+let postBreakResponseBody: any = { ok: true };
 let lastPostBreakBody: any = null;
 
 vi.mock("../../lib/api", () => {
@@ -41,7 +42,12 @@ vi.mock("../../lib/api", () => {
         if (postBreakStatus !== null) {
           return Promise.reject(new ApiError(postBreakStatus, postBreakMessage));
         }
-        return Promise.resolve({ ok: true });
+        // The server returns 200 (not an error) for an idempotent
+        // already-exists no-op, and api() only ever rejects on a non-2xx
+        // status — this mock returning normally for both the 200
+        // already_exists case and the 201 created case is exactly what
+        // makes that distinction invisible (and irrelevant) to the caller.
+        return Promise.resolve(postBreakResponseBody);
       }
       return Promise.reject(new Error(`Unhandled mock api() call in test: ${path}`));
     }),
@@ -76,6 +82,7 @@ beforeEach(() => {
   };
   postBreakStatus = null;
   postBreakMessage = "";
+  postBreakResponseBody = { ok: true };
   lastPostBreakBody = null;
 });
 
@@ -173,6 +180,26 @@ describe("AddBreakModal", () => {
     await user.selectOptions(screen.getByLabelText(/Break type/), "item-lunch");
 
     await screen.findByText(/This will split General/);
+  });
+
+  it("treats a server-reported already_exists idempotent result as success — closes/refreshes, never shows an error", async () => {
+    postBreakResponseBody = {
+      ok: true,
+      result: "already_exists",
+      break: { id: "existing-break-id", startedAt: "2026-08-11T16:00:00.000Z", endedAt: "2026-08-11T17:00:00.000Z", isPaid: false },
+    };
+    const { onCreated } = renderModal();
+    await screen.findByText(/Lunch \(12:00 PM–1:00 PM, Unpaid\)/);
+    const user = userEvent.setup();
+    await user.selectOptions(screen.getByLabelText(/Break type/), "item-lunch");
+    await screen.findByText("12:00 PM–1:00 PM · 1 hour · Unpaid");
+    await user.click(screen.getByRole("button", { name: "Add Break" }));
+
+    // The 200 already_exists response is a success as far as api() and this
+    // modal are concerned — onCreated (close/refresh) fires exactly like a
+    // genuine 201 creation would, and no error banner ever appears.
+    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    expect(screen.queryByText(/error/i)).not.toBeInTheDocument();
   });
 
   it("shows the server's rejection message and re-enables Save when the API call fails", async () => {

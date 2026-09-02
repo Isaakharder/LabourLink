@@ -553,12 +553,21 @@ async function main() {
       });
       check(coffee.status === 201, "POST /breaks creates the paid Coffee break (201)", coffee.body);
 
+      // A Custom break (no breakProfileItemId), not another Lunch — a
+      // preset can no longer submit an arbitrary time at all (the server
+      // always resolves it from break_profile_items), so re-submitting the
+      // SAME preset item here would now correctly be treated as the
+      // idempotent "already exists" no-op (200), not this general
+      // "overlaps a different existing break" rejection (409) the test
+      // means to exercise. Custom is what actually reaches that
+      // planBreakInsertion path with an arbitrary, genuinely overlapping
+      // time.
       const overlapBreak = await call("POST", "/api/inputs/breaks", {
         token: adminToken,
         body: {
           employeeId: target.id,
           date: DATE_BREAKS,
-          breakProfileItemId: lunchItem.id,
+          isPaid: false,
           startTime: zonedWallTimeToUtc(2019, 5, 9, 12, 10, 0).toISOString(),
           endTime: zonedWallTimeToUtc(2019, 5, 9, 12, 20, 0).toISOString(),
         },

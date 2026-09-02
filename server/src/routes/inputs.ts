@@ -2284,24 +2284,38 @@ router.post(
       await client.query("begin");
       await lockEmployeeForManualEntry(client, employeeId);
 
-      // A configured break type can only be added once per employee per
-      // date, regardless of how the existing one got there (a real phone
-      // tap, auto-add reconciliation, or an earlier Add Break) — checked
-      // inside the advisory-locked transaction so a double Save (two
-      // near-simultaneous submissions of the same preset) can never create
-      // two rows: whichever commits first makes the second one's own check
-      // find it and reject, an idempotent outcome either way. Custom breaks
-      // have no breakProfileItemId and are never subject to this check.
+      // A configured break type can only exist once per employee per date,
+      // regardless of how the existing one got there (a real phone tap,
+      // auto-add reconciliation, or an earlier Add Break) — checked inside
+      // the advisory-locked transaction so a double Save (two
+      // near-simultaneous submissions of the same preset, or an
+      // already-open browser tab re-submitting after someone else already
+      // added it) can never create two rows. This is a genuine idempotent
+      // no-op, not an error: the admin's intent ("this break should exist
+      // for this employee today") is already satisfied, so the response
+      // looks like success — carrying the existing row — rather than a
+      // rejection the Inputs page would have to show as a failure. Custom
+      // breaks have no breakProfileItemId and are never subject to this
+      // check.
       if (validatedItemId) {
         const dup = await client.query(
-          `select id from time_entries
+          `select id, started_at, ended_at, is_paid from time_entries
            where employee_id = $1 and break_profile_item_id = $2 and scheduled_break_date = $3 and deleted_at is null
            limit 1`,
           [employeeId, validatedItemId, date]
         );
         if (dup.rows[0]) {
           await client.query("rollback");
-          return res.status(409).json({ error: "This break has already been added for this employee on this date" });
+          return res.status(200).json({
+            ok: true,
+            result: "already_exists",
+            break: {
+              id: dup.rows[0].id,
+              startedAt: dup.rows[0].started_at,
+              endedAt: dup.rows[0].ended_at,
+              isPaid: dup.rows[0].is_paid,
+            },
+          });
         }
       }
 
