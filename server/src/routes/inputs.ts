@@ -3,7 +3,7 @@ import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { getSignedPhotoUrl, getSignedPhotoUrls } from "../lib/storage";
-import { calendarDateInAppTimezone, getDayBoundsUtc, APP_TIMEZONE } from "../lib/timezone";
+import { calendarDateInAppTimezone, getDayBoundsUtc, APP_TIMEZONE, parseTimeParts, zonedWallTimeToUtc } from "../lib/timezone";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { reconcileMidnightRollover } from "../lib/midnightRollover";
@@ -2189,10 +2189,15 @@ router.post(
 // set the same way — see mobileTime.ts's break/start) so it flows through
 // every existing calculation (paid/unpaid totals, reconciliation) with no
 // special-casing. `breakProfileItemId` ties it to one of the employee's
-// assigned break profile's scheduled items (is_paid is taken from that
-// item, never trusted from the client); omitting it creates a "Custom"
-// break not tied to any scheduled item, whose paid/unpaid status the
-// administrator sets directly.
+// assigned break profile's scheduled items — its configured start/end
+// time-of-day and paid status are the sole authority for a preset break;
+// startTime/endTime/isPaid in the request body are never trusted for one
+// (the Inputs Add Break modal no longer even sends them for a preset — see
+// AddBreakModal.tsx), the same way a mobile fixed-break match resolves its
+// own boundaries server-side rather than trusting whatever the phone sent.
+// Omitting breakProfileItemId creates a "Custom" break not tied to any
+// scheduled item, whose exact start/end and paid/unpaid status the
+// administrator sets directly — unchanged, no automatic rounding.
 router.post(
   "/breaks",
   requireAuth,
@@ -2212,17 +2217,6 @@ router.post(
     if (!isValidDate(date)) {
       return res.status(400).json({ error: "A valid date (YYYY-MM-DD) is required" });
     }
-    if (!startTime || isNaN(Date.parse(startTime)) || !endTime || isNaN(Date.parse(endTime))) {
-      return res.status(400).json({ error: "A valid startTime and endTime are required" });
-    }
-    const start = new Date(startTime);
-    const end = new Date(endTime);
-    if (end.getTime() <= start.getTime()) {
-      return res.status(422).json({ error: "End time must be after start time" });
-    }
-    if (calendarDateInAppTimezone(start) !== date || calendarDateInAppTimezone(end) !== date) {
-      return res.status(422).json({ error: "The break's start and end time must be on the selected date" });
-    }
 
     const empRes = await pool.query(
       "select id, break_profile_id from employees where id = $1 and is_active = true",
@@ -2231,9 +2225,8 @@ router.post(
     const employee = empRes.rows[0];
     if (!employee) return res.status(404).json({ error: "Employee not found or inactive" });
 
-    // Resolved paid/unpaid status — from the chosen scheduled item when one
-    // is given (never trusting a client-supplied isPaid alongside it), or
-    // directly from the request for a Custom break.
+    let start: Date;
+    let end: Date;
     let resolvedIsPaid: boolean;
     let validatedItemId: string | null = null;
     if (breakProfileItemId) {
@@ -2245,7 +2238,7 @@ router.post(
       // only ever considers the employee's own assigned profile
       // (mobileTime.ts's loadActiveFixedItems).
       const itemRes = await pool.query(
-        `select bpi.id, bpi.is_paid
+        `select bpi.id, bpi.start_time, bpi.end_time, bpi.is_paid
          from break_profile_items bpi
          join break_profiles bp on bp.id = bpi.break_profile_id and bp.is_active = true
          where bpi.id = $1 and bpi.is_active = true and bpi.break_profile_id = $2`,
@@ -2254,19 +2247,63 @@ router.post(
       if (!itemRes.rows[0]) {
         return res.status(400).json({ error: "This break type is not on the employee's assigned break profile" });
       }
-      resolvedIsPaid = itemRes.rows[0].is_paid;
+      const item = itemRes.rows[0];
+      // Combines the item's configured time-of-day with the selected
+      // calendar date in APP_TIMEZONE — the same pattern
+      // breakReconciliation.ts's auto-add already uses for the identical
+      // "scheduled time-of-day + a date -> a real UTC instant" problem.
+      // date is already validated as YYYY-MM-DD by isValidDate above.
+      const [y, mo, d] = (date as string).split("-").map(Number);
+      const [sh, sm, ss] = parseTimeParts(item.start_time);
+      const [eh, em, es] = parseTimeParts(item.end_time);
+      start = zonedWallTimeToUtc(y, mo, d, sh, sm, ss);
+      end = zonedWallTimeToUtc(y, mo, d, eh, em, es);
+      resolvedIsPaid = item.is_paid;
       validatedItemId = breakProfileItemId;
     } else {
+      // Custom — exact administrator-entered time, never rounded.
+      if (!startTime || isNaN(Date.parse(startTime)) || !endTime || isNaN(Date.parse(endTime))) {
+        return res.status(400).json({ error: "A valid startTime and endTime are required" });
+      }
+      start = new Date(startTime);
+      end = new Date(endTime);
+      if (calendarDateInAppTimezone(start) !== date || calendarDateInAppTimezone(end) !== date) {
+        return res.status(422).json({ error: "The break's start and end time must be on the selected date" });
+      }
       if (typeof isPaid !== "boolean") {
         return res.status(400).json({ error: "isPaid is required for a custom break" });
       }
       resolvedIsPaid = isPaid;
+    }
+    if (end.getTime() <= start.getTime()) {
+      return res.status(422).json({ error: "End time must be after start time" });
     }
 
     const client = await pool.connect();
     try {
       await client.query("begin");
       await lockEmployeeForManualEntry(client, employeeId);
+
+      // A configured break type can only be added once per employee per
+      // date, regardless of how the existing one got there (a real phone
+      // tap, auto-add reconciliation, or an earlier Add Break) — checked
+      // inside the advisory-locked transaction so a double Save (two
+      // near-simultaneous submissions of the same preset) can never create
+      // two rows: whichever commits first makes the second one's own check
+      // find it and reject, an idempotent outcome either way. Custom breaks
+      // have no breakProfileItemId and are never subject to this check.
+      if (validatedItemId) {
+        const dup = await client.query(
+          `select id from time_entries
+           where employee_id = $1 and break_profile_item_id = $2 and scheduled_break_date = $3 and deleted_at is null
+           limit 1`,
+          [employeeId, validatedItemId, date]
+        );
+        if (dup.rows[0]) {
+          await client.query("rollback");
+          return res.status(409).json({ error: "This break has already been added for this employee on this date" });
+        }
+      }
 
       // Resolves any work entry(s) the requested range overlaps into
       // trims/splits/deletions instead of rejecting outright — see
