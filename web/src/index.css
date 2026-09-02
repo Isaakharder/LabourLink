@@ -2773,15 +2773,19 @@ input {
 }
 
 .inputs-col-speed {
-  width: 17%;
+  width: 14%;
+}
+
+.inputs-col-starttime {
+  width: 15%;
 }
 
 .inputs-col-duration {
-  width: 16%;
+  width: 14%;
 }
 
 .inputs-col-endtime {
-  width: 22%;
+  width: 19%;
 }
 
 .inputs-col-actions {
@@ -2807,6 +2811,8 @@ input {
 
 .inputs-th-duration,
 .inputs-log-duration,
+.inputs-th-starttime,
+.inputs-log-starttime,
 .inputs-th-endtime,
 .inputs-log-endtime {
   text-align: right;
@@ -2818,8 +2824,17 @@ input {
   font-weight: 600;
 }
 
+.inputs-log-starttime-editable,
 .inputs-log-endtime-editable {
   cursor: text;
+}
+
+.inputs-log-starttime input[type="time"] {
+  font-variant-numeric: tabular-nums;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--color-primary);
+  border-radius: 4px;
+  font-size: 0.85rem;
 }
 
 /* Subtle — never the same weight/color as a real error or warning state.
@@ -2832,6 +2847,7 @@ input {
   color: var(--color-muted);
 }
 
+.inputs-log-row-selected .inputs-log-starttime-editable,
 .inputs-log-row-selected .inputs-log-endtime-editable {
   text-decoration: underline dotted;
 }

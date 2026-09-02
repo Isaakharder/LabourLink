@@ -26,6 +26,7 @@ import {
   BreakInsertionPlan,
 } from "../lib/manualTimeEntries";
 import { PoolClient } from "pg";
+import { createHash } from "crypto";
 
 const router = Router();
 
@@ -76,12 +77,24 @@ const BREAK_MANUAL_ADD_REASON = "Break manually added from Inputs page.";
 // row's trim/split/deletion.
 const BREAK_CORRECTION_SPLIT_DELETION_REASON = "Removed — fully covered by a corrected break";
 const BREAK_CORRECTION_SPLIT_REASON = "Activity continuation created by a break correction";
-// PATCH /activity-runs/:id/end-time below reuses this when a shortened end
-// time falls inside an EARLIER segment of a multi-fragment displayed run
-// (see computeActivityRunEndTimeCorrectionPlan) — the trailing segment(s)
-// are entirely beyond the new end time, so they're removed the same way
-// every other admin-initiated deletion in this file is.
-const GROUPED_TAIL_DELETION_REASON = "Removed — beyond the corrected end time";
+// PATCH /activity-runs/:id/correction below (computeActivityRunCorrectionPlan)
+// reuses these fixed, server-generated reasons for the various effects a
+// general start/end activity-time correction can produce — mirroring the
+// break-correction reasons above, one string per distinct kind of effect so
+// an admin reading the audit trail can tell what actually happened.
+// A segment of the run BEING CORRECTED that ends up entirely outside the
+// new [start, end) range (a "shortening" that leaves an earlier or later
+// fragment with nothing left to cover).
+const ACTIVITY_CORRECTION_OUTSIDE_RANGE_REASON = "Removed — outside the corrected time range";
+// A DIFFERENT activity's entry the corrected range now completely covers.
+const ACTIVITY_CORRECTION_FOREIGN_COVERED_REASON = "Removed — fully covered by a time correction";
+// A brand-new segment filling a gap inside the corrected range for the
+// activity BEING CORRECTED — either the range expanded into empty time, or
+// a break split it in two and this is the resumed half.
+const ACTIVITY_CORRECTION_GAP_FILL_REASON = "Activity continuation created by a time correction";
+// The resumed remainder of a DIFFERENT activity's entry that the corrected
+// range split in two (it used to fully contain the corrected range).
+const ACTIVITY_CORRECTION_FOREIGN_SPLIT_REASON = "Continuation created — split by an overlapping time correction";
 
 function trimOrNull(v: unknown): string | null {
   if (typeof v !== "string") return null;
@@ -428,6 +441,13 @@ router.get(
     // Finish Work tap could ever have closed anyway, since only the
     // currently-open entry is ever eligible for work-end rounding.
     const endedAtOriginalMeta = new Map<string, string>();
+    // Mirror of endedAtOriginalMeta above, for a run's FIRST segment
+    // instead of its last — needed now that PATCH .../activity-runs/:id/
+    // correction lets an administrator correct a run's start time too, so
+    // the Inputs UI needs the same "Rounded"/"Corrected" evidence for the
+    // start column that End Time already had. Looked up via
+    // run.segmentIds[0], never run.id (the LAST segment).
+    const startedAtOriginalMeta = new Map<string, string>();
     // Same per-segment-id keying and the same accepted limitation as
     // autoClosedMeta above: a multi-segment run only ever surfaces this for
     // its *last* segment (the one run.id resolves to). A break is always a
@@ -461,6 +481,9 @@ router.get(
       autoClosedMeta.set(r.id, r.auto_closed_at !== null);
       if (r.actual_ended_at) {
         endedAtOriginalMeta.set(r.id, r.actual_ended_at);
+      }
+      if (r.actual_started_at) {
+        startedAtOriginalMeta.set(r.id, r.actual_started_at);
       }
       if (r.created_by_employee_id) {
         manualEntryMeta.set(r.id, {
@@ -854,6 +877,11 @@ router.get(
           startedAt: r.startedAt,
           currentSegmentStartedAt: r.currentSegmentStartedAt,
           endedAt: r.endedAt,
+          // Mirror of endedAtOriginalTime/endedAtCorrectedFrom below, for
+          // this run's FIRST segment (segmentIds[0]) instead of its last —
+          // see startedAtOriginalMeta's own comment above.
+          startedAtOriginalTime: startedAtOriginalMeta.get(r.segmentIds[0]) ?? null,
+          startedAtCorrectedFrom: correctedFromMap.get(`${r.segmentIds[0]}:started_at`) ?? null,
           // The employee's original Finish Work button-press timestamp,
           // only present when work-end rounding actually applied to this
           // run's last segment (see workStartRounding.ts's roundWorkEnd
@@ -1208,60 +1236,105 @@ router.patch(
   })
 );
 
-interface RunEndTimeCorrectionPlanOk {
+interface ActivityCorrectionTrim {
+  id: string;
+  field: "started_at" | "ended_at";
+  oldValue: Date;
+  newValue: Date;
+}
+interface ActivityCorrectionDeletion {
+  id: string;
+  activityId: string;
+  startedAt: Date;
+  endedAt: Date;
+  reason: string;
+}
+interface ActivityCorrectionContinuation {
+  activityId: string;
+  greenhouseRowId: string | null;
+  carrierId: string | null;
+  densityType: "plants" | "stems" | null;
+  densityCountPerRow: number | null;
+  deviceId: string | null;
+  startedAt: Date;
+  endedAt: Date;
+  reason: string;
+}
+interface ActivityCorrectionPlanOk {
   ok: true;
   employeeId: string;
   activityId: string;
-  newEndedAt: Date;
-  // The one segment whose ended_at is set to the new end time — null only
-  // when the new end time exactly matches a segment boundary that's
-  // already correct (nothing to trim, only a later segment to remove).
-  trim: { id: string; oldValue: Date; newValue: Date } | null;
-  // Later WORK segments of this same displayed run, entirely beyond the
-  // new end time — soft-deleted. Empty for an ordinary same-segment
-  // correction. Any break sitting transparently inside the run (see
-  // groupIntoActivityRuns) is deliberately never included here.
-  deletions: { id: string; startedAt: Date; endedAt: Date }[];
-  // True only when the new end time is later than the run's current end —
-  // the existing "does this overlap the next entry" check applies. Every
-  // trim/shorten case is false: shortening a run can never overlap
-  // anything that comes after it.
-  isExtension: boolean;
+  runStartedAt: Date;
+  runEndedAt: Date;
+  trims: ActivityCorrectionTrim[];
+  deletions: ActivityCorrectionDeletion[];
+  continuations: ActivityCorrectionContinuation[];
 }
-type RunEndTimeCorrectionPlanResult = RunEndTimeCorrectionPlanOk | { ok: false; status: number; error: string };
+type ActivityCorrectionPlanResult = ActivityCorrectionPlanOk | { ok: false; status: number; error: string };
 
-// Shared by PATCH /activity-runs/:id/end-time (applies the plan) and POST
-// /activity-runs/:id/end-time-preview (describes it, then always rolls
-// back) — one function computing what a correction WOULD do is what
+// The general "Activity Time Correction" reconciliation engine — shared by
+// PATCH /activity-runs/:id/correction (applies the plan) and POST
+// /activity-runs/:id/correction-preview (describes it, then always rolls
+// back). One function computing what a correction WOULD do is what
 // guarantees the preview an admin sees can never disagree with what Save
 // actually does (same reasoning as computeBreakCorrectionPlan below).
 //
+// The admin's entered [newStart, newEnd) is authoritative for what the
+// corrected run's own final range should be. Getting there from whatever
+// currently exists in that range means:
+//
+//   1. Breaks are NEVER moved, trimmed, or deleted — a break inside
+//      [newStart, newEnd) instead SPLITS the corrected range around it
+//      (the same "protect the break, route work around it" principle
+//      planBreakInsertion already applies in the opposite direction, for a
+//      newly-inserted break splitting a work entry). An open-ended break
+//      inside the range can't be routed around (no known resume point) and
+//      blocks outright, same as an open-ended work entry below.
+//   2. Each resulting break-free sub-range is then reconciled against every
+//      existing WORK entry overlapping it, classified as either:
+//        - COMPATIBLE (same activity/row/carrier/density as the run being
+//          corrected) — merged into the sub-range's own final coverage.
+//          Extends past a sub-range boundary? Trimmed at that boundary
+//          (never grown outward — growth only ever happens via a brand new
+//          continuation, kept as a separate, clearly-audited row). A gap
+//          in coverage the existing compatible entries don't reach is
+//          filled by a new continuation entry.
+//        - FOREIGN (a different activity/row/carrier/density) — trimmed at
+//          whichever boundary the sub-range overlaps, soft-deleted if the
+//          sub-range completely covers it, or SPLIT (trimmed short, plus a
+//          new continuation for its own remainder) if it completely
+//          contains the sub-range. Never silently altered without the
+//          preview surfacing exactly this effect first.
+//   3. Any of the run's OWN original segments left untouched by every
+//      sub-range (shortened away entirely) are soft-deleted outright.
+//
 // The client only ever knows a displayed run by its LAST underlying
 // segment's id (ActivityRun.id — see activityRuns.ts's own comment on
-// why: groupIntoActivityRuns sets `current.id = e.id` on every contiguous
-// segment, so it always ends up the last one). This re-derives the FULL
-// set of segments that run is actually made of, the same way GET /daily
-// and the activity-run delete route above do — regroup the employee's
-// whole day and locate the run whose `id` matches — so a correction on a
-// multi-fragment run (created, for example, when deleting a break
-// "reconnects" two work entries into one contiguous, same-activity run —
-// see BREAK_DELETION_REASON above) is validated and applied against the
-// run's TRUE start, never just its last fragment's own start. That
-// mismatch — rejecting a visibly-valid end time because it precedes a
-// hidden trailing fragment's own start — was the root cause this function
-// exists to fix.
+// why). This re-derives the FULL set of segments that run is actually made
+// of the same way GET /daily does — regroup the employee's whole day and
+// locate the run whose `id` matches — so a correction is always validated
+// and applied against the run's TRUE start/end, never just its last
+// fragment's own boundary.
 //
 // Caller must run this inside a transaction, immediately after
-// lockEmployeeForManualEntry(client, <the run's own employee_id>).
-async function computeActivityRunEndTimeCorrectionPlan(
+// lockEmployeeForManualEntry(client, <the run's own employee_id>). The
+// day's rows are read with `for update`, so nothing else can change them
+// out from under an in-progress preview or apply.
+async function computeActivityRunCorrectionPlan(
   client: PoolClient,
   runId: string,
-  endTime: string | undefined
-): Promise<RunEndTimeCorrectionPlanResult> {
-  if (!endTime || isNaN(Date.parse(endTime))) {
+  newStartTime: string | undefined,
+  newEndTime: string | undefined
+): Promise<ActivityCorrectionPlanResult> {
+  if (newStartTime === undefined && newEndTime === undefined) {
+    return { ok: false, status: 400, error: "startTime and/or endTime is required" };
+  }
+  if (newStartTime !== undefined && (typeof newStartTime !== "string" || isNaN(Date.parse(newStartTime)))) {
+    return { ok: false, status: 400, error: "A valid startTime is required" };
+  }
+  if (newEndTime !== undefined && (typeof newEndTime !== "string" || isNaN(Date.parse(newEndTime)))) {
     return { ok: false, status: 400, error: "A valid endTime is required" };
   }
-  const newEndedAt = new Date(endTime);
 
   const peek = await client.query(
     `select id, employee_id, entry_type, started_at, ended_at, deleted_at from time_entries where id = $1`,
@@ -1276,10 +1349,12 @@ async function computeActivityRunEndTimeCorrectionPlan(
   const dateStr = calendarDateInAppTimezone(new Date(peekRow.started_at));
   const { start, end } = getDayBoundsUtc(dateStr);
   const dayRows = await client.query(
-    `select id, entry_type, activity_id, started_at, ended_at, greenhouse_row_id, carrier_id, density_type, density_count_per_row
+    `select id, entry_type, activity_id, started_at, ended_at, greenhouse_row_id, carrier_id,
+            density_type, density_count_per_row, device_id, is_paid
      from time_entries
      where employee_id = $1 and started_at >= $2 and started_at < $3 and deleted_at is null
-     order by started_at asc`,
+     order by started_at asc
+     for update`,
     [peekRow.employee_id, start, end]
   );
   const segments: RunSegment[] = dayRows.rows.map((r) => ({
@@ -1303,104 +1378,286 @@ async function computeActivityRunEndTimeCorrectionPlan(
     return { ok: false, status: 409, error: "Only a completed work entry can be corrected" };
   }
 
-  if (calendarDateInAppTimezone(newEndedAt) !== calendarDateInAppTimezone(run.startedAt)) {
-    return { ok: false, status: 422, error: "The corrected end time must be on the same date as the activity" };
+  const newStart = newStartTime !== undefined ? new Date(newStartTime) : run.startedAt;
+  const newEnd = newEndTime !== undefined ? new Date(newEndTime) : (run.endedAt as Date);
+
+  if (newStart.getTime() >= newEnd.getTime()) {
+    return { ok: false, status: 422, error: "Start time must be before end time" };
+  }
+  if (calendarDateInAppTimezone(newStart) !== dateStr || calendarDateInAppTimezone(newEnd) !== dateStr) {
+    return { ok: false, status: 422, error: "The corrected times must stay on the same date as the activity" };
   }
 
-  // Only the run's own WORK segments, in the same started_at-ascending
-  // order groupIntoActivityRuns built segmentIds in — any break sitting
-  // transparently inside this run is deliberately excluded and untouched
-  // by everything below.
-  const workSegs = segments.filter((s) => s.entry_type === "work" && run.segmentIds.includes(s.id));
-  const n = workSegs.length;
-  const firstStart = workSegs[0].started_at;
-  const lastSeg = workSegs[n - 1];
+  const identity = {
+    activityId: run.activityId,
+    greenhouseRowId: run.greenhouseRowId,
+    carrierId: run.carrierId,
+    densityType: run.densityType,
+    densityCountPerRow: run.densityCountPerRow,
+  };
+  const originalSegmentIds = new Set(run.segmentIds);
 
-  if (newEndedAt.getTime() <= firstStart.getTime()) {
-    return { ok: false, status: 422, error: "End time must be after the activity's start time" };
-  }
+  const allBreaks = dayRows.rows
+    .filter((r) => r.entry_type === "break")
+    .map((r) => ({ id: r.id, startedAt: new Date(r.started_at), endedAt: r.ended_at ? new Date(r.ended_at) : null }));
+  const allWork = dayRows.rows
+    .filter((r) => r.entry_type === "work")
+    .map((r) => ({
+      id: r.id,
+      activityId: r.activity_id as string,
+      startedAt: new Date(r.started_at),
+      endedAt: r.ended_at ? (new Date(r.ended_at) as Date) : null,
+      greenhouseRowId: r.greenhouse_row_id as string | null,
+      carrierId: r.carrier_id as string | null,
+      densityType: r.density_type as "plants" | "stems" | null,
+      densityCountPerRow: r.density_count_per_row as number | null,
+      deviceId: r.device_id as string | null,
+    }));
 
-  if (newEndedAt.getTime() > lastSeg.started_at.getTime()) {
-    // Ordinary case — identical to this route's behavior before this fix
-    // existed: the new end time reaches into (or beyond) the run's own
-    // last segment, so only that one row is ever touched. Covers both
-    // "inside the final segment" and "extending the run."
-    return {
-      ok: true,
-      employeeId: peekRow.employee_id,
-      activityId: run.activityId,
-      newEndedAt,
-      trim: { id: lastSeg.id, oldValue: lastSeg.ended_at as Date, newValue: newEndedAt },
-      deletions: [],
-      isExtension: newEndedAt.getTime() > (lastSeg.ended_at as Date).getTime(),
-    };
-  }
-
-  // The new end time lands at or before the run's LAST segment's own
-  // start — it belongs to an EARLIER segment (or, by
-  // groupIntoActivityRuns's own "equality is contiguous" convention,
-  // exactly on the boundary between two segments). n is guaranteed >= 2
-  // here: a single-segment run has firstStart === lastSeg.started_at, and
-  // that case was already rejected by the "before the run's start" check
-  // above.
-  let targetIndex = -1;
-  for (let i = 0; i < n; i++) {
-    if (newEndedAt.getTime() <= (workSegs[i].ended_at as Date).getTime()) {
-      targetIndex = i;
-      break;
+  // Breaks-in-range -> the break-free sub-ranges the corrected activity
+  // actually gets split into. An in-progress break inside the range has no
+  // known resume point to route around — blocks outright.
+  const breaksInRange = allBreaks
+    .filter((b) => b.startedAt.getTime() < newEnd.getTime() && (b.endedAt === null || b.endedAt.getTime() > newStart.getTime()))
+    .sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
+  for (const b of breaksInRange) {
+    if (b.endedAt === null) {
+      return { ok: false, status: 409, error: "An in-progress break falls inside this range — resolve it first." };
     }
   }
-  const seg = workSegs[targetIndex];
-  if (newEndedAt.getTime() <= seg.started_at.getTime()) {
-    // Falls inside a break that sits transparently within this run — no
-    // work is happening at that instant to attribute the new end time to.
-    // Reject clearly instead of silently picking a neighboring segment.
-    return {
-      ok: false,
-      status: 422,
-      error:
-        "The corrected end time falls during a break within this activity — choose a time during actual work, or edit the break directly.",
-    };
+  const subRanges: { start: Date; end: Date }[] = [];
+  let cursor = newStart.getTime();
+  for (const b of breaksInRange) {
+    const bStart = Math.max(b.startedAt.getTime(), newStart.getTime());
+    const bEnd = Math.min((b.endedAt as Date).getTime(), newEnd.getTime());
+    if (bStart > cursor) subRanges.push({ start: new Date(cursor), end: new Date(bStart) });
+    cursor = Math.max(cursor, bEnd);
+  }
+  if (cursor < newEnd.getTime()) subRanges.push({ start: new Date(cursor), end: newEnd });
+  if (subRanges.length === 0) {
+    return { ok: false, status: 422, error: "This time range is entirely covered by a break — nothing to correct." };
   }
 
-  const isBoundary = newEndedAt.getTime() === (seg.ended_at as Date).getTime();
-  const tail = workSegs.slice(targetIndex + 1);
+  const isCompatible = (w: (typeof allWork)[number]) =>
+    w.activityId === identity.activityId &&
+    w.greenhouseRowId === identity.greenhouseRowId &&
+    w.carrierId === identity.carrierId &&
+    w.densityType === identity.densityType;
+
+  const trims: ActivityCorrectionTrim[] = [];
+  const deletions: ActivityCorrectionDeletion[] = [];
+  const continuations: ActivityCorrectionContinuation[] = [];
+  const touchedIds = new Set<string>();
+
+  for (const sub of subRanges) {
+    const subStartMs = sub.start.getTime();
+    const subEndMs = sub.end.getTime();
+    const overlapping = allWork.filter(
+      (w) => w.startedAt.getTime() < subEndMs && (w.endedAt === null || w.endedAt.getTime() > subStartMs)
+    );
+    for (const w of overlapping) {
+      if (w.endedAt === null) {
+        return { ok: false, status: 409, error: "An in-progress activity overlaps this range — resolve it first." };
+      }
+    }
+
+    const compatible = overlapping.filter(isCompatible).sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
+    const foreign = overlapping.filter((w) => !isCompatible(w));
+
+    for (const f of foreign) {
+      touchedIds.add(f.id);
+      const fStart = f.startedAt.getTime();
+      const fEnd = (f.endedAt as Date).getTime();
+      const startsBefore = fStart < subStartMs;
+      const endsAfter = fEnd > subEndMs;
+      if (startsBefore && endsAfter) {
+        trims.push({ id: f.id, field: "ended_at", oldValue: f.endedAt as Date, newValue: sub.start });
+        continuations.push({
+          activityId: f.activityId,
+          greenhouseRowId: f.greenhouseRowId,
+          carrierId: f.carrierId,
+          densityType: f.densityType,
+          densityCountPerRow: f.densityCountPerRow,
+          deviceId: f.deviceId,
+          startedAt: sub.end,
+          endedAt: f.endedAt as Date,
+          reason: ACTIVITY_CORRECTION_FOREIGN_SPLIT_REASON,
+        });
+      } else if (startsBefore && !endsAfter) {
+        trims.push({ id: f.id, field: "ended_at", oldValue: f.endedAt as Date, newValue: sub.start });
+      } else if (!startsBefore && endsAfter) {
+        trims.push({ id: f.id, field: "started_at", oldValue: f.startedAt, newValue: sub.end });
+      } else {
+        deletions.push({
+          id: f.id,
+          activityId: f.activityId,
+          startedAt: f.startedAt,
+          endedAt: f.endedAt as Date,
+          reason: ACTIVITY_CORRECTION_FOREIGN_COVERED_REASON,
+        });
+      }
+    }
+
+    let coverCursor = subStartMs;
+    for (const c of compatible) {
+      touchedIds.add(c.id);
+      let cStart = c.startedAt.getTime();
+      let cEnd = (c.endedAt as Date).getTime();
+      if (cStart < subStartMs) {
+        trims.push({ id: c.id, field: "started_at", oldValue: c.startedAt, newValue: sub.start });
+        cStart = subStartMs;
+      }
+      if (cEnd > subEndMs) {
+        trims.push({ id: c.id, field: "ended_at", oldValue: c.endedAt as Date, newValue: sub.end });
+        cEnd = subEndMs;
+      }
+      if (cStart > coverCursor) {
+        continuations.push({
+          ...identity,
+          deviceId: null,
+          startedAt: new Date(coverCursor),
+          endedAt: new Date(cStart),
+          reason: ACTIVITY_CORRECTION_GAP_FILL_REASON,
+        });
+      }
+      coverCursor = Math.max(coverCursor, cEnd);
+    }
+    if (coverCursor < subEndMs) {
+      continuations.push({
+        ...identity,
+        deviceId: null,
+        startedAt: new Date(coverCursor),
+        endedAt: sub.end,
+        reason: ACTIVITY_CORRECTION_GAP_FILL_REASON,
+      });
+    }
+  }
+
+  // Any of the run's OWN original segments never found overlapping any
+  // sub-range above are now entirely outside the corrected range —
+  // shortening from one or both ends leaves them with nothing left to
+  // cover, so they're removed outright rather than trimmed to a
+  // zero/negative duration.
+  for (const id of originalSegmentIds) {
+    if (touchedIds.has(id)) continue;
+    const seg = allWork.find((w) => w.id === id)!;
+    deletions.push({
+      id,
+      activityId: seg.activityId,
+      startedAt: seg.startedAt,
+      endedAt: seg.endedAt as Date,
+      reason: ACTIVITY_CORRECTION_OUTSIDE_RANGE_REASON,
+    });
+  }
 
   return {
     ok: true,
     employeeId: peekRow.employee_id,
     activityId: run.activityId,
-    newEndedAt,
-    // On an exact boundary, this segment already ends exactly where the
-    // admin asked — nothing to trim, only the later segment(s) to remove.
-    // Otherwise trim it to the exact administrator-entered time; either
-    // way this can never create a zero-duration entry, since
-    // seg.started_at < newEndedAt was just confirmed above.
-    trim: isBoundary ? null : { id: seg.id, oldValue: seg.ended_at as Date, newValue: newEndedAt },
-    deletions: tail.map((s) => ({ id: s.id, startedAt: s.started_at, endedAt: s.ended_at as Date })),
-    isExtension: false,
+    runStartedAt: newStart,
+    runEndedAt: newEnd,
+    trims,
+    deletions,
+    continuations,
+  };
+}
+
+// A deterministic signature of everything a plan would actually DO — used
+// to detect "the timeline changed since this was previewed" (required:
+// recompute under lock on Save and reject if it no longer matches). Any
+// change to the day's relevant entries between preview and Save (another
+// admin's edit, a mobile sync, a second concurrent Save already applied)
+// changes what computeActivityRunCorrectionPlan recomputes, which changes
+// this fingerprint — the Save route rejects on a mismatch rather than
+// silently applying a plan that's no longer the one the admin actually saw.
+function fingerprintActivityCorrectionPlan(plan: ActivityCorrectionPlanOk): string {
+  const trimsSig = [...plan.trims]
+    .sort((a, b) => a.id.localeCompare(b.id) || a.field.localeCompare(b.field))
+    .map((t) => `${t.id}:${t.field}:${t.oldValue.toISOString()}:${t.newValue.toISOString()}`);
+  const deletionsSig = [...plan.deletions]
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .map((d) => `${d.id}:${d.startedAt.toISOString()}:${d.endedAt.toISOString()}`);
+  const continuationsSig = [...plan.continuations]
+    .sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime())
+    .map(
+      (c) =>
+        `${c.activityId}:${c.greenhouseRowId}:${c.carrierId}:${c.densityType}:${c.startedAt.toISOString()}:${c.endedAt.toISOString()}`
+    );
+  const raw = JSON.stringify({
+    runStartedAt: plan.runStartedAt.toISOString(),
+    runEndedAt: plan.runEndedAt.toISOString(),
+    trimsSig,
+    deletionsSig,
+    continuationsSig,
+  });
+  return createHash("sha256").update(raw).digest("hex");
+}
+
+// Simulates applying a plan to the day's CURRENT entries (already read
+// under `for update` by the caller) purely to report the worked/break-time
+// delta a preview shows — never touches the database. Worked time is a
+// whole-day SPAN calculation (see workdayTotals.ts), not a sum of
+// individual entry durations, so the only correct way to know how a plan
+// changes it is to recompute the whole day's totals before and after.
+function simulateWorkdayTotalsDelta(
+  dayRows: { entry_type: string; started_at: Date; ended_at: Date | null; is_paid: boolean | null }[],
+  plan: Pick<ActivityCorrectionPlanOk, "trims" | "deletions" | "continuations">
+): { workedSecondsDelta: number; breakSecondsDelta: number } {
+  const toBoundary = (r: { entry_type: string; started_at: Date; ended_at: Date | null; is_paid: boolean | null }): WorkdayBoundaryEntry => ({
+    entryType: r.entry_type as "work" | "break",
+    startedAt: r.started_at,
+    endedAt: r.ended_at,
+    isPaid: r.is_paid,
+  });
+  const before = computeWorkdayTotals(dayRows.map(toBoundary));
+
+  const deletedIds = new Set(plan.deletions.map((d) => d.id));
+  const afterRows = dayRows
+    .filter((r: any) => !deletedIds.has(r.id))
+    .map((r: any) => {
+      let started = r.started_at;
+      let ended = r.ended_at;
+      for (const t of plan.trims) {
+        if (t.id !== r.id) continue;
+        if (t.field === "started_at") started = t.newValue;
+        else ended = t.newValue;
+      }
+      return { entry_type: r.entry_type, started_at: started, ended_at: ended, is_paid: r.is_paid };
+    });
+  for (const c of plan.continuations) {
+    afterRows.push({ entry_type: "work", started_at: c.startedAt, ended_at: c.endedAt, is_paid: null });
+  }
+  const after = computeWorkdayTotals(afterRows.map(toBoundary));
+
+  return {
+    workedSecondsDelta: Math.round(after.workedSeconds - before.workedSeconds),
+    breakSecondsDelta: Math.round(after.breakSeconds - before.breakSeconds),
   };
 }
 
 router.patch(
-  "/activity-runs/:id/end-time",
+  "/activity-runs/:id/correction",
   requireAuth,
   requireRole(...EDIT_ROLES),
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid activity run id" });
-    const { endTime } = req.body as { endTime?: string };
+    const { startTime, endTime, fingerprint } = req.body as { startTime?: string; endTime?: string; fingerprint?: string };
+    if (!fingerprint || typeof fingerprint !== "string") {
+      return res.status(400).json({
+        error: "A fingerprint from POST .../correction-preview is required — preview this correction before saving it.",
+      });
+    }
 
     const client = await pool.connect();
     try {
       await client.query("begin");
 
       // The advisory employee lock must be taken before ANY row lock — same
-      // ordering every other manual-entry mutation in this file uses (POST
-      // /breaks, POST /activities, PATCH /breaks/:id) — so a concurrent Add
-      // Break/Add Activity/break correction/second Save for the same
-      // employee can never race past each other's checks. Unlocked peek
-      // first, purely to learn which employee to lock.
+      // ordering every other manual-entry mutation in this file uses — so a
+      // concurrent Add Break/Add Activity/break correction/second Save for
+      // the same employee can never race past each other's checks. Unlocked
+      // peek first, purely to learn which employee to lock.
       const ownerPeek = await client.query(`select employee_id from time_entries where id = $1`, [id]);
       if (!ownerPeek.rows[0]) {
         await client.query("rollback");
@@ -1408,101 +1665,72 @@ router.patch(
       }
       await lockEmployeeForManualEntry(client, ownerPeek.rows[0].employee_id);
 
-      const plan = await computeActivityRunEndTimeCorrectionPlan(client, id, endTime);
+      // Recomputed fresh, under the advisory lock (and the day's rows
+      // locked `for update` inside it) — never trusted from the client, and
+      // never the same plan object the preview call built. If anything
+      // about the day changed since the admin previewed this (another edit,
+      // a double Save racing itself, a mobile sync), the recomputed plan's
+      // fingerprint will differ from the one the client is echoing back.
+      const plan = await computeActivityRunCorrectionPlan(client, id, startTime, endTime);
       if (!plan.ok) {
         await client.query("rollback");
         return res.status(plan.status).json({ error: plan.error });
       }
-
-      // Re-lock and re-verify every row this plan touches now that the
-      // employee-level advisory lock is held — belt-and-suspenders against
-      // anything that changed between the plan's own unlocked grouping read
-      // and here (same defensive pattern the activity-run delete route
-      // above uses, for the identical reason: never apply a partial,
-      // now-inconsistent plan). A double Save for the same run is caught
-      // here too — the second call blocks on the advisory lock until the
-      // first commits, then finds its target already soft-deleted or
-      // trimmed out from under it.
-      const idsToVerify = [...(plan.trim ? [plan.trim.id] : []), ...plan.deletions.map((d) => d.id)];
-      for (const segId of idsToVerify) {
-        const r = await client.query(
-          `select id from time_entries where id = $1 and deleted_at is null and entry_type = 'work' for update`,
-          [segId]
-        );
-        if (!r.rows[0]) {
-          await client.query("rollback");
-          return res
-            .status(409)
-            .json({ error: "This activity log changed since it was loaded — please refresh and try again" });
-        }
+      if (fingerprintActivityCorrectionPlan(plan) !== fingerprint) {
+        await client.query("rollback");
+        return res
+          .status(409)
+          .json({ error: "This activity's timeline changed since you loaded this correction — please refresh and try again" });
       }
 
-      if (plan.isExtension) {
-        // Unchanged from before this fix: an extension must not overwrite a
-        // later activity or break. Compared against the trimmed segment's
-        // own stored started_at via a subquery, not a JS Date round-trip of
-        // it (node-postgres's timestamptz parser only holds millisecond
-        // precision, while Postgres stores microseconds — see the identical
-        // reasoning elsewhere in this file).
-        const nextRes = await client.query(
-          `select started_at from time_entries
-           where employee_id = $1
-             and deleted_at is null
-             and started_at > (select started_at from time_entries where id = $2)
-           order by started_at asc limit 1
-           for update`,
-          [plan.employeeId, plan.trim!.id]
-        );
-        const next = nextRes.rows[0];
-        // Equality with the next entry's start is allowed — the same
-        // exact-boundary-match convention used throughout this file.
-        if (next && plan.trim!.newValue.getTime() > new Date(next.started_at).getTime()) {
-          await client.query("rollback");
-          return res.status(409).json({ error: "Corrected end time overlaps the next activity or break" });
-        }
-      }
-
-      if (plan.trim) {
-        // A real correction supersedes any daily-cutoff placeholder this row
-        // may have been left with, and clears actual_ended_at — the same
-        // "an admin correction supersedes rounding/auto-close evidence"
-        // reasoning as every other correction route in this file, so this
-        // now displays "Corrected," not a stale "Rounded."
-        await client.query(
-          "update time_entries set ended_at = $1, auto_closed_at = null, actual_ended_at = null where id = $2",
-          [plan.trim.newValue, plan.trim.id]
-        );
+      for (const trim of plan.trims) {
+        const actualColumn = trim.field === "started_at" ? "actual_started_at" : "actual_ended_at";
+        const autoClosedClause = trim.field === "ended_at" ? ", auto_closed_at = null" : "";
+        await client.query(`update time_entries set ${trim.field} = $1, ${actualColumn} = null${autoClosedClause} where id = $2`, [
+          trim.newValue,
+          trim.id,
+        ]);
         await client.query(
           `insert into time_entry_corrections
              (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
-           values ($1, $2, $3, 'ended_at', $4, $5, $6)`,
-          [
-            plan.trim.id,
-            plan.employeeId,
-            req.employee!.id,
-            plan.trim.oldValue.toISOString(),
-            plan.trim.newValue.toISOString(),
-            AUTO_CORRECTION_REASON,
-          ]
+           values ($1, $2, $3, $4, $5, $6, $7)`,
+          [trim.id, plan.employeeId, req.employee!.id, trim.field, trim.oldValue.toISOString(), trim.newValue.toISOString(), AUTO_CORRECTION_REASON]
         );
       }
 
-      if (plan.deletions.length > 0) {
-        // Soft delete only — every column but deleted_at/deleted_by_
-        // employee_id/deletion_reason is left exactly as it was, so each
-        // removed segment's original employee-tap timestamps
-        // (actual_started_at/actual_ended_at) and provenance (source) stay
-        // fully intact and the row remains recoverable.
-        const delIds = plan.deletions.map((d) => d.id);
+      for (const del of plan.deletions) {
         await client.query(
-          `update time_entries set deleted_at = now(), deleted_by_employee_id = $1, deletion_reason = $2 where id = any($3::uuid[])`,
-          [req.employee!.id, GROUPED_TAIL_DELETION_REASON, delIds]
+          `update time_entries set deleted_at = now(), deleted_by_employee_id = $1, deletion_reason = $2 where id = $3`,
+          [req.employee!.id, del.reason, del.id]
         );
         await client.query(
           `insert into time_entry_deletions
              (employee_id, deleted_by_employee_id, deletion_type, affected_time_entry_ids, reason)
            values ($1, $2, 'activity_run', $3, $4)`,
-          [plan.employeeId, req.employee!.id, delIds, GROUPED_TAIL_DELETION_REASON]
+          [plan.employeeId, req.employee!.id, [del.id], del.reason]
+        );
+      }
+
+      for (const cont of plan.continuations) {
+        await client.query(
+          `insert into time_entries
+             (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source,
+              greenhouse_row_id, carrier_id, density_type, density_count_per_row,
+              created_by_employee_id, creation_reason)
+           values ($1, $2, 'work', $3, gen_random_uuid(), $4, $5, 'manual', $6, $7, $8, $9, $10, $11)`,
+          [
+            plan.employeeId,
+            cont.deviceId,
+            cont.activityId,
+            cont.startedAt,
+            cont.endedAt,
+            cont.greenhouseRowId,
+            cont.carrierId,
+            cont.densityType,
+            cont.densityCountPerRow,
+            req.employee!.id,
+            cont.reason,
+          ]
         );
       }
 
@@ -1518,23 +1746,21 @@ router.patch(
   })
 );
 
-// "This will end General at 5:00 PM and remove one later 1-second
-// segment." — built from the exact same plan the real PATCH above would
-// apply, inside a transaction that's ALWAYS rolled back (this never writes
-// anything), so the confirmation an admin sees can never drift from what
-// Save actually does (same pattern as POST /breaks/:id/correction-preview
-// below). An ordinary correction (no grouped segments involved) returns an
-// empty messages array — the client skips the confirmation step entirely
-// in that case, saving directly, same as every other correction on this
-// page.
+// "This will set General to 8:45 AM – 6:00 PM. Packing Peppers will
+// continue from 1:00 PM to 6:00 PM." — built from the exact same plan the
+// real PATCH above would apply, inside a transaction that's ALWAYS rolled
+// back (this never writes anything), so the confirmation an admin sees can
+// never drift from what Save actually does. Every response includes a
+// `fingerprint` the client must echo back to PATCH .../correction — see
+// fingerprintActivityCorrectionPlan's own comment.
 router.post(
-  "/activity-runs/:id/end-time-preview",
+  "/activity-runs/:id/correction-preview",
   requireAuth,
   requireRole(...EDIT_ROLES),
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid activity run id" });
-    const { endTime } = req.body as { endTime?: string };
+    const { startTime, endTime } = req.body as { startTime?: string; endTime?: string };
 
     const client = await pool.connect();
     try {
@@ -1546,34 +1772,72 @@ router.post(
       }
       await lockEmployeeForManualEntry(client, ownerPeek.rows[0].employee_id);
 
-      const plan = await computeActivityRunEndTimeCorrectionPlan(client, id, endTime);
+      const plan = await computeActivityRunCorrectionPlan(client, id, startTime, endTime);
       if (!plan.ok) {
         await client.query("rollback");
         return res.status(plan.status).json({ error: plan.error });
       }
 
-      const messages: string[] = [];
-      if (plan.deletions.length > 0) {
-        const activityRes = await client.query(`select name from activities where id = $1`, [plan.activityId]);
-        const activityName = activityRes.rows[0]?.name ?? "this activity";
-        const fmt = (d: Date) =>
-          new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: APP_TIMEZONE }).format(d);
-        const endLabel = fmt(plan.newEndedAt);
-        if (plan.deletions.length === 1) {
-          const durSec = Math.round(
-            (plan.deletions[0].endedAt.getTime() - plan.deletions[0].startedAt.getTime()) / 1000
-          );
-          const durLabel = durSec < 60 ? `${durSec}-second` : `${Math.round(durSec / 60)}-minute`;
-          messages.push(`This will end ${activityName} at ${endLabel} and remove one later ${durLabel} segment.`);
-        } else {
-          messages.push(
-            `This will end ${activityName} at ${endLabel} and remove ${plan.deletions.length} later segments.`
-          );
-        }
+      // Re-read the day's rows (unlocked is fine — still inside the same
+      // transaction that's holding the advisory lock, purely to build the
+      // human-readable summary and the before/after totals delta) with the
+      // extra columns the plan itself doesn't need but the summary does.
+      const dateStr = calendarDateInAppTimezone(plan.runStartedAt);
+      const { start, end } = getDayBoundsUtc(dateStr);
+      const dayRowsRes = await client.query(
+        `select id, entry_type, started_at, ended_at, is_paid from time_entries
+         where employee_id = $1 and started_at >= $2 and started_at < $3 and deleted_at is null`,
+        [plan.employeeId, start, end]
+      );
+      const { workedSecondsDelta, breakSecondsDelta } = simulateWorkdayTotalsDelta(dayRowsRes.rows, plan);
+
+      const activityIds = [...new Set([plan.activityId, ...plan.deletions.map((d) => d.activityId), ...plan.continuations.map((c) => c.activityId)])];
+      const nameByActivityId = new Map<string, string>();
+      if (activityIds.length > 0) {
+        const { rows } = await client.query(`select id, name from activities where id = any($1::uuid[])`, [activityIds]);
+        for (const r of rows) nameByActivityId.set(r.id, r.name);
+      }
+      const activityName = nameByActivityId.get(plan.activityId) ?? "this activity";
+      const fmt = (d: Date) =>
+        new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: APP_TIMEZONE }).format(d);
+
+      const messages: string[] = [`This will set ${activityName} to ${fmt(plan.runStartedAt)} – ${fmt(plan.runEndedAt)}.`];
+      // The trims array doesn't carry which activity each trimmed row
+      // belongs to (it could be the corrected run's own segment, or a
+      // foreign one being boundary-trimmed) — one extra lookup resolves
+      // it, purely for message wording.
+      const trimEntryIds = plan.trims.map((t) => t.id);
+      const trimActivityById = new Map<string, string>();
+      if (trimEntryIds.length > 0) {
+        const { rows } = await client.query(`select id, activity_id from time_entries where id = any($1::uuid[])`, [trimEntryIds]);
+        for (const r of rows) trimActivityById.set(r.id, r.activity_id);
+      }
+      for (const trim of plan.trims) {
+        const trimName = nameByActivityId.get(trimActivityById.get(trim.id) ?? "") ?? activityName;
+        const boundaryLabel = trim.field === "started_at" ? "start" : "end";
+        messages.push(`${trimName} will be trimmed — ${boundaryLabel} moves to ${fmt(trim.newValue)}.`);
+      }
+      for (const del of plan.deletions) {
+        const delName = nameByActivityId.get(del.activityId) ?? "this activity";
+        const reasonLabel = del.reason === ACTIVITY_CORRECTION_FOREIGN_COVERED_REASON ? "fully covered by the corrected activity" : "outside the corrected time range";
+        messages.push(`${delName} from ${fmt(del.startedAt)} to ${fmt(del.endedAt)} will be removed — ${reasonLabel}.`);
+      }
+      for (const cont of plan.continuations) {
+        const contName = nameByActivityId.get(cont.activityId) ?? "this activity";
+        messages.push(`${contName} will continue from ${fmt(cont.startedAt)} to ${fmt(cont.endedAt)}.`);
       }
 
+      const fingerprint = fingerprintActivityCorrectionPlan(plan);
+
       await client.query("rollback");
-      res.json({ messages });
+      res.json({
+        runStartedAt: plan.runStartedAt.toISOString(),
+        runEndedAt: plan.runEndedAt.toISOString(),
+        messages,
+        workedSecondsDelta,
+        breakSecondsDelta,
+        fingerprint,
+      });
     } catch (err) {
       await client.query("rollback").catch(() => {});
       throw err;

@@ -20,7 +20,7 @@
     "test:midnight-rollover": "ts-node src/lib/midnightRollover.test.ts",
     "test:long-shift-admin-end": "ts-node src/lib/longShiftAdminEnd.test.ts",
     "test:inputs-rollover-corrected-from-display": "ts-node src/routes/inputs.rolloverCorrectedFromDisplay.test.ts",
-    "test:inputs-activity-run-end-time-grouped-segments": "ts-node src/routes/inputs.activityRunEndTimeGroupedSegments.test.ts",
+    "test:inputs-activity-run-correction": "ts-node src/routes/inputs.activityRunCorrection.test.ts",
     "typecheck": "tsc --noEmit",
     "test:row-layout": "ts-node src/lib/rowLayout.test.ts",
     "test:workday-totals": "ts-node src/lib/workdayTotals.test.ts",

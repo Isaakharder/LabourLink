@@ -103,6 +103,8 @@ function buildDaily(date: string): DailyInputsResponse {
         rowCompletion: null,
         segmentIds: ["run-1"],
         durationSeconds: 3600,
+        startedAtOriginalTime: null,
+        startedAtCorrectedFrom: null,
         endedAtOriginalTime: null,
         endedAtCorrectedFrom: null,
         startedAt: `${date}T13:00:00.000Z`,

@@ -6,11 +6,12 @@ import { formatDateLong, formatDurationHMS, formatTimeInAppTimezone } from "../.
 import { RowCompletionReviewModal } from "./RowCompletionReviewModal";
 import { InputsErrorBoundary } from "./InputsErrorBoundary";
 
-// One row's worth of columns — 7 <th>s in the header above (Activity, Row,
-// Carrier, Speed, Duration, End Time, Actions). Kept as a plain constant
-// (not derived) since the fallback row below needs the same span whether
-// or not a real render ever gets far enough to count columns dynamically.
-const ACTIVITY_LOG_COLUMN_COUNT = 7;
+// One row's worth of columns — 8 <th>s in the header above (Activity, Row,
+// Carrier, Speed, Start Time, Duration, End Time, Actions). Kept as a plain
+// constant (not derived) since the fallback row below needs the same span
+// whether or not a real render ever gets far enough to count columns
+// dynamically.
+const ACTIVITY_LOG_COLUMN_COUNT = 8;
 
 // Defensive against a non-finite/missing value reaching this — .toFixed
 // throws a TypeError outright on null/undefined (not just a bad-looking
@@ -38,19 +39,26 @@ interface ActivityLogsCardProps {
   totals: { workedSeconds: number; breakSeconds: number };
   selectedRunId: string | null;
   onSelectRun: (id: string) => void;
+  // Both Start Time and End Time are editable now (the general Activity
+  // Time Correction workflow — see InputsPage.tsx's handleSaveEdit),
+  // entered together as one combined edit mode on the run regardless of
+  // which cell was clicked, so an admin can change either or both boundaries
+  // in a single correction.
   editingRunId: string | null;
-  editTimeValue: string;
+  editStartTimeValue: string;
+  editEndTimeValue: string;
   onStartEdit: (run: ActivityRunDto) => void;
-  onEditTimeChange: (value: string) => void;
+  onEditStartTimeChange: (value: string) => void;
+  onEditEndTimeChange: (value: string) => void;
   onSaveEdit: () => void;
   onCancelEdit: () => void;
   onDeleteRun: (run: ActivityRunDto) => void;
   // Called after the admin combines segments in the row-completion review
   // modal — the parent reloads the day so the newly-resolved speed shows up.
   onRowCompletionChanged: () => void;
-  // True while an end-time correction's preview or PATCH request is in
-  // flight (InputsPage's actionInFlight) — disables Save/Cancel on the
-  // inline editor so a double-click can't fire two overlapping requests.
+  // True while a correction's preview or PATCH request is in flight
+  // (InputsPage's actionInFlight) — disables Save/Cancel on the inline
+  // editor so a double-click can't fire two overlapping requests.
   saving: boolean;
 }
 
@@ -73,9 +81,11 @@ export function ActivityLogsCard({
   selectedRunId,
   onSelectRun,
   editingRunId,
-  editTimeValue,
+  editStartTimeValue,
+  editEndTimeValue,
   onStartEdit,
-  onEditTimeChange,
+  onEditStartTimeChange,
+  onEditEndTimeChange,
   onSaveEdit,
   onCancelEdit,
   onDeleteRun,
@@ -90,11 +100,15 @@ export function ActivityLogsCard({
     rowLabel: string;
   } | null>(null);
 
-  function handleEndTimeCellClick(run: ActivityRunDto) {
+  // Shared by both the Start Time and End Time cells — either one clicked
+  // while the row is already selected and editable enters ONE combined
+  // edit mode covering both boundaries (see onStartEdit's own comment on
+  // InputsPage.tsx), not two independent per-field editors.
+  function handleTimeCellClick(run: ActivityRunDto) {
     // Blocked while a correction is already in flight for this card — a
     // Save click closes the editor immediately (before the request
     // resolves), so without this guard a quick second click on the same
-    // cell could re-open editing on the still-stale pre-correction value
+    // cell could re-open editing on the still-stale pre-correction values
     // and race a second request against the first.
     if (saving) return;
     if (run.id === selectedRunId && run.canEdit && editingRunId !== run.id) {
@@ -157,6 +171,7 @@ export function ActivityLogsCard({
               <col className="inputs-col-row" />
               <col className="inputs-col-carrier" />
               <col className="inputs-col-speed" />
+              <col className="inputs-col-starttime" />
               <col className="inputs-col-duration" />
               <col className="inputs-col-endtime" />
               <col className="inputs-col-actions" />
@@ -167,6 +182,7 @@ export function ActivityLogsCard({
                 <th>Row</th>
                 <th>Carrier</th>
                 <th>Speed</th>
+                <th className="inputs-th-starttime">Start Time</th>
                 <th className="inputs-th-duration">Duration</th>
                 <th className="inputs-th-endtime">End Time</th>
                 <th className="inputs-th-actions">Actions</th>
@@ -223,6 +239,53 @@ export function ActivityLogsCard({
                       "—"
                     )}
                   </td>
+                  <td
+                    className={`inputs-log-starttime${run.canEdit ? " inputs-log-starttime-editable" : ""}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleTimeCellClick(run);
+                    }}
+                  >
+                    {editingRunId === run.id ? (
+                      <input
+                        type="time"
+                        step={1}
+                        value={editStartTimeValue}
+                        onChange={(e) => onEditStartTimeChange(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !saving) onSaveEdit();
+                          if (e.key === "Escape") onCancelEdit();
+                        }}
+                        disabled={saving}
+                        onClick={(e) => e.stopPropagation()}
+                        autoFocus
+                      />
+                    ) : (
+                      <>
+                        {formatTimeInAppTimezone(run.startedAt)}
+                        {run.startedAtOriginalTime && run.startedAtOriginalTime !== run.startedAt && (
+                          <span
+                            className="inputs-rounded-badge"
+                            title={`Actual tap time: ${formatTimeInAppTimezone(
+                              run.startedAtOriginalTime
+                            )} — adjusted by this employee's break profile's work-start rounding setting.`}
+                          >
+                            Rounded
+                          </span>
+                        )}
+                        {run.startedAtCorrectedFrom && (
+                          <span
+                            className="inputs-corrected-badge"
+                            title={`Previously ${formatTimeInAppTimezone(
+                              run.startedAtCorrectedFrom
+                            )} — adjusted by an administrator or an automatic correction.`}
+                          >
+                            Corrected
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </td>
                   <td className="inputs-log-duration">
                     {run.isOpen ? (
                       <>
@@ -241,7 +304,7 @@ export function ActivityLogsCard({
                     className={`inputs-log-endtime${run.canEdit ? " inputs-log-endtime-editable" : ""}`}
                     onClick={(e) => {
                       e.stopPropagation();
-                      handleEndTimeCellClick(run);
+                      handleTimeCellClick(run);
                     }}
                   >
                     {editingRunId === run.id ? (
@@ -249,8 +312,8 @@ export function ActivityLogsCard({
                         <input
                           type="time"
                           step={1}
-                          value={editTimeValue}
-                          onChange={(e) => onEditTimeChange(e.target.value)}
+                          value={editEndTimeValue}
+                          onChange={(e) => onEditEndTimeChange(e.target.value)}
                           onKeyDown={(e) => {
                             if (e.key === "Enter" && !saving) onSaveEdit();
                             if (e.key === "Escape") onCancelEdit();

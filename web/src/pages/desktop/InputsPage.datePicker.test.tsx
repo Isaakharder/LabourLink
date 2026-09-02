@@ -102,6 +102,8 @@ function buildDaily(emp: InputsEmployee, date: string, activityName: string): Da
         rowCompletion: null,
         segmentIds: [`run-${emp.id}-${date}`],
         durationSeconds: 3600,
+        startedAtOriginalTime: null,
+        startedAtCorrectedFrom: null,
         endedAtOriginalTime: null,
         endedAtCorrectedFrom: null,
         startedAt: `${date}T13:00:00.000Z`,

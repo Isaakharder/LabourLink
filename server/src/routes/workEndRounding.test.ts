@@ -463,11 +463,17 @@ async function main() {
       check(beforeCorrection.actual_ended_at !== null, "H) the entry has rounding audit data before correction");
 
       const correctedEnd = new Date(b.getTime() + 3 * 60000 + 30000); // deliberately not a rounding boundary
-      const correctionRes = await callAdmin(
-        "PATCH",
-        `/api/inputs/activity-runs/${entryId}/end-time`,
+      const correctionPreview = await callAdmin(
+        "POST",
+        `/api/inputs/activity-runs/${entryId}/correction-preview`,
         adminToken,
         { endTime: correctedEnd.toISOString() }
+      );
+      const correctionRes = await callAdmin(
+        "PATCH",
+        `/api/inputs/activity-runs/${entryId}/correction`,
+        adminToken,
+        { endTime: correctedEnd.toISOString(), fingerprint: correctionPreview.body?.fingerprint }
       );
       check(correctionRes.status === 200, "H) the manual correction succeeds", correctionRes.body);
 
@@ -575,12 +581,22 @@ async function main() {
       });
       check(startCorrectionRes.status === 200, "K) the manual start-time correction succeeds", startCorrectionRes.body);
 
-      const correctedEnd = new Date(endedAt.getTime() + 10 * 60000);
-      const endCorrectionRes = await callAdmin(
-        "PATCH",
-        `/api/inputs/activity-runs/${entryId}/end-time`,
+      // Shortened (not extended) — a shortening trims entryId's own row
+      // directly, which is what this section is actually testing (the
+      // audit-clearing behavior on THAT row); an extension instead creates
+      // a separate continuation entry (see inputs.activityRunCorrection.test.ts).
+      const correctedEnd = new Date(endedAt.getTime() - 10 * 60000);
+      const endCorrectionPreview = await callAdmin(
+        "POST",
+        `/api/inputs/activity-runs/${entryId}/correction-preview`,
         adminToken,
         { endTime: correctedEnd.toISOString() }
+      );
+      const endCorrectionRes = await callAdmin(
+        "PATCH",
+        `/api/inputs/activity-runs/${entryId}/correction`,
+        adminToken,
+        { endTime: correctedEnd.toISOString(), fingerprint: endCorrectionPreview.body?.fingerprint }
       );
       check(endCorrectionRes.status === 200, "K) the manual end-time correction succeeds", endCorrectionRes.body);
 

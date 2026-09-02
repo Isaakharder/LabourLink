@@ -211,14 +211,20 @@ async function main() {
         roundedBreakId,
       ]);
 
-      // A work run whose end time gets corrected via the REAL PATCH
-      // endpoint — must show "Corrected" (endedAtCorrectedFrom), never
-      // "Rounded", and the correction must still land in
-      // time_entry_corrections exactly as before this fix.
+      // A work run whose end time gets corrected via the REAL preview ->
+      // apply flow (general Activity Time Correction workflow) — must show
+      // "Corrected" (endedAtCorrectedFrom), never "Rounded", and the
+      // correction must still land in time_entry_corrections exactly as
+      // before this fix. Shortening (13:47:12 -> 13:45:00) trims the same
+      // row in place, unlike an expansion (see inputs.activityRunCorrection.test.ts).
       const correctedRunId = await insertWork(empC, zonedWallTimeToUtc(2019, 7, 15, 13, 0, 0), zonedWallTimeToUtc(2019, 7, 15, 13, 47, 12));
-      const correctionRes = await call("PATCH", `/api/inputs/activity-runs/${correctedRunId}/end-time`, {
+      const correctionPreview = await call("POST", `/api/inputs/activity-runs/${correctedRunId}/correction-preview`, {
         token: adminToken,
         body: { endTime: zonedWallTimeToUtc(2019, 7, 15, 13, 45, 0).toISOString() },
+      });
+      const correctionRes = await call("PATCH", `/api/inputs/activity-runs/${correctedRunId}/correction`, {
+        token: adminToken,
+        body: { endTime: zonedWallTimeToUtc(2019, 7, 15, 13, 45, 0).toISOString(), fingerprint: correctionPreview.body.fingerprint },
       });
       check(correctionRes.status === 200, "3) the end-time correction succeeds", correctionRes.body);
 
@@ -334,10 +340,11 @@ async function main() {
     }
 
     // Broader than just timeEntryIds — some entries in this file are
-    // created through the real POST /work-start / PATCH .../end-time / POST
-    // .../delete endpoints (never returning their own row id), not only via
-    // this file's own direct insertWork/insertBreak helpers, so cleanup is
-    // scoped by employee_id instead to reliably catch all of them.
+    // created through the real POST /work-start / PATCH .../correction /
+    // POST .../delete endpoints (never returning their own row id), not
+    // only via this file's own direct insertWork/insertBreak helpers, so
+    // cleanup is scoped by employee_id instead to reliably catch all of
+    // them.
     if (employeeIds.length) {
       await tryDelete("time_entry_corrections", () =>
         pool.query(`delete from time_entry_corrections where employee_id = any($1::uuid[])`, [employeeIds])

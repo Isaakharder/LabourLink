@@ -504,11 +504,18 @@ async function main() {
       const entryId = completedEntry.rows[0].id;
       const originalEndedAt = completedEntry.rows[0].ended_at;
 
-      // Admin corrects the end time (the employee actually worked 15 more
-      // minutes than the device recorded).
-      const correctedEnd = new Date(new Date(originalEndedAt).getTime() + 15 * 60 * 1000);
-      const correctionRes = await callAdmin("PATCH", `/api/inputs/activity-runs/${entryId}/end-time`, adminToken, {
+      // Admin corrects the end time (the device recorded 15 minutes past
+      // when the employee actually stopped). Shortening trims entryId's
+      // own row directly (an extension instead creates a separate
+      // continuation entry — see inputs.activityRunCorrection.test.ts —
+      // which isn't what this scenario is testing).
+      const correctedEnd = new Date(new Date(originalEndedAt).getTime() - 15 * 60 * 1000);
+      const correctionPreview = await callAdmin("POST", `/api/inputs/activity-runs/${entryId}/correction-preview`, adminToken, {
         endTime: correctedEnd.toISOString(),
+      });
+      const correctionRes = await callAdmin("PATCH", `/api/inputs/activity-runs/${entryId}/correction`, adminToken, {
+        endTime: correctedEnd.toISOString(),
+        fingerprint: correctionPreview.body?.fingerprint,
       });
       check(correctionRes.status === 200, "7) admin correction succeeds", correctionRes.body);
 

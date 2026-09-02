@@ -45,14 +45,19 @@ interface DailyCall {
 let employeesResponse: { employees: InputsEmployee[] } = { employees: [] };
 let dailyCalls: DailyCall[] = [];
 let breakPatchFailure: { status: number; message: string } | null = null;
-// Activity-run end-time correction preview/apply — mirrors breakPatchFailure
-// above, but for POST .../activity-runs/:id/end-time-preview and PATCH
-// .../activity-runs/:id/end-time. null messages (the default) short-circuits
-// straight to "no preview call configured" tests never needing it; an empty
-// array means "preview ran, nothing to confirm."
+// Activity-run correction preview/apply (the general Activity Time
+// Correction workflow) — mirrors breakPatchFailure above, but for POST
+// .../activity-runs/:id/correction-preview and PATCH
+// .../activity-runs/:id/correction. null messages (the default)
+// short-circuits straight to "no preview call configured" tests never
+// needing it; an empty array means "preview ran with nothing notable to
+// report" (every preview always includes at least the final start/end
+// message in the real API, but these tests only assert on the extra ones).
 let activityRunPreviewMessages: string[] | null = null;
-let activityRunPreviewDeferred: Deferred<{ messages: string[] }> | null = null;
+let activityRunPreviewDeferred: Deferred<{ messages: string[]; fingerprint: string }> | null = null;
 let activityRunEndTimePatchCalls = 0;
+let lastActivityRunPreviewBody: { startTime?: string; endTime?: string } | null = null;
+let lastActivityRunCorrectionBody: { startTime?: string; endTime?: string; fingerprint?: string } | null = null;
 
 vi.mock("../../lib/api", () => {
   class ApiError extends Error {
@@ -91,7 +96,7 @@ vi.mock("../../lib/api", () => {
         }
         return deferred.promise;
       }
-      if (path.endsWith("/correction-preview") && options?.method === "POST") {
+      if (path.includes("/breaks/") && path.endsWith("/correction-preview") && options?.method === "POST") {
         // Same simulated failure surfaces here now — the preview computes
         // the identical plan PATCH would apply, so an invalid correction
         // is now rejected at preview time, before any commit.
@@ -106,12 +111,14 @@ vi.mock("../../lib/api", () => {
         }
         return Promise.resolve({ ok: true });
       }
-      if (path.endsWith("/end-time-preview") && options?.method === "POST") {
+      if (path.includes("/activity-runs/") && path.endsWith("/correction-preview") && options?.method === "POST") {
+        lastActivityRunPreviewBody = options?.body ? JSON.parse(options.body as string) : null;
         if (activityRunPreviewDeferred) return activityRunPreviewDeferred.promise;
-        return Promise.resolve({ messages: activityRunPreviewMessages ?? [] });
+        return Promise.resolve({ messages: activityRunPreviewMessages ?? [], fingerprint: "qa-fingerprint" });
       }
-      if (/\/activity-runs\/[^/]+\/end-time$/.test(path) && options?.method === "PATCH") {
+      if (/\/activity-runs\/[^/]+\/correction$/.test(path) && options?.method === "PATCH") {
         activityRunEndTimePatchCalls++;
+        lastActivityRunCorrectionBody = options?.body ? JSON.parse(options.body as string) : null;
         return Promise.resolve({ ok: true });
       }
       return Promise.reject(new Error(`Unhandled mock api() call in test: ${path}`));
@@ -147,6 +154,8 @@ function buildDaily(emp: InputsEmployee, date: string, activityName: string, bre
         rowCompletion: null,
         segmentIds: [`run-${emp.id}`],
         durationSeconds: 3600,
+        startedAtOriginalTime: null,
+        startedAtCorrectedFrom: null,
         endedAtOriginalTime: null,
         endedAtCorrectedFrom: null,
         startedAt: `${date}T13:00:00.000Z`,
@@ -212,6 +221,8 @@ beforeEach(() => {
   activityRunPreviewMessages = null;
   activityRunPreviewDeferred = null;
   activityRunEndTimePatchCalls = 0;
+  lastActivityRunPreviewBody = null;
+  lastActivityRunCorrectionBody = null;
 });
 
 afterEach(() => {
@@ -463,10 +474,10 @@ describe("InputsPage employee switching", () => {
     const endTimeText = formatTimeInAppTimezone("2026-08-11T14:00:00.000Z");
     const user = userEvent.setup();
     await user.click(screen.getByText(endTimeText)); // select the run
-    await user.click(screen.getByText(endTimeText)); // enter edit mode
-    const timeInput = container.querySelector('input[type="time"]') as HTMLInputElement;
-    expect(timeInput).not.toBeNull();
-    fireEvent.change(timeInput, { target: { value: "17:00:00" } });
+    await user.click(screen.getByText(endTimeText)); // enter combined edit mode
+    const endTimeInput = container.querySelector('.inputs-log-endtime input[type="time"]') as HTMLInputElement;
+    expect(endTimeInput).not.toBeNull();
+    fireEvent.change(endTimeInput, { target: { value: "17:00:00" } });
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     // The confirmation modal appears with the server's exact preview
@@ -478,8 +489,8 @@ describe("InputsPage employee switching", () => {
     await waitFor(() => expect(activityRunEndTimePatchCalls).toBe(1));
   });
 
-  it("disables Save while the correction request is in flight, and applies directly (no confirmation) when nothing hidden would be removed", async () => {
-    activityRunPreviewDeferred = createDeferred<{ messages: string[] }>();
+  it("disables Save while the correction preview is in flight, and still shows a confirmation even when nothing hidden would be removed", async () => {
+    activityRunPreviewDeferred = createDeferred<{ messages: string[]; fingerprint: string }>();
     const { container } = renderInputsPage();
 
     await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
@@ -492,8 +503,8 @@ describe("InputsPage employee switching", () => {
     const user = userEvent.setup();
     await user.click(screen.getByText(endTimeText));
     await user.click(screen.getByText(endTimeText));
-    const timeInput = container.querySelector('input[type="time"]') as HTMLInputElement;
-    fireEvent.change(timeInput, { target: { value: "13:30:00" } });
+    const endTimeInput = container.querySelector('.inputs-log-endtime input[type="time"]') as HTMLInputElement;
+    fireEvent.change(endTimeInput, { target: { value: "13:30:00" } });
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     // Still waiting on the preview response — no PATCH has fired yet.
@@ -502,16 +513,94 @@ describe("InputsPage employee switching", () => {
 
     // A quick second click on the same cell while still processing must
     // NOT reopen the editor on the stale pre-correction value (ActivityLogsCard's
-    // `saving` guard on handleEndTimeCellClick) — it stays a plain display.
+    // `saving` guard on handleTimeCellClick) — it stays a plain display.
     await user.click(screen.getByText(endTimeText));
     expect(container.querySelector('input[type="time"]')).toBeNull();
 
     await act(async () => {
-      activityRunPreviewDeferred!.resolve({ messages: [] });
+      activityRunPreviewDeferred!.resolve({ messages: [], fingerprint: "qa-fingerprint" });
     });
 
-    // No confirmation modal — applies directly.
+    // Every correction is confirmed explicitly now, even one with no extra
+    // effects to call out — the modal still appears, and Save is required.
+    await screen.findByText("Confirm activity correction");
+    expect(activityRunEndTimePatchCalls).toBe(0);
+    await user.click(screen.getByRole("button", { name: "Save correction" }));
     await waitFor(() => expect(activityRunEndTimePatchCalls).toBe(1));
-    expect(screen.queryByText("Confirm activity correction")).not.toBeInTheDocument();
+  });
+
+  it("editing only the Start Time cell sends startTime and omits endTime entirely", async () => {
+    const { container } = renderInputsPage("/inputs?date=2026-08-11");
+    await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
+    await act(async () => {
+      findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity"));
+    });
+    await screen.findByText("Alice's Activity");
+
+    // buildDaily's run is 2026-08-11T13:00:00Z-14:00:00Z — the Start Time
+    // column shows the run's own startedAt.
+    const startTimeText = formatTimeInAppTimezone("2026-08-11T13:00:00.000Z");
+    const user = userEvent.setup();
+    await user.click(screen.getByText(startTimeText)); // select
+    await user.click(screen.getByText(startTimeText)); // enter combined edit mode
+    const startTimeInput = container.querySelector('.inputs-log-starttime input[type="time"]') as HTMLInputElement;
+    expect(startTimeInput).not.toBeNull();
+    fireEvent.change(startTimeInput, { target: { value: "12:00:00" } });
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(lastActivityRunPreviewBody).not.toBeNull());
+    expect(lastActivityRunPreviewBody?.startTime).toBeDefined();
+    expect(lastActivityRunPreviewBody?.endTime).toBeUndefined();
+
+    await screen.findByText("Confirm activity correction");
+    await user.click(screen.getByRole("button", { name: "Save correction" }));
+    await waitFor(() => expect(activityRunEndTimePatchCalls).toBe(1));
+    expect(lastActivityRunCorrectionBody?.startTime).toBeDefined();
+    expect(lastActivityRunCorrectionBody?.endTime).toBeUndefined();
+    expect(lastActivityRunCorrectionBody?.fingerprint).toBe("qa-fingerprint");
+  });
+
+  it("editing only the End Time cell sends endTime and omits startTime entirely", async () => {
+    const { container } = renderInputsPage("/inputs?date=2026-08-11");
+    await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
+    await act(async () => {
+      findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity"));
+    });
+    await screen.findByText("Alice's Activity");
+
+    const endTimeText = formatTimeInAppTimezone("2026-08-11T14:00:00.000Z");
+    const user = userEvent.setup();
+    await user.click(screen.getByText(endTimeText));
+    await user.click(screen.getByText(endTimeText));
+    const endTimeInput = container.querySelector('.inputs-log-endtime input[type="time"]') as HTMLInputElement;
+    fireEvent.change(endTimeInput, { target: { value: "16:00:00" } });
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(lastActivityRunPreviewBody).not.toBeNull());
+    expect(lastActivityRunPreviewBody?.endTime).toBeDefined();
+    expect(lastActivityRunPreviewBody?.startTime).toBeUndefined();
+  });
+
+  it("editing both Start Time and End Time together sends both fields in one correction", async () => {
+    const { container } = renderInputsPage("/inputs?date=2026-08-11");
+    await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
+    await act(async () => {
+      findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity"));
+    });
+    await screen.findByText("Alice's Activity");
+
+    const endTimeText = formatTimeInAppTimezone("2026-08-11T14:00:00.000Z");
+    const user = userEvent.setup();
+    await user.click(screen.getByText(endTimeText)); // select the run
+    await user.click(screen.getByText(endTimeText)); // enter combined edit mode (both fields now editable)
+    const startTimeInput = container.querySelector('.inputs-log-starttime input[type="time"]') as HTMLInputElement;
+    const endTimeInput = container.querySelector('.inputs-log-endtime input[type="time"]') as HTMLInputElement;
+    fireEvent.change(startTimeInput, { target: { value: "12:00:00" } });
+    fireEvent.change(endTimeInput, { target: { value: "16:00:00" } });
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(lastActivityRunPreviewBody).not.toBeNull());
+    expect(lastActivityRunPreviewBody?.startTime).toBeDefined();
+    expect(lastActivityRunPreviewBody?.endTime).toBeDefined();
   });
 });

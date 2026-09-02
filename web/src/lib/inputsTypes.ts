@@ -107,6 +107,13 @@ export interface ActivityRunDto {
   startedAt: string;
   currentSegmentStartedAt: string;
   endedAt: string | null;
+  // Mirror of endedAtOriginalTime/endedAtCorrectedFrom below, for this
+  // run's FIRST segment instead of its last — lets the Inputs page show
+  // the same "Rounded"/"Corrected" evidence for the Start Time column that
+  // End Time already had, now that PATCH .../activity-runs/:id/correction
+  // lets an administrator correct a run's start time too.
+  startedAtOriginalTime: string | null;
+  startedAtCorrectedFrom: string | null;
   // Present only when work-end rounding actually applied to this run's
   // last segment (a genuine Finish Work tap, with rounding enabled on the
   // employee's break profile at the time) — the employee's original
