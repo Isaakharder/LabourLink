@@ -90,7 +90,7 @@ function DesktopApp() {
             </RequireRole>
           }
         />
-        <Route path="employees" element={<EmployeesPage />} />
+        <Route path="employees/*" element={<EmployeesPage />} />
         <Route path="activities/*" element={<ActivitiesPage />} />
         <Route path="basic-data/*" element={<BasicDataPage />} />
         <Route path="devices" element={<DevicesPage />} />

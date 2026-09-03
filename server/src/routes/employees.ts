@@ -23,7 +23,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-const NATIONALITIES = ["Canadian", "Mexican"] as const;
+const NATIONALITIES = ["Canadian", "Mexican", "Jamaican", "Guatemalan", "Filipino", "Thai"] as const;
 const GENDERS = ["Male", "Female", "Prefer not to say"] as const;
 const LANGUAGES = ["English", "Spanish"] as const;
 
@@ -87,7 +87,7 @@ function validateCreate(body: Record<string, unknown>):
 
   const nationality = body.nationality as Nationality;
   if (!NATIONALITIES.includes(nationality)) {
-    errors.nationality = "Nationality must be Canadian or Mexican";
+    errors.nationality = `Nationality must be one of: ${NATIONALITIES.join(", ")}`;
   }
 
   let email: string | null = null;
@@ -199,7 +199,7 @@ function validateUpdate(body: Record<string, unknown>):
   if ("nationality" in body) {
     const nationality = body.nationality as Nationality;
     if (!NATIONALITIES.includes(nationality)) {
-      errors.nationality = "Nationality must be Canadian or Mexican";
+      errors.nationality = `Nationality must be one of: ${NATIONALITIES.join(", ")}`;
     } else {
       data.nationality = nationality;
       nationalityForPhone = nationality;

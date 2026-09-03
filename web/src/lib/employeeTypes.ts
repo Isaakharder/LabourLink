@@ -26,7 +26,7 @@ export interface Employee {
   startDate: string;
   isActive: boolean;
   employeeNumber: string | null;
-  nationality: "Canadian" | "Mexican";
+  nationality: "Canadian" | "Mexican" | "Jamaican" | "Guatemalan" | "Filipino" | "Thai";
   preferredLanguage: string | null;
   notes?: string;
   photoUrl: string | null;
@@ -52,4 +52,4 @@ export interface Employee {
 
 export const GENDERS = ["Male", "Female", "Prefer not to say"] as const;
 export const LANGUAGES = ["English", "Spanish"] as const;
-export const NATIONALITIES = ["Canadian", "Mexican"] as const;
+export const NATIONALITIES = ["Canadian", "Mexican", "Jamaican", "Guatemalan", "Filipino", "Thai"] as const;

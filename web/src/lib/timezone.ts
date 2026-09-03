@@ -97,6 +97,23 @@ export function startOfWeekMonday(dateStr: string): string {
   return addCalendarDays(dateStr, -offset);
 }
 
+// Adds `months` CALENDAR months to a YYYY-MM-DD string — "1 month after
+// Jan 31" means Feb 28/29 (end-of-month clamping to the last real day of
+// the shorter month), not a fixed 30-day approximation. Pure
+// UTC-arithmetic-space calendar math, mirroring the server's
+// subtractCalendarMonths (server/src/lib/workPermits.ts) so month math
+// isn't invented a third separate way in this codebase — used by the
+// Employment Timeline graph's Month/Quarter/Year navigation.
+export function addCalendarMonths(dateStr: string, months: number): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const totalMonthsFromEpoch = y * 12 + (m - 1) + months;
+  const ny = Math.floor(totalMonthsFromEpoch / 12);
+  const nm = totalMonthsFromEpoch - ny * 12; // 0-11
+  const lastDayOfTargetMonth = new Date(Date.UTC(ny, nm + 1, 0)).getUTCDate();
+  const clampedDay = Math.min(d, lastDayOfTargetMonth);
+  return `${ny}-${String(nm + 1).padStart(2, "0")}-${String(clampedDay).padStart(2, "0")}`;
+}
+
 // "YYYY-MM-01" for the month containing `dateStr`.
 export function startOfMonth(dateStr: string): string {
   const [y, m] = dateStr.split("-").map(Number);

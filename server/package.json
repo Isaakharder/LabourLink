@@ -26,6 +26,8 @@
     "test:workday-totals": "ts-node src/lib/workdayTotals.test.ts",
     "test:reports-employee-selection": "ts-node src/routes/reports.employeeSelection.test.ts",
     "test:reports-activity-paid-time": "ts-node src/routes/reports.activityPaidTime.test.ts",
+    "test:employment-periods-logic": "ts-node src/lib/employmentPeriods.test.ts",
+    "test:employment-periods": "ts-node src/routes/employmentPeriods.test.ts",
     "test:greenhouse-row-options": "ts-node src/lib/activitySelection.greenhouseRowOptions.test.ts",
     "qa:cleanup": "ts-node src/scripts/cleanupOrphanedQaFixtures.ts",
     "test:qa-fixture-cleanup": "ts-node src/scripts/cleanupOrphanedQaFixtures.test.ts",

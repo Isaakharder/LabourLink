@@ -6763,3 +6763,371 @@ input {
   color: var(--color-muted);
   font-size: 0.75rem;
 }
+
+/* ---------- Employment Timeline (Employees section) ---------- */
+
+.employment-timeline-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.employment-timeline-view-switch,
+.employment-timeline-nav,
+.employment-timeline-view-mode,
+.employment-timeline-export-actions {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.employment-timeline-view-switch button,
+.employment-timeline-view-mode button {
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  border-radius: 4px;
+  font-size: 0.82rem;
+}
+
+.employment-timeline-view-switch button.active,
+.employment-timeline-view-mode button.active {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: white;
+  font-weight: 600;
+}
+
+.employment-timeline-range-picker {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.employment-timeline-range-picker label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.72rem;
+  color: var(--color-muted);
+  gap: 0.15rem;
+}
+
+/* -- filters -- */
+
+.employment-timeline-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.employment-timeline-filter {
+  position: relative;
+}
+
+.employment-timeline-filter-trigger {
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  border-radius: 4px;
+  font-size: 0.82rem;
+}
+
+.employment-timeline-filter-panel {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  z-index: 20;
+  min-width: 240px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  padding: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.employment-timeline-filter-search {
+  width: 100%;
+}
+
+.employment-timeline-filter-toolbar {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.employment-timeline-filter-list {
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.employment-timeline-filter-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+}
+
+.employment-timeline-filter-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+.employment-timeline-filter-apply {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: white;
+  font-weight: 600;
+}
+
+/* -- graph -- */
+
+.employment-timeline-graph-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+
+.employment-timeline-graph {
+  display: grid;
+  font-size: 0.78rem;
+}
+
+.employment-timeline-header-cell {
+  padding: 0.4rem 0.3rem;
+  text-align: center;
+  font-weight: 600;
+  color: var(--color-muted);
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+  background: var(--color-bg);
+}
+
+/* Sticky left employee-name column — the same mechanism already solved for
+   ReportPivotTable's sticky columns (.report-pivot-employee-col), mirrored
+   to the left side here instead of the right. */
+.employment-timeline-employee-col {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+  min-width: 220px;
+}
+
+.employment-timeline-name-cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--color-border);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.employment-timeline-add-period-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  flex-shrink: 0;
+}
+
+.employment-timeline-track {
+  border-bottom: 1px solid var(--color-border);
+  min-height: 32px;
+}
+
+.employment-timeline-today-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-danger);
+  z-index: 1;
+}
+
+.employment-timeline-permit-marker {
+  position: absolute;
+  top: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-warning, #b45309);
+  transform: translateX(-50%);
+  z-index: 1;
+}
+
+.employment-timeline-bar {
+  position: absolute;
+  top: 4px;
+  height: calc(100% - 8px);
+  border-radius: 4px;
+  border: none;
+  padding: 0 0.4rem;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  cursor: pointer;
+  min-width: 6px;
+}
+
+.employment-timeline-bar-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: white;
+}
+
+.employment-timeline-bar-current {
+  background: var(--color-primary);
+}
+
+.employment-timeline-bar-planned {
+  background: var(--color-primary);
+  opacity: 0.45;
+}
+
+.employment-timeline-bar-planned .employment-timeline-bar-label {
+  color: var(--color-text);
+}
+
+.employment-timeline-bar-completed {
+  background: var(--color-muted);
+}
+
+.employment-timeline-bar-overdue {
+  background: var(--color-danger);
+  background-image: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.25) 0, rgba(255, 255, 255, 0.25) 4px, transparent 4px, transparent 8px);
+}
+
+.employment-timeline-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.6rem;
+  border-top: 1px solid var(--color-border);
+  font-size: 0.78rem;
+}
+
+.employment-timeline-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.employment-timeline-legend-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.employment-timeline-legend-marker {
+  position: static;
+  transform: none;
+}
+
+/* -- table view -- */
+
+.employment-timeline-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.employment-timeline-table th,
+.employment-timeline-table td {
+  border: 1px solid var(--color-border);
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+}
+
+.employment-timeline-table thead th {
+  background: var(--color-bg);
+  font-weight: 600;
+}
+
+/* -- period add/edit modal -- */
+
+.employment-period-modal-note {
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  margin-bottom: 0.75rem;
+}
+
+.employment-period-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.employment-period-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.employment-period-delete-confirm {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  border: 1px solid var(--color-danger);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.employment-period-delete-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.danger-button {
+  border: 1px solid var(--color-danger);
+  background: transparent;
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.danger-button:hover {
+  background: var(--color-danger);
+  color: white;
+}
+
+/* Print: only the timeline's table view + generated-at note — the graph
+   itself isn't print-friendly (a wide horizontally-scrolled Gantt chart),
+   so printing renders the accessible table instead. Scoped via :has() the
+   same way the Reports print block is (index.css's body:has(.report-view)
+   block above), so printing from anywhere else is unaffected. */
+@media print {
+  body:has(.employment-timeline-view) .sidebar,
+  body:has(.employment-timeline-view) .sidebar-restore-tab,
+  .employment-timeline-toolbar,
+  .employment-timeline-filters,
+  .employment-timeline-graph-wrap,
+  .tabs {
+    display: none !important;
+  }
+
+  body:has(.employment-timeline-view) .app-content {
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+}
