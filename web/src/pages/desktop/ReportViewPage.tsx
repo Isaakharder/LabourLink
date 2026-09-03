@@ -151,11 +151,11 @@ export function ReportViewPage() {
     if (!report || !data || !pivotMetric) return null;
     if (isActivity) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return buildActivityPivotGrid(data as ActivityReportData, dateRange, pivotMetric as any);
+      return buildActivityPivotGrid(data as ActivityReportData, dateRange, pivotMetric as any, metrics.includes("paidTime"));
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return buildPayrollPivotGrid(data as PayrollReportData, dateRange, pivotMetric as any);
-  }, [report, data, pivotMetric, dateRange, isActivity]);
+  }, [report, data, pivotMetric, dateRange, isActivity, metrics]);
 
   if (loadError) return <p className="error-text">{loadError}</p>;
   if (!report) return <p>Loading...</p>;

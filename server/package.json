@@ -25,6 +25,7 @@
     "test:row-layout": "ts-node src/lib/rowLayout.test.ts",
     "test:workday-totals": "ts-node src/lib/workdayTotals.test.ts",
     "test:reports-employee-selection": "ts-node src/routes/reports.employeeSelection.test.ts",
+    "test:reports-activity-paid-time": "ts-node src/routes/reports.activityPaidTime.test.ts",
     "test:greenhouse-row-options": "ts-node src/lib/activitySelection.greenhouseRowOptions.test.ts",
     "qa:cleanup": "ts-node src/scripts/cleanupOrphanedQaFixtures.ts",
     "test:qa-fixture-cleanup": "ts-node src/scripts/cleanupOrphanedQaFixtures.test.ts",

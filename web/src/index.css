@@ -6134,6 +6134,21 @@ input {
   z-index: 2;
 }
 
+/* Total Paid Time — an independent trailing total column (visible whenever
+   Paid time is checked, regardless of which metric "Show:" has selected;
+   see ReportPivotTable.tsx) stacked outside Employee Total. Both are
+   pinned to the right edge; Employee Total shifts left by this column's
+   own fixed width so the two never render on top of each other, and this
+   one stays the true rightmost/outermost sticky column. */
+.report-pivot-paidtime-col {
+  min-width: 130px;
+  right: 0;
+}
+
+.report-pivot-grand-col-with-paidtime {
+  right: 130px;
+}
+
 .report-pivot-table tbody tr:hover .report-pivot-cell,
 .report-pivot-table tbody tr:hover .report-pivot-employee-col {
   background: rgba(29, 78, 216, 0.05);
