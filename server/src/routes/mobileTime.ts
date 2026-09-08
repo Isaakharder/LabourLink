@@ -3,9 +3,8 @@ import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireDevice } from "../middleware/device";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
-import { reconcileMidnightRollover } from "../lib/midnightRollover";
+import { reconcileMidnightCutoff, MIDNIGHT_CUTOFF_REASON } from "../lib/midnightCutoff";
 import { findMostRecentShiftClosureBoundary } from "../lib/longShiftAdminEnd";
-import { RUNAWAY_SHIFT_AUTO_CUTOFF_REASON } from "../lib/runawayShiftAutoCutoff";
 import { APP_TIMEZONE, calendarDateInAppTimezone, parseTimeParts, zonedWallTimeToUtc } from "../lib/timezone";
 import {
   MAX_CLIENT_CLOCK_SKEW_FUTURE_MS,
@@ -604,14 +603,13 @@ async function serializeStatus(
   employeePreferredLanguage: string | null,
   employeeSecurityRole: string
 ) {
-  // Rolls a still-open entry forward across any local midnight(s) it's
-  // behind on BEFORE break reconciliation runs — break reconciliation
-  // reasons about "today," which only makes sense once a multi-day-stale
-  // open entry has actually been brought up to today. See
-  // midnightRollover.ts; runs on every status fetch and every mutating
-  // action for the same "never depends on a background worker" reason
-  // reconcileEmployeeBreaks below already does.
-  await reconcileMidnightRollover(employeeId);
+  // Closes a still-open entry at local midnight, if it's behind, BEFORE
+  // break reconciliation runs — break reconciliation reasons about "today,"
+  // which would otherwise incorrectly treat a prior day's still-open entry
+  // as today's covering work entry. See midnightCutoff.ts; runs on every
+  // status fetch and every mutating action for the same "never depends on a
+  // background worker" reason reconcileEmployeeBreaks below already does.
+  await reconcileMidnightCutoff(employeeId);
 
   // Server-side reconciliation for scheduled breaks the employee worked
   // straight through — runs on every status fetch and every mutating
@@ -795,9 +793,9 @@ async function serializeStatus(
     since: open?.started_at ?? null,
     previousActivity,
     recentJobs,
-    // Lets the client predict local midnight rollover while offline
-    // (lib/localMidnightRollover.ts) using the org's REAL configured
-    // timezone rather than guessing from the device's own locale — cached
+    // Lets the client enforce the same local-midnight cutoff while offline
+    // (lib/localMidnightCutoff.ts) using the org's REAL configured timezone
+    // rather than guessing from the device's own locale — cached
     // client-side (persistServerMeSnapshot) so it's still known at a fully
     // offline cold start, long after this specific response.
     appTimezone: APP_TIMEZONE,
@@ -1406,13 +1404,13 @@ interface SyncApplyOutcome {
 // invalid/deleted activity, e.g.), only for a genuine unexpected failure
 // (caught by the caller, reported as retryable_failure).
 // An offline event genuinely queued on the device before an Administrator
-// used Dashboard's End Work action — OR before the runaway-shift automatic
-// safety cutoff stopped an abandoned chain (runawayShiftAutoCutoff.ts) —
-// only syncing afterward, must never silently reopen the shift either way
-// closed it; see longShiftAdminEnd.ts's own header. Gated to the event
-// types that would otherwise call openEntry() and could reopen/backdate
-// into that already-closed period; end_day is unaffected (closing
-// whatever's open, or a no-op, is safe either way).
+// used Dashboard's End Work action — OR before the automatic midnight
+// cutoff closed the previous day's shift (midnightCutoff.ts) — only syncing
+// afterward, must never silently reopen the shift either way closed it; see
+// longShiftAdminEnd.ts's own header. Gated to the event types that would
+// otherwise call openEntry() and could reopen/backdate into that
+// already-closed period; end_day is unaffected (closing whatever's open, or
+// a no-op, is safe either way).
 const EVENTS_GUARDED_AGAINST_ADMIN_END = new Set(["work_start", "activity_switch", "break_start", "break_end"]);
 
 async function applySyncedEvent(employeeId: string, deviceId: string, event: SyncEventInput): Promise<SyncApplyOutcome> {
@@ -1421,10 +1419,7 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
   if (EVENTS_GUARDED_AGAINST_ADMIN_END.has(event.eventType)) {
     const closure = await findMostRecentShiftClosureBoundary(employeeId);
     if (closure && new Date(event.occurredAtUtc).getTime() <= new Date(closure.endedAtIso).getTime()) {
-      const closedBy =
-        closure.reason === RUNAWAY_SHIFT_AUTO_CUTOFF_REASON
-          ? "an automatic safety cutoff"
-          : "an administrator";
+      const closedBy = closure.reason === MIDNIGHT_CUTOFF_REASON ? "the midnight cutoff" : "an administrator";
       return {
         status: "permanent_conflict",
         conflictReason: `event occurred before ${closedBy} ended this shift at ${closure.endedAtIso}`,

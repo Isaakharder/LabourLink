@@ -1,22 +1,24 @@
-// Client-side mirror of the server's midnight-rollover boundary math
+// Client-side mirror of the server's midnight-cutoff boundary math
 // (server/src/lib/timezone.ts's zonedWallTimeToUtc/getDayBoundsUtc,
-// server/src/lib/midnightRollover.ts's computeRolloverBoundary) — pure
+// server/src/lib/midnightCutoff.ts's computeMidnightCutoffBoundary) — pure
 // Intl.DateTimeFormat arithmetic, no server dependency, so it works fully
 // offline.
 //
 // This is DISPLAY-ONLY: it never writes to the local event log
 // (localEventStore.ts) and never sends anything to the server. The one and
-// only place a real rollover row is ever created is still the server's
-// reconcileMidnightRollover, run the moment this device's next
+// only place a real cutoff is ever recorded is still the server's
+// reconcileMidnightCutoff, run the moment this device's next
 // /api/mobile/me request lands (see WorkSessionContext.tsx's loadMe). All
 // this does is predict what that reconciliation will show, so the on-screen
-// timer/activity are already correct in the meantime — without it, a
-// segment that started yesterday and is still open would just keep
-// counting past 24h on screen, showing yesterday's raw start time, until
-// the device happened to reconnect. See the real incident
-// (Marcelino Besa, 2026-08-31) this whole feature traces back to: "local-
-// first Finish Work" alone doesn't cover a shift that's still genuinely
-// open across a midnight the device never got to tell the server about.
+// status is already correct in the meantime: once local midnight has
+// passed relative to the currently-displayed segment's own start, the
+// employee must be shown idle immediately, not still "working" with a
+// timer quietly ticking past 24h — a shift may never cross local midnight,
+// and the UI must never suggest otherwise while offline. See the real
+// incident (Marcelino Besa, 2026-08-31; 5 employees found stuck 57-105
+// hours, 2026-09 investigation) this whole feature traces back to: an
+// offline device that never got to tell the server a shift crossed
+// midnight must not let that shift silently keep counting.
 import { MeResponse } from "../context/WorkSessionContext";
 
 // Matches server/src/lib/timezone.ts's own APP_TIMEZONE default — used only
@@ -81,29 +83,8 @@ function nextLocalMidnightUtc(dateStr: string, tz: string): Date {
   return zonedWallTimeToUtc(nextDay.getUTCFullYear(), nextDay.getUTCMonth() + 1, nextDay.getUTCDate(), 0, 0, 0, tz);
 }
 
-// Mirrors server/src/lib/midnightRollover.ts's MAX_ROLLOVER_HOPS_PER_CALL —
-// several genuinely missed days (a phone left off for a while) reconstruct
-// correctly in one call; this is purely a defensive cap, never reached in
-// ordinary use.
-const MAX_LOCAL_ROLLOVER_HOPS = 30;
-
-// Walks startedAtIso forward one local midnight at a time until it lands on
-// today's calendar date (in tz) or the hop cap is reached. Returns the
-// SAME string, untouched, when nothing needs to change (the common case —
-// still today).
-function foldForward(startedAtIso: string, now: Date, tz: string): string {
-  const todayLocal = calendarDateInTimezone(now, tz);
-  let cursor = startedAtIso;
-  for (let hops = 0; hops < MAX_LOCAL_ROLLOVER_HOPS; hops++) {
-    const cursorLocalDate = calendarDateInTimezone(new Date(cursor), tz);
-    if (cursorLocalDate >= todayLocal) break;
-    cursor = nextLocalMidnightUtc(cursorLocalDate, tz).toISOString();
-  }
-  return cursor;
-}
-
 // Milliseconds from `now` until the next local-midnight boundary in `tz` —
-// used to schedule an exact setTimeout for the rollover fold (see
+// used to schedule an exact setTimeout for the cutoff transition (see
 // WorkSessionContext.tsx), rather than relying solely on a periodic poll.
 // Always positive and comfortably under setTimeout's ~24.8-day max delay
 // (at most ~24h + a DST hour), so it's always safe to pass straight
@@ -114,43 +95,35 @@ export function msUntilNextLocalMidnight(now: Date, tz: string): number {
   return Math.max(0, boundary.getTime() - now.getTime());
 }
 
+// Whether `startedAtIso`'s own local calendar date is before `now`'s —
+// i.e. whatever segment started on that date should already have been cut
+// off at its first local midnight, per the "a shift may never cross local
+// midnight" rule. A multi-day-old startedAt (a phone left off for days)
+// still simply returns true here — there is no hop count to cap: the
+// employee is idle either way, regardless of how many midnights were
+// actually crossed.
+function hasCrossedLocalMidnight(startedAtIso: string, now: Date, tz: string): boolean {
+  return calendarDateInTimezone(new Date(startedAtIso), tz) < calendarDateInTimezone(now, tz);
+}
+
 // Pure display transform, applied on top of whatever MeResponse is
 // currently known — a fresh server response, a locally-restored snapshot,
 // or a folded pending-event chain. Idempotent and cheap: a `me` already
-// anchored to today's calendar date is returned as the exact same object
-// reference, so a caller re-running this on every tick can skip a
-// re-render whenever nothing actually crossed a boundary.
+// anchored to today's calendar date (or already idle) is returned as the
+// exact same object reference, so a caller re-running this on every tick
+// can skip a re-render whenever nothing actually crossed a boundary.
 //
-// Only startedAt/since and the now-irrelevant accumulated-before-this-
-// entry counter are touched — activity id/name/row/carrier/density are
-// carried over completely untouched, per "today's timer starts from zero
-// while preserving activity, row, carrier and density."
-export function foldLocalMidnightRollover(me: MeResponse, now: Date, timezone: string = FALLBACK_APP_TIMEZONE): MeResponse {
-  if (me.status === "work" && me.currentActivity) {
-    const folded = foldForward(me.currentActivity.startedAt, now, timezone);
-    if (folded !== me.currentActivity.startedAt) {
-      return {
-        ...me,
-        currentActivity: {
-          ...me.currentActivity,
-          startedAt: folded,
-          // A calendar-day boundary is always a fresh start for "worked so
-          // far today" — there is no earlier-today segment the instant a
-          // new day begins. The precise same-day chain accumulation the
-          // server computes (accumulateChainSeconds) reconciles in on the
-          // next real sync/loadMe(), same as every other local
-          // approximation in this codebase (see applyLocalEventToMe).
-          accumulatedWorkedSecondsBeforeCurrentEntry: 0,
-        },
-      };
-    }
+// Mirrors applyLocalEventToMe's own "end_day" case exactly (same idle
+// shape) — a midnight cutoff is, from the display's point of view,
+// indistinguishable from the employee having pressed Finish Work at
+// exactly that instant.
+export function applyLocalMidnightCutoff(me: MeResponse, now: Date, timezone: string = FALLBACK_APP_TIMEZONE): MeResponse {
+  if (me.status === "work" && me.currentActivity && hasCrossedLocalMidnight(me.currentActivity.startedAt, now, timezone)) {
+    return { ...me, status: "idle", currentActivity: null, since: null, previousActivity: null };
   }
 
-  if (me.status === "break" && me.since) {
-    const folded = foldForward(me.since, now, timezone);
-    if (folded !== me.since) {
-      return { ...me, since: folded };
-    }
+  if (me.status === "break" && me.since && hasCrossedLocalMidnight(me.since, now, timezone)) {
+    return { ...me, status: "idle", currentActivity: null, since: null, previousActivity: null };
   }
 
   return me;

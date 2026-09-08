@@ -2,36 +2,42 @@ import { pool } from "../db";
 import { calendarDateInAppTimezone, getDayBoundsUtc } from "./timezone";
 import { daysBetweenDateStrs } from "./workPermits";
 
-// OUTER FALLBACK ONLY as of midnight rollover (see midnightRollover.ts) —
-// this used to be the primary "forgotten End Work" safety net, firing on
+// OUTER FALLBACK ONLY as of midnight cutoff (see midnightCutoff.ts) — this
+// used to be the primary "forgotten End Work" safety net, firing on
 // literally the next hourly sweep after ANY entry crossed local midnight.
-// That's now midnight rollover's job: it closes-and-immediately-reopens an
-// equivalent entry at each local midnight, both at request time and via its
-// own scheduled sweep, so a shift genuinely spanning midnight stays
-// continuous instead of landing here.
+// That's now midnight cutoff's job: it closes an employee's open entry
+// EXACTLY at each local midnight (never continuing it), both at request
+// time and via its own scheduled sweep, so a shift never stays open across
+// a midnight boundary long enough to land here in the first place.
 //
 // This file now only fires on an entry whose local start date is more than
-// DAILY_CUTOFF_STALE_DAYS days before today — i.e. one midnight rollover
-// has, for whatever reason, failed to touch across MULTIPLE scheduled
-// sweeps and multiple employee app-opens. That should be effectively never;
-// this exists purely as a last-resort backstop so a genuinely broken/
-// undeployed rollover can't leave an entry open indefinitely. Entirely
+// DAILY_CUTOFF_STALE_DAYS days before today — i.e. midnight cutoff has, for
+// whatever reason, failed to touch across MULTIPLE scheduled sweeps and
+// multiple employee app-opens. That should be effectively never; this
+// exists purely as a last-resort backstop so a genuinely broken/undeployed
+// midnight-cutoff mechanism can't leave an entry open indefinitely. Entirely
 // server-side, independent of any client (phone closed, charging overnight,
 // no internet, nobody opens the Inputs page, no mobile request ever occurs
 // again). Closes the entry by backdating it to 23:59:59 local time on the
 // day it actually started — never the day this job happens to run, and
-// never a later day than the entry itself began. Never creates a new entry
-// (no auto-resume, unlike midnight rollover): the employee simply shows
-// idle and picks a job again — appropriate here specifically because
-// reaching this path already means something is badly wrong upstream, not
-// an ordinary overnight shift.
+// never a later day than the entry itself began. Never creates a new entry:
+// the employee simply shows idle and picks a job again — appropriate here
+// specifically because reaching this path already means something is badly
+// wrong upstream, not an ordinary overnight shift.
+//
+// This backstop is a strictly more reliable signal than it used to be:
+// because midnight cutoff never refreshes an open entry's own started_at
+// (there is no continuation to refresh it — see midnightCutoff.ts's own
+// header), an entry that's genuinely gone this many days without being
+// touched has a real, un-tamperable age. There is no longer any way for a
+// still-open entry to LOOK recent while actually being stale.
 export const CUTOFF_REASON = "Automatically closed at daily cutoff";
 
 // How many local calendar days behind "today" an entry's own start date
-// must be before this outer fallback will touch it. Midnight rollover
-// should never let a gap this wide accumulate; this is deliberately a wide
-// margin, not a tight one, so the two mechanisms can never race over the
-// same entry in the ordinary case (rollover always gets there first).
+// must be before this outer fallback will touch it. Midnight cutoff should
+// never let a gap this wide accumulate; this is deliberately a wide margin,
+// not a tight one, so the two mechanisms can never race over the same entry
+// in the ordinary case (midnight cutoff always gets there first).
 export const DAILY_CUTOFF_STALE_DAYS = 3;
 
 export interface CutoffCandidate {
@@ -107,7 +113,7 @@ export async function runDailyCutoff(options: { dryRun?: boolean } = {}): Promis
     const todayLocal = calendarDateInAppTimezone(new Date());
     const startedLocalDate = calendarDateInAppTimezone(new Date(candidate.started_at));
     // Outer-fallback threshold (see this file's own header comment) — only
-    // an entry midnight rollover should have long since caught reaches
+    // an entry midnight cutoff should have long since caught reaches
     // here at all.
     if (daysBetweenDateStrs(startedLocalDate, todayLocal) < DAILY_CUTOFF_STALE_DAYS) continue;
 

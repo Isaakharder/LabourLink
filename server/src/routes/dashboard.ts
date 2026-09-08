@@ -13,18 +13,10 @@ import { getActiveWorkPermitAlerts } from "../lib/workPermits";
 import {
   getLongOpenShiftAlerts,
   getOrgSettings,
-  isValidAutoSafetyCutoffThresholdHours,
   isValidLongOpenShiftAlertThresholdHours,
-  setAutoSafetyCutoffThresholdHours,
   setLongOpenShiftAlertThresholdHours,
 } from "../lib/longOpenShiftAlerts";
 import { endLongOpenShift, LongShiftAdminEndError } from "../lib/longShiftAdminEnd";
-import {
-  applyRunawayChainRecovery,
-  getPendingRunawayChains,
-  previewRunawayChainRecovery,
-  RunawayChainRecoveryError,
-} from "../lib/runawayChainRecovery";
 import { APP_TIMEZONE } from "../lib/timezone";
 
 const router = Router();
@@ -121,8 +113,7 @@ router.get(
   })
 );
 
-// Long Open Shift Alerts — a workday (work or break, no idle gap — walked
-// across any midnight-rollover boundaries it crossed, see
+// Long Open Shift Alerts — a workday (work or break, no idle gap — see
 // longOpenShiftAlerts.ts) that's stayed open longer than the configurable
 // org-wide threshold below. Review-only: never closes/corrects anything.
 // Same Administrator/Manager restriction as work-permit alerts above (this
@@ -217,10 +208,7 @@ router.get(
   requireRole("Administrator", "Manager"),
   asyncHandler(async (_req, res) => {
     const settings = await getOrgSettings();
-    res.json({
-      longOpenShiftAlertThresholdHours: settings.longOpenShiftAlertThresholdHours,
-      autoSafetyCutoffThresholdHours: settings.autoSafetyCutoffThresholdHours,
-    });
+    res.json({ longOpenShiftAlertThresholdHours: settings.longOpenShiftAlertThresholdHours });
   })
 );
 
@@ -229,121 +217,12 @@ router.patch(
   requireAuth,
   requireRole("Administrator"),
   asyncHandler(async (req, res) => {
-    const { longOpenShiftAlertThresholdHours, autoSafetyCutoffThresholdHours } = req.body as {
-      longOpenShiftAlertThresholdHours?: number;
-      autoSafetyCutoffThresholdHours?: number;
-    };
-
-    if (longOpenShiftAlertThresholdHours === undefined && autoSafetyCutoffThresholdHours === undefined) {
-      return res
-        .status(400)
-        .json({ error: "At least one of longOpenShiftAlertThresholdHours or autoSafetyCutoffThresholdHours is required" });
-    }
-    if (
-      longOpenShiftAlertThresholdHours !== undefined &&
-      !isValidLongOpenShiftAlertThresholdHours(longOpenShiftAlertThresholdHours)
-    ) {
+    const { longOpenShiftAlertThresholdHours } = req.body as { longOpenShiftAlertThresholdHours?: number };
+    if (!isValidLongOpenShiftAlertThresholdHours(longOpenShiftAlertThresholdHours)) {
       return res.status(400).json({ error: "longOpenShiftAlertThresholdHours must be an integer between 1 and 168" });
     }
-    if (
-      autoSafetyCutoffThresholdHours !== undefined &&
-      !isValidAutoSafetyCutoffThresholdHours(autoSafetyCutoffThresholdHours)
-    ) {
-      return res.status(400).json({ error: "autoSafetyCutoffThresholdHours must be an integer between 24 and 336" });
-    }
-
-    // The automatic cutoff must stay strictly larger than the review-only
-    // alert threshold — an admin needs a chance to act on the alert before
-    // the automatic mechanism stops the chain on its own. Validated here
-    // (against whichever value — new or currently stored — each field
-    // resolves to), not as a DB CHECK constraint: a hard cross-column
-    // constraint would reject a legitimate standalone update to ONE
-    // threshold the instant it crossed the other's current value.
-    const current = await getOrgSettings();
-    const nextAlert = longOpenShiftAlertThresholdHours ?? current.longOpenShiftAlertThresholdHours;
-    const nextCutoff = autoSafetyCutoffThresholdHours ?? current.autoSafetyCutoffThresholdHours;
-    if (nextCutoff <= nextAlert) {
-      return res.status(400).json({
-        error: `autoSafetyCutoffThresholdHours (${nextCutoff}) must be greater than longOpenShiftAlertThresholdHours (${nextAlert})`,
-      });
-    }
-
-    if (longOpenShiftAlertThresholdHours !== undefined) {
-      await setLongOpenShiftAlertThresholdHours(longOpenShiftAlertThresholdHours, req.employee!.id);
-    }
-    if (autoSafetyCutoffThresholdHours !== undefined) {
-      await setAutoSafetyCutoffThresholdHours(autoSafetyCutoffThresholdHours, req.employee!.id);
-    }
-    res.json({ longOpenShiftAlertThresholdHours: nextAlert, autoSafetyCutoffThresholdHours: nextCutoff });
-  })
-);
-
-// Runaway-shift "needs review" queue — every employee currently sitting on
-// an unresolved automatic safety cutoff (runawayShiftAutoCutoff.ts). Unlike
-// Long Open Shift Alerts above, this lists CLOSED entries: once the safety
-// cutoff stops a chain it's no longer "open," so without this route an
-// affected employee would simply vanish from the alert list with no prompt
-// to go confirm their real end time. Same Administrator/Manager read gate.
-router.get(
-  "/runaway-shift-chains",
-  requireAuth,
-  requireRole("Administrator", "Manager"),
-  asyncHandler(async (_req, res) => {
-    const chains = await getPendingRunawayChains();
-    res.json({ chains });
-  })
-);
-
-// Read-only preview of one employee's pending chain — classifies every
-// entry (genuine / synthetic / ambiguous) with a suggested action. Never
-// writes anything; see runawayChainRecovery.ts's own header.
-router.get(
-  "/runaway-shift-chains/:employeeId/preview",
-  requireAuth,
-  requireRole("Administrator", "Manager"),
-  asyncHandler(async (req, res) => {
-    const { employeeId } = req.params;
-    if (!UUID_RE.test(employeeId)) {
-      return res.status(400).json({ error: "Invalid employeeId" });
-    }
-    const entries = await previewRunawayChainRecovery(employeeId);
-    res.json({ entries });
-  })
-);
-
-// The only route that can modify a runaway chain's interior entries —
-// Administrator-only (stricter than the read routes above, matching this
-// file's convention of reserving destructive/config changes to that role),
-// and requires an explicit per-entry action list from the admin (never
-// "apply the suggestions" on the server's own judgment).
-router.post(
-  "/runaway-shift-chains/:employeeId/apply",
-  requireAuth,
-  requireRole("Administrator"),
-  asyncHandler(async (req, res) => {
-    const { employeeId } = req.params;
-    if (!UUID_RE.test(employeeId)) {
-      return res.status(400).json({ error: "Invalid employeeId" });
-    }
-    const { actions } = req.body as { actions?: { entryId: string; action: "delete" | "keep" }[] };
-    if (!Array.isArray(actions) || actions.length === 0) {
-      return res.status(400).json({ error: "actions is required and must be a non-empty array" });
-    }
-    for (const a of actions) {
-      if (!a || typeof a.entryId !== "string" || !UUID_RE.test(a.entryId) || (a.action !== "delete" && a.action !== "keep")) {
-        return res.status(400).json({ error: "Each action must be { entryId: uuid, action: 'delete' | 'keep' }" });
-      }
-    }
-
-    try {
-      const result = await applyRunawayChainRecovery(employeeId, req.employee!.id, actions);
-      res.json(result);
-    } catch (err) {
-      if (err instanceof RunawayChainRecoveryError) {
-        return res.status(400).json({ error: err.message });
-      }
-      throw err;
-    }
+    await setLongOpenShiftAlertThresholdHours(longOpenShiftAlertThresholdHours, req.employee!.id);
+    res.json({ longOpenShiftAlertThresholdHours });
   })
 );
 

@@ -1,15 +1,15 @@
-// Pure-function tests for the client-side offline midnight-rollover
-// display fold — America/Toronto DST dates deliberately mirror
-// server/src/lib/midnightRollover.test.ts's own known-good boundary values
+// Pure-function tests for the client-side offline midnight-cutoff display
+// transform — America/Toronto DST dates deliberately mirror
+// server/src/lib/midnightCutoff.test.ts's own known-good boundary values
 // exactly, so the two can never quietly drift apart on what "the next
 // local midnight" means.
 import { describe, expect, it } from "vitest";
 import {
   calendarDateInTimezone,
-  foldLocalMidnightRollover,
+  applyLocalMidnightCutoff,
   msUntilNextLocalMidnight,
   FALLBACK_APP_TIMEZONE,
-} from "./localMidnightRollover";
+} from "./localMidnightCutoff";
 import { MeResponse } from "../context/WorkSessionContext";
 
 const TZ = "America/Toronto";
@@ -48,67 +48,61 @@ function breakMe(since: string, overrides: Partial<MeResponse> = {}): MeResponse
   };
 }
 
-describe("foldLocalMidnightRollover", () => {
-  it("same calendar day — returns the exact same object reference, no fold", () => {
+describe("applyLocalMidnightCutoff", () => {
+  it("same calendar day — returns the exact same object reference, no cutoff", () => {
     const me = workMe("2026-08-05T14:00:00.000Z");
     const now = new Date("2026-08-05T20:00:00.000Z"); // same UTC day, same local (EDT) day
-    const result = foldLocalMidnightRollover(me, now, TZ);
+    const result = applyLocalMidnightCutoff(me, now, TZ);
     expect(result).toBe(me);
   });
 
-  it("crosses exactly one local midnight — folds to the boundary, preserves activity/row/carrier/density, resets accumulated", () => {
+  it("crosses exactly one local midnight while working — resets straight to idle, no continuation", () => {
     const me = workMe("2026-08-05T14:00:00.000Z"); // Aug 5, afternoon EDT
     const now = new Date("2026-08-06T18:00:00.000Z"); // Aug 6, afternoon EDT
-    const result = foldLocalMidnightRollover(me, now, TZ);
+    const result = applyLocalMidnightCutoff(me, now, TZ);
     expect(result).not.toBe(me);
-    // Matches server midnightRollover.test.ts's own known-good value for
-    // this exact date pair.
-    expect(result.currentActivity!.startedAt).toBe("2026-08-06T04:00:00.000Z");
-    expect(result.currentActivity!.accumulatedWorkedSecondsBeforeCurrentEntry).toBe(0);
-    expect(result.currentActivity!.id).toBe("activity-1");
-    expect(result.currentActivity!.name).toBe("Picking Peppers");
-    expect(result.currentActivity!.row).toEqual({ id: "row-1", label: "Phase 1 · Row 13" });
-    expect(result.currentActivity!.carrier).toEqual({ id: "carrier-1", name: "Bin 57" });
+    expect(result.status).toBe("idle");
+    expect(result.currentActivity).toBeNull();
+    expect(result.since).toBeNull();
+    expect(result.previousActivity).toBeNull();
   });
 
-  it("crosses several missed midnights (phone off for days) — lands on TODAY's boundary, not an intermediate one", () => {
+  it("crosses several missed midnights (phone off for days) — still just idle, not a chain of hops", () => {
     const me = workMe("2026-08-03T14:00:00.000Z"); // 3 days before `now`
     const now = new Date("2026-08-06T12:00:00.000Z");
-    const result = foldLocalMidnightRollover(me, now, TZ);
-    expect(result.currentActivity!.startedAt).toBe("2026-08-06T04:00:00.000Z");
-    expect(calendarDateInTimezone(new Date(result.currentActivity!.startedAt), TZ)).toBe(
-      calendarDateInTimezone(now, TZ)
-    );
+    const result = applyLocalMidnightCutoff(me, now, TZ);
+    expect(result.status).toBe("idle");
+    expect(result.currentActivity).toBeNull();
   });
 
-  it("break spanning midnight — since folds the same way, work fields untouched", () => {
+  it("break spanning midnight — also resets to idle, previousActivity cleared like an ordinary end_day", () => {
     const me = breakMe("2026-08-05T22:00:00.000Z"); // late evening EDT, Aug 5
     const now = new Date("2026-08-06T13:00:00.000Z");
-    const result = foldLocalMidnightRollover(me, now, TZ);
-    expect(result.since).toBe("2026-08-06T04:00:00.000Z");
-    expect(result.status).toBe("break");
-    expect(result.previousActivity).toEqual(me.previousActivity);
+    const result = applyLocalMidnightCutoff(me, now, TZ);
+    expect(result.status).toBe("idle");
+    expect(result.since).toBeNull();
+    expect(result.previousActivity).toBeNull();
   });
 
-  it("spring-forward boundary matches the server's own known-good value", () => {
+  it("spring-forward boundary still cuts off correctly", () => {
     const me = workMe("2026-03-07T14:00:00.000Z"); // day before spring-forward, EST
     const now = new Date("2026-03-08T14:00:00.000Z");
-    const result = foldLocalMidnightRollover(me, now, TZ);
-    expect(result.currentActivity!.startedAt).toBe("2026-03-08T05:00:00.000Z");
+    const result = applyLocalMidnightCutoff(me, now, TZ);
+    expect(result.status).toBe("idle");
   });
 
-  it("fall-back boundary matches the server's own known-good value", () => {
+  it("fall-back boundary still cuts off correctly", () => {
     const me = workMe("2026-10-31T14:00:00.000Z");
     const now = new Date("2026-11-01T14:00:00.000Z");
-    const result = foldLocalMidnightRollover(me, now, TZ);
-    expect(result.currentActivity!.startedAt).toBe("2026-11-01T04:00:00.000Z");
+    const result = applyLocalMidnightCutoff(me, now, TZ);
+    expect(result.status).toBe("idle");
   });
 
-  it("is idempotent — folding an already-folded result again is a no-op", () => {
+  it("is idempotent — applying the cutoff to an already-idle result again is a no-op", () => {
     const me = workMe("2026-08-05T14:00:00.000Z");
     const now = new Date("2026-08-06T18:00:00.000Z");
-    const once = foldLocalMidnightRollover(me, now, TZ);
-    const twice = foldLocalMidnightRollover(once, now, TZ);
+    const once = applyLocalMidnightCutoff(me, now, TZ);
+    const twice = applyLocalMidnightCutoff(once, now, TZ);
     expect(twice).toBe(once);
   });
 
@@ -122,16 +116,16 @@ describe("foldLocalMidnightRollover", () => {
       recentJobs: [],
       appTimezone: TZ,
     };
-    const result = foldLocalMidnightRollover(me, new Date("2026-08-06T18:00:00.000Z"), TZ);
+    const result = applyLocalMidnightCutoff(me, new Date("2026-08-06T18:00:00.000Z"), TZ);
     expect(result).toBe(me);
   });
 
   it("falls back to the default org timezone when none is known yet (never-online cold start)", () => {
     const me = workMe("2026-08-05T14:00:00.000Z", { appTimezone: undefined });
     const now = new Date("2026-08-06T18:00:00.000Z");
-    const result = foldLocalMidnightRollover(me, now); // no timezone arg — uses the default
+    const result = applyLocalMidnightCutoff(me, now); // no timezone arg — uses the default
     expect(FALLBACK_APP_TIMEZONE).toBe(TZ);
-    expect(result.currentActivity!.startedAt).toBe("2026-08-06T04:00:00.000Z");
+    expect(result.status).toBe("idle");
   });
 });
 

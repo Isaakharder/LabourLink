@@ -6,10 +6,9 @@ import { getSignedPhotoUrl, getSignedPhotoUrls } from "../lib/storage";
 import { calendarDateInAppTimezone, getDayBoundsUtc, APP_TIMEZONE, parseTimeParts, zonedWallTimeToUtc } from "../lib/timezone";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
-import { reconcileMidnightRollover } from "../lib/midnightRollover";
+import { reconcileMidnightCutoff } from "../lib/midnightCutoff";
 import { aggregateDensitySpeed } from "../lib/densitySpeed";
 import { computeWorkdayTotals, WorkdayBoundaryEntry } from "../lib/workdayTotals";
-import { getPendingChainAnchorsForEmployees } from "../lib/runawayShiftAutoCutoff";
 import { getRolloverPriorDurationSeconds, getUnresolvedRunsForRows } from "../lib/rowCompletionCandidates";
 import {
   loadCarrierOptions,
@@ -295,23 +294,23 @@ router.get(
     // performance investigation.
     const photoUrlPromise = employee.profile_photo_path ? getSignedPhotoUrl(employee.profile_photo_path) : null;
 
-    // Roll a still-open entry forward across any local midnight(s) it's
-    // behind on before break reconciliation (which reasons about "today")
-    // or the main time_entries query below runs — see midnightRollover.ts.
-    // Deliberately scoped to viewing TODAY specifically, not "any date <=
-    // today" (unlike reconcileEmployeeBreaks below, which legitimately
-    // reconciles whichever day is being viewed): reconcileMidnightRollover
-    // operates on whatever is GLOBALLY currently open for this employee,
-    // not on the viewed date, so running it while an admin reviews an
-    // unrelated old date would silently mutate the employee's live status
-    // as a side effect of looking at old history — a surprising effect
-    // with no real benefit, since the mobile app's own GET /me already
-    // reconciles current status on every request regardless. Only viewing
-    // today gets the extra request-time nudge here, matching what an admin
-    // watching a live/current day would actually expect.
-    const todayLocalForRollover = calendarDateInAppTimezone(new Date());
-    if (date === todayLocalForRollover) {
-      await reconcileMidnightRollover(employeeId);
+    // Close a still-open entry at local midnight if it's behind, before
+    // break reconciliation (which reasons about "today") or the main
+    // time_entries query below runs — see midnightCutoff.ts. Deliberately
+    // scoped to viewing TODAY specifically, not "any date <= today" (unlike
+    // reconcileEmployeeBreaks below, which legitimately reconciles whichever
+    // day is being viewed): reconcileMidnightCutoff operates on whatever is
+    // GLOBALLY currently open for this employee, not on the viewed date, so
+    // running it while an admin reviews an unrelated old date would
+    // silently mutate the employee's live status as a side effect of
+    // looking at old history — a surprising effect with no real benefit,
+    // since the mobile app's own GET /me already reconciles current status
+    // on every request regardless. Only viewing today gets the extra
+    // request-time nudge here, matching what an admin watching a live/
+    // current day would actually expect.
+    const todayLocalForCutoff = calendarDateInAppTimezone(new Date());
+    if (date === todayLocalForCutoff) {
+      await reconcileMidnightCutoff(employeeId);
     }
 
     // Reconcile scheduled breaks the employee worked straight through before
@@ -388,11 +387,12 @@ router.get(
       );
       for (const c of correctionRows) {
         // old_value is TEXT, and every SYSTEM-generated correction (a
-        // midnight-rollover close, a daily-cutoff close) writes the
-        // literal 4-character string "null" here — not SQL NULL — to keep
-        // a human-readable audit trail of "there was no previous value"
-        // (see midnightRollover.ts/dailyCutoff.ts's own inserts). That's
-        // correct for the audit log itself, but this map feeds
+        // midnight-cutoff close, a daily-cutoff close, or — historically —
+        // a midnight-rollover close) writes the literal 4-character string
+        // "null" here — not SQL NULL — to keep a human-readable audit trail
+        // of "there was no previous value" (see midnightCutoff.ts/
+        // dailyCutoff.ts's own inserts). That's correct for the audit log
+        // itself, but this map feeds
         // *Corrected-From API fields the client formats as a date
         // (formatTimeInAppTimezone) — passing the string "null" through
         // produces `new Date("null")`, an Invalid Date, which throws
@@ -757,16 +757,7 @@ router.get(
       endedAt: r.ended_at,
       isPaid: r.is_paid,
     }));
-    // Excludes time at/after a runaway-shift automatic safety cutoff's
-    // genuine_anchor_at from this day's totals, same reasoning as
-    // reportQueries.ts's own getPayrollReportData — see
-    // runawayShiftAutoCutoff.ts. Near-always a no-op query (empty result)
-    // for this one employee; only actually clips anything on a day this
-    // specific date!'s chain touched.
-    const pendingAnchorsForEmployee = await getPendingChainAnchorsForEmployees(pool, [employeeId]);
-    const unverifiedFrom =
-      pendingAnchorsForEmployee.find((a) => a.affectedDates.includes(date!))?.genuineAnchorAt ?? null;
-    const workdayTotals = computeWorkdayTotals(workdayEntries, undefined, unverifiedFrom);
+    const workdayTotals = computeWorkdayTotals(workdayEntries);
     const totalWorkedSeconds = Math.round(workdayTotals.workedSeconds);
     const totalBreakSeconds = Math.round(workdayTotals.breakSeconds);
     const totalPaidBreakSeconds = Math.round(workdayTotals.paidBreakSeconds);
@@ -970,12 +961,6 @@ router.get(
         breakSeconds: totalBreakSeconds,
         paidBreakSeconds: totalPaidBreakSeconds,
         unpaidBreakSeconds: totalUnpaidBreakSeconds,
-        // True when this day's chain was closed by the runaway-shift
-        // automatic safety cutoff and hasn't yet been corrected via
-        // Dashboard End Work — the totals above already exclude the
-        // unverified remainder (unverifiedSeconds is how much).
-        needsReview: workdayTotals.needsReview,
-        unverifiedSeconds: Math.round(workdayTotals.unverifiedSeconds),
       },
       canEdit: canEditRole,
     });
@@ -1701,8 +1686,7 @@ router.patch(
 
       for (const trim of plan.trims) {
         const actualColumn = trim.field === "started_at" ? "actual_started_at" : "actual_ended_at";
-        const autoClosedClause =
-          trim.field === "ended_at" ? ", auto_closed_at = null, safety_cutoff_at = null, genuine_anchor_at = null" : "";
+        const autoClosedClause = trim.field === "ended_at" ? ", auto_closed_at = null" : "";
         await client.query(`update time_entries set ${trim.field} = $1, ${actualColumn} = null${autoClosedClause} where id = $2`, [
           trim.newValue,
           trim.id,
@@ -2643,7 +2627,6 @@ router.patch(
       await client.query(
         `update time_entries
          set started_at = $1, ended_at = $2, auto_closed_at = null,
-             safety_cutoff_at = null, genuine_anchor_at = null,
              actual_started_at = case when $4 then null else actual_started_at end,
              actual_ended_at = case when $5 then null else actual_ended_at end
          where id = $3`,
@@ -2892,10 +2875,7 @@ router.post(
         // holds (same precision reasoning as the lookups above) instead of
         // a millisecond-truncated copy of it.
         await client.query(
-          `update time_entries
-           set ended_at = (select ended_at from time_entries where id = $1),
-               auto_closed_at = null, safety_cutoff_at = null, genuine_anchor_at = null
-           where id = $2`,
+          `update time_entries set ended_at = (select ended_at from time_entries where id = $1), auto_closed_at = null where id = $2`,
           [id, preceding.id]
         );
         await client.query(

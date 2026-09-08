@@ -3477,14 +3477,6 @@ input {
   color: var(--color-muted);
 }
 
-/* Runaway-shift safety-cutoff review banner (ActivityLogsCard) — reuses the
-   same "Needs review" visual family above, not a separate color language,
-   since both mean the same thing to an admin: something here needs a human
-   decision before it's trusted. */
-.inputs-safety-cutoff-review {
-  margin: 0 0 1rem;
-}
-
 .inputs-needs-review-badge {
   display: inline-block;
   padding: 0.1rem 0.45rem;

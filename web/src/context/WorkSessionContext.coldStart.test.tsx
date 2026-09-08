@@ -9,7 +9,7 @@
 // WorkSessionContext.timeoutRetry.test.tsx / .performance.test.tsx.
 // @vitest-environment jsdom
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, vi, beforeEach } from "vitest";
 import type { ReactNode } from "react";
 
 const {
@@ -135,6 +135,13 @@ function createDeferred<T>() {
 }
 
 beforeEach(() => {
+  // Pinned to the same America/Toronto calendar day as every fixture event
+  // in this file (2026-08-25) — restoreLocalSessionState applies the
+  // midnight-cutoff transform (localMidnightCutoff.ts) against the real
+  // clock, which would otherwise see these fixed-past timestamps as long
+  // since crossed into a new day and reset every one of them to idle,
+  // unrelated to what each test is actually proving.
+  vi.setSystemTime(new Date("2026-08-25T20:00:00.000Z"));
   mockAppendEvent.mockReset();
   mockApi.mockReset().mockResolvedValue(idleMeResponse());
   mockGetPendingCount.mockReset().mockResolvedValue(0);
@@ -145,6 +152,10 @@ beforeEach(() => {
   mockMarkSyncResult.mockReset().mockResolvedValue(undefined);
   mockGetSyncMeta.mockReset().mockResolvedValue({ lastSuccessfulSyncAt: null, lastAttemptedSyncAt: null, lastError: null });
   mockSetSyncMeta.mockReset().mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("cold start / restart while offline", () => {

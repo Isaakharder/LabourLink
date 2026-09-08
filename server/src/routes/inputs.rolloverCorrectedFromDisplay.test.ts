@@ -1,17 +1,27 @@
 // Regression test for the Inputs blank-screen crash (Marcelino Besa,
-// 2026-08-31): a system-generated correction (midnightRollover.ts's own
-// `old_value: 'null'` sentinel — the literal 4-character string, not JSON
-// null, used so the audit trail reads "there was no previous value") was
-// passed straight through into the API's *CorrectedFrom fields. The client
-// formats those as a date (formatTimeInAppTimezone); `new Date("null")` is
-// an Invalid Date, and Intl.DateTimeFormat throws RangeError: Invalid time
-// value on one — uncaught during render, with no error boundary, blanking
-// the whole page. Fixed at its source in inputs.ts (correctedFromMap now
-// excludes old_value === 'null'); this locks that in with a fixture shaped
-// exactly like the real multi-day rollover chain, plus the other data
-// shapes explicitly called out in the investigation: a duplicate
-// midnight-boundary started_at, and getRolloverPriorDurationSeconds's
-// cycle guard.
+// 2026-08-31): a system-generated correction (the old midnight-rollover
+// mechanism's own `old_value: 'null'` sentinel — the literal 4-character
+// string, not JSON null, used so the audit trail reads "there was no
+// previous value") was passed straight through into the API's
+// *CorrectedFrom fields. The client formats those as a date
+// (formatTimeInAppTimezone); `new Date("null")` is an Invalid Date, and
+// Intl.DateTimeFormat throws RangeError: Invalid time value on one —
+// uncaught during render, with no error boundary, blanking the whole page.
+// Fixed at its source in inputs.ts (correctedFromMap now excludes
+// old_value === 'null'); this locks that in with a fixture shaped exactly
+// like the real multi-day rollover chain, plus the other data shapes
+// explicitly called out in the investigation: a duplicate midnight-boundary
+// started_at, and getRolloverPriorDurationSeconds's cycle guard.
+//
+// The rollover mechanism itself (time_entries.source = 'midnight_rollover',
+// rollover_of_entry_id — migration 049) has since been replaced by midnight
+// cutoff (midnightCutoff.ts), which never creates a continuation row and so
+// can no longer produce this shape going forward. The shape this test
+// guards against still exists in real historical production data from
+// before that change, so the fixture below is built via direct SQL inserts
+// that replicate exactly what the old reconcileMidnightRollover used to
+// write, rather than calling a live reconcile function — there is no
+// longer one that produces a multi-hop chain.
 //
 // Run with: npm run test:inputs-rollover-corrected-from-display
 import "dotenv/config";
@@ -21,10 +31,14 @@ import { AddressInfo } from "net";
 import { randomUUID } from "crypto";
 import { pool } from "../db";
 import { signSession, SESSION_COOKIE } from "../middleware/auth";
-import { reconcileMidnightRollover, MIDNIGHT_ROLLOVER_REASON } from "../lib/midnightRollover";
 import { getRolloverPriorDurationSeconds } from "../lib/rowCompletionCandidates";
-import { addDaysToDateStr, calendarDateInAppTimezone, zonedWallTimeToUtc } from "../lib/timezone";
+import { addDaysToDateStr, calendarDateInAppTimezone, getDayBoundsUtc, zonedWallTimeToUtc } from "../lib/timezone";
 import inputsRouter from "./inputs";
+
+// Historical-only reason/source value — the live midnightCutoff.ts never
+// writes this anymore (see MIDNIGHT_CUTOFF_REASON there), but old
+// production rows still carry it and this fixture reproduces that shape.
+const HISTORICAL_MIDNIGHT_ROLLOVER_REASON = "midnight_rollover";
 
 let pass = 0;
 let fail = 0;
@@ -127,32 +141,66 @@ async function main() {
     //    Inputs. The MIDDLE day (the one whose entry was closed BY
     //    rollover, exactly like Marcelino's Aug 30/31) is the one whose
     //    endedAtCorrectedFrom must come back null, never the string "null".
+    //    Built via direct SQL, replicating exactly what the old (now
+    //    removed) reconcileMidnightRollover used to write — see this file's
+    //    header for why.
     // -----------------------------------------------------------------
     {
       const empId = await insertEmployee("Chain");
       const deviceId = await insertDevice(empId, "Chain");
       const started = daysAgo(2, 20); // 2 real days ago, evening — will need 2 rollover hops to reach today
+      const startedLocalDate0 = calendarDateInAppTimezone(started);
+      const boundary1 = getDayBoundsUtc(startedLocalDate0).end; // midnight ending day -2
+      const boundary1LocalDate = calendarDateInAppTimezone(boundary1);
+      const boundary2 = getDayBoundsUtc(boundary1LocalDate).end; // midnight ending day -1
+
       const originalId = (
         await pool.query(
-          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, source)
-           values ($1, $2, 'work', $3, $4, $5, 'manual') returning id`,
-          [empId, deviceId, activityId, randomUUID(), started]
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
+           values ($1, $2, 'work', $3, $4, $5, $6, 'manual') returning id`,
+          [empId, deviceId, activityId, randomUUID(), started, boundary1]
         )
       ).rows[0].id;
-      timeEntryIds.push(originalId);
+      await pool.query(
+        `insert into time_entry_corrections
+           (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+         values ($1, $2, null, 'ended_at', 'null', $3, $4)`,
+        [originalId, empId, boundary1.toISOString(), HISTORICAL_MIDNIGHT_ROLLOVER_REASON]
+      );
 
-      await reconcileMidnightRollover(empId);
+      const continuation1Id = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source, rollover_of_entry_id)
+           values ($1, $2, 'work', $3, $4, $5, $6, 'midnight_rollover', $7) returning id`,
+          [empId, deviceId, activityId, randomUUID(), boundary1, boundary2, originalId]
+        )
+      ).rows[0].id;
+      await pool.query(
+        `insert into time_entry_corrections
+           (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+         values ($1, $2, null, 'ended_at', 'null', $3, $4)`,
+        [continuation1Id, empId, boundary2.toISOString(), HISTORICAL_MIDNIGHT_ROLLOVER_REASON]
+      );
+
+      const continuation2Id = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, source, rollover_of_entry_id)
+           values ($1, $2, 'work', $3, $4, $5, 'midnight_rollover', $6) returning id`,
+          [empId, deviceId, activityId, randomUUID(), boundary2, continuation1Id]
+        )
+      ).rows[0].id;
 
       const chain = (
         await pool.query(`select id, started_at, ended_at from time_entries where employee_id = $1 order by started_at asc`, [empId])
       ).rows;
-      check(chain.length >= 3, "1) reconciliation produced a multi-hop chain (real tap + 2 rollover continuations)", chain.length);
-      for (const r of chain) timeEntryIds.push(r.id);
+      check(chain.length === 3, "1) fixture built a 3-row chain (real tap + 2 rollover continuations)", chain.length);
+      timeEntryIds.push(originalId, continuation1Id, continuation2Id);
 
       // The middle entry: started via rollover, ALSO closed via rollover
       // (both its own started_at boundary AND ended_at boundary are
       // system-generated) — exactly Marcelino's Aug 30 entry shape.
       const middleEntry = chain[1];
+      check(middleEntry.id === continuation1Id, "1) sanity — the middle chronological row is the fully-rollover-bounded continuation");
       const middleDateLocal = new Date(middleEntry.started_at).toISOString().slice(0, 10);
 
       const dailyRes = await call("GET", `/api/inputs/daily?employeeId=${empId}&date=${middleDateLocal}`, adminToken);
@@ -299,7 +347,6 @@ async function main() {
       check(elapsedMs < 5000, "5) terminates promptly via the cycle guard, not by exhausting the 60-hop cap", elapsedMs);
     }
 
-    console.log(`MIDNIGHT_ROLLOVER_REASON sanity: ${MIDNIGHT_ROLLOVER_REASON}`);
   } finally {
     async function tryDelete(label: string, fn: () => Promise<unknown>) {
       const maxAttempts = 3;

@@ -149,9 +149,20 @@ describe("offline row/carrier fold — reproduces the reported v1.3 defect", () 
       getCachedJson: () => Promise.resolve(null),
     });
 
-    const folded = await foldPendingEventsOntoMe(DEVICE_ID, idleBase);
-    expect(folded.currentActivity?.row?.id).toBe(ROW_644_ID);
-    expect(folded.currentActivity?.carrier?.id).toBe(BIN_14_ID);
+    // Pinned to the same America/Toronto calendar day as both fixture
+    // events above — foldPendingEventsOntoMe also applies the midnight
+    // cutoff (correctly, per localMidnightCutoff.ts), which would otherwise
+    // see these fixed 2026-08-27 timestamps as long past local midnight
+    // relative to the real current clock and reset to idle, unrelated to
+    // what this test is actually proving (row/carrier preservation).
+    vi.setSystemTime(new Date("2026-08-27T20:00:00.000Z"));
+    try {
+      const folded = await foldPendingEventsOntoMe(DEVICE_ID, idleBase);
+      expect(folded.currentActivity?.row?.id).toBe(ROW_644_ID);
+      expect(folded.currentActivity?.carrier?.id).toBe(BIN_14_ID);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("the symmetric case — a row-only edit (carrier unchanged) — preserves the carrier the same way", () => {

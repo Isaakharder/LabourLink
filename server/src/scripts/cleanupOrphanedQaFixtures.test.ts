@@ -168,7 +168,7 @@ async function main() {
     landIds.splice(landIds.indexOf(orphanLand), 1);
     deviceIds.splice(deviceIds.indexOf(orphanDevice), 1);
   } finally {
-    // Same retry-then-fail-visibly convention as midnightRollover.test.ts's
+    // Same retry-then-fail-visibly convention as midnightCutoff.test.ts's
     // own tryDelete — a bare .catch(() => {}) here would silently hide a
     // real leftover fixture exactly the way the 2026-08-31 leak went
     // unnoticed.

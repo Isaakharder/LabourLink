@@ -68,17 +68,6 @@ export interface WorkdayTotals {
   // are never double-subtracted, and the displayed "unpaid break" total
   // stays consistent with what Worked actually reflects.
   unpaidBreakSeconds: number;
-  // True only when a caller passed `unverifiedFrom` AND it actually
-  // truncated something (see computeWorkdayTotals's own comment) — an
-  // employee-day touched by the runaway-shift safety cutoff
-  // (runawayShiftAutoCutoff.ts), whose automatically-assumed end time was
-  // never administrator-confirmed. Every *Seconds field above already
-  // excludes time at/after that boundary; this just tells a caller there
-  // WAS something excluded, worth surfacing rather than rendering silently.
-  needsReview: boolean;
-  // Seconds excluded from the totals above because they fell at or after
-  // `unverifiedFrom` — 0 whenever needsReview is false.
-  unverifiedSeconds: number;
 }
 
 const ZERO: WorkdayTotals = {
@@ -88,8 +77,6 @@ const ZERO: WorkdayTotals = {
   breakSeconds: 0,
   paidBreakSeconds: 0,
   unpaidBreakSeconds: 0,
-  needsReview: false,
-  unverifiedSeconds: 0,
 };
 
 // Merges overlapping/adjacent [start, end) intervals (already clipped by
@@ -120,22 +107,7 @@ function unionSeconds(intervals: { start: number; end: number }[]): number {
 // `now` is injectable (defaults to the real current time) purely for
 // deterministic tests of the still-open-day path — every real caller
 // leaves it as the default.
-//
-// `unverifiedFrom` (optional): everything at or after this instant is
-// excluded from every *Seconds total below, rather than counted as
-// ordinary worked/break time — for an employee-day whose chain was closed
-// by the runaway-shift automatic safety cutoff (runawayShiftAutoCutoff.ts),
-// this is that cutoff's own genuine_anchor_at: the automatically-assumed
-// remainder of the shift was never verified by a real employee/device
-// action or an administrator, so it must never silently read as confirmed
-// payroll time. Callers resolve this per employee-day (reportQueries.ts,
-// inputs.ts) and pass null/omit for the overwhelming majority of ordinary
-// days that were never touched by that mechanism.
-export function computeWorkdayTotals(
-  entries: WorkdayBoundaryEntry[],
-  now: Date = new Date(),
-  unverifiedFrom?: Date | null
-): WorkdayTotals {
+export function computeWorkdayTotals(entries: WorkdayBoundaryEntry[], now: Date = new Date()): WorkdayTotals {
   if (entries.length === 0) return ZERO;
 
   const workEntries = entries.filter((e) => e.entryType === "work");
@@ -152,14 +124,7 @@ export function computeWorkdayTotals(
       if (e.endedAt! > workEndTime!) workEndTime = e.endedAt!;
     }
   }
-  const rawSpanEnd = workEndTime ?? now;
-  const unverifiedFromMs = unverifiedFrom ? unverifiedFrom.getTime() : null;
-  const needsReview = unverifiedFromMs !== null && unverifiedFromMs < rawSpanEnd.getTime();
-  // The clipped span everything below is measured against — workEndTime
-  // itself (returned separately) stays the raw, actual stored value; only
-  // the derived *Seconds totals are truncated.
-  const spanEnd = needsReview ? new Date(unverifiedFromMs!) : rawSpanEnd;
-  const unverifiedSeconds = needsReview ? (rawSpanEnd.getTime() - spanEnd.getTime()) / 1000 : 0;
+  const spanEnd = workEndTime ?? now;
   // null when there's no work entry at all that day (e.g. a break recorded
   // before its surrounding work entries were ever added) — break totals
   // below must still be computed correctly in that case; only Worked
@@ -184,14 +149,8 @@ export function computeWorkdayTotals(
   const unpaidIntervals: { start: number; end: number }[] = [];
   for (const e of entries) {
     if (e.entryType !== "break") continue;
-    let endMs = e.endedAt ? e.endedAt.getTime() : now.getTime();
+    const endMs = e.endedAt ? e.endedAt.getTime() : now.getTime();
     const startMs = e.startedAt.getTime();
-    // Clipped to the same unverifiedFrom boundary as the overall span
-    // above — a break that fell entirely (or partly) at/after that
-    // instant must never subtract time the span itself no longer counts;
-    // see this function's own header on why NOT clipping to workStart/
-    // spanEnd otherwise remains correct.
-    if (unverifiedFromMs !== null && endMs > unverifiedFromMs) endMs = unverifiedFromMs;
     if (endMs <= startMs) continue;
     if (e.isPaid) {
       paidBreakSeconds += (endMs - startMs) / 1000;
@@ -205,22 +164,11 @@ export function computeWorkdayTotals(
   // Worked can never go negative even if recorded unpaid-break time
   // somehow exceeds the measured span (a data anomaly, not something
   // clipping should paper over — see the comment above) — floored at 0
-  // rather than trusted to always come out non-negative on its own. Also
-  // naturally floors to 0 whenever unverifiedFrom fell before workStart
-  // entirely (the whole day is unverified) since spanEnd < workStartMs.
+  // rather than trusted to always come out non-negative on its own.
   const workedSeconds =
     workStartMs !== null ? Math.max(0, (spanEnd.getTime() - workStartMs) / 1000 - unpaidBreakSeconds) : 0;
 
-  return {
-    workStartTime,
-    workEndTime,
-    workedSeconds,
-    breakSeconds,
-    paidBreakSeconds,
-    unpaidBreakSeconds,
-    needsReview,
-    unverifiedSeconds,
-  };
+  return { workStartTime, workEndTime, workedSeconds, breakSeconds, paidBreakSeconds, unpaidBreakSeconds };
 }
 
 // Groups a flat list of entries (already scoped to one employee, one date

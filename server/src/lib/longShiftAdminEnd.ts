@@ -7,8 +7,9 @@
 //
 // Every rule below traces to that incident:
 //  - Reconcile midnight boundaries FIRST (its own call, own lock/txn — see
-//    reconcileMidnightRollover) so the entry being closed is always the
-//    CURRENT segment, never a stale pre-rollover one.
+//    reconcileMidnightCutoff) so the entry being closed is always the
+//    CURRENT segment, never one a midnight boundary should already have
+//    closed.
 //  - Same employee advisory lock as every other time_entries mutation
 //    (manualTimeEntries.ts's lockEmployeeForManualEntry) — held for this
 //    function's own transaction, taken AFTER reconciliation's own lock has
@@ -23,9 +24,8 @@
 import { PoolClient } from "pg";
 import { pool } from "../db";
 import { lockEmployeeForManualEntry } from "./manualTimeEntries";
-import { reconcileMidnightRollover } from "./midnightRollover";
+import { reconcileMidnightCutoff, MIDNIGHT_CUTOFF_REASON } from "./midnightCutoff";
 import { walkShiftStart } from "./longOpenShiftAlerts";
-import { RUNAWAY_SHIFT_AUTO_CUTOFF_REASON } from "./runawayShiftAutoCutoff";
 
 export const LONG_SHIFT_ADMIN_END_REASON = "long_shift_admin_end";
 
@@ -54,15 +54,9 @@ interface OpenEntryRow {
 async function mostRecentlyClosedEntry(
   client: PoolClient,
   employeeId: string
-): Promise<{
-  id: string;
-  entry_type: "work" | "break";
-  started_at: string;
-  ended_at: string;
-  safety_cutoff_at: string | null;
-} | null> {
+): Promise<{ id: string; entry_type: "work" | "break"; started_at: string; ended_at: string } | null> {
   const { rows } = await client.query(
-    `select id, entry_type, started_at, ended_at, safety_cutoff_at from time_entries
+    `select id, entry_type, started_at, ended_at from time_entries
      where employee_id = $1 and deleted_at is null and ended_at is not null
      order by ended_at desc limit 1`,
     [employeeId]
@@ -70,15 +64,32 @@ async function mostRecentlyClosedEntry(
   return rows[0] ?? null;
 }
 
+// Whether the given entry's most recent ended_at correction was the
+// automatic midnight cutoff (as opposed to a real employee tap — which
+// writes no correction at all — or a prior admin action). Used to decide
+// whether an already-closed entry is eligible for End Work to still adjust:
+// a midnight cutoff's end time is only ever an assumption (the boundary, not
+// a confirmed real stop), so an admin who knows the employee actually
+// stopped earlier can correct it here rather than through an ordinary
+// Inputs correction.
+async function mostRecentEndedAtCorrectionReason(client: PoolClient, timeEntryId: string): Promise<string | null> {
+  const { rows } = await client.query<{ reason: string }>(
+    `select reason from time_entry_corrections
+     where time_entry_id = $1 and field_name = 'ended_at'
+     order by changed_at desc limit 1`,
+    [timeEntryId]
+  );
+  return rows[0]?.reason ?? null;
+}
+
 // Used by mobileTime.ts's sync-event processing: an offline event that was
 // genuinely queued on the device before an admin used End Work, or before
-// the runaway-shift automatic safety cutoff stopped an abandoned chain
-// (runawayShiftAutoCutoff.ts), but only syncs afterward, must never
-// silently reopen the shift either way closed it — see this module's own
-// header. An event whose own occurred_at_utc falls at-or-before whichever
-// closure's confirmed end time is most recent is exactly that case;
-// anything genuinely later (a real new shift starting after the closure) is
-// unaffected.
+// the midnight cutoff closed the previous day's shift (midnightCutoff.ts),
+// but only syncs afterward, must never silently reopen the shift either way
+// closed it — see this module's own header. An event whose own
+// occurred_at_utc falls at-or-before whichever closure's confirmed end time
+// is most recent is exactly that case; anything genuinely later (a real new
+// shift starting after the closure) is unaffected.
 export async function findMostRecentShiftClosureBoundary(
   employeeId: string
 ): Promise<{ endedAtIso: string; reason: string } | null> {
@@ -86,7 +97,7 @@ export async function findMostRecentShiftClosureBoundary(
     `select new_value, reason from time_entry_corrections
      where employee_id = $1 and reason = any($2::text[])
      order by changed_at desc limit 1`,
-    [employeeId, [LONG_SHIFT_ADMIN_END_REASON, RUNAWAY_SHIFT_AUTO_CUTOFF_REASON]]
+    [employeeId, [LONG_SHIFT_ADMIN_END_REASON, MIDNIGHT_CUTOFF_REASON]]
   );
   return rows[0] ? { endedAtIso: rows[0].new_value, reason: rows[0].reason } : null;
 }
@@ -95,12 +106,12 @@ export async function findMostRecentShiftClosureBoundary(
 // "now" client-side, but may be any past time the admin enters). adminId:
 // the acting Administrator/Manager, for the audit correction's
 // changed_by_employee_id — never null here, unlike the system-generated
-// midnight_rollover/dailyCutoff corrections.
+// midnight_cutoff/dailyCutoff corrections.
 export async function endLongOpenShift(employeeId: string, endedAt: Date, adminId: string): Promise<EndLongOpenShiftResult> {
   // Own call, own lock/transaction, committed before this function ever
   // takes its own lock below — never nested inside it. Cheap no-op in the
   // overwhelming majority of calls (nothing to reconcile).
-  await reconcileMidnightRollover(employeeId);
+  await reconcileMidnightCutoff(employeeId);
 
   const client = await pool.connect();
   try {
@@ -122,10 +133,12 @@ export async function endLongOpenShift(employeeId: string, endedAt: Date, adminI
         throw new LongShiftAdminEndError("No open or recent time entry found for this employee.");
       }
 
-      if (!last.safety_cutoff_at) {
+      const lastCorrectionReason = await mostRecentEndedAtCorrectionReason(client, last.id);
+      if (lastCorrectionReason !== MIDNIGHT_CUTOFF_REASON) {
         // Already ended — by the employee's own device, another admin tab,
-        // or this exact request retried. Idempotent: report the current
-        // state, never a duplicate correction.
+        // a prior admin correction, or this exact request retried.
+        // Idempotent: report the current state, never a duplicate
+        // correction.
         await client.query("commit");
         return {
           status: "already_finished",
@@ -137,13 +150,11 @@ export async function endLongOpenShift(employeeId: string, endedAt: Date, adminI
         };
       }
 
-      // Pending review: the runaway-shift safety cutoff (midnightRollover.ts
-      // / runawayShiftAutoCutoff.ts) already closed this entry at an assumed
-      // end time it never verified as real payroll time. THIS is the
-      // recovery path for that — same End Work action, just correcting an
-      // already-closed row instead of an open one. Never recreates a
-      // continuation (the chain stays stopped); clears the pending-review
-      // marker so this employee drops out of the runaway-chain queue.
+      // The midnight cutoff closed this entry at an assumed boundary (local
+      // midnight), never a confirmed real stop. An admin who knows the
+      // employee actually stopped at a different time can correct it here —
+      // same End Work action, just adjusting an already-closed row instead
+      // of an open one. Never recreates a continuation.
       const startedAt = new Date(last.started_at);
       const shiftStart = await walkShiftStart(client, employeeId, startedAt);
 
@@ -165,12 +176,7 @@ export async function endLongOpenShift(employeeId: string, endedAt: Date, adminI
         throw new LongShiftAdminEndError("End time overlaps another time entry for this employee.");
       }
 
-      await client.query(
-        `update time_entries
-           set ended_at = $2, actual_ended_at = null, safety_cutoff_at = null, genuine_anchor_at = null
-         where id = $1`,
-        [last.id, endedAt]
-      );
+      await client.query(`update time_entries set ended_at = $2, actual_ended_at = null where id = $1`, [last.id, endedAt]);
       await client.query(
         `insert into time_entry_corrections
            (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)

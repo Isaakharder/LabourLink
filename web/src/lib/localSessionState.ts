@@ -8,7 +8,7 @@
 // means everything downstream keeps working unmodified, while still getting
 // a genuinely immediate, no-network-wait UI update.
 import { getLocalEventStore, LocalEvent } from "./localEventStore";
-import { foldLocalMidnightRollover } from "./localMidnightRollover";
+import { applyLocalMidnightCutoff } from "./localMidnightCutoff";
 import {
   ActivitiesResponse,
   CarriersResponse,
@@ -220,13 +220,29 @@ export async function foldPendingEventsOntoMe(deviceId: string, base: MeResponse
   }
   // Even with nothing pending, the base itself (a server response that's
   // aged while offline, or a cold-start restore of yesterday's last-known
-  // snapshot) can still be anchored to a prior calendar day — fold before
-  // returning either way, not just when there's something to replay.
-  if (pending.length === 0) return foldLocalMidnightRollover(base, new Date(), base.appTimezone);
+  // snapshot) can still be anchored to a prior calendar day — apply the
+  // cutoff before returning either way, not just when there's something to
+  // replay.
+  if (pending.length === 0) return applyLocalMidnightCutoff(base, new Date(), base.appTimezone);
 
   const lookup = await buildDisplayLookup();
+  const tz = base.appTimezone;
+  // The cutoff is applied BEFORE each event, using that event's own
+  // occurredAtUtc — not just once at the end — so two pending events that
+  // straddle a local midnight (e.g. a work_start late one night, then an
+  // activity_switch after midnight once the device reconnects) are never
+  // merged into one continuous session. Applying it only at the end would
+  // let the first event's own state (still anchored to the earlier day)
+  // survive right up until the final result, silently carrying yesterday's
+  // startedAt/since through every intermediate fold. Each call is a no-op
+  // unless the carried-over state actually crosses a boundary relative to
+  // that event's own timestamp — applyLocalEventToMe never reads anything
+  // from `result` except through fields this fold has already normalized,
+  // so inserting the check here is side-effect-free except exactly where a
+  // boundary was genuinely crossed.
   let result = base;
   for (const event of pending) {
+    result = applyLocalMidnightCutoff(result, new Date(event.occurredAtUtc), tz);
     const display: LocalDisplayInfo = {
       activityName: event.activityId ? (lookup.activityName.get(event.activityId) ?? null) : null,
       rowLabel: event.greenhouseRowId ? (lookup.rowLabel.get(event.greenhouseRowId) ?? null) : null,
@@ -235,7 +251,10 @@ export async function foldPendingEventsOntoMe(deviceId: string, base: MeResponse
     };
     result = applyLocalEventToMe(result, event, display);
   }
-  return foldLocalMidnightRollover(result, new Date(), base.appTimezone);
+  // Covers a last pending event that's itself from a prior day relative to
+  // right now (device reconnects the next morning) — the loop above only
+  // ever checks each event against the state carried in from BEFORE it.
+  return applyLocalMidnightCutoff(result, new Date(), tz);
 }
 
 // The durable "last known base" a cold start folds pending events onto —

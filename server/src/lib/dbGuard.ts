@@ -1,13 +1,16 @@
 // Fails fast, before any connection is opened, if this process is about to
 // talk to LabourLink's production database without explicit authorization.
 //
-// Root cause this exists for: on 2026-08-31, `npm run rollover:run` was run
-// locally against server/.env's DATABASE_URL — which IS the production
-// database, there being no separate dev/test instance at the time —
-// retroactively rewriting real employees' time_entries (Marcelino Besa,
-// Shaima Qasimi). `test:midnight-rollover`'s own test 4 calls the same
-// table-wide runMidnightRolloverSweep() directly, so simply re-running the
-// test suite could have repeated the incident. This module is the fix:
+// Root cause this exists for: on 2026-08-31, `npm run rollover:run` (since
+// renamed `midnight-cutoff:run` when the underlying feature was redesigned
+// from "roll over into a continuation" to "cut off at midnight, never
+// continue") was run locally against server/.env's DATABASE_URL — which IS
+// the production database, there being no separate dev/test instance at the
+// time — retroactively rewriting real employees' time_entries (Marcelino
+// Besa, Shaima Qasimi). `test:midnight-rollover`'s (now `test:midnight-
+// cutoff`'s) own test 4 calls the same table-wide sweep function directly,
+// so simply re-running the test suite could have repeated the incident.
+// This module is the fix:
 // recognize the one specific known production database by its connection
 // identity, and refuse to proceed from any process that hasn't explicitly
 // opted in.

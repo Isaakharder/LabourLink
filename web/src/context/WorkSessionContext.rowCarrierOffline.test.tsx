@@ -147,10 +147,17 @@ function carrierOnlyEditEvent(deviceSeq: number, occurredAtUtc: string) {
 
 beforeEach(() => {
   // Restores real system time before every test, regardless of how the
-  // previous one ended (assertion failure, thrown error) — only one test
-  // below ever calls vi.setSystemTime, but this guarantees that mock can
-  // never leak into an unrelated later test in this file.
+  // previous one ended (assertion failure, thrown error), then pins "now"
+  // to the same America/Toronto calendar day as every fixture event in
+  // this file (2026-08-27). Restoring local session state on mount applies
+  // the midnight-cutoff transform (localMidnightCutoff.ts) against the real
+  // clock — without this, these fixed-past timestamps would look long since
+  // cut off to idle relative to whatever day the suite actually runs on,
+  // unrelated to what each test is actually proving. One test below further
+  // narrows this to a more specific same-day instant; that's a deliberate
+  // override, not a leak.
   vi.useRealTimers();
+  vi.setSystemTime(new Date("2026-08-27T20:00:00.000Z"));
   mockAppendEvent.mockReset();
   mockApi.mockReset().mockResolvedValue(idleMeResponse());
   mockGetPendingCount.mockReset().mockResolvedValue(0);
@@ -312,12 +319,12 @@ describe("offline row/carrier assignment stays visible without a server round tr
   it("reconnection syncing both events successfully does not change the locally selected assignment or the events' own timestamps", async () => {
     // Pinned to the same calendar day (America/Toronto) as this test's own
     // fixture timestamps below — otherwise, run for real on any later date,
-    // the local midnight-rollover display fold (lib/localMidnightRollover.ts,
-    // a genuinely separate feature: an unsynced segment's on-screen timer
-    // must roll forward at local midnight even while offline) would
-    // correctly roll a multi-day-stale fixture forward, which is not what
-    // this test is about — it's specifically proving reconnection doesn't
-    // ALSO disturb an already-current-today assignment/timestamp.
+    // the local midnight-cutoff display transform (lib/localMidnightCutoff.ts,
+    // a genuinely separate feature: an unsynced segment must reset to idle
+    // on screen at local midnight even while offline) would correctly reset
+    // a multi-day-stale fixture to idle, which is not what this test is
+    // about — it's specifically proving reconnection doesn't ALSO disturb
+    // an already-current-today assignment/timestamp.
     vi.setSystemTime(new Date("2026-08-27T15:00:00.000Z"));
     const initialEvent = {
       clientEventId: "evt-initial",

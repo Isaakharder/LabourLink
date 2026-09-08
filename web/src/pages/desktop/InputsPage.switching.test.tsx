@@ -170,7 +170,7 @@ function buildDaily(emp: InputsEmployee, date: string, activityName: string, bre
       },
     ],
     breaks,
-    totals: { workedSeconds: 3600, breakSeconds: 0, paidBreakSeconds: 0, unpaidBreakSeconds: 0, needsReview: false, unverifiedSeconds: 0 },
+    totals: { workedSeconds: 3600, breakSeconds: 0, paidBreakSeconds: 0, unpaidBreakSeconds: 0 },
     canEdit: true,
   };
 }

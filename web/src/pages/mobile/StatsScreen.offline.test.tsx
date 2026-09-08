@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Confirms Stats' offline behavior explicitly (see localMidnightRollover
+// Confirms Stats' offline behavior explicitly (see localMidnightCutoff
 // work): Stats has no local-first computation of its own — it is entirely
 // server-driven (loadStats -> GET /api/mobile/stats) — so opening it
 // offline must never show misleading numbers. Two honest states instead:

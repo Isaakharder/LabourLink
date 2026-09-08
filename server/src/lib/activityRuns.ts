@@ -44,19 +44,25 @@ export interface RunSegment {
   // report attribution).
   density_type: "plants" | "stems" | null;
   density_count_per_row: number | null;
-  // Set only on a midnight-rollover-created continuation segment (see
-  // midnightRollover.ts) — points at the entry it continues, always on the
-  // OTHER side of a local-midnight boundary from this segment. Never set on
-  // an ordinary segment. Exists so callers that need to treat a visit
-  // spanning midnight as ONE visit (row-completion ambiguity/candidate
-  // resolution — see rowCompletionCandidates.ts) can detect and walk across
-  // that boundary; groupIntoActivityRuns itself doesn't need it; a rollover
-  // continuation is already boundary-contiguous with matching activity/row/
-  // carrier/densityType, so it merges into the same run as its predecessor
-  // for free WHENEVER both segments are in the same `entries` array — this
-  // field only matters to a caller (like rowCompletionCandidates.ts) that
-  // queries one calendar day at a time and therefore never has both halves
-  // in one `entries` array to begin with.
+  // Historical only — set on a midnight-rollover-created continuation
+  // segment from before the midnight-rollover design (close-and-reopen an
+  // equivalent entry) was replaced by midnight cutoff (close, never
+  // continue — see midnightCutoff.ts). Real production data from before
+  // that change still has this populated; nothing written from here on ever
+  // sets it again. Points at the entry it continues, always on the OTHER
+  // side of a local-midnight boundary from this segment. Exists so callers
+  // that need to treat a visit spanning midnight as ONE visit (row-
+  // completion ambiguity/candidate resolution — see
+  // rowCompletionCandidates.ts) can detect and walk across that boundary;
+  // groupIntoActivityRuns itself doesn't need it; a rollover continuation is
+  // already boundary-contiguous with matching activity/row/carrier/
+  // densityType, so it merges into the same run as its predecessor for free
+  // WHENEVER both segments are in the same `entries` array — this field
+  // only matters to a caller (like rowCompletionCandidates.ts) that queries
+  // one calendar day at a time and therefore never has both halves in one
+  // `entries` array to begin with. A visit genuinely spanning midnight going
+  // forward reads as two disconnected runs — see midnightCutoff.ts's own
+  // header for why that's the accepted trade-off, not a bug.
   rollover_of_entry_id: string | null;
 }
 

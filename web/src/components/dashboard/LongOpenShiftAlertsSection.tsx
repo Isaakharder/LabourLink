@@ -145,9 +145,11 @@ function LongOpenShiftAlertCard({ alert, timezone, onEndWork }: LongOpenShiftAle
 }
 
 // Near the top of the Dashboard (alongside WorkPermitAlertsSection), per
-// the requirements: a workday that's remained open (continuously, across
-// any midnight-rollover boundaries) longer than the configurable org
-// threshold. Restricted server-side (GET /api/dashboard/long-open-shift-
+// the requirements: a workday that's remained open longer than the
+// configurable org threshold. Since a shift is automatically closed at
+// midnight every night (Midnight Cutoff — see midnightCutoff.ts), this can
+// only ever concern a single calendar day, not a multi-day chain.
+// Restricted server-side (GET /api/dashboard/long-open-shift-
 // alerts, POST .../end-work both requireRole("Administrator","Manager")) —
 // this component simply doesn't render for anyone else, same "silently
 // nothing rather than an error banner" convention as WorkPermitAlertsSection.

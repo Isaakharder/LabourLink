@@ -14,7 +14,7 @@ import {
 } from "../lib/localSessionState";
 import { resolveDisplayLabels } from "../lib/referenceDataCache";
 import { hasSyncProblem, onSyncSettled, trySyncSoon } from "../lib/syncEngine";
-import { FALLBACK_APP_TIMEZONE, foldLocalMidnightRollover, msUntilNextLocalMidnight } from "../lib/localMidnightRollover";
+import { FALLBACK_APP_TIMEZONE, applyLocalMidnightCutoff, msUntilNextLocalMidnight } from "../lib/localMidnightCutoff";
 import { RecentJob } from "../components/mobile/RecentJobsCard";
 import { uuid } from "../lib/uuid";
 
@@ -105,7 +105,7 @@ export interface MeResponse {
   // The org's real configured timezone (server/src/lib/timezone.ts's
   // APP_TIMEZONE) — optional only because older cached snapshots
   // (persisted before this field existed) won't have it; see
-  // localMidnightRollover.ts's own fallback for that case.
+  // localMidnightCutoff.ts's own fallback for that case.
   appTimezone?: string;
 }
 
@@ -308,42 +308,41 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
   // (no restart, no server response — restoreLocalSessionState/loadMe's own
   // fold only run at those two moments, neither of which necessarily
   // happens exactly at midnight). A cheap, idempotent check on an interval:
-  // foldLocalMidnightRollover returns the SAME object when nothing crossed
+  // applyLocalMidnightCutoff returns the SAME object when nothing crossed
   // a boundary, so this costs nothing in the overwhelming majority of
-  // ticks. See lib/localMidnightRollover.ts's own header for why this is
+  // ticks. See lib/localMidnightCutoff.ts's own header for why this is
   // needed at all — "local-first Finish Work" makes actions durable
   // offline, but never by itself resets what's already ON SCREEN at
   // midnight for a shift the device hasn't told the server about yet.
   const MIDNIGHT_FOLD_CHECK_INTERVAL_MS = 30000;
   useEffect(() => {
     const interval = window.setInterval(() => {
-      setMe((prev) => (prev ? foldLocalMidnightRollover(prev, new Date(), prev.appTimezone) : prev));
+      setMe((prev) => (prev ? applyLocalMidnightCutoff(prev, new Date(), prev.appTimezone) : prev));
     }, MIDNIGHT_FOLD_CHECK_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, []);
 
-  // Primary mechanism: fires the fold at the EXACT calculated local-
+  // Primary mechanism: fires the cutoff at the EXACT calculated local-
   // midnight instant via a scheduled setTimeout, then reschedules itself
-  // for the FOLLOWING midnight — so the timer/activity on screen flips
-  // over right on time, not up to 30s late. The interval above is
-  // deliberately kept as a recovery net, not replaced: a single scheduled
-  // timeout is NOT reliable on its own on a real device — a backgrounded/
-  // suspended WebView can have its timers frozen and fire late (or, on
-  // some platforms, not at all until foregrounded again), and a device
-  // clock change (manual adjustment, timezone travel, NTP correction)
-  // between scheduling and firing can make the originally-computed delay
-  // wrong. Both failure modes self-heal within one interval tick, since
-  // foldLocalMidnightRollover always re-derives from the current real
-  // clock rather than trusting elapsed setTimeout time. Re-scheduled
-  // whenever the known org timezone changes (in practice: once, the first
-  // time a real server response arrives) — appTimezone, not the whole
-  // `me` object, is the dependency, so this doesn't reschedule on every
-  // ordinary local-first action.
+  // for the FOLLOWING midnight — so the status on screen flips over right
+  // on time, not up to 30s late. The interval above is deliberately kept as
+  // a recovery net, not replaced: a single scheduled timeout is NOT
+  // reliable on its own on a real device — a backgrounded/suspended WebView
+  // can have its timers frozen and fire late (or, on some platforms, not at
+  // all until foregrounded again), and a device clock change (manual
+  // adjustment, timezone travel, NTP correction) between scheduling and
+  // firing can make the originally-computed delay wrong. Both failure modes
+  // self-heal within one interval tick, since applyLocalMidnightCutoff
+  // always re-derives from the current real clock rather than trusting
+  // elapsed setTimeout time. Re-scheduled whenever the known org timezone
+  // changes (in practice: once, the first time a real server response
+  // arrives) — appTimezone, not the whole `me` object, is the dependency,
+  // so this doesn't reschedule on every ordinary local-first action.
   const appTimezone = me?.appTimezone;
   useEffect(() => {
     let timeoutId: number | null = null;
     function fireAndReschedule() {
-      setMe((prev) => (prev ? foldLocalMidnightRollover(prev, new Date(), prev.appTimezone) : prev));
+      setMe((prev) => (prev ? applyLocalMidnightCutoff(prev, new Date(), prev.appTimezone) : prev));
       schedule();
     }
     function schedule() {

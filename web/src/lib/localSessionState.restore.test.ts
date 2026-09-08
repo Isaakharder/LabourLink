@@ -9,7 +9,7 @@
 // immediately from SQLite and the local event ledger."
 // @vitest-environment jsdom
 import "fake-indexeddb/auto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@capacitor/core", () => ({
   Capacitor: { isNativePlatform: () => false },
@@ -55,6 +55,19 @@ beforeEach(async () => {
   await resetJournal();
 });
 
+// Every fixture below uses fixed 2026 timestamps to describe a chain of
+// events within a single local (America/Toronto) calendar day — this file
+// is about proving pending-event replay mechanics, not midnight-cutoff
+// behavior (that's localMidnightCutoff.test.ts's job). Without pinning
+// "now" to that same calendar day, restoreLocalSessionState's own real-time
+// midnight-cutoff check (applyLocalMidnightCutoff, correctly applied on
+// every restore) would see these fixed-past timestamps as long since
+// crossed into a new day and reset every one of them to idle, regardless
+// of what this file is actually trying to prove.
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("restoreLocalSessionState", () => {
   it("returns null when this device has never been paired (nothing durable to restore)", async () => {
     const restored = await restoreLocalSessionState(DEVICE_ID, null);
@@ -74,6 +87,7 @@ describe("restoreLocalSessionState", () => {
 
     await simulateRestart();
 
+    vi.setSystemTime(new Date("2026-08-25T20:00:00.000Z")); // same America/Toronto calendar day as the event above
     const restored = await restoreLocalSessionState(DEVICE_ID, {
       employeeId: EMPLOYEE_ID,
       firstName: "Byron",
@@ -84,6 +98,45 @@ describe("restoreLocalSessionState", () => {
     expect(restored?.status).toBe("work");
     expect(restored?.currentActivity?.id).toBe("activity-winding");
     expect(restored?.currentActivity?.row?.id).toBe("row-12");
+  });
+
+  it("restart offline, ACROSS local midnight: a still-pending work_start from yesterday restores to idle, never still 'working' — must explicitly clock in again", async () => {
+    const store = getLocalEventStore();
+    await store.appendEvent({
+      deviceId: DEVICE_ID,
+      employeeId: EMPLOYEE_ID,
+      eventType: "work_start",
+      occurredAtUtc: "2026-08-25T15:00:00.000Z", // 11:00 EDT, Aug 25
+      activityId: "activity-winding",
+      greenhouseRowId: "row-12",
+    });
+
+    await simulateRestart();
+
+    // The device stayed offline overnight and only reopens the NEXT day —
+    // "now" is a different America/Toronto calendar date than the pending
+    // event above. A shift may never cross local midnight (see
+    // localMidnightCutoff.ts): restoring must show idle immediately, not
+    // still "working" with a timer quietly counting past 24h, exactly as if
+    // the midnight cutoff had already reconciled this with the server.
+    vi.setSystemTime(new Date("2026-08-26T14:00:00.000Z")); // Aug 26, still offline
+    const restored = await restoreLocalSessionState(DEVICE_ID, {
+      employeeId: EMPLOYEE_ID,
+      firstName: "Byron",
+      lastName: "Escober",
+      lastVerifiedAt: "2026-08-25T08:00:00.000Z",
+    });
+
+    expect(restored?.status).toBe("idle");
+    expect(restored?.currentActivity).toBeNull();
+
+    // The underlying event itself is untouched on disk — still pending,
+    // still carrying its original timestamp — this is a display-only
+    // transform; the real reconciliation still happens server-side the
+    // moment this device reaches it.
+    const pending = await store.getPendingEvents(DEVICE_ID);
+    expect(pending).toHaveLength(1);
+    expect(pending[0].occurredAtUtc).toBe("2026-08-25T15:00:00.000Z");
   });
 
   it("restart while on break: reconstructs status=break from a pending break_start on top of the last real server snapshot", async () => {
@@ -110,6 +163,7 @@ describe("restoreLocalSessionState", () => {
 
     await simulateRestart();
 
+    vi.setSystemTime(new Date("2026-08-25T20:00:00.000Z")); // same America/Toronto calendar day as the events above
     const restored = await restoreLocalSessionState(DEVICE_ID, {
       employeeId: EMPLOYEE_ID,
       firstName: "Byron",
@@ -160,6 +214,7 @@ describe("restoreLocalSessionState", () => {
 
     await simulateRestart();
 
+    vi.setSystemTime(new Date("2026-08-25T20:00:00.000Z")); // same America/Toronto calendar day as the events above
     const restored = await restoreLocalSessionState(DEVICE_ID, {
       employeeId: EMPLOYEE_ID,
       firstName: "Byron",
@@ -186,6 +241,7 @@ describe("restoreLocalSessionState", () => {
 
     await simulateRestart();
 
+    vi.setSystemTime(new Date("2026-08-25T20:00:00.000Z")); // same America/Toronto calendar day as the event above
     const restored = await restoreLocalSessionState(DEVICE_ID, {
       employeeId: EMPLOYEE_ID,
       firstName: "Brand",
@@ -210,6 +266,7 @@ describe("restoreLocalSessionState", () => {
     });
 
     await simulateRestart();
+    vi.setSystemTime(new Date("2026-08-25T20:00:00.000Z")); // same America/Toronto calendar day as every event below
     const firstRestore = await restoreLocalSessionState(DEVICE_ID, null);
     expect(firstRestore?.currentActivity?.id).toBe("activity-a");
 
@@ -266,6 +323,7 @@ describe("restoreLocalSessionState", () => {
 
     await simulateRestart();
 
+    vi.setSystemTime(new Date("2026-08-27T20:00:00.000Z")); // same America/Toronto calendar day as the events above
     const restored = await restoreLocalSessionState(DEVICE_ID, {
       employeeId: EMPLOYEE_ID,
       firstName: "Redacted",

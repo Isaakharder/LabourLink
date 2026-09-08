@@ -11,7 +11,6 @@ import { addDaysToDateStr, APP_TIMEZONE, calendarDateInAppTimezone, getRangeBoun
 import { aggregateDensitySpeed } from "./densitySpeed";
 import { computeWorkdayTotals, groupByEmployeeDay, WorkdayBoundaryEntry } from "./workdayTotals";
 import { getUnresolvedRunsForRows } from "./rowCompletionCandidates";
-import { getPendingChainAnchorsForEmployees } from "./runawayShiftAutoCutoff";
 
 export interface ActivityReportRow {
   employeeId: string;
@@ -606,13 +605,6 @@ export interface PayrollReportRow {
   unpaidBreakSeconds: number;
   paidSeconds: number; // work + paid breaks
   totalSeconds: number; // work + all breaks
-  // True when this employee-day's totals above exclude time at/after a
-  // runaway-shift automatic safety cutoff's genuine_anchor_at (see
-  // workdayTotals.ts / runawayShiftAutoCutoff.ts) — that remainder was
-  // never verified as real payroll time, so it's missing from every total
-  // above rather than silently counted. unverifiedSeconds is how much.
-  needsReview: boolean;
-  unverifiedSeconds: number;
 }
 
 export interface PayrollActivityBreakdownRow {
@@ -717,34 +709,10 @@ export async function getPayrollReportData(
     isPaid: r.is_paid,
   }));
 
-  // Employee-days whose totals must exclude time at/after a runaway-shift
-  // safety cutoff's genuine_anchor_at (see runawayShiftAutoCutoff.ts) —
-  // that automatically-assumed remainder was never administrator-confirmed
-  // as real payroll time. Expected empty for the overwhelming majority of
-  // reports; a distinct-employee-id lookup, not per-row, since this set is
-  // always small regardless of report size.
-  const distinctEmployeeIds = [...new Set(rawEntries.map((e) => e.employeeId))];
-  const pendingAnchors = await getPendingChainAnchorsForEmployees(pool, distinctEmployeeIds);
-  const unverifiedFromByEmployeeDay = new Map<string, Date>();
-  for (const anchor of pendingAnchors) {
-    for (const date of anchor.affectedDates) {
-      const key = `${anchor.employeeId}:${date}`;
-      const existing = unverifiedFromByEmployeeDay.get(key);
-      // An employee could in principle have more than one historical
-      // pending chain touching different date ranges (each resolved
-      // independently via Dashboard End Work) — the earliest anchor wins
-      // for a day where they somehow overlap, since it's the more
-      // conservative (larger) exclusion.
-      if (!existing || anchor.genuineAnchorAt < existing) {
-        unverifiedFromByEmployeeDay.set(key, anchor.genuineAnchorAt);
-      }
-    }
-  }
-
   const rows: PayrollReportRow[] = [...groupByEmployeeDay(rawEntries).entries()]
     .map(([key, entries]) => {
       const [employeeId, date] = [entries[0].employeeId, key.slice(key.indexOf(":") + 1)];
-      const totals = computeWorkdayTotals(entries, undefined, unverifiedFromByEmployeeDay.get(key) ?? null);
+      const totals = computeWorkdayTotals(entries);
       const workSeconds = toSeconds(totals.workedSeconds);
       const breakSeconds = toSeconds(totals.breakSeconds);
       const paidBreakSeconds = toSeconds(totals.paidBreakSeconds);
@@ -759,8 +727,6 @@ export async function getPayrollReportData(
         breakSeconds,
         paidBreakSeconds,
         unpaidBreakSeconds,
-        needsReview: totals.needsReview,
-        unverifiedSeconds: toSeconds(totals.unverifiedSeconds),
         // Paid breaks are already folded into workSeconds (the span-based
         // formula only ever subtracts UNPAID break time — see
         // workdayTotals.ts) — "paid time" is therefore identical to

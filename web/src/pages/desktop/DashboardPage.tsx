@@ -6,7 +6,6 @@ import { DashboardSettingsPanel } from "../../components/dashboard/DashboardSett
 import { BinCompletionsPanel } from "../../components/dashboard/BinCompletionsPanel";
 import { WorkPermitAlertsSection } from "../../components/dashboard/WorkPermitAlertsSection";
 import { LongOpenShiftAlertsSection } from "../../components/dashboard/LongOpenShiftAlertsSection";
-import { RunawayShiftChainsSection } from "../../components/dashboard/RunawayShiftChainsSection";
 import { useAuth } from "../../context/AuthContext";
 import { api, ApiError } from "../../lib/api";
 import { DashboardCard, GetDashboardCardsResponse } from "../../lib/dashboardTypes";
@@ -94,7 +93,6 @@ export function DashboardPage() {
 
       {canEdit && <WorkPermitAlertsSection />}
       {canEdit && <LongOpenShiftAlertsSection onEnded={() => load(true)} />}
-      {canEdit && <RunawayShiftChainsSection onResolved={() => load(true)} />}
 
       {loadError && <p className="error-text">{loadError}</p>}
 
