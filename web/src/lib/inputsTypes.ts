@@ -197,6 +197,18 @@ export interface DailyInputsResponse {
   workStartManualEntry: ManualEntryMeta | null;
   runs: ActivityRunDto[];
   breaks: BreakDto[];
-  totals: { workedSeconds: number; breakSeconds: number; paidBreakSeconds: number; unpaidBreakSeconds: number };
+  totals: {
+    workedSeconds: number;
+    breakSeconds: number;
+    paidBreakSeconds: number;
+    unpaidBreakSeconds: number;
+    // True when this day's chain was closed by the runaway-shift automatic
+    // safety cutoff (server/src/lib/runawayShiftAutoCutoff.ts) and hasn't
+    // yet been corrected via Dashboard End Work — every total above already
+    // excludes the unverified remainder (unverifiedSeconds is how much),
+    // rather than silently counting it as confirmed payroll time.
+    needsReview: boolean;
+    unverifiedSeconds: number;
+  };
   canEdit: boolean;
 }

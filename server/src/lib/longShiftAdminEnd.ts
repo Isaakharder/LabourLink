@@ -25,6 +25,7 @@ import { pool } from "../db";
 import { lockEmployeeForManualEntry } from "./manualTimeEntries";
 import { reconcileMidnightRollover } from "./midnightRollover";
 import { walkShiftStart } from "./longOpenShiftAlerts";
+import { RUNAWAY_SHIFT_AUTO_CUTOFF_REASON } from "./runawayShiftAutoCutoff";
 
 export const LONG_SHIFT_ADMIN_END_REASON = "long_shift_admin_end";
 
@@ -53,9 +54,15 @@ interface OpenEntryRow {
 async function mostRecentlyClosedEntry(
   client: PoolClient,
   employeeId: string
-): Promise<{ id: string; entry_type: "work" | "break"; started_at: string; ended_at: string } | null> {
+): Promise<{
+  id: string;
+  entry_type: "work" | "break";
+  started_at: string;
+  ended_at: string;
+  safety_cutoff_at: string | null;
+} | null> {
   const { rows } = await client.query(
-    `select id, entry_type, started_at, ended_at from time_entries
+    `select id, entry_type, started_at, ended_at, safety_cutoff_at from time_entries
      where employee_id = $1 and deleted_at is null and ended_at is not null
      order by ended_at desc limit 1`,
     [employeeId]
@@ -64,20 +71,24 @@ async function mostRecentlyClosedEntry(
 }
 
 // Used by mobileTime.ts's sync-event processing: an offline event that was
-// genuinely queued on the device before an admin used End Work, but only
-// syncs afterward, must never silently reopen the day — see this module's
-// own header. An event whose own occurred_at_utc falls at-or-before the
-// most recent long_shift_admin_end correction's confirmed end time is
-// exactly that case; anything genuinely later (a real new shift starting
-// after the admin's correction) is unaffected.
-export async function findMostRecentAdminEndCorrection(employeeId: string): Promise<{ endedAtIso: string } | null> {
-  const { rows } = await pool.query<{ new_value: string }>(
-    `select new_value from time_entry_corrections
-     where employee_id = $1 and reason = $2
+// genuinely queued on the device before an admin used End Work, or before
+// the runaway-shift automatic safety cutoff stopped an abandoned chain
+// (runawayShiftAutoCutoff.ts), but only syncs afterward, must never
+// silently reopen the shift either way closed it — see this module's own
+// header. An event whose own occurred_at_utc falls at-or-before whichever
+// closure's confirmed end time is most recent is exactly that case;
+// anything genuinely later (a real new shift starting after the closure) is
+// unaffected.
+export async function findMostRecentShiftClosureBoundary(
+  employeeId: string
+): Promise<{ endedAtIso: string; reason: string } | null> {
+  const { rows } = await pool.query<{ new_value: string; reason: string }>(
+    `select new_value, reason from time_entry_corrections
+     where employee_id = $1 and reason = any($2::text[])
      order by changed_at desc limit 1`,
-    [employeeId, LONG_SHIFT_ADMIN_END_REASON]
+    [employeeId, [LONG_SHIFT_ADMIN_END_REASON, RUNAWAY_SHIFT_AUTO_CUTOFF_REASON]]
   );
-  return rows[0] ? { endedAtIso: rows[0].new_value } : null;
+  return rows[0] ? { endedAtIso: rows[0].new_value, reason: rows[0].reason } : null;
 }
 
 // endedAt: the administrator-confirmed exact clock-out instant (defaults to
@@ -105,21 +116,76 @@ export async function endLongOpenShift(employeeId: string, endedAt: Date, adminI
     const open = rows[0];
 
     if (!open) {
-      // Already ended — by the employee's own device, another admin tab, or
-      // this exact request retried. Idempotent: report the current state,
-      // never a duplicate correction.
-      await client.query("commit");
       const last = await mostRecentlyClosedEntry(client, employeeId);
       if (!last) {
+        await client.query("rollback");
         throw new LongShiftAdminEndError("No open or recent time entry found for this employee.");
       }
+
+      if (!last.safety_cutoff_at) {
+        // Already ended — by the employee's own device, another admin tab,
+        // or this exact request retried. Idempotent: report the current
+        // state, never a duplicate correction.
+        await client.query("commit");
+        return {
+          status: "already_finished",
+          employeeId,
+          timeEntryId: last.id,
+          entryType: last.entry_type,
+          startedAtIso: new Date(last.started_at).toISOString(),
+          endedAtIso: new Date(last.ended_at).toISOString(),
+        };
+      }
+
+      // Pending review: the runaway-shift safety cutoff (midnightRollover.ts
+      // / runawayShiftAutoCutoff.ts) already closed this entry at an assumed
+      // end time it never verified as real payroll time. THIS is the
+      // recovery path for that — same End Work action, just correcting an
+      // already-closed row instead of an open one. Never recreates a
+      // continuation (the chain stays stopped); clears the pending-review
+      // marker so this employee drops out of the runaway-chain queue.
+      const startedAt = new Date(last.started_at);
+      const shiftStart = await walkShiftStart(client, employeeId, startedAt);
+
+      if (endedAt.getTime() <= shiftStart.getTime()) {
+        await client.query("rollback");
+        throw new LongShiftAdminEndError(
+          `End time must be after this shift's true start (${shiftStart.toISOString()}).`
+        );
+      }
+
+      const { rows: overlapRows } = await client.query(
+        `select id from time_entries
+         where employee_id = $1 and id <> $2 and deleted_at is null
+           and started_at < $3 and (ended_at is null or ended_at > $4)`,
+        [employeeId, last.id, endedAt, startedAt]
+      );
+      if (overlapRows.length > 0) {
+        await client.query("rollback");
+        throw new LongShiftAdminEndError("End time overlaps another time entry for this employee.");
+      }
+
+      await client.query(
+        `update time_entries
+           set ended_at = $2, actual_ended_at = null, safety_cutoff_at = null, genuine_anchor_at = null
+         where id = $1`,
+        [last.id, endedAt]
+      );
+      await client.query(
+        `insert into time_entry_corrections
+           (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+         values ($1, $2, $3, 'ended_at', $4, $5, $6)`,
+        [last.id, employeeId, adminId, new Date(last.ended_at).toISOString(), endedAt.toISOString(), LONG_SHIFT_ADMIN_END_REASON]
+      );
+
+      await client.query("commit");
       return {
-        status: "already_finished",
+        status: "ended",
         employeeId,
         timeEntryId: last.id,
         entryType: last.entry_type,
-        startedAtIso: new Date(last.started_at).toISOString(),
-        endedAtIso: new Date(last.ended_at).toISOString(),
+        startedAtIso: startedAt.toISOString(),
+        endedAtIso: endedAt.toISOString(),
       };
     }
 

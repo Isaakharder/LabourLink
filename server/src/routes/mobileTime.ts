@@ -4,7 +4,8 @@ import { asyncHandler } from "../lib/asyncHandler";
 import { requireDevice } from "../middleware/device";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { reconcileMidnightRollover } from "../lib/midnightRollover";
-import { findMostRecentAdminEndCorrection } from "../lib/longShiftAdminEnd";
+import { findMostRecentShiftClosureBoundary } from "../lib/longShiftAdminEnd";
+import { RUNAWAY_SHIFT_AUTO_CUTOFF_REASON } from "../lib/runawayShiftAutoCutoff";
 import { APP_TIMEZONE, calendarDateInAppTimezone, parseTimeParts, zonedWallTimeToUtc } from "../lib/timezone";
 import {
   MAX_CLIENT_CLOCK_SKEW_FUTURE_MS,
@@ -1405,23 +1406,28 @@ interface SyncApplyOutcome {
 // invalid/deleted activity, e.g.), only for a genuine unexpected failure
 // (caught by the caller, reported as retryable_failure).
 // An offline event genuinely queued on the device before an Administrator
-// used Dashboard's End Work action, only syncing afterward, must never
-// silently reopen the day it already closed — see longShiftAdminEnd.ts's
-// own header. Gated to the event types that would otherwise call
-// openEntry() and could reopen/backdate into that already-closed period;
-// end_day is unaffected (closing whatever's open, or a no-op, is safe
-// either way).
+// used Dashboard's End Work action — OR before the runaway-shift automatic
+// safety cutoff stopped an abandoned chain (runawayShiftAutoCutoff.ts) —
+// only syncing afterward, must never silently reopen the shift either way
+// closed it; see longShiftAdminEnd.ts's own header. Gated to the event
+// types that would otherwise call openEntry() and could reopen/backdate
+// into that already-closed period; end_day is unaffected (closing
+// whatever's open, or a no-op, is safe either way).
 const EVENTS_GUARDED_AGAINST_ADMIN_END = new Set(["work_start", "activity_switch", "break_start", "break_end"]);
 
 async function applySyncedEvent(employeeId: string, deviceId: string, event: SyncEventInput): Promise<SyncApplyOutcome> {
   const now = new Date();
 
   if (EVENTS_GUARDED_AGAINST_ADMIN_END.has(event.eventType)) {
-    const adminEnd = await findMostRecentAdminEndCorrection(employeeId);
-    if (adminEnd && new Date(event.occurredAtUtc).getTime() <= new Date(adminEnd.endedAtIso).getTime()) {
+    const closure = await findMostRecentShiftClosureBoundary(employeeId);
+    if (closure && new Date(event.occurredAtUtc).getTime() <= new Date(closure.endedAtIso).getTime()) {
+      const closedBy =
+        closure.reason === RUNAWAY_SHIFT_AUTO_CUTOFF_REASON
+          ? "an automatic safety cutoff"
+          : "an administrator";
       return {
         status: "permanent_conflict",
-        conflictReason: `event occurred before an administrator ended this shift at ${adminEnd.endedAtIso}`,
+        conflictReason: `event occurred before ${closedBy} ended this shift at ${closure.endedAtIso}`,
       };
     }
   }

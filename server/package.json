@@ -19,6 +19,8 @@
     "rollover:run": "ts-node src/cli/midnightRolloverRun.ts",
     "test:midnight-rollover": "ts-node src/lib/midnightRollover.test.ts",
     "test:long-shift-admin-end": "ts-node src/lib/longShiftAdminEnd.test.ts",
+    "test:runaway-chain-recovery": "ts-node src/lib/runawayChainRecovery.test.ts",
+    "test:dashboard-runaway-shift-chains": "ts-node src/routes/dashboard.runawayShiftChains.test.ts",
     "test:inputs-rollover-corrected-from-display": "ts-node src/routes/inputs.rolloverCorrectedFromDisplay.test.ts",
     "test:inputs-activity-run-correction": "ts-node src/routes/inputs.activityRunCorrection.test.ts",
     "typecheck": "tsc --noEmit",

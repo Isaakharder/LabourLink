@@ -227,8 +227,8 @@ export async function reconcileEmployeeBreaks(
           await client.query(
             `insert into time_entries
                (employee_id, device_id, entry_type, activity_id, started_at, ended_at, idempotency_key,
-                greenhouse_row_id, carrier_id, density_type, density_count_per_row)
-             values ($1, $2, 'work', $3, $4, $5, $6, $7, $8, $9, $10)`,
+                greenhouse_row_id, carrier_id, density_type, density_count_per_row, source)
+             values ($1, $2, 'work', $3, $4, $5, $6, $7, $8, $9, $10, 'break_reconciliation')`,
             [
               employeeId,
               w.device_id,

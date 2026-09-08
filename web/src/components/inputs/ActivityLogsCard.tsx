@@ -36,7 +36,7 @@ interface ActivityLogsCardProps {
   employee: ActivityLogsCardEmployee;
   date: string;
   runs: ActivityRunDto[];
-  totals: { workedSeconds: number; breakSeconds: number };
+  totals: { workedSeconds: number; breakSeconds: number; needsReview?: boolean; unverifiedSeconds?: number };
   selectedRunId: string | null;
   onSelectRun: (id: string) => void;
   // Both Start Time and End Time are editable now (the general Activity
@@ -160,6 +160,19 @@ export function ActivityLogsCard({
           </div>
         </div>
       </div>
+
+      {totals.needsReview && (
+        <div className="inputs-needs-review inputs-safety-cutoff-review" role="status">
+          <p className="inputs-needs-review-title">
+            <span className="inputs-needs-review-badge">Needs review</span> Automatically stopped shift
+          </p>
+          <p className="inputs-needs-review-detail">
+            The runaway-shift safety cutoff closed this shift automatically after too long with no genuine activity.
+            The totals above exclude {formatDurationHMS(totals.unverifiedSeconds ?? 0)} of unverified time. Use
+            Dashboard End Work to confirm the real end time.
+          </p>
+        </div>
+      )}
 
       {runs.length === 0 ? (
         <p className="placeholder-page inputs-workspace-placeholder">No activity logs for this date.</p>

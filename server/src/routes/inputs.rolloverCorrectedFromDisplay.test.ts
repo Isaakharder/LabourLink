@@ -23,6 +23,7 @@ import { pool } from "../db";
 import { signSession, SESSION_COOKIE } from "../middleware/auth";
 import { reconcileMidnightRollover, MIDNIGHT_ROLLOVER_REASON } from "../lib/midnightRollover";
 import { getRolloverPriorDurationSeconds } from "../lib/rowCompletionCandidates";
+import { addDaysToDateStr, calendarDateInAppTimezone, zonedWallTimeToUtc } from "../lib/timezone";
 import inputsRouter from "./inputs";
 
 let pass = 0;
@@ -106,11 +107,18 @@ async function main() {
       return rows[0].id;
     }
 
+    // Local-calendar-aware, not naive UTC-date arithmetic: "n days ago" must
+    // mean n LOCAL calendar days before today, at hour:00 LOCAL time — a
+    // plain `setUTCDate` offset drifts by a day whenever the test happens to
+    // run while UTC and APP_TIMEZONE disagree on what day it is (e.g. any
+    // run between UTC midnight and ~4am, which is still "yesterday evening"
+    // in America/Toronto's UTC-4/-5 offset), producing an entry that isn't
+    // actually as many local days old as the test intends.
     function daysAgo(n: number, hour: number): Date {
-      const d = new Date();
-      d.setUTCDate(d.getUTCDate() - n);
-      d.setUTCHours(hour, 0, 0, 0);
-      return d;
+      const todayLocal = calendarDateInAppTimezone(new Date());
+      const targetLocal = addDaysToDateStr(todayLocal, -n);
+      const [y, mo, d] = targetLocal.split("-").map(Number);
+      return zonedWallTimeToUtc(y, mo, d, hour, 0, 0);
     }
 
     // -----------------------------------------------------------------

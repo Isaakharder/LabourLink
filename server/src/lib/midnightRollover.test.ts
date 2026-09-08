@@ -21,6 +21,12 @@ import { randomUUID } from "crypto";
 import { pool } from "../db";
 import { computeRolloverBoundary, reconcileMidnightRollover, runMidnightRolloverSweep } from "./midnightRollover";
 import { runDailyCutoff, DAILY_CUTOFF_STALE_DAYS } from "./dailyCutoff";
+import {
+  RUNAWAY_SHIFT_AUTO_CUTOFF_REASON,
+  computeSafetyCutoffBoundary,
+  findGenuineAnchor,
+} from "./runawayShiftAutoCutoff";
+import { getPendingRunawayChains, previewRunawayChainRecovery } from "./runawayChainRecovery";
 import { getUnresolvedRunsForRow } from "./rowCompletionCandidates";
 import { getLongOpenShiftAlerts, getOrgSettings, setLongOpenShiftAlertThresholdHours } from "./longOpenShiftAlerts";
 import { addDaysToDateStr, calendarDateInAppTimezone, getDayBoundsUtc, zonedWallTimeToUtc } from "./timezone";
@@ -74,6 +80,21 @@ for (const d of ["2026-01-01", "2026-06-15", "2026-12-31", "2026-03-08", "2026-1
   check(
     computeRolloverBoundary(d).getTime() === getDayBoundsUtc(d).end.getTime(),
     `computeRolloverBoundary("${d}") equals getDayBoundsUtc(d).end exactly`
+  );
+}
+
+// computeSafetyCutoffBoundary — pure timestamp math, same convention as
+// computeRolloverBoundary/computeCutoffAt above.
+{
+  const anchor = new Date("2026-09-03T17:00:00.000Z");
+  check(
+    computeSafetyCutoffBoundary(anchor, 72).toISOString() === "2026-09-06T17:00:00.000Z",
+    "computeSafetyCutoffBoundary adds exactly thresholdHours to the anchor",
+    computeSafetyCutoffBoundary(anchor, 72).toISOString()
+  );
+  check(
+    computeSafetyCutoffBoundary(anchor, 24).getTime() === anchor.getTime() + 24 * 60 * 60 * 1000,
+    "computeSafetyCutoffBoundary is exact millisecond math, not calendar-day rounding"
   );
 }
 
@@ -250,21 +271,28 @@ async function main() {
       return rows[0].id;
     }
 
+    // Local-calendar-aware, not naive UTC-date arithmetic: "n days ago" must
+    // mean n LOCAL calendar days before today, at hour:00 LOCAL time. A
+    // plain `setUTCDate` offset (the original form of this helper) drifts a
+    // day whenever the test happens to run while UTC and APP_TIMEZONE
+    // disagree on what day it is — any real run between UTC midnight and
+    // ~4am, which is still "yesterday evening" in America/Toronto's UTC-4/-5
+    // offset. That's a distinct failure mode from an entry's own hour
+    // crossing ITS OWN local midnight (which picking a mid-day `hour` value
+    // already guards against, DST included) — this is about "today" itself
+    // meaning two different calendar dates depending on which clock you ask.
     function daysAgo(n: number, hour: number): Date {
-      const d = new Date();
-      d.setUTCDate(d.getUTCDate() - n);
-      // Keep this well inside the local day regardless of DST — noon UTC is
-      // always mid-afternoon/morning in APP_TIMEZONE, never crossing its
-      // own local midnight due to the UTC offset alone.
-      d.setUTCHours(hour, 0, 0, 0);
-      return d;
+      const todayLocal = calendarDateInAppTimezone(new Date());
+      const targetLocal = addDaysToDateStr(todayLocal, -n);
+      const [y, mo, d] = targetLocal.split("-").map(Number);
+      return zonedWallTimeToUtc(y, mo, d, hour, 0, 0);
     }
 
     async function fetchEntry(id: string) {
       const { rows } = await pool.query(
         `select id, entry_type, activity_id, started_at, ended_at, greenhouse_row_id, carrier_id,
                 density_type, density_count_per_row, source, rollover_of_entry_id, device_id,
-                actual_started_at, actual_ended_at, auto_closed_at, idempotency_key
+                actual_started_at, actual_ended_at, auto_closed_at, safety_cutoff_at, genuine_anchor_at, idempotency_key
          from time_entries where id = $1`,
         [id]
       );
@@ -273,7 +301,7 @@ async function main() {
     async function fetchOpenEntry(employeeId: string) {
       const { rows } = await pool.query(
         `select id, entry_type, activity_id, started_at, ended_at, greenhouse_row_id, carrier_id,
-                density_type, density_count_per_row, source, rollover_of_entry_id
+                density_type, density_count_per_row, source, rollover_of_entry_id, safety_cutoff_at, genuine_anchor_at
          from time_entries where employee_id = $1 and ended_at is null and deleted_at is null`,
         [employeeId]
       );
@@ -349,16 +377,24 @@ async function main() {
 
     // -----------------------------------------------------------------
     // 3) Several missed midnights reconstructed in ONE call.
+    //
+    // Deliberately kept well under runawayShiftAutoCutoff.ts's default 72h
+    // safety-cutoff threshold (2 days here, not the ~3-4 days this fixture
+    // used before that mechanism existed) — a genuinely offline-then-
+    // reconnecting device within the threshold must still reconstruct its
+    // full chain exactly as before. A chain actually beyond the threshold
+    // is covered separately (see runawayShiftAutoCutoff.test.ts), where the
+    // expected outcome is the opposite: stop and cut off, not reconstruct.
     // -----------------------------------------------------------------
     {
       const { employeeId, deviceRowId } = await freshFixture("MissedDays");
-      const started = daysAgo(4, 10); // 4 local days ago
+      const started = daysAgo(2, 10); // 2 local days ago
       await insertOpenEntry({ employeeId, deviceId: deviceRowId, entryType: "work", activityId, startedAt: started });
       await reconcileMidnightRollover(employeeId);
       const chain = await fetchChain(employeeId, started);
-      // 4 real days elapsed since `started`'s own local day -> at least 4
+      // 2 real days elapsed since `started`'s own local day -> at least 2
       // closed segments (one per crossed midnight) plus one final open one.
-      check(chain.length >= 5, "3) several missed midnights produce a full chain, not just one hop", chain.length);
+      check(chain.length >= 3, "3) several missed midnights produce a full chain, not just one hop", chain.length);
       const closed = chain.filter((r: any) => r.ended_at !== null);
       const open = chain.find((r: any) => r.ended_at === null);
       check(open !== undefined, "3) the chain ends with exactly one still-open entry");
@@ -504,7 +540,10 @@ async function main() {
     {
       const { employeeId: emp11a, deviceRowId: dev11a } = await freshFixture("Visit11A");
       const { employeeId: emp11b, deviceRowId: dev11b } = await freshFixture("Visit11B");
-      const started = daysAgo(3, 9);
+      // Kept under the 72h safety-cutoff default (see scenario 3's comment)
+      // — this test is about row-completion candidate merging across a
+      // rollover chain, not about the cutoff itself.
+      const started = daysAgo(2, 9);
       await insertOpenEntry({
         employeeId: emp11a,
         deviceId: dev11a,
@@ -598,19 +637,22 @@ async function main() {
         "13) a shift well under the threshold does not alert"
       );
 
-      // A shift that started 3 real days ago and rolled forward across
+      // A shift that started 2 real days ago and rolled forward across
       // those midnights — the CURRENT open row's own started_at is only
       // hours old (today's boundary), but the true continuous streak is
-      // ~3 days, which must still trip a 16h threshold. This is exactly
+      // ~2 days, which must still trip a 16h threshold. This is exactly
       // the bug a naive "check the current row's own started_at" alert
-      // would miss.
+      // would miss. Kept under runawayShiftAutoCutoff.ts's 72h default
+      // safety-cutoff threshold — comfortably past the 16h alert threshold
+      // this scenario is actually testing, without also tripping the
+      // separate (and much larger-threshold) automatic cutoff.
       const { employeeId: empOver, deviceRowId: devOver } = await freshFixture("AlertOver");
       await insertOpenEntry({
         employeeId: empOver,
         deviceId: devOver,
         entryType: "work",
         activityId,
-        startedAt: daysAgo(3, 9),
+        startedAt: daysAgo(2, 9),
       });
       await reconcileMidnightRollover(empOver);
       const rolledOpen = await fetchOpenEntry(empOver);
@@ -722,6 +764,257 @@ async function main() {
       await pool.query(`update time_entries set ended_at = now() where id = $1`, [open.id]);
       timeEntryIds.push(open.id);
     }
+
+    // -----------------------------------------------------------------
+    // 14) Runaway-shift safety cutoff: a genuine device event anywhere in
+    //     the chain resets the inactivity clock, even though the chain's
+    //     own true start is well past the 72h default threshold.
+    // -----------------------------------------------------------------
+    {
+      const { employeeId, deviceRowId, deviceIdentifier } = await freshFixture("GenuineResets");
+      const started = daysAgo(4, 9); // true chain start, well past 72h
+      const entryId = await insertOpenEntry({ employeeId, deviceId: deviceRowId, entryType: "work", activityId, startedAt: started });
+
+      // A real, accepted device event tied to THIS chain, occurring recently
+      // — must move the anchor forward regardless of how old the chain's
+      // own contiguous start is.
+      const deviceRes = await pool.query(`select id from devices where id = $1`, [deviceRowId]);
+      await pool.query(
+        `insert into mobile_time_events
+           (client_event_id, device_id, employee_id, device_seq, event_type, occurred_at_utc,
+            local_tz_offset_minutes, payload, processing_status, time_entry_id)
+         values ($1, $2, $3, 1, 'activity_switch', now(), 0, '{}'::jsonb, 'accepted', $4)`,
+        [randomUUID(), deviceRowId, employeeId, entryId]
+      );
+      check(deviceRes.rows.length === 1, "14) sanity — fixture device row exists");
+
+      await reconcileMidnightRollover(employeeId);
+      const open14 = await fetchOpenEntry(employeeId);
+      check(
+        open14 !== undefined && open14.ended_at === null && open14.safety_cutoff_at === null,
+        "14) a genuine recent device event prevents the safety cutoff despite an ancient chain start",
+        open14
+      );
+      check(
+        open14?.source === "midnight_rollover",
+        "14) rollover proceeds normally (hops forward) instead of cutting off",
+        open14
+      );
+
+      if (open14) {
+        await pool.query(`update time_entries set ended_at = now() where id = $1`, [open14.id]);
+        timeEntryIds.push(open14.id);
+      }
+
+      // Direct unit check on findGenuineAnchor itself, not just the
+      // observable rollover outcome above.
+      const anchorCheck = await findGenuineAnchor(pool, employeeId, {
+        id: entryId,
+        entryType: "work",
+        source: "manual",
+        createdByEmployeeId: null,
+        startedAt: started,
+        endedAt: null,
+        createdAt: started,
+      });
+      check(
+        anchorCheck.anchorAt.getTime() > Date.now() - 5 * 60 * 1000,
+        "14) findGenuineAnchor returns the recent device event's timestamp, not the 4-day-old chain start",
+        anchorCheck.anchorAt.toISOString()
+      );
+    }
+
+    // -----------------------------------------------------------------
+    // 15/16/18/19/20) A chain with NO genuine action beyond its true start,
+    //     well past the 72h default threshold: the safety cutoff fires
+    //     immediately (before any rollover hop), closes at exactly
+    //     anchor + threshold, records the runaway_shift_auto_cutoff audit
+    //     correction, is idempotent on a second call, and dailyCutoff
+    //     running concurrently against the now-closed entry is a no-op.
+    // -----------------------------------------------------------------
+    {
+      const { employeeId, deviceRowId } = await freshFixture("RunawayNoSignal");
+      const started = daysAgo(4, 11);
+      const entryId = await insertOpenEntry({ employeeId, deviceId: deviceRowId, entryType: "work", activityId, startedAt: started });
+      timeEntryIds.push(entryId);
+
+      await reconcileMidnightRollover(employeeId);
+
+      const afterFirst = await fetchEntry(entryId);
+      const expectedCutoff = computeSafetyCutoffBoundary(started, 72);
+      check(afterFirst.ended_at !== null, "16) the chain is closed, not left open or extended", afterFirst);
+      check(afterFirst.source !== "midnight_rollover", "16) no rollover hop is created — cutoff fires before any hop");
+      check(
+        afterFirst.safety_cutoff_at !== null && new Date(afterFirst.safety_cutoff_at).getTime() === expectedCutoff.getTime(),
+        "16) closed at exactly genuine_anchor_at + threshold, not at 'now' or a midnight boundary",
+        { got: afterFirst.safety_cutoff_at, expected: expectedCutoff.toISOString() }
+      );
+      check(
+        afterFirst.genuine_anchor_at !== null && new Date(afterFirst.genuine_anchor_at).getTime() === started.getTime(),
+        "16) genuine_anchor_at records the true (only) genuine action — the chain's real start"
+      );
+
+      const chainAfterFirst = await fetchChain(employeeId, started);
+      check(chainAfterFirst.length === 1, "16) no additional entries were created by the cutoff", chainAfterFirst.length);
+
+      // 20) Audit history: the correction row itself.
+      const { rows: corrections20 } = await pool.query(
+        `select * from time_entry_corrections where time_entry_id = $1 and reason = $2`,
+        [entryId, RUNAWAY_SHIFT_AUTO_CUTOFF_REASON]
+      );
+      check(corrections20.length === 1, "20) exactly one runaway_shift_auto_cutoff correction is recorded", corrections20);
+      check(
+        corrections20[0]?.changed_by_employee_id === null,
+        "20) the correction is attributed to the system (null), never a real employee id, matching midnight_rollover/dailyCutoff's own convention"
+      );
+      check(corrections20[0]?.old_value === "null", "20) old_value is 'null' — the entry genuinely had no ended_at before this");
+      check(
+        corrections20[0]?.new_value === expectedCutoff.toISOString(),
+        "20) new_value is exactly the computed cutoff boundary",
+        corrections20[0]?.new_value
+      );
+
+      // 18) Idempotency — calling reconcileMidnightRollover again must not
+      // write a second correction or otherwise change anything.
+      await reconcileMidnightRollover(employeeId);
+      const afterSecond = await fetchEntry(entryId);
+      check(
+        new Date(afterSecond.ended_at).getTime() === new Date(afterFirst.ended_at).getTime() &&
+          new Date(afterSecond.safety_cutoff_at).getTime() === new Date(afterFirst.safety_cutoff_at).getTime(),
+        "18) a second reconcile call after the cutoff is a true no-op",
+        { first: afterFirst.ended_at, second: afterSecond.ended_at }
+      );
+      const { rows: correctionsAfterSecond } = await pool.query(
+        `select count(*) from time_entry_corrections where time_entry_id = $1 and reason = $2`,
+        [entryId, RUNAWAY_SHIFT_AUTO_CUTOFF_REASON]
+      );
+      check(
+        Number(correctionsAfterSecond[0].count) === 1,
+        "18) still exactly one correction row after a second call — no duplicate"
+      );
+
+      // 19) dailyCutoff running concurrently must not touch an entry the
+      // safety cutoff already closed — it only ever considers open rows.
+      await runDailyCutoff();
+      const afterDailyCutoff = await fetchEntry(entryId);
+      check(
+        new Date(afterDailyCutoff.ended_at).getTime() === new Date(afterFirst.ended_at).getTime(),
+        "19) a concurrent dailyCutoff sweep leaves the already-closed entry untouched",
+        { before: afterFirst.ended_at, after: afterDailyCutoff.ended_at }
+      );
+
+      // The employee now appears in the admin "needs review" queue.
+      const pending = await getPendingRunawayChains();
+      check(
+        pending.some((p) => p.employeeId === employeeId),
+        "16) the employee appears in the runaway-chain needs-review queue"
+      );
+    }
+
+    // -----------------------------------------------------------------
+    // 21) Robert Guillermo's reported production shape, as a regression
+    //     fixture: one genuine tap, then an unbroken run of
+    //     midnight_rollover hops interleaved with auto-break splits whose
+    //     "after" continuation is honestly source='break_reconciliation'
+    //     (not the pre-fix 'manual' default) — none of which may count as
+    //     genuine — ending in a "today"-looking open row. The safety
+    //     cutoff must still catch it by walking past every synthetic hop
+    //     to the one real tap at the true origin.
+    // -----------------------------------------------------------------
+    {
+      const { employeeId, deviceRowId } = await freshFixture("RobertShape");
+      const trueStart = daysAgo(4, 17); // the one real tap, 4+ days ago
+
+      const a = await insertOpenEntry({ employeeId, deviceId: deviceRowId, entryType: "work", activityId, startedAt: trueStart });
+      const boundary1 = computeRolloverBoundary(calendarDateInAppTimezone(trueStart));
+      await pool.query(`update time_entries set ended_at = $2 where id = $1`, [a, boundary1]);
+
+      const r1 = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source, rollover_of_entry_id)
+           values ($1, $2, 'work', $3, $4, $5, $6, 'midnight_rollover', $7) returning id`,
+          [employeeId, deviceRowId, activityId, randomUUID(), boundary1, new Date(boundary1.getTime() + 9 * 60 * 60 * 1000), a]
+        )
+      ).rows[0].id;
+      const breakStart = new Date(boundary1.getTime() + 9 * 60 * 60 * 1000);
+      const breakEnd = new Date(breakStart.getTime() + 15 * 60 * 1000);
+      const br1 = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, idempotency_key, started_at, ended_at, source, is_paid)
+           values ($1, $2, 'break', $3, $4, $5, 'auto', false) returning id`,
+          [employeeId, deviceRowId, randomUUID(), breakStart, breakEnd]
+        )
+      ).rows[0].id;
+      // The "after" continuation of the auto-break split — honestly
+      // labeled 'break_reconciliation' post-fix (breakReconciliation.ts),
+      // never 'manual'. This row is exactly the one that used to masquerade
+      // as a genuine entry in production.
+      const boundary2 = computeRolloverBoundary(calendarDateInAppTimezone(breakEnd));
+      const r1b = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
+           values ($1, $2, 'work', $3, $4, $5, $6, 'break_reconciliation') returning id`,
+          [employeeId, deviceRowId, activityId, randomUUID(), breakEnd, boundary2]
+        )
+      ).rows[0].id;
+      const finalStart = new Date(Date.now() - 2 * 60 * 60 * 1000); // "today," 2h ago
+      const r2 = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source, rollover_of_entry_id)
+           values ($1, $2, 'work', $3, $4, $5, $6, 'midnight_rollover', $7) returning id`,
+          [employeeId, deviceRowId, activityId, randomUUID(), boundary2, finalStart, r1b]
+        )
+      ).rows[0].id;
+      const finalEntry = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, source)
+           values ($1, $2, 'work', $3, $4, $5, 'manual') returning id`,
+          [employeeId, deviceRowId, activityId, randomUUID(), finalStart]
+        )
+      ).rows[0].id;
+      timeEntryIds.push(a, r1, br1, r1b, r2, finalEntry);
+
+      await reconcileMidnightRollover(employeeId);
+
+      const finalAfter = await fetchEntry(finalEntry);
+      const expectedCutoff21 = computeSafetyCutoffBoundary(trueStart, 72);
+      check(
+        finalAfter.ended_at !== null && finalAfter.safety_cutoff_at !== null,
+        "21) Robert's shape: the currently-open, today-looking final segment is caught and closed",
+        finalAfter
+      );
+      check(
+        new Date(finalAfter.genuine_anchor_at).getTime() === trueStart.getTime(),
+        "21) the anchor walks all the way past 4 synthetic hops (rollover/auto/break_reconciliation) to the one real tap",
+        { got: finalAfter.genuine_anchor_at, expected: trueStart.toISOString() }
+      );
+      // The true chain is already well past threshold by the time this
+      // runs, so the terminal segment's own started_at is itself already
+      // past the computed boundary — this floors to started_at + 1ms (see
+      // applySafetyCutoff's own comment on the DB's strict
+      // ended_at > started_at constraint), never a zero/negative-duration
+      // entry.
+      check(
+        new Date(finalAfter.ended_at).getTime() === Math.max(expectedCutoff21.getTime(), finalStart.getTime() + 1),
+        "21) never produces ended_at <= started_at even when the boundary has long since passed",
+        { got: finalAfter.ended_at, finalStart: finalStart.toISOString(), expectedCutoff21: expectedCutoff21.toISOString() }
+      );
+
+      const preview21 = await previewRunawayChainRecovery(employeeId);
+      const byId = new Map(preview21.map((p) => [p.id, p]));
+      check(
+        byId.get(r1)?.classification === "synthetic" &&
+          byId.get(br1)?.classification === "synthetic" &&
+          byId.get(r1b)?.classification === "synthetic" &&
+          byId.get(r2)?.classification === "synthetic",
+        "21) every rollover/auto-break/break_reconciliation hop is classified synthetic, never genuine",
+        preview21.map((p) => ({ id: p.id, source: p.source, classification: p.classification }))
+      );
+      check(
+        byId.get(a)?.classification === "ambiguous_manual_label",
+        "21) the true origin tap (source='manual', no corroborating device event in this synthetic fixture) is flagged for human review, never silently trusted or silently discarded"
+      );
+    }
   } finally {
     // Retries transient failures (a dropped pooled connection, a momentary
     // lock) up to 3 times, but a step that's still failing after that is
@@ -764,6 +1057,12 @@ async function main() {
           `delete from row_completion_segments where time_entry_id in (select id from time_entries where employee_id = any($1::uuid[]))`,
           [employeeIds]
         )
+      );
+      // mobile_time_events.time_entry_id references time_entries — scenario
+      // 14's genuine-device-event fixture inserts one directly, so this
+      // must be cleared before the time_entries delete below can succeed.
+      await tryDelete("mobile_time_events (by employee)", () =>
+        pool.query(`delete from mobile_time_events where employee_id = any($1::uuid[])`, [employeeIds])
       );
       await tryDelete("time_entries (by employee)", () => pool.query(`delete from time_entries where employee_id = any($1::uuid[])`, [employeeIds]));
     }

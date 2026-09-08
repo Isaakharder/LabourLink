@@ -5,6 +5,7 @@ import { api, ApiError } from "../../lib/api";
 
 interface OrgSettingsResponse {
   longOpenShiftAlertThresholdHours: number;
+  autoSafetyCutoffThresholdHours: number;
 }
 
 // Administrator/Manager can view (matches GET /api/dashboard/org-settings'
@@ -23,11 +24,23 @@ export function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // The runaway-shift automatic safety cutoff threshold (migration 051 /
+  // runawayShiftAutoCutoff.ts) — a separate, larger threshold from the
+  // review-only alert above: once a chain has gone this long since its last
+  // GENUINE action, it's stopped automatically rather than just flagged.
+  const [cutoffHours, setCutoffHours] = useState<number | null>(null);
+  const [cutoffDraft, setCutoffDraft] = useState("");
+  const [cutoffSaveError, setCutoffSaveError] = useState<string | null>(null);
+  const [cutoffSaved, setCutoffSaved] = useState(false);
+  const [cutoffSaving, setCutoffSaving] = useState(false);
+
   const load = useCallback(() => {
     api<OrgSettingsResponse>("/api/dashboard/org-settings")
       .then((res) => {
         setThresholdHours(res.longOpenShiftAlertThresholdHours);
         setDraft(String(res.longOpenShiftAlertThresholdHours));
+        setCutoffHours(res.autoSafetyCutoffThresholdHours);
+        setCutoffDraft(String(res.autoSafetyCutoffThresholdHours));
         setLoadError(null);
       })
       .catch((err) => {
@@ -61,6 +74,30 @@ export function SettingsPage() {
       setSaveError(err instanceof ApiError ? err.message : "Could not save this setting");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleCutoffSubmit(e: FormEvent) {
+    e.preventDefault();
+    const parsed = Number(cutoffDraft);
+    if (!Number.isInteger(parsed) || parsed < 24 || parsed > 336) {
+      setCutoffSaveError("Enter a whole number of hours between 24 and 336");
+      return;
+    }
+    setCutoffSaving(true);
+    setCutoffSaveError(null);
+    setCutoffSaved(false);
+    try {
+      await api<OrgSettingsResponse>("/api/dashboard/org-settings", {
+        method: "PATCH",
+        body: JSON.stringify({ autoSafetyCutoffThresholdHours: parsed }),
+      });
+      setCutoffHours(parsed);
+      setCutoffSaved(true);
+    } catch (err) {
+      setCutoffSaveError(err instanceof ApiError ? err.message : "Could not save this setting");
+    } finally {
+      setCutoffSaving(false);
     }
   }
 
@@ -106,6 +143,47 @@ export function SettingsPage() {
               {!canEdit && <p className="settings-view-only-note">Only an Administrator can change this.</p>}
               {saveError && <span className="field-error">{saveError}</span>}
               {saved && <span className="settings-saved-note">Saved.</span>}
+            </form>
+          )}
+        </section>
+      )}
+
+      {canView && (
+        <section className="settings-section">
+          <h2>Runaway Shift Automatic Safety Cutoff</h2>
+          <p className="settings-section-description">
+            If a shift chain (across any midnight rollovers) goes this many hours with no genuine employee/device or
+            administrator action, it's automatically stopped instead of continuing indefinitely — closed with an
+            assumed end time that shows up under "Automatically Stopped Shifts" for review. Must stay greater than
+            the alert threshold above, so an admin has a chance to act on the alert first.
+          </p>
+
+          {cutoffHours !== null && (
+            <form onSubmit={handleCutoffSubmit} className="settings-threshold-form">
+              <label>
+                Threshold (hours)
+                <input
+                  type="number"
+                  min={24}
+                  max={336}
+                  step={1}
+                  value={cutoffDraft}
+                  onChange={(e) => {
+                    setCutoffDraft(e.target.value);
+                    setCutoffSaved(false);
+                  }}
+                  disabled={!canEdit || cutoffSaving}
+                  required
+                />
+              </label>
+              {canEdit && (
+                <button type="submit" className="employee-form-save" disabled={cutoffSaving || cutoffDraft === String(cutoffHours)}>
+                  {cutoffSaving ? "Saving..." : "Save"}
+                </button>
+              )}
+              {!canEdit && <p className="settings-view-only-note">Only an Administrator can change this.</p>}
+              {cutoffSaveError && <span className="field-error">{cutoffSaveError}</span>}
+              {cutoffSaved && <span className="settings-saved-note">Saved.</span>}
             </form>
           )}
         </section>

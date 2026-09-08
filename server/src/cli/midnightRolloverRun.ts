@@ -22,7 +22,7 @@ async function run() {
 
   console.log(
     `[midnight-rollover] run complete: candidateEmployees=${result.candidateEmployees} ` +
-      `succeeded=${result.succeeded} failures=${result.failures}`
+      `rolledOver=${result.rolledOver} cutOff=${result.cutOff} skipped=${result.skipped} failures=${result.failures}`
   );
 
   await pool.end();

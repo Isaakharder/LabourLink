@@ -9,6 +9,7 @@ import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { reconcileMidnightRollover } from "../lib/midnightRollover";
 import { aggregateDensitySpeed } from "../lib/densitySpeed";
 import { computeWorkdayTotals, WorkdayBoundaryEntry } from "../lib/workdayTotals";
+import { getPendingChainAnchorsForEmployees } from "../lib/runawayShiftAutoCutoff";
 import { getRolloverPriorDurationSeconds, getUnresolvedRunsForRows } from "../lib/rowCompletionCandidates";
 import {
   loadCarrierOptions,
@@ -756,7 +757,16 @@ router.get(
       endedAt: r.ended_at,
       isPaid: r.is_paid,
     }));
-    const workdayTotals = computeWorkdayTotals(workdayEntries);
+    // Excludes time at/after a runaway-shift automatic safety cutoff's
+    // genuine_anchor_at from this day's totals, same reasoning as
+    // reportQueries.ts's own getPayrollReportData — see
+    // runawayShiftAutoCutoff.ts. Near-always a no-op query (empty result)
+    // for this one employee; only actually clips anything on a day this
+    // specific date!'s chain touched.
+    const pendingAnchorsForEmployee = await getPendingChainAnchorsForEmployees(pool, [employeeId]);
+    const unverifiedFrom =
+      pendingAnchorsForEmployee.find((a) => a.affectedDates.includes(date!))?.genuineAnchorAt ?? null;
+    const workdayTotals = computeWorkdayTotals(workdayEntries, undefined, unverifiedFrom);
     const totalWorkedSeconds = Math.round(workdayTotals.workedSeconds);
     const totalBreakSeconds = Math.round(workdayTotals.breakSeconds);
     const totalPaidBreakSeconds = Math.round(workdayTotals.paidBreakSeconds);
@@ -960,6 +970,12 @@ router.get(
         breakSeconds: totalBreakSeconds,
         paidBreakSeconds: totalPaidBreakSeconds,
         unpaidBreakSeconds: totalUnpaidBreakSeconds,
+        // True when this day's chain was closed by the runaway-shift
+        // automatic safety cutoff and hasn't yet been corrected via
+        // Dashboard End Work — the totals above already exclude the
+        // unverified remainder (unverifiedSeconds is how much).
+        needsReview: workdayTotals.needsReview,
+        unverifiedSeconds: Math.round(workdayTotals.unverifiedSeconds),
       },
       canEdit: canEditRole,
     });
@@ -1685,7 +1701,8 @@ router.patch(
 
       for (const trim of plan.trims) {
         const actualColumn = trim.field === "started_at" ? "actual_started_at" : "actual_ended_at";
-        const autoClosedClause = trim.field === "ended_at" ? ", auto_closed_at = null" : "";
+        const autoClosedClause =
+          trim.field === "ended_at" ? ", auto_closed_at = null, safety_cutoff_at = null, genuine_anchor_at = null" : "";
         await client.query(`update time_entries set ${trim.field} = $1, ${actualColumn} = null${autoClosedClause} where id = $2`, [
           trim.newValue,
           trim.id,
@@ -2626,6 +2643,7 @@ router.patch(
       await client.query(
         `update time_entries
          set started_at = $1, ended_at = $2, auto_closed_at = null,
+             safety_cutoff_at = null, genuine_anchor_at = null,
              actual_started_at = case when $4 then null else actual_started_at end,
              actual_ended_at = case when $5 then null else actual_ended_at end
          where id = $3`,
@@ -2874,7 +2892,10 @@ router.post(
         // holds (same precision reasoning as the lookups above) instead of
         // a millisecond-truncated copy of it.
         await client.query(
-          `update time_entries set ended_at = (select ended_at from time_entries where id = $1), auto_closed_at = null where id = $2`,
+          `update time_entries
+           set ended_at = (select ended_at from time_entries where id = $1),
+               auto_closed_at = null, safety_cutoff_at = null, genuine_anchor_at = null
+           where id = $2`,
           [id, preceding.id]
         );
         await client.query(

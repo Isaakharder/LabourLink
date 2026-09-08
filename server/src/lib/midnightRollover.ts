@@ -15,10 +15,12 @@
 // the exact same function either way, so there is only ever one code path
 // that can create a rollover row.
 import crypto from "crypto";
-import { PoolClient } from "pg";
+import { Pool, PoolClient } from "pg";
 import { pool } from "../db";
 import { lockEmployeeForManualEntry } from "./manualTimeEntries";
 import { calendarDateInAppTimezone, getDayBoundsUtc } from "./timezone";
+import { getOrgSettings } from "./longOpenShiftAlerts";
+import { RUNAWAY_SHIFT_AUTO_CUTOFF_REASON, computeSafetyCutoffBoundary, findGenuineAnchor } from "./runawayShiftAutoCutoff";
 
 export const MIDNIGHT_ROLLOVER_REASON = "midnight_rollover";
 
@@ -45,6 +47,13 @@ interface OpenEntryRow {
   break_profile_item_id: string | null;
   scheduled_break_date: string | null;
   is_paid: boolean | null;
+  // Needed only for the runaway-shift safety-cutoff check below (see
+  // findGenuineAnchor) — every other field above is copied forward into
+  // each rollover continuation; these three are read-only context for the
+  // CURRENT open row, never copied.
+  source: string;
+  created_by_employee_id: string | null;
+  created_at: string;
 }
 
 // Deterministic per (employee, boundary, entry type) — the task's "use
@@ -70,13 +79,87 @@ async function getOpenEntryForUpdate(client: PoolClient, employeeId: string): Pr
   const { rows } = await client.query(
     `select id, entry_type, activity_id, device_id, started_at, greenhouse_row_id, carrier_id,
             density_type, density_count_per_row, break_profile_item_id,
-            to_char(scheduled_break_date, 'YYYY-MM-DD') as scheduled_break_date, is_paid
+            to_char(scheduled_break_date, 'YYYY-MM-DD') as scheduled_break_date, is_paid,
+            source, created_by_employee_id, created_at
      from time_entries
      where employee_id = $1 and ended_at is null and deleted_at is null
      for update`,
     [employeeId]
   );
   return rows[0] ?? null;
+}
+
+// Same shape as getOpenEntryForUpdate but no lock/transaction — used for the
+// cheap up-front check (is a safety cutoff or a rollover hop even plausibly
+// due?) that decides whether reconcileMidnightRollover needs to take the
+// advisory lock at all. Never trusted for a real mutation decision on its
+// own — every actual write re-fetches FOR UPDATE and re-validates first.
+async function getOpenEntryUnlocked(db: Pool, employeeId: string): Promise<OpenEntryRow | null> {
+  const { rows } = await db.query(
+    `select id, entry_type, activity_id, device_id, started_at, greenhouse_row_id, carrier_id,
+            density_type, density_count_per_row, break_profile_item_id,
+            to_char(scheduled_break_date, 'YYYY-MM-DD') as scheduled_break_date, is_paid,
+            source, created_by_employee_id, created_at
+     from time_entries
+     where employee_id = $1 and ended_at is null and deleted_at is null`,
+    [employeeId]
+  );
+  return rows[0] ?? null;
+}
+
+async function computeCutoffBoundaryFor(
+  db: Pool | PoolClient,
+  employeeId: string,
+  open: OpenEntryRow
+): Promise<{ anchorAt: Date; cutoffBoundary: Date }> {
+  const { autoSafetyCutoffThresholdHours } = await getOrgSettings();
+  const { anchorAt } = await findGenuineAnchor(db, employeeId, {
+    id: open.id,
+    entryType: open.entry_type,
+    source: open.source,
+    createdByEmployeeId: open.created_by_employee_id,
+    startedAt: new Date(open.started_at),
+    endedAt: null,
+    createdAt: new Date(open.created_at),
+  });
+  return { anchorAt, cutoffBoundary: computeSafetyCutoffBoundary(anchorAt, autoSafetyCutoffThresholdHours) };
+}
+
+// Closes the given open entry at the safety-cutoff boundary and records the
+// audit trail — never creates a replacement/continuation row (unlike an
+// ordinary rollover hop): this is a genuine stop, not a boundary hop. Caller
+// already holds the per-employee advisory lock and has re-validated `open`
+// is still the current open row under FOR UPDATE.
+async function applySafetyCutoff(
+  client: PoolClient,
+  employeeId: string,
+  open: OpenEntryRow,
+  cutoffBoundary: Date,
+  anchorAt: Date
+): Promise<void> {
+  // time_entries has a hard DB constraint (chk_time_entries_ended_after_started,
+  // 040_fix_break_end_ordering.sql) that ended_at must be STRICTLY after
+  // started_at — a zero-length row is treated as unrecoverable garbage in
+  // this codebase, not a valid edge case. A threshold lowered after the
+  // chain already started, or (the common real-world shape: a chain that's
+  // been running so long its own current segment's started_at is already
+  // past the computed boundary — see runawayShiftAutoCutoff.ts's header)
+  // both need a floor of started_at + 1ms, never started_at itself. This is
+  // a deliberate sentinel-short duration, not a real measurement — exactly
+  // why the row is simultaneously marked safety_cutoff_at/genuine_anchor_at
+  // and surfaced in the needs-review queue for a human to replace with the
+  // real end time via Dashboard End Work.
+  const closeAt = new Date(Math.max(cutoffBoundary.getTime(), new Date(open.started_at).getTime() + 1));
+  await client.query(
+    `update time_entries set ended_at = $2, safety_cutoff_at = $2, genuine_anchor_at = $3 where id = $1`,
+    [open.id, closeAt, anchorAt]
+  );
+  await client.query(
+    `insert into time_entry_corrections
+       (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+     values ($1, $2, null, 'ended_at', 'null', $3, $4)`,
+    [open.id, employeeId, closeAt.toISOString(), RUNAWAY_SHIFT_AUTO_CUTOFF_REASON]
+  );
 }
 
 // Caps how many boundaries a single call will walk — several genuinely
@@ -107,18 +190,37 @@ const MAX_ROLLOVER_HOPS_PER_CALL = 30;
 // there's nothing to do, which is the overwhelming majority of calls: this
 // runs on every mobile request and Inputs load, exactly like
 // breakReconciliation.reconcileEmployeeBreaks.
-export async function reconcileMidnightRollover(employeeId: string): Promise<void> {
-  // Unlocked peek first — real correctness comes from the lock+recheck
+// Reported back to the scheduled sweep (runMidnightRolloverSweep) purely
+// for its own cron-run summary log — no caller depends on this for
+// correctness, since every actual decision is already final by the time
+// this returns. "no_action" covers both "there was nothing open" and "an
+// ordinary open shift with nothing due yet," which the sweep's own log
+// doesn't need to further distinguish.
+export type ReconcileOutcome = "no_action" | "rolled_over" | "cut_off";
+
+export async function reconcileMidnightRollover(employeeId: string): Promise<ReconcileOutcome> {
+  // Unlocked pre-check first — real correctness comes from the lock+recheck
   // below, this just avoids opening a transaction/taking the advisory lock
-  // for the common case where nothing is open, or what's open already
-  // belongs to today.
-  const peek = await pool.query(
-    `select started_at from time_entries where employee_id = $1 and ended_at is null and deleted_at is null`,
-    [employeeId]
-  );
-  if (!peek.rows[0]) return;
+  // for the common case (the large majority of calls): nothing open, or
+  // what's open neither needs a midnight hop today NOR has already crossed
+  // the runaway-shift safety-cutoff boundary.
+  //
+  // The safety-cutoff half of this check can't be skipped just because the
+  // open row "belongs to today" the way the old rollover-only check could —
+  // that's exactly the bug this mechanism exists to fix: a chain that
+  // rolled over last night has a `started_at` from today even when the
+  // TRUE chain has been running, genuinely untouched, for days (see
+  // runawayShiftAutoCutoff.ts). So every call with something open pays for
+  // one chain walk + two cheap indexed aggregate queries (findGenuineAnchor)
+  // to answer "is this actually stale," even when nothing else needs to
+  // happen — there is no cheaper test that stays correct.
+  const peeked = await getOpenEntryUnlocked(pool, employeeId);
+  if (!peeked) return "no_action";
   const todayLocal = calendarDateInAppTimezone(new Date());
-  if (calendarDateInAppTimezone(new Date(peek.rows[0].started_at)) >= todayLocal) return;
+  const hopDue = calendarDateInAppTimezone(new Date(peeked.started_at)) < todayLocal;
+  const { cutoffBoundary: peekedCutoffBoundary } = await computeCutoffBoundaryFor(pool, employeeId, peeked);
+  const cutoffDue = peekedCutoffBoundary.getTime() <= Date.now();
+  if (!hopDue && !cutoffDue) return "no_action";
 
   const client = await pool.connect();
   try {
@@ -130,11 +232,42 @@ export async function reconcileMidnightRollover(employeeId: string): Promise<voi
     // whichever commits first leaves nothing for the other to do.
     await lockEmployeeForManualEntry(client, employeeId);
 
-    let open = await getOpenEntryForUpdate(client, employeeId);
+    const open = await getOpenEntryForUpdate(client, employeeId);
+    if (!open) {
+      // Closed by whoever we were blocked behind (End Work, a concurrent
+      // reconcile, this same safety cutoff already applied) — nothing left
+      // to do.
+      await client.query("commit");
+      return "no_action";
+    }
+
+    // Re-derived under the lock, not trusted from the unlocked pre-check
+    // above — state may have changed while this call waited for the lock.
+    const { anchorAt, cutoffBoundary } = await computeCutoffBoundaryFor(client, employeeId, open);
+
+    if (cutoffBoundary.getTime() <= Date.now()) {
+      // The chain has gone longer than the configured threshold since its
+      // last genuine action anywhere in it — stop here. No further
+      // continuation is created (unlike an ordinary hop below): ending the
+      // chain, not extending it, is the whole point of this branch.
+      await applySafetyCutoff(client, employeeId, open, cutoffBoundary, anchorAt);
+      await client.query("commit");
+      return "cut_off";
+    }
+
+    // Not yet past the safety threshold — proceed with the ordinary
+    // midnight-rollover hop loop exactly as before. Every hop boundary
+    // created below is, by construction, no later than "now," and
+    // cutoffBoundary is already known to be later than "now" at this point
+    // — so cutoffBoundary is guaranteed later than every boundary this loop
+    // could possibly create; there is nothing left to re-check per hop.
+    let hopOpen: OpenEntryRow | null = open;
+    let hopsExecuted = 0;
     // Recomputed on every iteration (not captured once) — a sweep that
     // straddles local midnight itself, or a call that's been queued behind
     // the lock for a while, must still classify every boundary correctly.
     for (let hops = 0; hops < MAX_ROLLOVER_HOPS_PER_CALL; hops++) {
+      const open = hopOpen;
       if (!open) break;
       const currentTodayLocal = calendarDateInAppTimezone(new Date());
       const startedLocalDate = calendarDateInAppTimezone(new Date(open.started_at));
@@ -165,7 +298,8 @@ export async function reconcileMidnightRollover(employeeId: string): Promise<voi
          on conflict (idempotency_key) do nothing
          returning id, entry_type, activity_id, device_id, started_at, greenhouse_row_id, carrier_id,
                    density_type, density_count_per_row, break_profile_item_id,
-                   to_char(scheduled_break_date, 'YYYY-MM-DD') as scheduled_break_date, is_paid`,
+                   to_char(scheduled_break_date, 'YYYY-MM-DD') as scheduled_break_date, is_paid,
+                   source, created_by_employee_id, created_at`,
         [
           employeeId,
           open.device_id,
@@ -193,10 +327,12 @@ export async function reconcileMidnightRollover(employeeId: string): Promise<voi
         next = (await getOpenEntryForUpdate(client, employeeId)) ?? undefined;
         if (!next) break;
       }
-      open = next;
+      hopOpen = next;
+      hopsExecuted++;
     }
 
     await client.query("commit");
+    return hopsExecuted > 0 ? "rolled_over" : "no_action";
   } catch (err) {
     await client.query("rollback").catch(() => {});
     throw err;
@@ -206,30 +342,54 @@ export async function reconcileMidnightRollover(employeeId: string): Promise<voi
 }
 
 export interface RolloverSweepResult {
+  // Every employee with a currently open entry — not just the ones that
+  // turned out to need action; see this function's own comment on why the
+  // candidate set can't be narrowed further upfront.
   candidateEmployees: number;
-  succeeded: number;
+  // Ordinary midnight-boundary hop(s) applied — a shift genuinely spanning
+  // midnight, continuing normally.
+  rolledOver: number;
+  // The runaway-shift safety cutoff fired instead of continuing the chain —
+  // this employee now needs admin review (see runawayChainRecovery.ts).
+  cutOff: number;
+  // Nothing was due — an ordinary open shift with no midnight boundary to
+  // cross yet and not past the safety-cutoff threshold.
+  skipped: number;
   failures: number;
 }
 
-// Scheduled-job entry point (cli/midnightRolloverRun.ts) — finds every
-// employee with an open entry that's behind on at least one boundary and
-// reconciles each in turn through the exact same function request-time
-// callers use. One employee's failure never aborts the sweep for the rest.
+// Scheduled-job entry point (cli/midnightRolloverRun.ts) — reconciles every
+// employee with a currently open entry through the exact same function
+// request-time callers use. One employee's failure never aborts the sweep
+// for the rest.
+//
+// Deliberately every open entry, not just ones behind on a midnight
+// boundary (started_at < today) — an entry whose started_at IS today can
+// still belong to a chain that's genuinely been running, untouched, for
+// days (a prior night's rollover hop refreshes started_at without moving
+// the true chain forward at all), and only reconcileMidnightRollover's own
+// safety-cutoff check can tell the difference. Narrowing this candidate set
+// back to "started before today" would silently exempt exactly the
+// runaway chains this whole mechanism exists to catch from ever being swept
+// by cron at all, leaving them dependent on someone happening to load that
+// employee's Inputs/mobile view. reconcileMidnightRollover's own unlocked
+// pre-check keeps the ordinary (non-stale, no hop due) case just as cheap
+// as before.
 export async function runMidnightRolloverSweep(): Promise<RolloverSweepResult> {
-  const todayLocal = calendarDateInAppTimezone(new Date());
-  const { start: todayStartUtc } = getDayBoundsUtc(todayLocal);
   const { rows } = await pool.query<{ employee_id: string }>(
-    `select distinct employee_id from time_entries
-     where ended_at is null and deleted_at is null and started_at < $1`,
-    [todayStartUtc]
+    `select distinct employee_id from time_entries where ended_at is null and deleted_at is null`
   );
 
-  let succeeded = 0;
+  let rolledOver = 0;
+  let cutOff = 0;
+  let skipped = 0;
   let failures = 0;
   for (const row of rows) {
     try {
-      await reconcileMidnightRollover(row.employee_id);
-      succeeded++;
+      const outcome = await reconcileMidnightRollover(row.employee_id);
+      if (outcome === "rolled_over") rolledOver++;
+      else if (outcome === "cut_off") cutOff++;
+      else skipped++;
     } catch (err) {
       failures++;
       console.error(
@@ -239,5 +399,5 @@ export async function runMidnightRolloverSweep(): Promise<RolloverSweepResult> {
     }
   }
 
-  return { candidateEmployees: rows.length, succeeded, failures };
+  return { candidateEmployees: rows.length, rolledOver, cutOff, skipped, failures };
 }

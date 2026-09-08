@@ -20,7 +20,9 @@ import { AddressInfo } from "net";
 import { randomUUID } from "crypto";
 import { pool } from "../db";
 import { endLongOpenShift, LongShiftAdminEndError, LONG_SHIFT_ADMIN_END_REASON } from "./longShiftAdminEnd";
+import { getPendingRunawayChains } from "./runawayChainRecovery";
 import mobileTimeRouter from "../routes/mobileTime";
+import { addDaysToDateStr, calendarDateInAppTimezone, zonedWallTimeToUtc } from "./timezone";
 
 let pass = 0;
 let fail = 0;
@@ -137,11 +139,15 @@ async function main() {
     function hoursAgo(h: number): Date {
       return new Date(Date.now() - h * 60 * 60 * 1000);
     }
+    // Local-calendar-aware, not naive UTC-date arithmetic — see
+    // midnightRollover.test.ts's own copy of this fix for why a plain
+    // setUTCDate offset drifts a day whenever the test happens to run while
+    // UTC and APP_TIMEZONE disagree on what day it is.
     function daysAgo(n: number, hour: number): Date {
-      const d = new Date();
-      d.setUTCDate(d.getUTCDate() - n);
-      d.setUTCHours(hour, 0, 0, 0);
-      return d;
+      const todayLocal = calendarDateInAppTimezone(new Date());
+      const targetLocal = addDaysToDateStr(todayLocal, -n);
+      const [y, mo, d] = targetLocal.split("-").map(Number);
+      return zonedWallTimeToUtc(y, mo, d, hour, 0, 0);
     }
 
     async function fetchEntry(id: string) {
@@ -464,6 +470,135 @@ async function main() {
         laterMte[0]
       );
       if (laterMte[0]?.time_entry_id) timeEntryIds.push(laterMte[0].time_entry_id);
+    }
+
+    // -----------------------------------------------------------------
+    // 12) Recovering a runaway-shift automatic safety cutoff
+    //     (runawayShiftAutoCutoff.ts / midnightRollover.ts): End Work must
+    //     be able to correct an entry that's already CLOSED with a pending
+    //     safety_cutoff_at, not just an open one — this is the actual
+    //     admin recovery path for a chain the automatic mechanism stopped.
+    // -----------------------------------------------------------------
+    {
+      const { employeeId, deviceRowId } = await freshFixture("SafetyCutoffRecover");
+      const trueStart = hoursAgo(100); // well past any real single shift
+      const openId = await insertOpenEntry({ employeeId, deviceId: deviceRowId, entryType: "work", activityId, startedAt: trueStart });
+      const assumedCutoff = new Date(trueStart.getTime() + 72 * 60 * 60 * 1000);
+      await pool.query(
+        `update time_entries set ended_at = $2, safety_cutoff_at = $2, genuine_anchor_at = $3 where id = $1`,
+        [openId, assumedCutoff, trueStart]
+      );
+      await pool.query(
+        `insert into time_entry_corrections
+           (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+         values ($1, $2, null, 'ended_at', 'null', $3, 'runaway_shift_auto_cutoff')`,
+        [openId, employeeId, assumedCutoff.toISOString()]
+      );
+
+      const pendingBefore = await getPendingRunawayChains();
+      check(
+        pendingBefore.some((p) => p.employeeId === employeeId),
+        "12) sanity — the fixture shows up in the needs-review queue before recovery"
+      );
+
+      const realEndTime = new Date(trueStart.getTime() + 9 * 60 * 60 * 1000); // the actual true end, an ordinary shift length
+      const result = await endLongOpenShift(employeeId, realEndTime, adminId);
+      check(result.status === "ended", "12) End Work reports 'ended', not 'already_finished', for a pending safety cutoff", result);
+      check(result.timeEntryId === openId, "12) End Work targets the safety-cutoff-closed entry itself");
+
+      const after12 = await fetchEntry(openId);
+      check(
+        new Date(after12.ended_at).getTime() === realEndTime.getTime(),
+        "12) the assumed cutoff time is replaced with the administrator's real end time"
+      );
+      const { rows: rawAfter12 } = await pool.query(`select safety_cutoff_at, genuine_anchor_at from time_entries where id = $1`, [openId]);
+      check(
+        rawAfter12[0]?.safety_cutoff_at === null && rawAfter12[0]?.genuine_anchor_at === null,
+        "12) the pending-review markers are cleared once a real end time is confirmed",
+        rawAfter12[0]
+      );
+
+      const correctionsAfter12 = await corrections(employeeId, LONG_SHIFT_ADMIN_END_REASON);
+      check(correctionsAfter12.length === 1, "12) exactly one long_shift_admin_end correction is recorded for the recovery");
+      check(
+        correctionsAfter12[0]?.old_value === new Date(assumedCutoff).toISOString(),
+        "12) the correction's old_value is the PREVIOUS (assumed) end time, not 'null' — this was a real edit, not a fresh close",
+        correctionsAfter12[0]?.old_value
+      );
+
+      const pendingAfter = await getPendingRunawayChains();
+      check(
+        !pendingAfter.some((p) => p.employeeId === employeeId),
+        "12) the employee drops out of the needs-review queue once recovered"
+      );
+
+      // Idempotency: calling End Work again now hits the ordinary
+      // already-finished path (safety_cutoff_at is gone), never re-corrects.
+      const result2 = await endLongOpenShift(employeeId, realEndTime, adminId);
+      check(result2.status === "already_finished", "12) a second End Work call now reports already_finished, the ordinary idempotent path");
+      const correctionsAfterSecond = await corrections(employeeId, LONG_SHIFT_ADMIN_END_REASON);
+      check(correctionsAfterSecond.length === 1, "12) still exactly one correction — the second call wrote nothing new");
+    }
+
+    // -----------------------------------------------------------------
+    // 13) A late offline event dated before a runaway-shift automatic
+    //     safety cutoff's boundary must go to Sync Conflicts, never reopen
+    //     the shift — same guard as admin End Work (test 11), now also
+    //     covering the automatic mechanism.
+    // -----------------------------------------------------------------
+    {
+      const { employeeId, deviceRowId, deviceIdentifier } = await freshFixture("SafetyCutoffSync");
+      const trueStart = hoursAgo(80);
+      const openId = await insertOpenEntry({ employeeId, deviceId: deviceRowId, entryType: "work", activityId, startedAt: trueStart });
+      const cutoffAt = new Date(trueStart.getTime() + 72 * 60 * 60 * 1000);
+      await pool.query(`update time_entries set ended_at = $2, safety_cutoff_at = $2, genuine_anchor_at = $3 where id = $1`, [
+        openId,
+        cutoffAt,
+        trueStart,
+      ]);
+      await pool.query(
+        `insert into time_entry_corrections
+           (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+         values ($1, $2, null, 'ended_at', 'null', $3, 'runaway_shift_auto_cutoff')`,
+        [openId, employeeId, cutoffAt.toISOString()]
+      );
+
+      const staleOccurred13 = new Date(cutoffAt.getTime() - 30 * 60 * 1000);
+      const staleRes13 = await callMobile("POST", "/api/mobile/sync/events", deviceIdentifier, {
+        events: [
+          { clientEventId: randomUUID(), deviceSeq: 1, eventType: "activity_switch", occurredAtUtc: staleOccurred13.toISOString(), activityId },
+        ],
+      });
+      check(staleRes13.status === 200, "13) stale event: sync request itself succeeds (200)", staleRes13.body);
+      const { rows: staleMte13 } = await pool.query(
+        `select processing_status, conflict_reason from mobile_time_events where employee_id = $1 order by received_at desc limit 1`,
+        [employeeId]
+      );
+      check(
+        staleMte13[0]?.processing_status === "permanent_conflict" && /automatic safety cutoff/.test(staleMte13[0]?.conflict_reason ?? ""),
+        "13) stale event before an automatic safety cutoff: permanent_conflict, with wording distinguishing it from an admin End Work",
+        staleMte13[0]
+      );
+      const { rows: stillOpenAfterStale13 } = await pool.query(`select id from time_entries where employee_id = $1 and ended_at is null`, [
+        employeeId,
+      ]);
+      check(stillOpenAfterStale13.length === 0, "13) the automatically-closed shift is never reopened by the stale event");
+
+      // Negative control: a genuinely later event is a real new shift.
+      const laterOccurred13 = new Date(cutoffAt.getTime() + 60 * 60 * 1000);
+      const laterRes13 = await callMobile("POST", "/api/mobile/sync/events", deviceIdentifier, {
+        events: [{ clientEventId: randomUUID(), deviceSeq: 2, eventType: "work_start", occurredAtUtc: laterOccurred13.toISOString(), activityId }],
+      });
+      const { rows: laterMte13 } = await pool.query(
+        `select processing_status, time_entry_id from mobile_time_events where employee_id = $1 order by received_at desc limit 1`,
+        [employeeId]
+      );
+      check(
+        laterMte13[0]?.processing_status === "accepted",
+        "13) a genuinely later event after the automatic cutoff is accepted normally (negative control)",
+        laterMte13[0]
+      );
+      if (laterMte13[0]?.time_entry_id) timeEntryIds.push(laterMte13[0].time_entry_id);
     }
   } finally {
     async function tryDelete(label: string, fn: () => Promise<unknown>) {
