@@ -5,7 +5,8 @@ import { requireDevice } from "../middleware/device";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { reconcileMidnightCutoff, MIDNIGHT_CUTOFF_REASON } from "../lib/midnightCutoff";
 import { findMostRecentShiftClosureBoundary } from "../lib/longShiftAdminEnd";
-import { APP_TIMEZONE, calendarDateInAppTimezone, parseTimeParts, zonedWallTimeToUtc } from "../lib/timezone";
+import { APP_TIMEZONE, calendarDateInAppTimezone } from "../lib/timezone";
+import { applyBreakBoundaryFloor, resolveFixedBreakCloseBoundary, resolveStartBreakMatch } from "../lib/fixedBreakMatching";
 import {
   MAX_CLIENT_CLOCK_SKEW_FUTURE_MS,
   resolveOriginalEndedAt,
@@ -471,32 +472,6 @@ async function getCurrentWorkSegment(employeeId: string): Promise<{
   };
 }
 
-interface FixedItem {
-  id: string;
-  start_time: string;
-  end_time: string;
-  is_paid: boolean;
-  fixed_start_window_minutes: number;
-  fixed_end_window_minutes: number;
-}
-
-// Fixed-break items on the employee's currently active assigned profile —
-// used to decide whether a manual Start/End Break tap should be rounded to
-// the scheduled time. Inactive profile/employee naturally returns nothing.
-async function loadActiveFixedItems(employeeId: string): Promise<FixedItem[]> {
-  const { rows } = await pool.query(
-    `select bpi.id, bpi.start_time, bpi.end_time, bpi.is_paid,
-            bpi.fixed_start_window_minutes, bpi.fixed_end_window_minutes
-     from employees e
-     join break_profiles bp on bp.id = e.break_profile_id and bp.is_active = true
-     join break_profile_items bpi
-       on bpi.break_profile_id = bp.id and bpi.fixed_break = true and bpi.is_active = true
-     where e.id = $1 and e.is_active = true`,
-    [employeeId]
-  );
-  return rows;
-}
-
 interface WorkStartRoundingSettings {
   enabled: boolean;
   direction: RoundingDirection;
@@ -952,6 +927,22 @@ router.post(
       // back to server now() for started_at exactly as it did before this
       // feature existed, and actual_started_at stays null on this row, same
       // as every work entry recorded before this feature shipped.
+    } else {
+      // Not a genuine idle -> work transition: something is already open.
+      // If it's a break bound to a fixed schedule item, THIS request is
+      // what's actually ending it (the employee picked a new job directly
+      // instead of tapping End Break) — that must still honor the break's
+      // configured end time, exactly like the dedicated End Break action
+      // does (see resolveFixedBreakCloseBoundary's own header for why this
+      // can never resolve to a different preset than the one Start Break
+      // matched).
+      const currentlyOpen = await getOpenEntryExcluding(d.employeeId, idempotencyKey);
+      if (currentlyOpen?.entry_type === "break") {
+        const fixedEnd = await resolveFixedBreakCloseBoundary(pool, currentlyOpen.id, "break");
+        if (fixedEnd) {
+          overrides.startedAt = applyBreakBoundaryFloor(fixedEnd, new Date(currentlyOpen.started_at), new Date());
+        }
+      }
     }
 
     await openEntry(d.employeeId, d.id, "work", activityId, idempotencyKey, overrides);
@@ -968,92 +959,56 @@ router.post(
       return res.status(400).json({ error: "a valid idempotencyKey is required" });
     }
 
-    // If the employee's assigned profile has a fixed-break item whose start
-    // grace window contains this moment, round to the scheduled time and
-    // tag the entry with that item — otherwise record the actual tap time
-    // with no profile association. Nearest scheduled time wins on overlap
-    // between two items' windows.
-    //
-    // `now` is always server-processing time, same as every other
-    // timestamp in this file — for a request replayed from the offline
-    // queue (offlineQueue.ts) after connectivity returns, that's when it's
-    // replayed, not the original tap. A long-delayed replay can therefore
-    // miss the window it should have matched, or (rarely) land inside a
-    // different item's window. Accepted: the offline queue is already
-    // documented as not meant to survive an extended fully-offline shift,
-    // and every other timestamp here has the same server-time
-    // characteristic — fixed-break rounding doesn't introduce a new class
-    // of problem, it just makes an existing one slightly more visible.
-    const now = new Date();
     // The phone's own clock reading of the moment "Start Break" was
     // tapped, captured client-side before the request was even attempted
     // — same resolveOriginalStartedAt convention POST /time-entries/work
-    // already uses (see that route and workStartRounding.ts). Without
-    // this, a batch of actions replayed from the offline queue
-    // (web/src/lib/offlineQueue.ts) after connectivity returns all get
-    // rounded against REPLAY time instead of each one's own true tap
-    // moment — several taps landing within the same rounding instant is
-    // exactly what previously fed the floor-guard fallback below into a
-    // runaway cascade of ever-advancing, essentially fake timestamps (see
-    // migration 040's own comment for the incident this caused).
+    // already uses (see that route and workStartRounding.ts). This is also
+    // what decides whether/which scheduled break this tap belongs to (see
+    // resolveStartBreakMatch's own header): matching is always anchored to
+    // the real tap moment, never to whenever the server happens to process
+    // the request — a batch of actions replayed from the offline queue
+    // (web/src/lib/offlineQueue.ts) after connectivity returns must resolve
+    // exactly as it would have live, not against replay time.
+    const now = new Date();
     const originalTap = resolveOriginalStartedAt(clientStartedAt, now);
-    const todayLocal = calendarDateInAppTimezone(now);
-    const [y, mo, da] = todayLocal.split("-").map(Number);
-    const fixedItems = await loadActiveFixedItems(d.employeeId);
+    const match = await resolveStartBreakMatch(pool, d.employeeId, originalTap);
 
-    let match: { item: FixedItem; scheduledStart: Date } | null = null;
-    for (const item of fixedItems) {
-      const [sh, sm, ss] = parseTimeParts(item.start_time);
-      const scheduledStart = zonedWallTimeToUtc(y, mo, da, sh, sm, ss);
-      const windowMs = item.fixed_start_window_minutes * 60 * 1000;
-      const distance = Math.abs(now.getTime() - scheduledStart.getTime());
-      if (distance > windowMs) continue;
-      if (!match || distance < Math.abs(now.getTime() - match.scheduledStart.getTime())) {
-        match = { item, scheduledStart };
-      }
-    }
-
-    let overrides: OpenEntryOverrides = {};
+    let overrides: OpenEntryOverrides;
     if (match) {
       overrides = {
         startedAt: match.scheduledStart,
         actualStartedAt: originalTap,
         breakProfileItemId: match.item.id,
-        scheduledBreakDate: todayLocal,
+        scheduledBreakDate: match.scheduledDateLocal,
         source: "manual",
-        isPaid: match.item.is_paid,
+        isPaid: match.item.isPaid,
       };
     } else {
-      // No scheduled fixed-break item matched this tap — apply the
-      // employee's own break-rounding setting instead, if enabled (see
-      // 037_break_rounding.sql). Deliberately never layered on top of a
-      // fixed-item match above: that's already an exact scheduled-time
-      // snap, and rounding it further would just move it away from the
-      // schedule it was just matched to.
+      // No scheduled fixed-break item contains this tap (or the only one
+      // that would have has already been used today — see
+      // resolveStartBreakMatch's own "only one instance per employee/date"
+      // exclusion) — apply the employee's own break-rounding setting
+      // instead, if enabled (see 037_break_rounding.sql). Deliberately
+      // never layered on top of a fixed-item match above: that's already
+      // an exact scheduled-time snap, and rounding it further would just
+      // move it away from the schedule it was just matched to. Always
+      // anchored to the real tap (never left unset to fall through to
+      // openEntry()'s own server-now() default) so this stays correct even
+      // when rounding is disabled.
+      overrides = { startedAt: originalTap };
       const settings = await loadBreakRoundingSettings(d.employeeId);
       if (settings?.enabled) {
         let rounded = roundBreak(originalTap, settings.intervalMinutes, settings.direction);
         // Never let rounding push this break's start at or before the
-        // work entry it's about to close — same short-workday guard (and
-        // the same two-step fallback) as end-day's work-end rounding (see
-        // loadWorkEndRoundingSettings's call site below). The first
-        // fallback (the exact unrounded tap) is itself not guaranteed to
-        // clear the floor: that entry's own started_at could itself be a
-        // clockwise-work-start-rounded instant still in the future
-        // relative to `now`, in which case a second, guaranteed-positive
-        // fallback is needed.
+        // work entry it's about to close — same short-workday guard as
+        // end-day's work-end rounding (see loadWorkEndRoundingSettings's
+        // call site below).
         const currentlyOpen = await getOpenEntry(d.employeeId);
         if (currentlyOpen) {
-          const floor = new Date(currentlyOpen.started_at).getTime();
-          if (rounded.getTime() <= floor) rounded = originalTap;
-          if (rounded.getTime() <= floor) rounded = new Date(floor + 1000);
+          rounded = applyBreakBoundaryFloor(rounded, new Date(currentlyOpen.started_at), originalTap);
         }
         overrides = { startedAt: rounded, actualStartedAt: originalTap };
       }
-      // rounding disabled (or no active profile assigned): no overrides at
-      // all — openEntry() falls back to server now() for started_at
-      // exactly as it did before this feature existed, and
-      // actual_started_at stays null on this row.
     }
 
     await openEntry(d.employeeId, d.id, "break", null, idempotencyKey, overrides);
@@ -1139,70 +1094,44 @@ router.post(
       densitySnapshot: { densityType: resumeDensityType, densityCountPerRow: resumeDensityCountPerRow },
     };
 
-    // Only snap-to-schedule the end if the currently open break was itself
-    // matched to a fixed item at start time (never retroactively match on
-    // end alone).
+    // Snap-to-schedule unconditionally if the currently open break was
+    // itself matched to a fixed item at start time — "once a Start Break
+    // tap matches a scheduled break... End Break must use that same
+    // scheduled break's configured end time," with no separate end-side
+    // window and no re-matching against any other item (see
+    // resolveFixedBreakCloseBoundary's own header). Never retroactively
+    // matched on end alone: a break with no break_profile_item_id stored at
+    // start falls straight through to ordinary break-rounding below.
     const open = await getOpenEntry(d.employeeId);
-    let matchedFixedEnd = false;
-    if (open?.entry_type === "break") {
-      const { rows: itemRows } = await pool.query(
-        `select bpi.end_time, bpi.fixed_end_window_minutes,
-                to_char(te.scheduled_break_date, 'YYYY-MM-DD') as scheduled_break_date
-         from time_entries te
-         join break_profile_items bpi on bpi.id = te.break_profile_item_id
-         where te.id = $1`,
-        [open.id]
-      );
-      const row = itemRows[0];
-      if (row) {
-        const [y, mo, da] = (row.scheduled_break_date as string).split("-").map(Number);
-        const [eh, em, es] = parseTimeParts(row.end_time);
-        const scheduledEnd = zonedWallTimeToUtc(y, mo, da, eh, em, es);
-        const windowMs = row.fixed_end_window_minutes * 60 * 1000;
-        if (Math.abs(now.getTime() - scheduledEnd.getTime()) <= windowMs) {
-          // Never let the scheduled end land at or before the break's own
-          // start — this guard was previously MISSING here (unlike the
-          // general rounding path just below, which always had it), and a
-          // scheduled end time earlier than the break's actual start
-          // produced a physically impossible negative-duration row (see
-          // migration 040). Same two-step fallback as every other
-          // rounding guard in this file.
-          const floor = new Date(open.started_at).getTime();
-          let guardedEnd = scheduledEnd;
-          if (guardedEnd.getTime() <= floor) guardedEnd = originalTap;
-          if (guardedEnd.getTime() <= floor) guardedEnd = new Date(floor + 1000);
-          overrides.startedAt = guardedEnd;
-          matchedFixedEnd = true;
-        }
-      }
-    }
-
-    // No fixed-item end match — apply the employee's own break-rounding
-    // setting instead, if enabled (see 037_break_rounding.sql). Always
-    // explicitly resolved to a concrete value here (never left unset to
-    // fall through to openEntry()'s own `coalesce($3, now())` default) so
-    // this closing boundary and actualEndedAt above are built from the
-    // exact same JS Date — otherwise a JS-vs-Postgres now() skew of a few
-    // milliseconds could make an unrounded break look "Rounded" on the
-    // Inputs page for no real reason.
-    if (open?.entry_type === "break" && !matchedFixedEnd) {
+    const fixedEnd = open ? await resolveFixedBreakCloseBoundary(pool, open.id, open.entry_type) : null;
+    if (open?.entry_type === "break" && fixedEnd) {
+      // Never let the scheduled end land at or before the break's own
+      // start — a scheduled end time earlier than the break's actual start
+      // would otherwise produce a physically impossible negative-duration
+      // row (see migration 040).
+      overrides.startedAt = applyBreakBoundaryFloor(fixedEnd, new Date(open.started_at), originalTap);
+    } else if (open?.entry_type === "break") {
+      // No fixed-item end match — apply the employee's own break-rounding
+      // setting instead, if enabled (see 037_break_rounding.sql). Always
+      // explicitly resolved to a concrete value here (never left unset to
+      // fall through to openEntry()'s own `coalesce($3, now())` default) so
+      // this closing boundary and actualEndedAt above are built from the
+      // exact same JS Date — otherwise a JS-vs-Postgres now() skew of a few
+      // milliseconds could make an unrounded break look "Rounded" on the
+      // Inputs page for no real reason.
       let effectiveEnd = originalTap;
       const settings = await loadBreakRoundingSettings(d.employeeId);
       if (settings?.enabled) {
         effectiveEnd = roundBreak(originalTap, settings.intervalMinutes, settings.direction);
       }
       // Never let the break's end land at or before its own start — same
-      // short-workday guard (and the same two-step fallback) as end-day's
-      // work-end rounding. Enforced unconditionally, not just when
-      // break-end rounding is enabled: this break's own started_at can
-      // itself be a clockwise-break-rounded instant still in the future
-      // relative to `originalTap` (break-start rounding, above), so even
-      // the exact unrounded tap isn't guaranteed to clear it — the second
-      // fallback guarantees a strictly positive duration regardless.
-      const floor = new Date(open.started_at).getTime();
-      if (effectiveEnd.getTime() <= floor) effectiveEnd = originalTap;
-      if (effectiveEnd.getTime() <= floor) effectiveEnd = new Date(floor + 1000);
-      overrides.startedAt = effectiveEnd;
+      // short-workday guard as end-day's work-end rounding. Enforced
+      // unconditionally, not just when break-end rounding is enabled: this
+      // break's own started_at can itself be a clockwise-break-rounded
+      // instant still in the future relative to `originalTap` (break-start
+      // rounding, above), so even the exact unrounded tap isn't guaranteed
+      // to clear it.
+      overrides.startedAt = applyBreakBoundaryFloor(effectiveEnd, new Date(open.started_at), originalTap);
     }
 
     await openEntry(d.employeeId, d.id, "work", resumeActivityId, idempotencyKey, overrides);
@@ -1439,7 +1368,8 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
         return { status: "permanent_conflict", conflictReason: validation.error };
       }
 
-      const wasIdle = (await getOpenEntryExcluding(employeeId, event.clientEventId)) === null;
+      const currentlyOpen = await getOpenEntryExcluding(employeeId, event.clientEventId);
+      const wasIdle = currentlyOpen === null;
       // Unlike the direct POST /time-entries/work route (where a client
       // submits within roughly a network round trip of the real tap, so
       // falling through to openEntry()'s own now()-default when rounding
@@ -1462,37 +1392,37 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
           const rounded = roundWorkStart(original, settings.intervalMinutes, settings.direction);
           overrides = { ...overrides, startedAt: rounded, actualStartedAt: original };
         }
+      } else if (currentlyOpen!.entry_type === "break") {
+        // Same rule as the direct POST /time-entries/work route and the
+        // dedicated End Break action: closing a break bound to a fixed
+        // schedule item — however that closing happens — always uses that
+        // break's configured end time.
+        const fixedEnd = await resolveFixedBreakCloseBoundary(pool, currentlyOpen!.id, "break");
+        if (fixedEnd) {
+          overrides.startedAt = applyBreakBoundaryFloor(fixedEnd, new Date(currentlyOpen!.started_at), original);
+        }
       }
       const entry = await openEntry(employeeId, deviceId, "work", event.activityId, event.clientEventId, overrides);
       return { status: "accepted", timeEntryId: entry.id, conflictReason: entry.boundaryNote ?? null };
     }
     case "break_start": {
+      // Same anchoring as POST /time-entries/break/start: matching is
+      // always decided against the event's own real occurrence time, never
+      // whenever this sync request happens to be processed — see
+      // resolveStartBreakMatch's own header for why (this is precisely the
+      // path a delayed/out-of-order offline sync replays through).
       const originalTap = resolveOriginalStartedAt(event.occurredAtUtc, now);
-      const todayLocal = calendarDateInAppTimezone(now);
-      const [y, mo, da] = todayLocal.split("-").map(Number);
-      const fixedItems = await loadActiveFixedItems(employeeId);
+      const match = await resolveStartBreakMatch(pool, employeeId, originalTap);
 
-      let match: { item: FixedItem; scheduledStart: Date } | null = null;
-      for (const item of fixedItems) {
-        const [sh, sm, ss] = parseTimeParts(item.start_time);
-        const scheduledStart = zonedWallTimeToUtc(y, mo, da, sh, sm, ss);
-        const windowMs = item.fixed_start_window_minutes * 60 * 1000;
-        const distance = Math.abs(now.getTime() - scheduledStart.getTime());
-        if (distance > windowMs) continue;
-        if (!match || distance < Math.abs(now.getTime() - match.scheduledStart.getTime())) {
-          match = { item, scheduledStart };
-        }
-      }
-
-      let overrides: OpenEntryOverrides = {};
+      let overrides: OpenEntryOverrides;
       if (match) {
         overrides = {
           startedAt: match.scheduledStart,
           actualStartedAt: originalTap,
           breakProfileItemId: match.item.id,
-          scheduledBreakDate: todayLocal,
+          scheduledBreakDate: match.scheduledDateLocal,
           source: "manual",
-          isPaid: match.item.is_paid,
+          isPaid: match.item.isPaid,
         };
       } else {
         // Same anchoring fix as work_start/activity_switch above: always
@@ -1505,9 +1435,7 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
           let rounded = roundBreak(originalTap, settings.intervalMinutes, settings.direction);
           const currentlyOpen = await getOpenEntry(employeeId);
           if (currentlyOpen) {
-            const floor = new Date(currentlyOpen.started_at).getTime();
-            if (rounded.getTime() <= floor) rounded = originalTap;
-            if (rounded.getTime() <= floor) rounded = new Date(floor + 1000);
+            rounded = applyBreakBoundaryFloor(rounded, new Date(currentlyOpen.started_at), originalTap);
           }
           overrides = { startedAt: rounded, actualStartedAt: originalTap };
         }
@@ -1548,43 +1476,21 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
         densitySnapshot: { densityType: resumeDensityType, densityCountPerRow: resumeDensityCountPerRow },
       };
 
+      // Same unconditional rule as POST /time-entries/break/end: once
+      // Start Break matched a fixed item, End Break (however/whenever it's
+      // tapped or synced) always uses that item's configured end time, no
+      // separate window and no re-matching against any other item.
       const open = await getOpenEntry(employeeId);
-      let matchedFixedEnd = false;
-      if (open?.entry_type === "break") {
-        const { rows: itemRows } = await pool.query(
-          `select bpi.end_time, bpi.fixed_end_window_minutes,
-                  to_char(te.scheduled_break_date, 'YYYY-MM-DD') as scheduled_break_date
-           from time_entries te
-           join break_profile_items bpi on bpi.id = te.break_profile_item_id
-           where te.id = $1`,
-          [open.id]
-        );
-        const row = itemRows[0];
-        if (row) {
-          const [y, mo, da] = (row.scheduled_break_date as string).split("-").map(Number);
-          const [eh, em, es] = parseTimeParts(row.end_time);
-          const scheduledEnd = zonedWallTimeToUtc(y, mo, da, eh, em, es);
-          const windowMs = row.fixed_end_window_minutes * 60 * 1000;
-          if (Math.abs(now.getTime() - scheduledEnd.getTime()) <= windowMs) {
-            const floor = new Date(open.started_at).getTime();
-            let guardedEnd = scheduledEnd;
-            if (guardedEnd.getTime() <= floor) guardedEnd = originalTap;
-            if (guardedEnd.getTime() <= floor) guardedEnd = new Date(floor + 1000);
-            overrides.startedAt = guardedEnd;
-            matchedFixedEnd = true;
-          }
-        }
-      }
-      if (open?.entry_type === "break" && !matchedFixedEnd) {
+      const fixedEnd = open ? await resolveFixedBreakCloseBoundary(pool, open.id, open.entry_type) : null;
+      if (open?.entry_type === "break" && fixedEnd) {
+        overrides.startedAt = applyBreakBoundaryFloor(fixedEnd, new Date(open.started_at), originalTap);
+      } else if (open?.entry_type === "break") {
         let effectiveEnd = originalTap;
         const settings = await loadBreakRoundingSettings(employeeId);
         if (settings?.enabled) {
           effectiveEnd = roundBreak(originalTap, settings.intervalMinutes, settings.direction);
         }
-        const floor = new Date(open.started_at).getTime();
-        if (effectiveEnd.getTime() <= floor) effectiveEnd = originalTap;
-        if (effectiveEnd.getTime() <= floor) effectiveEnd = new Date(floor + 1000);
-        overrides.startedAt = effectiveEnd;
+        overrides.startedAt = applyBreakBoundaryFloor(effectiveEnd, new Date(open.started_at), originalTap);
       }
 
       const entry = await openEntry(employeeId, deviceId, "work", resumeActivityId, event.clientEventId, overrides);

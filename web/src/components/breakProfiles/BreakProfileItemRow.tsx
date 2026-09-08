@@ -94,31 +94,13 @@ export function BreakProfileItemRow({
             Fixed Break
           </label>
           <p className="field-hint">
-            When an employee starts or ends a break near this scheduled time, LabourLink records the scheduled start
-            and end time instead of the exact tap time.
+            The configured start and end time are the authoritative record — an employee's tap only confirms the
+            scheduled break happened, it never changes the recorded times. Example: a Lunch Break scheduled 12:00
+            PM–1:00 PM records exactly 12:00 PM–1:00 PM no matter when the employee taps, as long as each tap falls
+            somewhere inside that window — Start Break anytime between 12:00 PM and 1:00 PM records 12:00 PM, and End
+            Break anytime after that records 1:00 PM. A tap at 12:02 PM and another at 12:58 PM still produce
+            12:00 PM–1:00 PM.
           </p>
-          {item.fixedBreak && (
-            <div className="break-item-window-fields">
-              <label>
-                Start window (± minutes)
-                <input
-                  type="number"
-                  min={0}
-                  value={item.fixedStartWindowMinutes}
-                  onChange={(e) => onChange({ fixedStartWindowMinutes: Math.max(0, Number(e.target.value) || 0) })}
-                />
-              </label>
-              <label>
-                End window (± minutes)
-                <input
-                  type="number"
-                  min={0}
-                  value={item.fixedEndWindowMinutes}
-                  onChange={(e) => onChange({ fixedEndWindowMinutes: Math.max(0, Number(e.target.value) || 0) })}
-                />
-              </label>
-            </div>
-          )}
         </div>
 
         <div className="break-item-toggle-group">

@@ -48,8 +48,6 @@ interface ItemInput {
   isPaid: boolean;
   fixedBreak: boolean;
   autoAdd: boolean;
-  fixedStartWindowMinutes: number;
-  fixedEndWindowMinutes: number;
 }
 
 // Validates a full scheduled-break list: at least one row, each with a
@@ -82,16 +80,6 @@ function validateItems(raw: unknown): { error: string } | { items: ItemInput[] }
     }
     seen.add(key);
 
-    const fixedStartWindowMinutes =
-      it.fixedStartWindowMinutes != null ? Number(it.fixedStartWindowMinutes) : 10;
-    const fixedEndWindowMinutes = it.fixedEndWindowMinutes != null ? Number(it.fixedEndWindowMinutes) : 10;
-    if (!Number.isInteger(fixedStartWindowMinutes) || fixedStartWindowMinutes < 0) {
-      return { error: `Scheduled break ${i + 1}: fixed start window must be a non-negative whole number` };
-    }
-    if (!Number.isInteger(fixedEndWindowMinutes) || fixedEndWindowMinutes < 0) {
-      return { error: `Scheduled break ${i + 1}: fixed end window must be a non-negative whole number` };
-    }
-
     const id = typeof it.id === "string" && UUID_RE.test(it.id) ? it.id : null;
 
     items.push({
@@ -102,8 +90,6 @@ function validateItems(raw: unknown): { error: string } | { items: ItemInput[] }
       isPaid: Boolean(it.isPaid),
       fixedBreak: Boolean(it.fixedBreak),
       autoAdd: Boolean(it.autoAdd),
-      fixedStartWindowMinutes,
-      fixedEndWindowMinutes,
     });
   }
 
@@ -140,41 +126,17 @@ async function upsertItems(client: PoolClient, breakProfileId: string, items: It
       await client.query(
         `update break_profile_items
          set name = $1, start_time = $2, end_time = $3, is_paid = $4, fixed_break = $5, auto_add = $6,
-             fixed_start_window_minutes = $7, fixed_end_window_minutes = $8, sort_order = $9, updated_at = now()
-         where id = $10`,
-        [
-          it.name,
-          it.startTime,
-          it.endTime,
-          it.isPaid,
-          it.fixedBreak,
-          it.autoAdd,
-          it.fixedStartWindowMinutes,
-          it.fixedEndWindowMinutes,
-          i,
-          it.id,
-        ]
+             sort_order = $7, updated_at = now()
+         where id = $8`,
+        [it.name, it.startTime, it.endTime, it.isPaid, it.fixedBreak, it.autoAdd, i, it.id]
       );
     } else {
       const { rows } = await client.query(
         `insert into break_profile_items
-           (id, break_profile_id, name, start_time, end_time, is_paid, fixed_break, auto_add,
-            fixed_start_window_minutes, fixed_end_window_minutes, sort_order)
-         values (coalesce($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           (id, break_profile_id, name, start_time, end_time, is_paid, fixed_break, auto_add, sort_order)
+         values (coalesce($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9)
          returning id`,
-        [
-          it.id,
-          breakProfileId,
-          it.name,
-          it.startTime,
-          it.endTime,
-          it.isPaid,
-          it.fixedBreak,
-          it.autoAdd,
-          it.fixedStartWindowMinutes,
-          it.fixedEndWindowMinutes,
-          i,
-        ]
+        [it.id, breakProfileId, it.name, it.startTime, it.endTime, it.isPaid, it.fixedBreak, it.autoAdd, i]
       );
       keptIds.add(rows[0].id as string);
     }
@@ -210,8 +172,6 @@ const LIST_SELECT = `
              'isPaid', bpi.is_paid,
              'fixedBreak', bpi.fixed_break,
              'autoAdd', bpi.auto_add,
-             'fixedStartWindowMinutes', bpi.fixed_start_window_minutes,
-             'fixedEndWindowMinutes', bpi.fixed_end_window_minutes,
              'sortOrder', bpi.sort_order,
              'durationSeconds', extract(epoch from (bpi.end_time - bpi.start_time))::int
            ) order by bpi.sort_order) as items,

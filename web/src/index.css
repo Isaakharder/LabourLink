@@ -3226,30 +3226,6 @@ input {
   margin: 0;
 }
 
-.break-item-window-fields {
-  display: flex;
-  gap: 0.75rem;
-  margin-top: 0.2rem;
-}
-
-.break-item-window-fields label {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  font-size: 0.75rem;
-  color: var(--color-muted);
-}
-
-.break-item-window-fields input {
-  width: 70px;
-  padding: 0.35rem 0.5rem;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  font-size: 0.85rem;
-  font-family: inherit;
-  color: var(--color-text);
-}
-
 .break-item-row-remove {
   grid-area: remove;
   align-self: start;

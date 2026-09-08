@@ -231,7 +231,8 @@ async function main() {
 
     async function fetchEntry(id: string) {
       const { rows } = await pool.query(
-        `select started_at, actual_started_at, ended_at, actual_ended_at from time_entries where id = $1`,
+        `select started_at, actual_started_at, ended_at, actual_ended_at, break_profile_item_id, is_paid
+         from time_entries where id = $1`,
         [id]
       );
       return rows[0];
@@ -239,7 +240,7 @@ async function main() {
 
     async function fetchOpenEntry() {
       const { rows } = await pool.query(
-        `select id, entry_type, started_at, actual_started_at, ended_at, actual_ended_at
+        `select id, entry_type, started_at, actual_started_at, ended_at, actual_ended_at, break_profile_item_id, is_paid
          from time_entries where employee_id = $1 and ended_at is null and deleted_at is null`,
         [target!.id]
       );
@@ -429,22 +430,26 @@ async function main() {
 
     // -----------------------------------------------------------------
     // F) A break matched to a scheduled fixed-break item keeps its exact
-    //    existing snap-to-schedule behavior — break rounding is never
-    //    layered on top of it.
+    //    snap-to-schedule behavior on BOTH ends — break rounding is never
+    //    layered on top of it. This is the canonical example from the
+    //    product spec: a 12:00 PM-1:00 PM Lunch Break, tapped at 12:02 PM
+    //    and 12:58 PM (both comfortably inside the window, not at the
+    //    boundary — see F2 for the exact-boundary cases), must still
+    //    record exactly 12:00 PM-1:00 PM.
     // -----------------------------------------------------------------
     {
       // Interval deliberately large and directionally certain to move the
       // value if (incorrectly) applied on top of the fixed-item match.
       await setBreakRounding(true, "clockwise", 30);
-      const now = new Date();
-      const scheduledStart = timeOfDayStr(now); // matches "now" essentially exactly
-      const scheduledEnd = timeOfDayStr(new Date(now.getTime() + 60 * 60000));
+      const scheduledStartInstant = new Date(Date.now() - 2 * 60000); // "12:00 PM" — tap arrives 2 minutes in
+      const scheduledEndInstant = new Date(scheduledStartInstant.getTime() + 60 * 60000); // "1:00 PM"
+      const scheduledStart = timeOfDayStr(scheduledStartInstant);
+      const scheduledEnd = timeOfDayStr(scheduledEndInstant);
       const fixedItem = (
         await pool.query(
           `insert into break_profile_items
-             (break_profile_id, name, start_time, end_time, is_paid, fixed_break, auto_add,
-              fixed_start_window_minutes, fixed_end_window_minutes, sort_order, is_active)
-           values ($1, $2, $3, $4, false, true, false, 60, 60, 0, true)
+             (break_profile_id, name, start_time, end_time, is_paid, fixed_break, auto_add, sort_order, is_active)
+           values ($1, $2, $3, $4, false, true, false, 0, true)
            returning id`,
           [profile!.id, `QA BR Fixed Item ${RUN_ID}`, scheduledStart, scheduledEnd]
         )
@@ -455,6 +460,8 @@ async function main() {
         const workStart = new Date(Date.now() - 60 * 60000);
         await openWorkEntry(workStart, deviceIds[deviceIds.length - 1]);
 
+        // Tap 1: "12:02 PM" — 2 minutes after the scheduled start, still
+        // comfortably inside [12:00 PM, 1:00 PM).
         const res = await callDevice("POST", "/api/mobile/time-entries/break/start", deviceIdentifier, {
           idempotencyKey: randomUUID(),
         });
@@ -466,9 +473,7 @@ async function main() {
           "F) the break was recorded",
           openBreak
         );
-        // The fixed-item match snaps started_at to the scheduled time
-        // (wall-clock HH:MM:SS combined with today's date) — not to
-        // whatever break-rounding-on-the-raw-tap would have produced.
+        check(openBreak.break_profile_item_id === fixedItem.id, "F) the break is tagged to the fixed item", openBreak);
         // Comparing wall-clock-time-of-day (rather than an exact instant)
         // sidesteps any residual clock skew between "now" captured here
         // and the one the server captured when the request was handled.
@@ -477,14 +482,175 @@ async function main() {
         const startedTimeOfDay = `${pad(startedParts.hour)}:${pad(startedParts.minute)}:${pad(startedParts.second)}`;
         check(
           startedTimeOfDay === scheduledStart,
-          "F) a fixed-item match snaps to the exact scheduled time, unaffected by break rounding",
+          "F) a fixed-item match snaps the START to the exact scheduled time (12:00 PM), unaffected by break rounding, even though the tap itself was at 12:02 PM",
           { startedTimeOfDay, scheduledStart }
         );
 
-        await callDevice("POST", "/api/mobile/time-entries/break/end", deviceIdentifier, { idempotencyKey: randomUUID() });
+        // Tap 2: "12:58 PM" — 2 minutes before the scheduled end, still
+        // comfortably inside the window on the end side too.
+        const endRes = await callDevice("POST", "/api/mobile/time-entries/break/end", deviceIdentifier, {
+          idempotencyKey: randomUUID(),
+        });
+        check(endRes.status === 200, "F) break/end succeeds", endRes.body);
+        const closedBreak = await fetchEntry(openBreak.id);
+        const endedParts = zonedWallTimeParts(new Date(closedBreak.ended_at));
+        const endedTimeOfDay = `${pad(endedParts.hour)}:${pad(endedParts.minute)}:${pad(endedParts.second)}`;
+        check(
+          endedTimeOfDay === scheduledEnd,
+          "F) End Break snaps the END to the exact scheduled time (1:00 PM), unaffected by break rounding, even though the tap itself was at 12:58 PM — never a separate end-side window",
+          { endedTimeOfDay, scheduledEnd }
+        );
+        check(
+          closedBreak.is_paid === false,
+          "F) is_paid comes from the configured break (false here), never from the device",
+          closedBreak
+        );
       } finally {
         await pool.query(`update break_profile_items set is_active = false where id = $1`, [fixedItem.id]);
       }
+    }
+
+    // -----------------------------------------------------------------
+    // F2) Exact-boundary taps: Start Break AT the configured start instant,
+    //     and End Break AT the configured end instant, both still match
+    //     (containment is [start, end) on the low side and the end itself
+    //     is always reachable — see resolveStartBreakMatch's own
+    //     half-open-interval comment).
+    // -----------------------------------------------------------------
+    {
+      await setBreakRounding(true, "clockwise", 30);
+      const scheduledStartInstant = new Date(Date.now() + 500); // fires almost immediately
+      const scheduledEndInstant = new Date(scheduledStartInstant.getTime() + 45 * 60000);
+      const fixedItem = (
+        await pool.query(
+          `insert into break_profile_items
+             (break_profile_id, name, start_time, end_time, is_paid, fixed_break, auto_add, sort_order, is_active)
+           values ($1, $2, $3, $4, true, true, false, 0, true)
+           returning id`,
+          [profile!.id, `QA BR Exact Boundary Item ${RUN_ID}`, timeOfDayStr(scheduledStartInstant), timeOfDayStr(scheduledEndInstant)]
+        )
+      ).rows[0];
+
+      try {
+        const deviceIdentifier = await pairDevice();
+        await openWorkEntry(new Date(Date.now() - 60 * 60000), deviceIds[deviceIds.length - 1]);
+
+        // Wait until we're at (or a hair past) the exact scheduled start.
+        await new Promise((r) => setTimeout(r, Math.max(0, scheduledStartInstant.getTime() - Date.now()) + 50));
+        const res = await callDevice("POST", "/api/mobile/time-entries/break/start", deviceIdentifier, {
+          idempotencyKey: randomUUID(),
+        });
+        check(res.status === 200, "F2) break/start at the exact scheduled boundary succeeds", res.body);
+        const openBreak = await fetchOpenEntry();
+        check(
+          openBreak.break_profile_item_id === fixedItem.id,
+          "F2) a tap essentially exactly at the scheduled start still matches",
+          openBreak
+        );
+
+        const endRes = await callDevice("POST", "/api/mobile/time-entries/break/end", deviceIdentifier, {
+          idempotencyKey: randomUUID(),
+        });
+        check(endRes.status === 200, "F2) break/end (well before the scheduled end) succeeds", endRes.body);
+        const closedBreak = await fetchEntry(openBreak.id);
+        const endedParts = zonedWallTimeParts(new Date(closedBreak.ended_at));
+        const pad = (n: number) => String(n).padStart(2, "0");
+        const endedTimeOfDay = `${pad(endedParts.hour)}:${pad(endedParts.minute)}:${pad(endedParts.second)}`;
+        check(
+          endedTimeOfDay === timeOfDayStr(scheduledEndInstant),
+          "F2) End Break still records the full configured end time even though the tap itself came much earlier",
+          { endedTimeOfDay, expected: timeOfDayStr(scheduledEndInstant) }
+        );
+      } finally {
+        await pool.query(`update break_profile_items set is_active = false where id = $1`, [fixedItem.id]);
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // F3) "Only one instance of each scheduled break may be added per
+    //     employee/date": a second Start Break tap that falls inside the
+    //     SAME already-used fixed item's window on the SAME date must not
+    //     create a second scheduled-matched instance — it falls through to
+    //     ordinary (non-scheduled) break handling instead, exactly as if
+    //     nothing had matched.
+    // -----------------------------------------------------------------
+    {
+      await setBreakRounding(false, "clockwise", 15);
+      const scheduledStartInstant = new Date(Date.now() - 5 * 60000);
+      const scheduledEndInstant = new Date(scheduledStartInstant.getTime() + 60 * 60000);
+      const fixedItem = (
+        await pool.query(
+          `insert into break_profile_items
+             (break_profile_id, name, start_time, end_time, is_paid, fixed_break, auto_add, sort_order, is_active)
+           values ($1, $2, $3, $4, true, true, false, 0, true)
+           returning id`,
+          [profile!.id, `QA BR Duplicate Item ${RUN_ID}`, timeOfDayStr(scheduledStartInstant), timeOfDayStr(scheduledEndInstant)]
+        )
+      ).rows[0];
+
+      try {
+        const deviceIdentifier = await pairDevice();
+        await openWorkEntry(new Date(Date.now() - 90 * 60000), deviceIds[deviceIds.length - 1]);
+
+        // First tap: matches and consumes today's instance of this item.
+        await callDevice("POST", "/api/mobile/time-entries/break/start", deviceIdentifier, { idempotencyKey: randomUUID() });
+        const firstBreak = await fetchOpenEntry();
+        check(firstBreak.break_profile_item_id === fixedItem.id, "F3) the first tap matches the fixed item", firstBreak);
+        await callDevice("POST", "/api/mobile/time-entries/break/end", deviceIdentifier, { idempotencyKey: randomUUID() });
+
+        // Second tap, still well inside the same window on the same date —
+        // must NOT match again (the item is already used for today).
+        const secondRes = await callDevice("POST", "/api/mobile/time-entries/break/start", deviceIdentifier, {
+          idempotencyKey: randomUUID(),
+        });
+        check(secondRes.status === 200, "F3) a duplicate tap inside the same window still succeeds (as an ordinary break)", secondRes.body);
+        const secondBreak = await fetchOpenEntry();
+        check(
+          secondBreak.break_profile_item_id === null,
+          "F3) the duplicate tap does NOT re-match the already-used fixed item — it's recorded as an ordinary, unscheduled break",
+          secondBreak
+        );
+        await callDevice("POST", "/api/mobile/time-entries/break/end", deviceIdentifier, { idempotencyKey: randomUUID() });
+
+        const { rows: matchedCount } = await pool.query(
+          `select count(*)::int as n from time_entries where employee_id = $1 and break_profile_item_id = $2 and deleted_at is null`,
+          [target!.id, fixedItem.id]
+        );
+        check(matchedCount[0].n === 1, "F3) exactly one instance of this scheduled break exists for the employee/date", matchedCount[0]);
+      } finally {
+        await pool.query(`update break_profile_items set is_active = false where id = $1`, [fixedItem.id]);
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // F4) Custom/unscheduled breaks retain their actual punch times: a tap
+    //     that falls outside every configured fixed item's window is
+    //     recorded with no break_profile_item_id and (rounding disabled,
+    //     as set here) the exact raw tap times.
+    // -----------------------------------------------------------------
+    {
+      await setBreakRounding(false, "clockwise", 15);
+      const deviceIdentifier = await pairDevice();
+      await openWorkEntry(new Date(Date.now() - 60 * 60000), deviceIds[deviceIds.length - 1]);
+
+      const res = await callDevice("POST", "/api/mobile/time-entries/break/start", deviceIdentifier, {
+        idempotencyKey: randomUUID(),
+      });
+      check(res.status === 200, "F4) break/start with no fixed item configured on the profile succeeds", res.body);
+      const openBreak = await fetchOpenEntry();
+      check(openBreak.break_profile_item_id === null, "F4) no fixed item is matched", openBreak);
+      check(openBreak.actual_started_at === null, "F4) no rounding audit trail — the raw tap IS the recorded time", openBreak);
+
+      await callDevice("POST", "/api/mobile/time-entries/break/end", deviceIdentifier, { idempotencyKey: randomUUID() });
+      const closedBreak = await fetchEntry(openBreak.id);
+      // actual_ended_at is always recorded (see scenario A above), but with
+      // rounding disabled it's exactly equal to ended_at — no rounding was
+      // actually applied, so the "Rounded" badge correctly never fires.
+      check(
+        new Date(closedBreak.actual_ended_at).getTime() === new Date(closedBreak.ended_at).getTime(),
+        "F4) same for the end — no scheduled match and no rounding, so the raw tap IS the recorded time",
+        closedBreak
+      );
     }
 
     // -----------------------------------------------------------------
@@ -999,6 +1165,17 @@ async function main() {
     await tryDelete("time_entry_corrections", () =>
       pool.query(
         `delete from time_entry_corrections where employee_id in (select id from employees where email like $1)`,
+        [`qa-br-%-${RUN_ID}@test.local`]
+      )
+    );
+    // A boundary-collapse "different kind of entry" transition (see
+    // openEntry's own PRE_ROUNDING_VOID_REASON branch in mobileTime.ts) can
+    // soft-delete a zero-duration placeholder and record it here — must be
+    // cleared before the referencing time_entries rows and employees below,
+    // or their deletes fail on this FK.
+    await tryDelete("time_entry_deletions", () =>
+      pool.query(
+        `delete from time_entry_deletions where employee_id in (select id from employees where email like $1)`,
         [`qa-br-%-${RUN_ID}@test.local`]
       )
     );

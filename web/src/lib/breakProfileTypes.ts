@@ -6,8 +6,6 @@ export interface BreakProfileItem {
   isPaid: boolean;
   fixedBreak: boolean;
   autoAdd: boolean;
-  fixedStartWindowMinutes: number;
-  fixedEndWindowMinutes: number;
   sortOrder: number;
   durationSeconds: number;
 }
@@ -61,6 +59,4 @@ export interface BreakProfileItemDraft {
   isPaid: boolean;
   fixedBreak: boolean;
   autoAdd: boolean;
-  fixedStartWindowMinutes: number;
-  fixedEndWindowMinutes: number;
 }

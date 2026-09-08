@@ -1,0 +1,50 @@
+-- Fixed-break matching is replaced: a Start Break tap now matches a
+-- configured scheduled break by INTERVAL CONTAINMENT (the tap falls within
+-- [start_time, end_time)) rather than by proximity to start_time alone
+-- within an independently configured number of minutes; once matched, End
+-- Break always uses that SAME break's configured end_time unconditionally
+-- (no separate end-side window, no re-matching against another item — see
+-- server/src/lib/fixedBreakMatching.ts).
+--
+-- fixed_start_window_minutes / fixed_end_window_minutes are NOT dropped
+-- here, deliberately: the new application code never reads or writes them,
+-- but during Railway's rolling deploy, OLD server instances (still running
+-- the previous code, which does read/write them) may still be serving
+-- traffic against this same database for a brief window after this
+-- migration applies. Dropping the columns now would break every one of
+-- those still-running old instances outright. They stay in place, unused,
+-- until a later cleanup migration removes them once the new code is fully
+-- rolled out and verified.
+--
+-- BEFORE applying this migration to production, run the read-only preflight
+-- query at server/scripts/052_duplicate_scheduled_break_preflight.sql to
+-- confirm no existing (employee_id, break_profile_item_id,
+-- scheduled_break_date) tuple already has more than one live manual match —
+-- if one exists, this CREATE UNIQUE INDEX fails outright and the migration
+-- aborts (it's a single statement in one transaction, so nothing partial is
+-- left behind either way, but better to know in advance than to discover it
+-- at deploy time).
+--
+-- Not CREATE INDEX CONCURRENTLY: this repo's migration runner
+-- (server/src/migrate.ts) wraps every migration file in one transaction,
+-- and CONCURRENTLY cannot run inside a transaction block at all. A plain
+-- CREATE UNIQUE INDEX takes a SHARE lock on time_entries for the duration
+-- of the build, which blocks concurrent WRITES (not reads) to the table
+-- until it completes — on this table's actual size that's expected to be
+-- well under a second, but the rollout order should still apply this
+-- during a low-traffic window as a matter of course, not because it's
+-- known to be slow.
+--
+-- "Only one instance of each scheduled break may be added per
+-- employee/date" was previously enforced only for auto-added rows
+-- (idx_time_entries_auto_break_once, migration 010) — a manual (mobile-tap)
+-- match to a fixed item had no equivalent database-level guarantee, relying
+-- solely on application logic. Scoped to source = 'manual' specifically so
+-- this is purely additive: it can never conflict with, or change the
+-- behavior of, the existing auto-break index above. Excludes soft-deleted
+-- rows, matching the existing "already_exists" duplicate check in
+-- inputs.ts's Add Break route — deleting a mistaken match frees the
+-- scheduled slot for that date again.
+create unique index idx_time_entries_manual_scheduled_break_once
+  on time_entries (employee_id, break_profile_item_id, scheduled_break_date)
+  where source = 'manual' and break_profile_item_id is not null and deleted_at is null;

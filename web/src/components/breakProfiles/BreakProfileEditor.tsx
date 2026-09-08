@@ -29,8 +29,6 @@ function toDraftItem(item: BreakProfileItem): BreakProfileItemDraft {
     isPaid: item.isPaid,
     fixedBreak: item.fixedBreak,
     autoAdd: item.autoAdd,
-    fixedStartWindowMinutes: item.fixedStartWindowMinutes,
-    fixedEndWindowMinutes: item.fixedEndWindowMinutes,
   };
 }
 
@@ -43,8 +41,6 @@ function blankItem(): BreakProfileItemDraft {
     isPaid: false,
     fixedBreak: false,
     autoAdd: false,
-    fixedStartWindowMinutes: 10,
-    fixedEndWindowMinutes: 10,
   };
 }
 
@@ -229,8 +225,6 @@ export function BreakProfileEditor({ profileId, onSaved, onCancel }: BreakProfil
         isPaid: it.isPaid,
         fixedBreak: it.fixedBreak,
         autoAdd: it.autoAdd,
-        fixedStartWindowMinutes: it.fixedStartWindowMinutes,
-        fixedEndWindowMinutes: it.fixedEndWindowMinutes,
       })),
     };
 
@@ -414,9 +408,10 @@ export function BreakProfileEditor({ profileId, onSaved, onCancel }: BreakProfil
         <h3>Break rounding</h3>
         <p className="field-hint">
           When enabled, both starting a break and returning from one are rounded to the nearest scheduled interval —
-          for a scheduled break the employee taps within its configured window, the existing exact schedule match
-          still applies instead. Activity changes and manual corrections on the Inputs page are never affected.
-          Independent of work-start and work-end rounding above — enabling one does not enable or affect the others.
+          for a break the employee taps somewhere inside a Fixed Break's own configured start/end time, that exact
+          schedule always applies instead (see "Fixed Break" below). Activity changes and manual corrections on the
+          Inputs page are never affected. Independent of work-start and work-end rounding above — enabling one does
+          not enable or affect the others.
         </p>
         <div className="employee-form-grid">
           <label className="employee-form-checkbox">

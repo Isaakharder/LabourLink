@@ -21,6 +21,23 @@
 //      1000`) into a runaway cascade of ever-advancing, essentially fake
 //      timestamps, one second apart, completely decoupled from real time.
 //
+// Scenario 1 below now documents something stronger than it originally
+// did: under the current fixed-break design (see fixedBreakMatching.ts), a
+// break can only ever be bound to an item whose configured
+// [start_time, end_time) actually contained the real Start Break tap — so
+// scheduledStart < scheduledEnd is guaranteed by construction the moment a
+// match happens (the break's own started_at IS that item's scheduledStart,
+// exactly). chk_break_profile_items_end_after_start additionally makes it
+// impossible to ever reconfigure end_time to fall at or before start_time,
+// even on an UPDATE to an item a break is already using — so the original
+// "the fixed-item end match set an end time before the break's own actual
+// start" trigger is no longer reachable through ANY sequence of actions,
+// not just the one this file originally reproduced. The floor guard
+// (applyBreakBoundaryFloor) stays in place in fixedBreakMatching.ts as
+// defense in depth regardless — cheap, and it's the exact same shared
+// helper the still-fully-reachable general (non-fixed) rounding path below
+// needs unconditionally.
+//
 // Also covers migration 040's new chk_time_entries_ended_after_started
 // constraint — the hard backstop against this class of corruption from
 // ANY code path, known or future.
@@ -153,54 +170,70 @@ async function main() {
     }
 
     // -----------------------------------------------------------------
-    // 1) The missing floor-guard bug: a fixed-break-item's scheduled END
-    //    time can land BEFORE the break's own actual start when the
-    //    break's START was itself rounded significantly forward by the
-    //    GENERAL rounding path (a large clockwise interval, unmatched by
-    //    this item — its own start_time is set hours away so it can't
-    //    match) — must never produce a negative duration; the guard now
-    //    applies the same fallback the general rounding path already had.
+    // 1) The database itself now makes the original bug's trigger
+    //    structurally impossible: an item's end_time can never be edited
+    //    to fall at or before its own start_time, even on an UPDATE to an
+    //    item a break is already using — chk_break_profile_items_end_
+    //    after_start applies unconditionally, not just at row creation.
+    //    Combined with a break's recorded started_at always being exactly
+    //    that item's own start_time (never anything else — see
+    //    resolveStartBreakMatch), this is what guarantees a fixed-matched
+    //    break's scheduled end can never land before its own start.
     // -----------------------------------------------------------------
     {
       const deviceIdentifier = await pairDevice();
-      await setBreakRounding(true, "clockwise", 30); // large interval so break/start rounds well into the future
       const now0 = new Date();
       await openWorkEntry(new Date(now0.getTime() - 60 * 60000), deviceIds[deviceIds.length - 1]);
 
-      // This item's own start_time is 6 hours away (can never match
-      // break/start's 10-minute window — the break's start is decided by
-      // general rounding instead, below), but its end_time is "now" —
-      // squarely inside break/end's 10-minute end window when that call
-      // happens moments later, even though by then the break's own start
-      // has already been rounded up to the next half-hour boundary.
       const itemRes = await pool.query(
-        `insert into break_profile_items (break_profile_id, name, start_time, end_time, is_paid, fixed_break, fixed_start_window_minutes, fixed_end_window_minutes, sort_order, is_active)
-         values ($1, $2, $3, $4, false, true, 10, 10, 0, true) returning id`,
-        [profile!.id, `QA Safety Item ${RUN_ID}`, timeOfDayStr(new Date(now0.getTime() - 6 * 3600000)), timeOfDayStr(now0)]
+        `insert into break_profile_items (break_profile_id, name, start_time, end_time, is_paid, fixed_break, sort_order, is_active)
+         values ($1, $2, $3, $4, false, true, 0, true) returning id`,
+        [
+          profile!.id,
+          `QA Safety Item ${RUN_ID}`,
+          timeOfDayStr(new Date(now0.getTime() - 5 * 60000)),
+          timeOfDayStr(new Date(now0.getTime() + 60 * 60000)),
+        ]
       );
-      itemIds.push(itemRes.rows[0].id);
+      const itemId = itemRes.rows[0].id;
+      itemIds.push(itemId);
 
       const startRes = await callDevice("/api/mobile/time-entries/break/start", deviceIdentifier, { idempotencyKey: randomUUID() });
-      check(startRes.status === 200, "1) break/start (unmatched — general rounding applies) succeeds", startRes.body);
+      check(startRes.status === 200, "1) break/start matches the fixed item", startRes.body);
       const openBreak = await fetchOpenEntry();
       check(openBreak?.entry_type === "break", "1) a break is now open", openBreak);
+
+      // Attempting the exact edit that used to be able to trigger the old
+      // bug (moving this SAME item's end_time to before its own
+      // start_time, while a break it already matched is still open) is
+      // rejected outright by the database, before it can ever reach
+      // mobileTime.ts at all.
+      let rejected = false;
+      try {
+        await pool.query(`update break_profile_items set end_time = $2 where id = $1`, [
+          itemId,
+          timeOfDayStr(new Date(new Date(openBreak.started_at).getTime() - 60000)),
+        ]);
+      } catch (err) {
+        rejected = (err as { code?: string }).code === "23514";
+      }
       check(
-        new Date(openBreak.started_at).getTime() > now0.getTime(),
-        "1) the break's start was rounded forward, past the fixed item's end_time (setting up the conflict)",
-        openBreak
+        rejected,
+        "1) the database itself refuses to let a fixed item's end_time fall before its own start_time, even mid-break",
+        rejected
       );
 
       const endRes = await callDevice("/api/mobile/time-entries/break/end", deviceIdentifier, { idempotencyKey: randomUUID() });
-      check(endRes.status === 200, "1) break/end (fixed-item end match, scheduled end before break start) succeeds", endRes.body);
+      check(endRes.status === 200, "1) break/end still succeeds normally afterward (the rejected edit never applied)", endRes.body);
 
       const closed = await fetchEntry(openBreak.id);
       check(
         new Date(closed.ended_at).getTime() > new Date(closed.started_at).getTime(),
-        "1) the break has a strictly positive duration — never negative, even with an already-past scheduled end",
+        "1) the break has a strictly positive duration and closed at the item's real (unmodified) scheduled end",
         closed
       );
 
-      await pool.query(`update break_profile_items set is_active = false where id = $1`, [itemIds[itemIds.length - 1]]);
+      await pool.query(`update break_profile_items set is_active = false where id = $1`, [itemId]);
     }
 
     // -----------------------------------------------------------------
