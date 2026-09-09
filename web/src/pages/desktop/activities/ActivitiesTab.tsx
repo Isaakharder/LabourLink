@@ -4,6 +4,7 @@ import { Activity } from "../../../lib/activityTypes";
 import { useAuth } from "../../../context/AuthContext";
 import { ActivityFormModal } from "../../../components/activities/ActivityFormModal";
 import { ActivityQuestionsModal } from "../../../components/activities/ActivityQuestionsModal";
+import { ConfirmDialog } from "../../../components/ui/ConfirmDialog";
 
 type StatusFilter = "active" | "inactive" | "all";
 
@@ -44,6 +45,14 @@ export function ActivitiesTab() {
   const [modalActivity, setModalActivity] = useState<Activity | null | "new">(null);
   const [questionsActivity, setQuestionsActivity] = useState<Activity | null>(null);
 
+  // Confirmation for deactivating an activity — kept separate from the
+  // page-level `error` banner above (and from modalActivity/questionsActivity)
+  // since this dialog needs its own submitting/error state, same convention
+  // as InputsPage's pendingDeletion + DeleteTimeEntryModal.
+  const [deactivateTarget, setDeactivateTarget] = useState<Activity | null>(null);
+  const [deactivating, setDeactivating] = useState(false);
+  const [deactivateError, setDeactivateError] = useState<string | null>(null);
+
   const load = useCallback(() => {
     const params = new URLSearchParams();
     if (search.trim()) params.set("search", search.trim());
@@ -65,21 +74,47 @@ export function ActivitiesTab() {
   }, [load, search]);
 
   async function handleToggleActive(activity: Activity) {
+    // Deactivating needs an explicit confirmation (see ConfirmDialog below);
+    // re-activating doesn't — matches the original window.confirm's own
+    // "only prompt when going active -> inactive" behavior.
     if (activity.isActive) {
-      const proceed = window.confirm(
-        `Deactivate "${activity.name}"? It will no longer appear in the mobile activity picker. Historical time entries are unaffected.`
-      );
-      if (!proceed) return;
+      setDeactivateError(null);
+      setDeactivateTarget(activity);
+      return;
     }
     try {
       await api(`/api/activities/${activity.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ isActive: !activity.isActive }),
+        body: JSON.stringify({ isActive: true }),
       });
       load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not update activity");
     }
+  }
+
+  async function handleConfirmDeactivate() {
+    if (!deactivateTarget || deactivating) return;
+    setDeactivating(true);
+    setDeactivateError(null);
+    try {
+      await api(`/api/activities/${deactivateTarget.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ isActive: false }),
+      });
+      setDeactivateTarget(null);
+      load();
+    } catch (err) {
+      setDeactivateError(err instanceof ApiError ? err.message : "Could not update activity");
+    } finally {
+      setDeactivating(false);
+    }
+  }
+
+  function handleCancelDeactivate() {
+    if (deactivating) return;
+    setDeactivateTarget(null);
+    setDeactivateError(null);
   }
 
   function renderActions(activity: Activity) {
@@ -224,6 +259,19 @@ export function ActivitiesTab() {
             setQuestionsActivity(null);
             load();
           }}
+        />
+      )}
+
+      {deactivateTarget && (
+        <ConfirmDialog
+          title="Deactivate activity?"
+          message={`"${deactivateTarget.name}" will no longer appear in the mobile activity picker. Historical time entries will not be affected.`}
+          confirmLabel="Deactivate"
+          confirmingLabel="Deactivating…"
+          submitting={deactivating}
+          error={deactivateError}
+          onConfirm={handleConfirmDeactivate}
+          onCancel={handleCancelDeactivate}
         />
       )}
     </>

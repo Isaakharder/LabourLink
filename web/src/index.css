@@ -2064,6 +2064,16 @@ input {
   flex-direction: column;
 }
 
+/* Opt-in modifier for ConfirmDialog only (see components/ui/ConfirmDialog.tsx)
+   — a subtle border/shadow so a destructive-action confirmation reads as a
+   distinct, deliberate surface floating above the dimmed page, not just
+   another form panel. Left off .modal-panel itself so every other modal's
+   appearance is unaffected. */
+.confirm-dialog-panel {
+  border: 1px solid var(--color-border);
+  box-shadow: 0 12px 32px rgba(15, 18, 25, 0.18);
+}
+
 .modal-panel-wide {
   max-width: 720px;
 }
