@@ -8,7 +8,7 @@ import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { reconcileMidnightCutoff } from "../lib/midnightCutoff";
 import { aggregateDensitySpeed } from "../lib/densitySpeed";
-import { computeWorkdayTotals, WorkdayBoundaryEntry } from "../lib/workdayTotals";
+import { computeWorkdayTotals, groupByEmployeeDay, WorkdayBoundaryEntry } from "../lib/workdayTotals";
 import { getRolloverPriorDurationSeconds, getUnresolvedRunsForRows } from "../lib/rowCompletionCandidates";
 import {
   loadCarrierOptions,
@@ -210,6 +210,77 @@ router.get(
 // any of them means the employee showed up) is the only test now: is_active
 // plays no part, so a deactivated employee with logs on this date stays
 // visible, and an active employee with none for this date does not appear.
+// One batch query for every employee GET /employees is about to return,
+// never one query per employee — the same "raw entries, computed in
+// application code" shape reportQueries.ts's getPayrollReportData already
+// uses for the identical authoritative-total problem across many
+// employees, reused here rather than reimplemented so the Inputs sidebar's
+// per-employee total can never quietly disagree with Payroll's or the
+// per-employee Daily view's own workedSeconds. Deliberately does NOT run
+// reconcileMidnightCutoff/reconcileEmployeeBreaks per employee first (both
+// GET /daily does for the ONE employee currently open) — doing that here
+// would mean a write-triggering side effect per row in the list, exactly
+// the per-employee-request/N+1 shape this function exists to avoid. The
+// tradeoff: a scheduled break an employee is mid-way through, that hasn't
+// been reconciled into a real break row yet, still reads as worked time
+// here until that employee's own Daily view is opened (which reconciles
+// and persists it) or the next reconciling event touches their day —  a
+// narrow, self-correcting staleness window, not a wrong formula.
+async function loadPaidSecondsByEmployee(
+  employeeIds: string[],
+  date: string,
+  start: Date,
+  end: Date
+): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  if (employeeIds.length === 0) return result;
+
+  const { rows: entryRows } = await pool.query(
+    `select employee_id, entry_type, started_at, ended_at, is_paid
+     from time_entries
+     where employee_id = any($1::uuid[])
+       and started_at >= $2 and started_at < $3
+       and deleted_at is null`,
+    [employeeIds, start, end]
+  );
+
+  interface RawEntry extends WorkdayBoundaryEntry {
+    employeeId: string;
+  }
+  const rawEntries: RawEntry[] = entryRows.map((r) => ({
+    employeeId: r.employee_id,
+    entryType: r.entry_type,
+    startedAt: r.started_at,
+    endedAt: r.ended_at,
+    isPaid: r.is_paid,
+  }));
+
+  for (const [key, entries] of groupByEmployeeDay(rawEntries)) {
+    // groupByEmployeeDay keys by `${employeeId}:${calendarDateInAppTimezone}`
+    // — a UUID never contains ":", so splitting on it back out is safe.
+    // Every entry here was already scoped to `date`'s own UTC bounds above,
+    // so the date half always resolves back to `date` itself.
+    const employeeId = key.slice(0, key.indexOf(":"));
+    try {
+      const totals = computeWorkdayTotals(entries);
+      // Paid breaks are already folded into workedSeconds (see
+      // workdayTotals.ts) — "paid hours" is workedSeconds directly, the
+      // same convention Payroll's own paidSeconds field uses.
+      result.set(employeeId, Math.round(totals.workedSeconds));
+    } catch (err) {
+      // One employee's malformed/unexpected entry shape must never take
+      // down the whole employee list — this employee is simply left out of
+      // the returned map (the route handler below turns "absent from the
+      // map" into paidSeconds: null, i.e. "unavailable," never a silent 0 —
+      // a genuine zero-hour day is a real, successfully-computed answer and
+      // must stay visually distinct from "couldn't be computed"). Every
+      // other employee in this same response is unaffected.
+      console.error(`[inputs] loadPaidSecondsByEmployee: failed to compute totals for employee ${employeeId}`, err);
+    }
+  }
+  return result;
+}
+
 router.get(
   "/employees",
   requireAuth,
@@ -244,7 +315,28 @@ router.get(
     );
 
     const photoPaths = rows.filter((r) => r.profile_photo_path).map((r) => r.profile_photo_path);
-    const urlMap = await getSignedPhotoUrls(photoPaths);
+    // Both independent of each other and of everything above — kicked off
+    // together rather than one after the other, same "overlap unrelated
+    // work" convention GET /daily already uses for its own photo URL call.
+    const photoUrlPromise = getSignedPhotoUrls(photoPaths);
+    // Caught here, not just inside loadPaidSecondsByEmployee's own per-
+    // employee try/catch — this covers the batch query itself failing
+    // (e.g. a transient DB error), not only one employee's computation
+    // blowing up. Either way, the roster (names/photos) the admin actually
+    // needs to pick an employee must never fail to load just because the
+    // paid-hours *total* couldn't be computed — every row falls back to
+    // "unavailable" (an empty map — see below) rather than failing the
+    // whole request.
+    const paidSecondsPromise = loadPaidSecondsByEmployee(
+      rows.map((r) => r.id),
+      date,
+      start,
+      end
+    ).catch((err) => {
+      console.error("[inputs] GET /employees: loadPaidSecondsByEmployee failed, every row will show as unavailable", err);
+      return new Map<string, number>();
+    });
+    const [urlMap, paidSecondsByEmployee] = await Promise.all([photoUrlPromise, paidSecondsPromise]);
 
     res.json({
       employees: rows.map((r) => ({
@@ -252,6 +344,13 @@ router.get(
         firstName: r.first_name,
         lastName: r.last_name,
         photoUrl: r.profile_photo_path ? urlMap.get(r.profile_photo_path) ?? null : null,
+        // null means "couldn't be computed" (a per-employee failure inside
+        // loadPaidSecondsByEmployee, or the whole batch query failing above)
+        // — distinct from a genuine, successfully-computed 0. Every
+        // employee this route returns has at least one non-deleted entry
+        // that day (see the EXISTS filter above), so absence from the map
+        // only ever means a real failure, never "nothing to compute."
+        paidSeconds: paidSecondsByEmployee.has(r.id) ? paidSecondsByEmployee.get(r.id)! : null,
       })),
     });
   })

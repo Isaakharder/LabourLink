@@ -127,7 +127,7 @@ vi.mock("../../lib/api", () => {
 });
 
 function employee(id: string, firstName: string, lastName: string): InputsEmployee {
-  return { id, firstName, lastName, photoUrl: null };
+  return { id, firstName, lastName, photoUrl: null, paidSeconds: 0 };
 }
 
 // One distinguishing, easy-to-assert-on activity name per fixture employee

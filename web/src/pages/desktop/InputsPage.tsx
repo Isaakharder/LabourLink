@@ -63,6 +63,14 @@ export function InputsPage() {
 
   const [employees, setEmployees] = useState<InputsEmployee[] | null>(null);
   const [employeesError, setEmployeesError] = useState<string | null>(null);
+  // True while a request for the CURRENTLY selected date/search is in
+  // flight — distinct from `employees === null` (first-ever load, panel
+  // shows its own "Loading..." text). Once the roster has loaded once,
+  // EmployeeListPanel uses this instead to show a placeholder in the
+  // paid-hours column rather than the previous date's now-possibly-stale
+  // numbers while a fresh total is on the way (the roster itself stays put
+  // — no full-panel flash, no lost scroll position).
+  const [employeesLoading, setEmployeesLoading] = useState(false);
   const [employeeSearch, setEmployeeSearch] = useState("");
   const [daily, setDaily] = useState<DailyInputsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -206,18 +214,60 @@ export function InputsPage() {
   // Scoped to `date` — the panel lists whoever has an actual time-entry log
   // on the selected date (server-side, see GET /api/inputs/employees),
   // never every active employee regardless of whether they worked that day.
-  // Re-runs on every date navigation, same as loadDaily.
-  const loadEmployees = useCallback(() => {
+  // Re-runs on every date navigation, same as loadDaily. The response also
+  // carries each employee's paidSeconds for `date` (same authoritative
+  // workedSeconds workdayTotals.ts computes for the Daily view and
+  // Payroll), shown as the row's H:MM total — `date` is always sent as an
+  // explicit query param and validated server-side (GET /api/inputs/employees
+  // 400s on a missing/malformed one), so what's displayed can never
+  // silently drift from what DateNav shows as selected.
+  const employeesRequestSeqRef = useRef(0);
+  // Mirrors loadDaily's own abortControllerRef immediately below — aborting
+  // whatever employees request was still in flight before starting a new
+  // one means at most one is ever genuinely in flight at a time, covering
+  // both a rapid date/search change AND the background poll/visibility/
+  // focus/online triggers (see the effect further down) landing close
+  // together. The requestId check in each callback below is the actual
+  // correctness guarantee (an already-past-fetch() request can still
+  // resolve after being aborted) — the abort itself is the "don't even let
+  // it finish" optimization on top.
+  const employeesAbortControllerRef = useRef<AbortController | null>(null);
+  // `background: true` marks a poll/visibility/focus/online-triggered
+  // refresh, same convention as loadDaily's own `opts.background`: it never
+  // flips employeesLoading (so the sidebar doesn't flash its placeholder
+  // bars every 10 seconds) and a failure never shows the error banner or
+  // blanks an already-loaded roster — it just leaves the last known totals
+  // in place until the next successful refresh. A foreground call (initial
+  // load, or an explicit date/search change) keeps showing the loading
+  // placeholder and surfaces a real failure normally.
+  const loadEmployees = useCallback((opts: { background?: boolean } = {}) => {
+    const background = opts.background ?? false;
     const params = new URLSearchParams();
     params.set("date", date);
     if (employeeSearch.trim()) params.set("search", employeeSearch.trim());
-    api<{ employees: InputsEmployee[] }>(`/api/inputs/employees?${params.toString()}`)
+
+    employeesAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    employeesAbortControllerRef.current = controller;
+
+    const requestId = ++employeesRequestSeqRef.current;
+    if (!background) setEmployeesLoading(true);
+    api<{ employees: InputsEmployee[] }>(`/api/inputs/employees?${params.toString()}`, { signal: controller.signal })
       .then((res) => {
+        if (requestId !== employeesRequestSeqRef.current) return;
         setEmployees(res.employees);
         setEmployeesError(null);
       })
       .catch((err) => {
-        setEmployeesError(err instanceof ApiError ? err.message : "Could not load employees");
+        if (requestId !== employeesRequestSeqRef.current) return;
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        if (!background) {
+          setEmployeesError(err instanceof ApiError ? err.message : "Could not load employees");
+        }
+      })
+      .finally(() => {
+        if (requestId !== employeesRequestSeqRef.current) return;
+        if (!background) setEmployeesLoading(false);
       });
   }, [employeeSearch, date]);
 
@@ -399,6 +449,17 @@ export function InputsPage() {
     function backgroundRefresh() {
       if (pausedRef.current) return;
       loadDaily({ background: true });
+      // Keeps the sidebar's paid-hours totals current through the exact
+      // same poll/visibility/focus/online triggers as the detail view —
+      // in particular, an employee still mid-shift (an open work entry)
+      // needs this to keep climbing rather than freezing at whatever it
+      // read on the last foreground load. No separate timer: this reuses
+      // the interval/listeners already set up below, and loadEmployees'
+      // own abort-the-previous-request handling (see its definition above)
+      // means this can never pile up a second concurrent request on top of
+      // one already in flight from a rapid date change or another trigger
+      // firing moments earlier.
+      loadEmployees({ background: true });
     }
     function handleVisibility() {
       if (document.visibilityState === "visible") backgroundRefresh();
@@ -419,7 +480,7 @@ export function InputsPage() {
       window.removeEventListener("online", backgroundRefresh);
       window.removeEventListener("offline", handleOffline);
     };
-  }, [selectedEmployeeId, loadDaily]);
+  }, [selectedEmployeeId, loadDaily, loadEmployees]);
 
   function handleSelectRun(id: string) {
     setSelectedRunId(id);
@@ -495,6 +556,12 @@ export function InputsPage() {
         body: JSON.stringify({ startTime: startTimeIso, endTime: endTimeIso, fingerprint }),
       });
       await loadDaily();
+      // The correction may have moved this employee's paid-hours total —
+      // refresh the sidebar row alongside the detail view rather than
+      // leaving it showing the pre-correction number until the next date
+      // switch. Fire-and-forget: it manages its own employees/employeesError
+      // state independently of loadDaily's.
+      loadEmployees();
       setSuccessMessage("Activity time updated.");
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
@@ -559,6 +626,10 @@ export function InputsPage() {
         body: JSON.stringify(field === "start" ? { startTime: newTimeIso } : { endTime: newTimeIso }),
       });
       await loadDaily();
+      // See applyActivityRunCorrection's own comment — a break correction
+      // (paid<->unpaid boundary moved, or reclassified) can change this
+      // employee's paid-hours total just as much as an activity correction.
+      loadEmployees();
       setSuccessMessage("Break updated.");
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
@@ -594,6 +665,8 @@ export function InputsPage() {
         body: JSON.stringify({ employeeId: selectedEmployeeId, date, newStartTime: newStartIso }),
       });
       await loadDaily();
+      // See applyActivityRunCorrection's own comment.
+      loadEmployees();
       setSuccessMessage("Work start time updated.");
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
@@ -642,6 +715,8 @@ export function InputsPage() {
       const deletedKind = pendingDeletion.kind;
       setPendingDeletion(null);
       await loadDaily();
+      // See applyActivityRunCorrection's own comment.
+      loadEmployees();
       setSuccessMessage(deletedKind === "activity-run" ? "Activity log deleted." : "Break deleted.");
     } catch (err) {
       setDeletionError(err instanceof ApiError ? err.message : "Could not delete");
@@ -659,6 +734,9 @@ export function InputsPage() {
   async function handleManualEntryCreated(message: string) {
     setAddModal(null);
     await loadDaily();
+    // See applyActivityRunCorrection's own comment — covers Add work start /
+    // Add break / Add activity, all of which can add paid time.
+    loadEmployees();
     setSuccessMessage(message);
   }
 
@@ -686,6 +764,7 @@ export function InputsPage() {
         <EmployeeListPanel
           employees={employees}
           error={employeesError}
+          loading={employeesLoading}
           selectedId={selectedEmployeeId}
           onSelect={(id) => updateParams({ employee: id })}
           search={employeeSearch}
@@ -779,7 +858,14 @@ export function InputsPage() {
                 onSaveEdit={handleSaveEdit}
                 onCancelEdit={handleCancelEdit}
                 onDeleteRun={handleDeleteRun}
-                onRowCompletionChanged={() => loadDaily()}
+                onRowCompletionChanged={() => {
+                  loadDaily();
+                  // Combining segments doesn't itself move any boundary,
+                  // but refreshing here too costs one extra batched request
+                  // and keeps this in line with every other "something
+                  // about this employee's day just changed" handler above.
+                  loadEmployees();
+                }}
                 saving={actionInFlight}
               />
               <WorkdayDetailsCard

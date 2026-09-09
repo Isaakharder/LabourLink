@@ -3,6 +3,15 @@ export interface InputsEmployee {
   firstName: string;
   lastName: string;
   photoUrl: string | null;
+  // Same authoritative "worked" total GET /daily's own totals.workedSeconds
+  // and Payroll's paidSeconds already use (see server's workdayTotals.ts) —
+  // paid breaks already folded in, unpaid breaks excluded, an in-progress
+  // day counted up to now. Shown in the employee nav list as each row's
+  // H:MM total. null means the server couldn't compute it (a per-employee
+  // failure, or the whole batch query failing) — distinct from a genuine,
+  // successfully-computed 0; the panel shows "—"/"Paid hours unavailable"
+  // for null and "0:00" only for an actual zero.
+  paidSeconds: number | null;
 }
 
 // Present on a run/break/work-start when an administrator created it

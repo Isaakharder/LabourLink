@@ -2361,9 +2361,56 @@ input {
 }
 
 .inputs-employee-name {
+  flex: 1;
+  /* Lets text-overflow: ellipsis actually kick in inside a flex item — a
+     flex child otherwise refuses to shrink below its own content width. */
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The row's paid-hours total (right of the name — see EmployeeListPanel.tsx).
+   Fixed width and right-aligned so every row's H:MM lines up on the right
+   edge regardless of how many digits it has, and never wraps or gets
+   pushed off-screen by a long truncating name (.inputs-employee-name above
+   already claims all the flexible space, this claims none of it). Tabular
+   figures keep a wider "10:25" from shifting narrower rows' colons out of
+   alignment as totals change. Muted by default so the name stays the
+   primary information; the selected row overrides this to a lighter tint
+   for contrast against its blue background rather than the muted gray
+   (which would be too low-contrast there). */
+.inputs-employee-hours {
+  flex-shrink: 0;
+  width: 2.6rem;
+  margin-left: 0.5rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.78rem;
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+
+.inputs-employee-item-selected .inputs-employee-hours {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+/* Loading placeholder — same fixed-width box as the real value (so a row's
+   name never jumps when a total appears/disappears), just a plain muted
+   bar instead of a shimmering skeleton: this can reappear on every date
+   switch, not just once on first load, so it's deliberately quieter than
+   InputsSkeleton's own animated bars. */
+.inputs-employee-hours-placeholder {
+  display: inline-block;
+  width: 1.8rem;
+  height: 0.7rem;
+  border-radius: 3px;
+  background: var(--color-border);
+  vertical-align: middle;
+}
+
+.inputs-employee-item-selected .inputs-employee-hours-placeholder {
+  background: rgba(255, 255, 255, 0.35);
 }
 
 .inputs-workspace-main {

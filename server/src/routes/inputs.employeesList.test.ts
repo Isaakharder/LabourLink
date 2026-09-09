@@ -113,14 +113,20 @@ async function main() {
       return rows[0].id;
     }
 
-    async function insertBreak(employeeId: string, dateStr: string, startHour: number, endHour: number | null): Promise<string> {
+    async function insertBreak(
+      employeeId: string,
+      dateStr: string,
+      startHour: number,
+      endHour: number | null,
+      isPaid = false
+    ): Promise<string> {
       const [y, m, d] = dateStr.split("-").map(Number);
       const startedAt = zonedWallTimeToUtc(y, m, d, startHour, 0, 0);
       const endedAt = endHour === null ? null : zonedWallTimeToUtc(y, m, d, endHour, 0, 0);
       const { rows } = await pool.query(
-        `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
-         values ($1, null, 'break', null, gen_random_uuid(), $2, $3, 'manual') returning id`,
-        [employeeId, startedAt, endedAt]
+        `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source, is_paid)
+         values ($1, null, 'break', null, gen_random_uuid(), $2, $3, 'manual', $4) returning id`,
+        [employeeId, startedAt, endedAt, isPaid]
       );
       timeEntryIds.push(rows[0].id);
       return rows[0].id;
@@ -161,12 +167,40 @@ async function main() {
     const differentDateOnly = await insertEmployee("DifferentDateOnly", true);
     await insertWork(differentDateOnly.id, OTHER_DATE, 8, 12);
 
+    // Deterministic paid-hours fixture (closed, same-day, no "now"-dependent
+    // open entry) — 8:00-18:00 span (10h) with a 1-hour UNPAID break and a
+    // 1-hour PAID break inside it. Expected paidSeconds is the authoritative
+    // workedSeconds formula (workdayTotals.ts): the whole span minus only
+    // the unpaid break — the paid break is never subtracted, so it's
+    // implicitly still counted as paid. 10h - 1h(unpaid) = 9h = 32400s,
+    // never 8h (which a naive "sum only work segments" calculation would
+    // wrongly produce by excluding the paid break too).
+    const paidHours = await insertEmployee("PaidHours", true);
+    await insertWork(paidHours.id, DATE, 8, 12);
+    await insertBreak(paidHours.id, DATE, 12, 13, false);
+    await insertWork(paidHours.id, DATE, 13, 16);
+    await insertBreak(paidHours.id, DATE, 16, 17, true);
+    await insertWork(paidHours.id, DATE, 17, 18);
+
     // ---------------------------------------------------------------
-    // 1) Missing date is rejected, same convention as GET /daily.
+    // 1) Missing/malformed date is rejected, same convention as GET /daily
+    //    — this is the "receives and validates the currently selected
+    //    local date" contract the Inputs sidebar's paid-hours totals rely
+    //    on: the client always sends its own selected `date`, and this
+    //    route never silently substitutes a different one (e.g. "today")
+    //    when what it's given doesn't parse.
     // ---------------------------------------------------------------
     {
       const res = await call("GET", `/api/inputs/employees`, { token: adminToken });
       check(res.status === 400, "1) missing date is rejected with 400", res);
+    }
+    {
+      const res = await call("GET", `/api/inputs/employees?date=not-a-date`, { token: adminToken });
+      check(res.status === 400, "1b) malformed date string is rejected with 400, not silently defaulted", res);
+    }
+    {
+      const res = await call("GET", `/api/inputs/employees?date=2019-13-40`, { token: adminToken });
+      check(res.status === 400, "1c) a syntactically YYYY-MM-DD but calendar-invalid date is rejected with 400", res);
     }
 
     // ---------------------------------------------------------------
@@ -212,6 +246,37 @@ async function main() {
       const ids = new Set((res.body?.employees ?? []).map((e: any) => e.id));
       check(ids.has(clockedOut.id), "4) search matches the intended employee within the date-scoped list", [...ids]);
       check(!ids.has(currentlyWorking.id), "4) search excludes a same-date employee whose name doesn't match", [...ids]);
+    }
+
+    // ---------------------------------------------------------------
+    // 5) Each employee's paidSeconds is the same authoritative workedSeconds
+    //    total GET /daily and Payroll use (workdayTotals.ts's
+    //    computeWorkdayTotals) — computed via one batch query for the whole
+    //    list, not one request/query per employee.
+    // ---------------------------------------------------------------
+    {
+      const res = await call("GET", `/api/inputs/employees?date=${DATE}`, { token: adminToken });
+      const byId = new Map((res.body?.employees ?? []).map((e: any) => [e.id, e]));
+
+      // clockedOut: a plain 8:00-16:00 closed work entry, no breaks at all
+      // — the simplest possible case, exactly 8h.
+      check(byId.get(clockedOut.id)?.paidSeconds === 8 * 3600, "5) plain 8h work entry, no breaks -> exactly 28800s", byId.get(clockedOut.id));
+
+      // paidHours: proves the paid-break-folded-in / unpaid-break-excluded
+      // distinction specifically — see the fixture's own comment above.
+      check(
+        byId.get(paidHours.id)?.paidSeconds === 9 * 3600,
+        "5) 10h span minus a 1h UNPAID break, with a separate 1h PAID break folded in (not subtracted) -> 32400s",
+        byId.get(paidHours.id)
+      );
+
+      // Every employee in this response carries the field at all — not
+      // just the two checked above.
+      check(
+        (res.body?.employees ?? []).every((e: any) => typeof e.paidSeconds === "number"),
+        "5) every employee in the response has a numeric paidSeconds",
+        res.body?.employees
+      );
     }
   } finally {
     async function tryDelete(label: string, fn: () => Promise<unknown>) {

@@ -78,7 +78,7 @@ vi.mock("../../lib/api", () => {
 });
 
 function employee(id: string, firstName: string, lastName: string): InputsEmployee {
-  return { id, firstName, lastName, photoUrl: null };
+  return { id, firstName, lastName, photoUrl: null, paidSeconds: 0 };
 }
 
 function buildDaily(emp: InputsEmployee, date: string, activityName: string): DailyInputsResponse {
