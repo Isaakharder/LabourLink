@@ -1,4 +1,3 @@
-import { Avatar } from "../employees/Avatar";
 import { InputsEmployee } from "../../lib/inputsTypes";
 
 interface EmployeeListPanelProps {
@@ -42,7 +41,6 @@ export function EmployeeListPanel({
                 className={`inputs-employee-item${e.id === selectedId ? " inputs-employee-item-selected" : ""}`}
                 onClick={() => onSelect(e.id)}
               >
-                <Avatar photoUrl={e.photoUrl} firstName={e.firstName} lastName={e.lastName} />
                 <span className="inputs-employee-name">
                   {e.firstName} {e.lastName}
                 </span>
