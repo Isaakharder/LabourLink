@@ -89,7 +89,7 @@ export function RowCompletionReviewModal({
     <Modal
       title={`Review row work — ${rowLabel} · ${activityName}`}
       onClose={onClose}
-      wide
+      xxl
       footer={
         isEmpty ? (
           <button type="button" className="employees-add-button" onClick={handleAcknowledgeStale}>

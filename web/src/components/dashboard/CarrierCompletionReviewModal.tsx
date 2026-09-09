@@ -76,7 +76,7 @@ export function CarrierCompletionReviewModal({
     <Modal
       title={`Review bin work — ${carrierName}`}
       onClose={onClose}
-      wide
+      xxl
       footer={
         <>
           <span className="employees-count">

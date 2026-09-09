@@ -9,13 +9,22 @@ interface ModalProps {
   // (e.g. a multi-group form) — distinct from `wide` so existing callers
   // are unaffected.
   xl?: boolean;
+  // Widest variant, for information-heavy table modals whose columns can't
+  // reasonably wrap (see RowCompletionReviewModal/CarrierCompletionReviewModal's
+  // checkbox/date/start/end/duration/employee/activity review tables) —
+  // wide enough that a table like that never needs horizontal scroll on a
+  // normal desktop screen, capped at the viewport width on a small one.
+  // Deliberately its own flag rather than widening `xl` (used by
+  // ReportPreviewModal for an unrelated tall/landscape shape) or `wide`
+  // (used by several ordinary forms that don't need this much room).
+  xxl?: boolean;
   // Optional pinned action row rendered below the scrollable body, outside
   // its own scroll area — e.g. Save/Cancel that must stay reachable
   // regardless of how tall the body's content gets.
   footer?: ReactNode;
 }
 
-export function Modal({ title, onClose, children, wide, xl, footer }: ModalProps) {
+export function Modal({ title, onClose, children, wide, xl, xxl, footer }: ModalProps) {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
@@ -27,7 +36,9 @@ export function Modal({ title, onClose, children, wide, xl, footer }: ModalProps
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
-        className={`modal-panel${wide ? " modal-panel-wide" : ""}${xl ? " modal-panel-xl" : ""}`}
+        className={`modal-panel${wide ? " modal-panel-wide" : ""}${xl ? " modal-panel-xl" : ""}${
+          xxl ? " modal-panel-xxl" : ""
+        }`}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
