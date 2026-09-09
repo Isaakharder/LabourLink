@@ -391,12 +391,12 @@ describe("InputsPage employee switching", () => {
       });
     });
 
-    // Both rows render — nothing threw, nothing blanked.
+    // Both rows render — nothing threw, nothing blanked. (The "Corrected"
+    // badge that used to render for this field has since been removed from
+    // the UI entirely, so this no longer asserts on its text; the malformed
+    // value just renders nothing extra instead of crashing.)
     await screen.findByText("Healthy Activity");
     expect(screen.getByText("Malformed Activity")).toBeInTheDocument();
-    // The malformed field degrades to a labeled, honest fallback instead
-    // of a real (fabricated) time.
-    expect(screen.getByText("Corrected")).toBeInTheDocument();
     // Navigation/admin controls are unaffected either way.
     expect(screen.getByText("Beatriz Barrios")).toBeInTheDocument();
     expect(screen.getByLabelText("Next day")).toBeEnabled();
