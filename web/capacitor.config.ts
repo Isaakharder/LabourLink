@@ -25,7 +25,7 @@ import { CapacitorConfig } from "@capacitor/cli";
 const isQaBuild = process.env.LABOURLINK_QA_BUILD === "true";
 
 const config: CapacitorConfig = {
-  appId: "com.labourlink.app",
+  appId: "com.linklogictechnologies.labourlink",
   appName: "LabourLink",
   webDir: "dist",
   server: {

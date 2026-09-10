@@ -1,14 +1,41 @@
 apply plugin: 'com.android.application'
 
+// ---------------------------------------------------------------------------
+// Release signing — reads from EITHER a local, git-ignored
+// android/keystore.properties file OR environment variables, never from
+// anything checked into source control. See android/keystore.properties.example
+// for the exact properties-file format. No passwords are hardcoded or
+// invented here: if neither source provides all four values, hasReleaseSigning
+// is false and the release build type below simply builds unsigned (same as
+// before this file existed) instead of failing the Gradle configuration.
+//
+// Deliberately NOT reusing the debug keystore for any of this — every APK
+// shipped through 1.7 was signed with the standard Android SDK debug
+// certificate (see the git history around the com.labourlink.app ->
+// com.linklogictechnologies.labourlink migration), which Google Play
+// rejects outright for a real release upload. This scaffold is only ever
+// meant to be filled in with a newly generated, real release keystore.
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+def releaseStoreFile = keystoreProperties.getProperty('storeFile') ?: System.getenv('LABOURLINK_RELEASE_STORE_FILE')
+def releaseStorePassword = keystoreProperties.getProperty('storePassword') ?: System.getenv('LABOURLINK_RELEASE_STORE_PASSWORD')
+def releaseKeyAlias = keystoreProperties.getProperty('keyAlias') ?: System.getenv('LABOURLINK_RELEASE_KEY_ALIAS')
+def releaseKeyPassword = keystoreProperties.getProperty('keyPassword') ?: System.getenv('LABOURLINK_RELEASE_KEY_PASSWORD')
+def hasReleaseSigning = releaseStoreFile && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+
 android {
-    namespace = "com.labourlink.app"
+    namespace = "com.linklogictechnologies.labourlink"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.labourlink.app"
+        applicationId "com.linklogictechnologies.labourlink"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 8
-        versionName "1.7"
+        versionCode 9
+        versionName "1.8"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,10 +43,34 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (hasReleaseSigning) {
+                // rootProject.file (NOT the bare file()) — this build.gradle
+                // is the :app module's own script, whose implicit project
+                // directory is android/app/, not android/. A bare file()
+                // call here would resolve releaseStoreFile against
+                // android/app/, silently disagreeing with
+                // keystorePropertiesFile above (which is already
+                // rootProject.file-relative, i.e. android/-relative) and
+                // with keystore.properties.example's documented contract.
+                // rootProject.file keeps storeFile resolution anchored to
+                // the same directory (android/) regardless of which module
+                // build script happens to read it.
+                storeFile rootProject.file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }

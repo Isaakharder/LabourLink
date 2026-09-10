@@ -1,4 +1,4 @@
-package com.labourlink.app;
+package com.linklogictechnologies.labourlink;
 
 import android.graphics.Color;
 import android.os.Bundle;
