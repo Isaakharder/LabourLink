@@ -1423,10 +1423,15 @@ input {
   padding: 0;
 }
 
+/* Fixed 4-column row: avatar | name (flexible, truncates) | status badge
+   (fixed-width column so every badge's left edge lines up regardless of
+   name length or which status word is showing) | chevron. Each row is its
+   own grid container, so the badge column's alignment comes from its fixed
+   width, not from matching content across rows. */
 .employees-list-item {
   width: 100%;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) 5rem auto;
   align-items: center;
   gap: 0.7rem;
   padding: 0.65rem 0.85rem;
@@ -1453,24 +1458,13 @@ input {
   color: var(--color-primary);
 }
 
-.employees-list-item-body {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-}
-
-.employees-list-item-topline {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  min-width: 0;
-}
-
 .employees-list-item-name {
+  min-width: 0;
   font-size: 0.9rem;
   font-weight: 600;
-  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .employees-detail-loading {
@@ -1486,6 +1480,13 @@ input {
 .employees-list-item .status-pill {
   padding: 0.12rem 0.5rem;
   font-size: 0.7rem;
+}
+
+.employees-list-item-status {
+  /* Sits in its own fixed-width grid column (see .employees-list-item) and
+     left-aligns within it, so the badge itself can stay its natural
+     (label-dependent) width while still lining up row to row. */
+  justify-self: start;
 }
 
 .employees-detail-scroll {

@@ -255,16 +255,12 @@ export function DirectoryTab() {
                             onClick={() => setSelectedEmployeeId(emp.id)}
                           >
                             <Avatar photoUrl={emp.photoUrl} firstName={emp.firstName} lastName={emp.lastName} />
-                            <div className="employees-list-item-body">
-                              <div className="employees-list-item-topline">
-                                <span className="employees-list-item-name">
-                                  {emp.firstName} {emp.lastName}
-                                </span>
-                                <span className={`status-pill ${emp.isActive ? "status-active" : "status-inactive"}`}>
-                                  {emp.isActive ? "Active" : "Inactive"}
-                                </span>
-                              </div>
-                            </div>
+                            <span className="employees-list-item-name" title={`${emp.firstName} ${emp.lastName}`}>
+                              {emp.firstName} {emp.lastName}
+                            </span>
+                            <span className={`status-pill employees-list-item-status ${emp.isActive ? "status-active" : "status-inactive"}`}>
+                              {emp.isActive ? "Active" : "Inactive"}
+                            </span>
                             <ChevronRight size={18} className="employees-list-item-chevron" aria-hidden="true" />
                           </button>
                         </li>
