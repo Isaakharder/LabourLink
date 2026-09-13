@@ -1326,6 +1326,30 @@ input {
   flex-direction: column;
 }
 
+/* Replaces the old PageHeader (large title + subtitle) for the Employees
+   page — the tabs sit directly under the normal .app-content padding, with
+   the signed-in admin name kept at the top-right on the same compact row
+   instead of a separate heading area. */
+.employees-page-topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 1.25rem;
+}
+
+.employees-page-topbar .tabs {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+
+.employees-page-topbar .page-header-user {
+  flex-shrink: 0;
+  padding-top: 0;
+}
+
 .employees-page {
   display: flex;
   flex-direction: column;
@@ -7179,6 +7203,7 @@ input {
   .employment-timeline-toolbar,
   .employment-timeline-filters,
   .employment-timeline-graph-wrap,
+  .employees-page-topbar,
   .tabs {
     display: none !important;
   }

@@ -1,5 +1,5 @@
 import { Navigate, NavLink, Route, Routes } from "react-router-dom";
-import { PageHeader } from "../../components/layout/PageHeader";
+import { useAuth } from "../../context/AuthContext";
 import { DirectoryTab } from "./employees/DirectoryTab";
 import { EmploymentTimelineTab } from "./employees/EmploymentTimelineTab";
 
@@ -9,17 +9,24 @@ const TABS = [
 ];
 
 export function EmployeesPage() {
+  const { employee } = useAuth();
+
   return (
     <>
-      <PageHeader title="Employees" description="Manage employee profiles, device assignments, and employment history." />
-
-      <nav className="tabs">
-        {TABS.map((tab) => (
-          <NavLink key={tab.path} to={tab.path} className={({ isActive }) => `tab${isActive ? " tab-active" : ""}`}>
-            {tab.label}
-          </NavLink>
-        ))}
-      </nav>
+      <div className="employees-page-topbar">
+        <nav className="tabs">
+          {TABS.map((tab) => (
+            <NavLink key={tab.path} to={tab.path} className={({ isActive }) => `tab${isActive ? " tab-active" : ""}`}>
+              {tab.label}
+            </NavLink>
+          ))}
+        </nav>
+        {employee && (
+          <span className="page-header-user">
+            {employee.firstName} {employee.lastName}
+          </span>
+        )}
+      </div>
 
       <Routes>
         {TABS.map((tab) => (
