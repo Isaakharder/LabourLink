@@ -1811,7 +1811,12 @@ router.post(
       }
     }
 
-    res.json({ results });
+    // deviceLastProcessedSeq: this device's own device_sync_state row after
+    // this batch — the client persists it locally (syncEngine.ts) as a
+    // best-effort floor input for its next local device_seq allocation, so
+    // a device whose local event log was reset can't reuse a seq the
+    // server has already consumed (see localSequenceAssignment.ts).
+    res.json({ results, deviceLastProcessedSeq: lastProcessedSeq });
   })
 );
 

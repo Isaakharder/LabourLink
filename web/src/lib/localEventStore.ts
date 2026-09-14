@@ -21,8 +21,54 @@
 // forever.
 import { getSqliteConnection, isNativeSqlite } from "./sqlite/bootstrap";
 import { DB_NAME, MIGRATIONS } from "./sqlite/schema";
+import { computeSequenceFloor, resolveSequenceConflict, SequenceFloorInputs } from "./localSequenceAssignment";
 import { uuid } from "./uuid";
 import * as journal from "./webEventJournal";
+
+// Thrown when appendEvent's native path can't allocate a device_seq even
+// after the one bounded retry — see localSequenceAssignment.ts's header for
+// the incident this recovers from. Distinct from LocalCommitTimeoutError
+// (WorkSessionContext.tsx) so a caller can tell "genuinely stuck, don't
+// bother waiting longer" apart from "took too long, might still land."
+export class LocalSequenceAllocationError extends Error {
+  constructor(detail: string) {
+    super(`local device_seq allocation failed: ${detail}`);
+    this.name = "LocalSequenceAllocationError";
+  }
+}
+
+// One retry after the first collision, per this fix's explicit "never loop
+// indefinitely" requirement — a second collision means something more than
+// ordinary read-before-write drift is going on and should surface as a real
+// error rather than keep hammering the same doomed insert.
+const MAX_SEQUENCE_ALLOCATION_ATTEMPTS = 2;
+
+// Safe, non-PII diagnostic snapshot logged only when allocation truly gives
+// up — error class, app version, and a short device-id suffix (same "first/
+// last few chars only" convention diagnostics.ts already uses for
+// clientEventId), plus the sequence numbers actually involved. Never an
+// employee id, activity/row/carrier id, or anything from `answers`.
+async function logSequenceAllocationFailure(
+  deviceId: string,
+  detail: Record<string, unknown>
+): Promise<void> {
+  let appVersion: string | null = null;
+  try {
+    if (isNativeSqlite()) {
+      const { App } = await import("@capacitor/app");
+      appVersion = (await App.getInfo()).version;
+    }
+  } catch {
+    // Best-effort only — never let a diagnostics read block or fail the
+    // error path it's trying to describe.
+  }
+  console.error("[local-first][sequence-allocation-failed]", {
+    errorClass: "LocalSequenceAllocationError",
+    appVersion,
+    deviceIdSuffix: deviceId.slice(-8),
+    ...detail,
+  });
+}
 
 export type LocalEventType = "work_start" | "activity_switch" | "break_start" | "break_end" | "end_day";
 
@@ -98,6 +144,21 @@ function isoNow(): string {
   return new Date().toISOString();
 }
 
+// Recognizes SQLite's own "UNIQUE constraint failed: pending_events.
+// device_id, pending_events.device_seq (code 2067)" message shape — the
+// exact text captured from the Nattawat N incident's logcat — as distinct
+// from every other possible native-insert failure (disk full, a genuinely
+// different constraint, a plugin-level error), which must still propagate
+// immediately rather than being treated as a retryable sequence collision.
+function isSequenceCollisionError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    message.includes("UNIQUE constraint failed") &&
+    message.includes("pending_events") &&
+    message.includes("device_seq")
+  );
+}
+
 function localTzOffsetMinutes(): number {
   // JS getTimezoneOffset() is minutes WEST of UTC (backwards from the usual
   // "+/-HH:MM ahead of UTC" convention) — negate it so a positive number
@@ -134,6 +195,27 @@ function journalEventToLocalEvent(e: journal.JournalEvent): LocalEvent {
 
 class LocalEventStoreImpl {
   private dbPromise: Promise<import("@capacitor-community/sqlite").SQLiteDBConnection> | null = null;
+
+  // Serializes every native appendEvent call through this one in-process
+  // chain so two overlapping calls (a retry firing before a prior attempt
+  // truly settled, or — per the Nattawat N incident's logcat, which showed
+  // ColdStartWatchdog recreating MainActivity 4 times during a slow cold
+  // start — a freshly recreated Activity/WebView re-driving a commit while
+  // an earlier context's attempt hadn't finished) can never both read
+  // device_seq_counter before either has written it back. A single SQLite
+  // transaction is atomic against ITSELF but not against a second,
+  // independently-opened transaction reading the same row first — this is
+  // the actual mutual-exclusion boundary that was missing before.
+  private appendLock: Promise<unknown> = Promise.resolve();
+
+  private async withAppendLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.appendLock.catch(() => {}).then(fn);
+    // Chain the NEXT caller onto this attempt's settlement (success or
+    // failure) regardless of outcome, so one failed attempt can never wedge
+    // the lock for everyone after it.
+    this.appendLock = run.catch(() => {});
+    return run;
+  }
 
   // Native-only from here down to persistPromise — every one of these
   // methods is only ever reached when isNativeSqlite() is true (see each
@@ -205,6 +287,51 @@ class LocalEventStoreImpl {
     // real use, same self-healing connection semantics either way.
   }
 
+  // Reads all four sequence-floor sources fresh — see
+  // localSequenceAssignment.ts's SequenceFloorInputs for why each exists.
+  // `select max(...)` over zero matching rows returns one row with a null
+  // aggregate (not zero rows), so the null-check below is the normal case
+  // for a brand-new device identity, not an error path.
+  private async readSequenceFloorInputs(
+    db: import("@capacitor-community/sqlite").SQLiteDBConnection,
+    deviceId: string
+  ): Promise<SequenceFloorInputs> {
+    const counterRows = await db.query(`select next_seq from device_seq_counter where device_id = ?`, [deviceId]);
+    const persistedCounterNextSeq = (counterRows.values?.[0] as DbRow | undefined)?.next_seq;
+
+    const pendingMaxRows = await db.query(`select max(device_seq) as m from pending_events where device_id = ?`, [
+      deviceId,
+    ]);
+    const highestPendingSeq = (pendingMaxRows.values?.[0] as DbRow | undefined)?.m;
+
+    const ackMaxRows = await db.query(
+      `select max(device_seq) as m from pending_events where device_id = ? and sync_status = 'synced'`,
+      [deviceId]
+    );
+    const highestAcknowledgedSeq = (ackMaxRows.values?.[0] as DbRow | undefined)?.m;
+
+    const serverCached = await this.getServerLastProcessedSeq(deviceId);
+
+    return {
+      persistedCounterNextSeq: typeof persistedCounterNextSeq === "number" ? persistedCounterNextSeq : null,
+      highestPendingSeq: typeof highestPendingSeq === "number" ? highestPendingSeq : null,
+      highestAcknowledgedSeq: typeof highestAcknowledgedSeq === "number" ? highestAcknowledgedSeq : null,
+      serverLastProcessedSeq: serverCached,
+    };
+  }
+
+  // Best-effort local cache of the server's device_sync_state.
+  // last_processed_seq, keyed off the existing generic reference_cache
+  // table (no new table needed) — see syncEngine.ts's write side.
+  async getServerLastProcessedSeq(deviceId: string): Promise<number | null> {
+    const cached = await this.getCachedJson<{ lastProcessedSeq: number }>(`server-last-processed-seq:${deviceId}`);
+    return typeof cached?.value.lastProcessedSeq === "number" ? cached.value.lastProcessedSeq : null;
+  }
+
+  async setServerLastProcessedSeq(deviceId: string, lastProcessedSeq: number): Promise<void> {
+    await this.setCachedJson(`server-last-processed-seq:${deviceId}`, { lastProcessedSeq });
+  }
+
   async appendEvent(event: NewLocalEvent): Promise<LocalEvent> {
     const correlationId = event.clientEventId ?? uuid();
 
@@ -222,68 +349,151 @@ class LocalEventStoreImpl {
     const createdAtLocal = isoNow();
     const tzOffset = localTzOffsetMinutes();
 
-    let deviceSeq = 0;
-    logCheckpoint(correlationId, "appendEvent:native:transaction-start");
-    await db.beginTransaction();
-    try {
-      const counterRows = await db.query(`select next_seq from device_seq_counter where device_id = ?`, [
-        event.deviceId,
-      ]);
-      const currentNext = (counterRows.values?.[0] as DbRow | undefined)?.next_seq;
-      deviceSeq = typeof currentNext === "number" ? currentNext : 1;
+    // Serialized: see appendLock's own comment for why two overlapping
+    // callers must never both read device_seq_counter before either writes
+    // it back.
+    return this.withAppendLock(async () => {
+      // Idempotent retry, checked up front — client_event_id is this row's
+      // own PRIMARY KEY, so a retry with the identical clientEventId whose
+      // local write already landed would otherwise hit THAT constraint
+      // before ever reaching the (device_id, device_seq) one below,
+      // bypassing the collision-recovery logic entirely. Same "check by
+      // clientEventId before inserting" precedent as webEventJournal.ts's
+      // appendJournalEvent on the web platform.
+      const existingRows = await db.query(`select * from pending_events where client_event_id = ?`, [clientEventId]);
+      const existingRow = existingRows.values?.[0] as DbRow | undefined;
+      if (existingRow) {
+        logCheckpoint(correlationId, "appendEvent:native:idempotent-retry-existing", {
+          deviceSeq: Number(existingRow.device_seq),
+        });
+        return this.rowToEvent(existingRow);
+      }
 
-      await db.run(
-        `insert into device_seq_counter (device_id, next_seq) values (?, ?)
-         on conflict(device_id) do update set next_seq = excluded.next_seq`,
-        [event.deviceId, deviceSeq + 1],
-        false
-      );
+      let candidateSeq: number | null = null;
 
-      await db.run(
-        `insert into pending_events
-           (client_event_id, device_id, employee_id, device_seq, event_type, occurred_at_utc,
-            local_tz_offset_minutes, activity_id, greenhouse_row_id, carrier_id, answers_json,
-            density_snapshot_json, config_revision, created_at_local, sync_status, sync_attempts)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0)`,
-        [
-          clientEventId,
-          event.deviceId,
-          event.employeeId,
-          deviceSeq,
-          event.eventType,
-          event.occurredAtUtc,
-          tzOffset,
-          event.activityId ?? null,
-          event.greenhouseRowId ?? null,
-          event.carrierId ?? null,
-          event.answers ? JSON.stringify(event.answers) : null,
-          event.densitySnapshot ? JSON.stringify(event.densitySnapshot) : null,
-          event.configRevision ?? null,
-          createdAtLocal,
-        ],
-        false
-      );
+      for (let attempt = 1; attempt <= MAX_SEQUENCE_ALLOCATION_ATTEMPTS; attempt++) {
+        const floorInputs = await this.readSequenceFloorInputs(db, event.deviceId);
+        const seq = candidateSeq ?? computeSequenceFloor(floorInputs);
+        logCheckpoint(correlationId, "appendEvent:native:transaction-start", { attempt, seq });
 
-      await db.commitTransaction();
-      logCheckpoint(correlationId, "appendEvent:native:transaction-committed", { deviceSeq });
-    } catch (err) {
-      await db.rollbackTransaction();
-      throw err;
-    }
-    this.schedulePersist();
-    logCheckpoint(correlationId, "appendEvent:native:persist-scheduled");
+        await db.beginTransaction();
+        try {
+          // Counter reservation and event insertion in ONE serialized
+          // transaction — a rollback on either statement failing reverts
+          // both together, so the counter can never advance past a device_seq
+          // that didn't actually get a pending_events row.
+          await db.run(
+            `insert into device_seq_counter (device_id, next_seq) values (?, ?)
+             on conflict(device_id) do update set next_seq = excluded.next_seq`,
+            [event.deviceId, seq + 1],
+            false
+          );
 
-    return {
-      ...event,
-      clientEventId,
-      deviceSeq,
-      localTzOffsetMinutes: tzOffset,
-      createdAtLocal,
-      syncStatus: "pending",
-      syncAttempts: 0,
-      lastSyncError: null,
-      serverResultJson: null,
-    };
+          await db.run(
+            `insert into pending_events
+               (client_event_id, device_id, employee_id, device_seq, event_type, occurred_at_utc,
+                local_tz_offset_minutes, activity_id, greenhouse_row_id, carrier_id, answers_json,
+                density_snapshot_json, config_revision, created_at_local, sync_status, sync_attempts)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0)`,
+            [
+              clientEventId,
+              event.deviceId,
+              event.employeeId,
+              seq,
+              event.eventType,
+              event.occurredAtUtc,
+              tzOffset,
+              event.activityId ?? null,
+              event.greenhouseRowId ?? null,
+              event.carrierId ?? null,
+              event.answers ? JSON.stringify(event.answers) : null,
+              event.densitySnapshot ? JSON.stringify(event.densitySnapshot) : null,
+              event.configRevision ?? null,
+              createdAtLocal,
+            ],
+            false
+          );
+
+          await db.commitTransaction();
+          logCheckpoint(correlationId, "appendEvent:native:transaction-committed", { deviceSeq: seq });
+
+          this.schedulePersist();
+          logCheckpoint(correlationId, "appendEvent:native:persist-scheduled");
+          return {
+            ...event,
+            clientEventId,
+            deviceSeq: seq,
+            localTzOffsetMinutes: tzOffset,
+            createdAtLocal,
+            syncStatus: "pending",
+            syncAttempts: 0,
+            lastSyncError: null,
+            serverResultJson: null,
+          };
+        } catch (err) {
+          await db.rollbackTransaction();
+          if (!isSequenceCollisionError(err)) throw err;
+
+          // Inspect the conflicting row rather than blindly incrementing —
+          // never delete, renumber, or overwrite it either way, only ever
+          // read it to decide idempotent-return vs. recompute-and-retry.
+          const conflictRows = await db.query(
+            `select client_event_id from pending_events where device_id = ? and device_seq = ?`,
+            [event.deviceId, seq]
+          );
+          const existingClientEventId = String(
+            (conflictRows.values?.[0] as DbRow | undefined)?.client_event_id ?? ""
+          );
+          const decision = resolveSequenceConflict(clientEventId, { deviceSeq: seq, existingClientEventId }, floorInputs);
+
+          if (decision.kind === "idempotent") {
+            logCheckpoint(correlationId, "appendEvent:native:sequence-collision-idempotent", { deviceSeq: seq });
+            const existingRows = await db.query(
+              `select * from pending_events where device_id = ? and device_seq = ?`,
+              [event.deviceId, seq]
+            );
+            const existingRow = existingRows.values?.[0] as DbRow | undefined;
+            if (existingRow) return this.rowToEvent(existingRow);
+            // The row we just read moments ago is gone — genuinely never
+            // expected (nothing in this codebase deletes a pending event by
+            // device_seq), so this is a real allocation failure, not a
+            // retryable case.
+            await logSequenceAllocationFailure(event.deviceId, {
+              clientEventId,
+              attempt,
+              deviceSeq: seq,
+              reason: "idempotent match disappeared before it could be read back",
+            });
+            throw new LocalSequenceAllocationError("idempotent match disappeared before it could be read back");
+          }
+
+          logCheckpoint(correlationId, "appendEvent:native:sequence-collision-retry", {
+            attempt,
+            attemptedSeq: seq,
+            retrySeq: decision.deviceSeq,
+          });
+          candidateSeq = decision.deviceSeq;
+
+          if (attempt >= MAX_SEQUENCE_ALLOCATION_ATTEMPTS) {
+            await logSequenceAllocationFailure(event.deviceId, {
+              clientEventId,
+              attempts: attempt,
+              lastAttemptedSeq: seq,
+              nextCandidateSeq: decision.deviceSeq,
+            });
+            throw new LocalSequenceAllocationError(
+              `gave up after ${attempt} attempts; last attempted device_seq=${seq}, conflicting clientEventId=${existingClientEventId}`
+            );
+          }
+          // Loop again with candidateSeq as the new attempt's seq.
+        }
+      }
+
+      // Unreachable — the loop above always either returns or throws before
+      // exhausting its bound — but keeps the function's return type honest
+      // for TypeScript without a non-null assertion.
+      throw new LocalSequenceAllocationError("sequence allocation loop exited without a result");
+    });
   }
 
   private rowToEvent(row: DbRow): LocalEvent {
@@ -479,4 +689,13 @@ let storeInstance: LocalEventStoreImpl | null = null;
 export function getLocalEventStore(): LocalEventStoreImpl {
   if (!storeInstance) storeInstance = new LocalEventStoreImpl();
   return storeInstance;
+}
+
+// Test-only — forces the next getLocalEventStore() to construct a fresh
+// instance (fresh dbPromise, fresh appendLock), simulating an app process
+// restart against whatever underlying storage the test's mocked
+// getSqliteConnection()/webEventJournal continues to serve. Same convention
+// as webEventJournal.ts's own __resetJournalConnectionForTests.
+export function __resetLocalEventStoreForTests(): void {
+  storeInstance = null;
 }

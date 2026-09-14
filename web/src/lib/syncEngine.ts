@@ -110,12 +110,20 @@ async function runSync(): Promise<void> {
 
   const attemptedAt = new Date().toISOString();
   try {
-    const response = await api<{ results: { clientEventId: string; status: SyncResultStatus; detail?: unknown }[] }>(
-      "/api/mobile/sync/events",
-      { method: "POST", body: JSON.stringify({ events: pending.map(toWire) }) }
-    );
+    const response = await api<{
+      results: { clientEventId: string; status: SyncResultStatus; detail?: unknown }[];
+      // Best-effort — see localSequenceAssignment.ts's SequenceFloorInputs
+      // for why appendEvent wants this as one of its sequence-floor
+      // sources: it's the one source that can recover a device whose OWN
+      // local event log was reset while the server still holds a higher
+      // watermark.
+      deviceLastProcessedSeq?: number;
+    }>("/api/mobile/sync/events", { method: "POST", body: JSON.stringify({ events: pending.map(toWire) }) });
     for (const result of response.results) {
       await store.markSyncResult(result.clientEventId, { clientEventId: result.clientEventId, status: result.status, detail: result.detail });
+    }
+    if (typeof response.deviceLastProcessedSeq === "number") {
+      await store.setServerLastProcessedSeq(deviceId, response.deviceLastProcessedSeq);
     }
     consecutiveFailures = 0;
     await store.setSyncMeta(deviceId, { lastSuccessfulSyncAt: attemptedAt, lastAttemptedSyncAt: attemptedAt, lastError: null });

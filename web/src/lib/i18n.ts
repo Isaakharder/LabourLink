@@ -155,6 +155,14 @@ const TRANSLATIONS_EN = {
   // within a bounded time — see WorkSessionContext.tsx's commitLocalEvent.
   // Retrying reuses the same tap, so it's always safe to press again.
   localCommitTimedOut: "This is taking longer than expected.",
+  // Shown when the local commit itself fails outright (not a timeout) —
+  // e.g. LocalSequenceAllocationError (localEventStore.ts). Replaces the
+  // old bare "Something went wrong" for this specific case per the
+  // Nattawat N incident's follow-up: the phone's current job never
+  // actually changed when this happens (the local write never landed), so
+  // saying so directly is both accurate and reassuring, and Retry is wired
+  // to re-attempt the identical tap.
+  localSaveFailed: "Couldn't save this job on the phone. Tap Retry. Your current job is still active.",
   retry: "Retry",
 
   // --- The mandatory message overlay's own interface control (see its
@@ -268,6 +276,7 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   couldNotReachServer: "No se pudo conectar con el servidor. Inténtelo de nuevo.",
   couldNotFinishWork: "No se pudo finalizar el trabajo. Inténtelo de nuevo.",
   localCommitTimedOut: "Esto está tardando más de lo esperado.",
+  localSaveFailed: "No se pudo guardar este trabajo en el teléfono. Toque Reintentar. Su trabajo actual sigue activo.",
   retry: "Reintentar",
 
   acknowledge: "Confirmar",

@@ -691,8 +691,18 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
             void performInternal(path, body, options, clientEventId);
           });
         } else {
-          console.error("[work-session] local commit failed:", err);
-          setError(t(language, "somethingWentWrong"));
+          // Covers LocalSequenceAllocationError (localEventStore.ts — see
+          // the Nattawat N incident) and any other non-timeout local-write
+          // failure alike: the write never landed, so the phone's current
+          // job genuinely never changed — "still active" is accurate, and
+          // Retry re-attempts the identical tap (safe: commitLocalEvent
+          // reuses clientEventId, so a write that actually succeeded a
+          // moment after all is never duplicated).
+          console.error("[work-session] local commit failed:", err instanceof Error ? err.name : "", err);
+          setError(t(language, "localSaveFailed"));
+          setRetryAction(() => () => {
+            void performInternal(path, body, options, clientEventId);
+          });
         }
       } finally {
         setBusy(false);
@@ -732,8 +742,11 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
             void startBreakInternal(clientEventId);
           });
         } else {
-          console.error("[work-session] break start failed:", err);
-          setError(t(language, "somethingWentWrong"));
+          console.error("[work-session] break start failed:", err instanceof Error ? err.name : "", err);
+          setError(t(language, "localSaveFailed"));
+          setRetryAction(() => () => {
+            void startBreakInternal(clientEventId);
+          });
         }
       } finally {
         setBusy(false);
@@ -804,8 +817,11 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
             void endBreakInternal(clientEventId);
           });
         } else {
-          console.error("[work-session] break end failed:", err);
-          setError(t(language, "somethingWentWrong"));
+          console.error("[work-session] break end failed:", err instanceof Error ? err.name : "", err);
+          setError(t(language, "localSaveFailed"));
+          setRetryAction(() => () => {
+            void endBreakInternal(clientEventId);
+          });
         }
       } finally {
         setBusy(false);

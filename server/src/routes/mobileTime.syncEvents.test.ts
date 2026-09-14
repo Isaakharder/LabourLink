@@ -179,6 +179,15 @@ async function main() {
     const r1 = await sync(deviceIdentifier, [event1]);
     check(r1.status === 200, "A) event1 (work_start) call succeeds", r1.body);
     check(r1.body?.results?.[0]?.status === "accepted", "A) event1 is accepted", r1.body);
+    // deviceLastProcessedSeq: the client's own local sequence-allocation
+    // fix (localSequenceAssignment.ts) persists this as one of its
+    // sequence-floor sources — must reflect the device's real watermark
+    // after this batch, not be omitted or stale.
+    check(
+      r1.body?.deviceLastProcessedSeq === 1,
+      "A) response reports deviceLastProcessedSeq matching the just-accepted device_seq",
+      r1.body
+    );
 
     const entryAfter1 = await pool.query(`select id, started_at, activity_id, idempotency_key from time_entries where employee_id = $1`, [
       employeeId,
