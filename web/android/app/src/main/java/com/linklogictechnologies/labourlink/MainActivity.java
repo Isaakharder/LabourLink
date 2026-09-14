@@ -44,24 +44,28 @@ public class MainActivity extends BridgeActivity {
     // on the still-live, still-foregrounded activity — a normal, always-
     // permitted operation — which tears down and rebuilds the Capacitor
     // Bridge/WebView in place and gives the renderer a fresh bindService()
-    // attempt, without ever registering as a process death. retryCount is
-    // static so it naturally survives recreate() within the same process.
-    // If every automatic attempt is exhausted, a plain native (non-WebView)
-    // screen with a manual Retry button takes over — it can't depend on the
-    // WebView working, since the WebView is exactly what's failing.
-    // Empirically, once the "bad process" mark triggers it can outlast
-    // several minutes of retries (measured: 16 retries over 3.5 minutes all
-    // failed) — only a full device reboot was observed to clear it
-    // immediately. These constants trade off a patient automatic-recovery
-    // window (~8 minutes worst case) against not leaving the app
-    // unresponsive indefinitely before falling back to the manual screen.
+    // attempt, without ever registering as a process death. If that one
+    // attempt is also exhausted, a plain native (non-WebView) screen with a
+    // manual Retry button takes over — it can't depend on the WebView
+    // working, since the WebView is exactly what's failing.
+    //
+    // Retry policy (revised 2026-09-14 after the Nattawat N incident — see
+    // ColdStartWatchdog's own header for the full writeup): the original
+    // version retried up to 20 times with increasing backoff, which on a
+    // slow-but-NOT-dead device could recreate the Activity repeatedly while
+    // real progress was happening, destroying it each time. All of the
+    // actual timing/retry-cap/single-flight/cancellation decision logic now
+    // lives in ColdStartWatchdog (plain Java, no Android framework
+    // dependency, unit-testable) — this class only wires it to the real
+    // Handler and Activity lifecycle. At most ONE automatic recovery
+    // attempt per cold-start session now; a second miss goes straight to
+    // the manual fallback, never a third recreate().
     private static final String TAG = "ColdStartWatchdog";
-    private static final long WATCHDOG_INITIAL_DELAY_MS = 5000;
-    private static final long WATCHDOG_BACKOFF_STEP_MS = 2000;
-    private static final long WATCHDOG_MAX_DELAY_MS = 60000;
-    private static final int WATCHDOG_MAX_RETRIES = 20;
 
-    private static int retryCount = 0;
+    // Static: shared across every MainActivity instance recreate() produces
+    // within one process — a genuinely new cold start is a new process, so
+    // this naturally starts fresh. See ColdStartWatchdog.Session's own doc.
+    private static final ColdStartWatchdog.Session watchdogSession = new ColdStartWatchdog.Session();
 
     // No androidx.core.splashscreen.SplashScreen.installSplashScreen() call
     // here. Confirmed NOT related to the hang above (see comment block),
@@ -70,16 +74,36 @@ public class MainActivity extends BridgeActivity {
     // transparent/unstyled instead of switching to postSplashScreenTheme.
 
     private final Handler watchdogHandler = new Handler(Looper.getMainLooper());
-    private volatile boolean pageStarted = false;
-    private Runnable watchdogRunnable;
-    private long attemptStartedAtMs;
+    private ColdStartWatchdog watchdog;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        attemptStartedAtMs = System.currentTimeMillis();
-        Log.i(TAG, "cold start attempt #" + retryCount + " beginning");
+        Log.i(TAG, "cold start beginning, recoveryAttempted=" + watchdogSession.recoveryAttempted);
+
+        watchdog = new ColdStartWatchdog(
+            watchdogSession,
+            (delayMs, action) -> {
+                Runnable r = action::run;
+                watchdogHandler.postDelayed(r, delayMs);
+                return () -> watchdogHandler.removeCallbacks(r);
+            },
+            new ColdStartWatchdog.Actions() {
+                @Override
+                public void recreateActivity() {
+                    Log.w(TAG, "did not start within timeout — attempting the one automatic recovery (recreate)");
+                    recreate();
+                }
+
+                @Override
+                public void showManualFallback() {
+                    Log.e(TAG, "did not start within timeout after the one automatic recovery was already used — showing manual fallback");
+                    showManualRetryUi();
+                }
+            }
+        );
+        watchdog.start();
 
         this.bridge.addWebViewListener(
             new WebViewListener() {
@@ -94,53 +118,28 @@ public class MainActivity extends BridgeActivity {
                 }
             }
         );
-
-        if (retryCount < WATCHDOG_MAX_RETRIES) {
-            long delay = Math.min(WATCHDOG_INITIAL_DELAY_MS + retryCount * WATCHDOG_BACKOFF_STEP_MS, WATCHDOG_MAX_DELAY_MS);
-            watchdogRunnable = () -> {
-                if (!pageStarted) {
-                    long elapsed = System.currentTimeMillis() - attemptStartedAtMs;
-                    Log.w(TAG, "attempt #" + retryCount + " did not start within " + elapsed + "ms, recreating activity");
-                    retryCount++;
-                    recreate();
-                }
-            };
-            watchdogHandler.postDelayed(watchdogRunnable, delay);
-        } else {
-            watchdogRunnable = () -> {
-                if (!pageStarted) {
-                    long elapsed = System.currentTimeMillis() - attemptStartedAtMs;
-                    Log.e(TAG, "attempt #" + retryCount + " did not start within " + elapsed + "ms, all automatic retries exhausted");
-                    showManualRetryUi();
-                }
-            };
-            watchdogHandler.postDelayed(watchdogRunnable, WATCHDOG_MAX_DELAY_MS);
-        }
     }
 
     private void markPageStarted() {
-        if (pageStarted) {
-            return;
-        }
-        pageStarted = true;
-        long elapsed = System.currentTimeMillis() - attemptStartedAtMs;
-        Log.i(TAG, "attempt #" + retryCount + " started successfully after " + elapsed + "ms");
-        retryCount = 0;
-        if (watchdogRunnable != null) {
-            watchdogHandler.removeCallbacks(watchdogRunnable);
-        }
+        Log.i(TAG, "page started/loaded — cancelling the watchdog");
+        watchdog.markReady();
     }
 
     @Override
     public void onDestroy() {
+        // Cancel immediately, unconditionally, and before anything else —
+        // lifecycle-aware: an instance being torn down (its own recreate(),
+        // or the user leaving mid-start) can never have its scheduled check
+        // fire afterward.
+        watchdog.cancel();
         watchdogHandler.removeCallbacksAndMessages(null);
         super.onDestroy();
     }
 
     // Plain native View tree — deliberately not touching the WebView/Bridge
     // at all, since the WebView is exactly what has failed to start after
-    // WATCHDOG_MAX_RETRIES automatic attempts. Tapping Retry resets the
-    // count and starts a fresh bounded retry sequence from zero.
+    // the one automatic recovery attempt. Tapping Retry starts a fresh
+    // one-recovery-attempt budget from zero.
     private void showManualRetryUi() {
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
@@ -169,8 +168,8 @@ public class MainActivity extends BridgeActivity {
         retryButton.setText("Retry");
         retryButton.setOnClickListener(
             v -> {
-                Log.i(TAG, "manual retry tapped, resetting attempt count");
-                retryCount = 0;
+                Log.i(TAG, "manual retry tapped, starting a fresh one-recovery-attempt budget");
+                watchdogSession.recoveryAttempted = false;
                 recreate();
             }
         );
