@@ -31,6 +31,9 @@ const period: EmploymentPeriod = {
   workGroupOtherDescription: null,
   notes: null,
   statuses: ["current"],
+  timelineEffectiveEndDate: "2026-06-01",
+  timelineLabel: "employed",
+  synthesized: false,
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
 };

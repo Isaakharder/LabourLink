@@ -144,7 +144,7 @@ describe("EmployeesPage compact layout", () => {
     renderEmployees("/employees/employment-timeline");
     expect(await screen.findByRole("link", { name: "Employment Timeline" })).toHaveClass("tab-active");
 
-    expect(screen.getByText("Month")).toBeInTheDocument();
+    expect(screen.getByText("Full timeline")).toBeInTheDocument();
     expect(screen.getByText("Today")).toBeInTheDocument();
     expect(screen.getByText("Graph")).toBeInTheDocument();
     expect(screen.getByText("Export CSV")).toBeInTheDocument();

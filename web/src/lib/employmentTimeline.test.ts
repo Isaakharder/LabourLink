@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   buildEmploymentTimelineRows,
+  buildTimelineMonthMarks,
   computeBarPosition,
+  computeFittedRange,
+  daysBetweenDateStrs,
   filterEmploymentTimelineEmployees,
-  getTimelineColumns,
-  shiftAnchor,
+  percentInRange,
 } from "./employmentTimeline";
 import { EmploymentTimelineEmployee, EmploymentTimelineFilterState, EMPTY_FILTER_STATE } from "./employmentPeriodTypes";
 
@@ -20,6 +22,9 @@ function period(overrides: Partial<EmploymentTimelineEmployee["periods"][number]
     workGroupOtherDescription: null,
     notes: null,
     statuses: ["current"],
+    timelineEffectiveEndDate: "2026-06-15",
+    timelineLabel: "ongoing",
+    synthesized: false,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     ...overrides,
@@ -35,87 +40,112 @@ function employee(overrides: Partial<EmploymentTimelineEmployee> = {}): Employme
     jobGroup: null,
     isActive: true,
     workPermit: null,
+    hasUsableDates: true,
     periods: [period()],
     ...overrides,
   };
 }
 
-describe("getTimelineColumns", () => {
-  it("Month view: one column per day of the month", () => {
-    const columns = getTimelineColumns("month", "2026-02-15");
-    expect(columns).toHaveLength(28); // Feb 2026 is not a leap year
-    expect(columns[0].startDate).toBe("2026-02-01");
-    expect(columns[columns.length - 1].startDate).toBe("2026-02-28");
-  });
-
-  it("Quarter view: exactly 13 weekly columns covering the quarter", () => {
-    const columns = getTimelineColumns("quarter", "2026-05-15"); // Q2: Apr-Jun
-    expect(columns).toHaveLength(13);
-    // Each column spans exactly 7 days (Monday-start week).
-    for (const c of columns) {
-      expect(c.startDate <= c.endDate).toBe(true);
-    }
-  });
-
-  it("Year view: exactly 12 monthly columns", () => {
-    const columns = getTimelineColumns("year", "2026-07-01");
-    expect(columns).toHaveLength(12);
-    expect(columns[0].startDate).toBe("2026-01-01");
-    expect(columns[11].startDate).toBe("2026-12-01");
-    expect(columns[11].endDate).toBe("2026-12-31");
+describe("daysBetweenDateStrs", () => {
+  it("counts calendar days, positive when `to` is later", () => {
+    expect(daysBetweenDateStrs("2027-02-01", "2027-02-25")).toBe(24);
+    expect(daysBetweenDateStrs("2027-02-25", "2027-02-01")).toBe(-24);
+    expect(daysBetweenDateStrs("2026-01-01", "2026-01-01")).toBe(0);
   });
 });
 
-describe("shiftAnchor", () => {
-  it("Month navigation moves by exactly one calendar month", () => {
-    expect(shiftAnchor("month", "2026-01-31", 1)).toBe("2026-02-28"); // end-of-month clamping
-    expect(shiftAnchor("month", "2026-03-15", -1)).toBe("2026-02-15");
+describe("computeFittedRange", () => {
+  const TODAY = "2026-06-15";
+
+  it("spans from the earliest period start to the latest timelineEffectiveEndDate", () => {
+    const a = employee({ id: "a", periods: [period({ startDate: "2020-01-01", timelineEffectiveEndDate: "2021-01-01", timelineLabel: "completed" })] });
+    const b = employee({ id: "b", periods: [period({ startDate: "2023-05-01", timelineEffectiveEndDate: "2027-01-01", timelineLabel: "employed" })] });
+    const range = computeFittedRange([a, b], TODAY);
+    expect(range).toEqual({ start: "2020-01-01", end: "2027-01-01" });
   });
-  it("Quarter navigation moves by three months, Year by twelve", () => {
-    expect(shiftAnchor("quarter", "2026-01-15", 1)).toBe("2026-04-15");
-    expect(shiftAnchor("year", "2026-01-15", 1)).toBe("2027-01-15");
+
+  it("includes today when every included period's effective end is already in the past", () => {
+    const a = employee({ periods: [period({ startDate: "2020-01-01", timelineEffectiveEndDate: "2020-06-01", timelineLabel: "completed" })] });
+    const range = computeFittedRange([a], TODAY);
+    expect(range).toEqual({ start: "2020-01-01", end: TODAY });
+  });
+
+  it("skips employees flagged hasUsableDates:false entirely — they don't affect the range", () => {
+    const dated = employee({ id: "dated", periods: [period({ startDate: "2024-01-01", timelineEffectiveEndDate: "2024-06-01", timelineLabel: "completed" })] });
+    const flagged = employee({ id: "flagged", hasUsableDates: false, periods: [] });
+    const range = computeFittedRange([dated, flagged], TODAY);
+    expect(range).toEqual({ start: "2024-01-01", end: TODAY });
+  });
+
+  it("returns null when nothing datable is included at all", () => {
+    const flagged = employee({ hasUsableDates: false, periods: [] });
+    expect(computeFittedRange([flagged], TODAY)).toBeNull();
+  });
+
+  it("recalculates from whatever list it's given — simulating 'recalculate after filters'", () => {
+    const a = employee({ id: "a", periods: [period({ startDate: "2020-01-01", timelineEffectiveEndDate: "2021-01-01", timelineLabel: "completed" })] });
+    const b = employee({ id: "b", periods: [period({ startDate: "2023-01-01", timelineEffectiveEndDate: "2024-01-01", timelineLabel: "completed" })] });
+    expect(computeFittedRange([a, b], TODAY)).toEqual({ start: "2020-01-01", end: TODAY });
+    // Once "a" is filtered out client-side, the range recomputed over the
+    // remaining list narrows accordingly.
+    expect(computeFittedRange([b], TODAY)).toEqual({ start: "2023-01-01", end: TODAY });
   });
 });
 
-describe("computeBarPosition", () => {
-  const columns = getTimelineColumns("month", "2026-06-15"); // June 2026, 30 columns, index 0=Jun1 .. 29=Jun30
+describe("percentInRange / computeBarPosition", () => {
+  const range = { start: "2026-01-01", end: "2026-12-31" };
 
-  it("a period fully within the visible range positions at the exact start/end columns, not clipped", () => {
-    const pos = computeBarPosition({ startDate: "2026-06-05", expectedFinishDate: null, actualFinishDate: "2026-06-10" }, columns);
-    expect(pos).toEqual({ startColIndex: 4, endColIndex: 9, clippedStart: false, clippedEnd: false });
+  it("start of range is 0%, end of range is 100%", () => {
+    expect(percentInRange("2026-01-01", range)).toBe(0);
+    expect(percentInRange("2026-12-31", range)).toBe(100);
   });
 
-  it("a period starting before the visible window is clipped to column 0", () => {
-    const pos = computeBarPosition({ startDate: "2026-01-01", expectedFinishDate: null, actualFinishDate: "2026-06-10" }, columns);
-    expect(pos?.clippedStart).toBe(true);
-    expect(pos?.startColIndex).toBe(0);
+  it("clamps a date outside the range instead of going negative or past 100", () => {
+    expect(percentInRange("2025-01-01", range)).toBe(0);
+    expect(percentInRange("2027-01-01", range)).toBe(100);
   });
 
-  it("an open-ended period (no finish at all) extends to the last visible column and is flagged clippedEnd", () => {
-    const pos = computeBarPosition({ startDate: "2026-06-05", expectedFinishDate: null, actualFinishDate: null }, columns);
-    expect(pos?.clippedEnd).toBe(true);
-    expect(pos?.endColIndex).toBe(columns.length - 1);
+  it("a completed period positions between its start and its actual (recorded) end, not extended", () => {
+    const p = period({ startDate: "2026-02-01", timelineEffectiveEndDate: "2026-03-01", timelineLabel: "completed" });
+    const pos = computeBarPosition(p, range);
+    expect(pos.leftPercent).toBeCloseTo(percentInRange("2026-02-01", range), 5);
+    expect(pos.leftPercent + pos.widthPercent).toBeCloseTo(percentInRange("2026-03-01", range), 5);
   });
 
-  it("a period finishing after the visible window is clipped at the last column", () => {
-    const pos = computeBarPosition({ startDate: "2026-06-05", expectedFinishDate: null, actualFinishDate: "2027-01-01" }, columns);
-    expect(pos?.clippedEnd).toBe(true);
-    expect(pos?.endColIndex).toBe(columns.length - 1);
+  it("an 'ongoing' period is drawn all the way to the range's right edge (100%), not clipped at its own effectiveEndDate", () => {
+    const p = period({ startDate: "2026-02-01", timelineEffectiveEndDate: "2026-06-15", timelineLabel: "ongoing" });
+    const pos = computeBarPosition(p, range);
+    expect(pos.leftPercent + pos.widthPercent).toBeCloseTo(100, 5);
   });
 
-  it("a period entirely before the visible range returns null (nothing to draw)", () => {
-    const pos = computeBarPosition({ startDate: "2026-01-01", expectedFinishDate: null, actualFinishDate: "2026-01-15" }, columns);
-    expect(pos).toBeNull();
+  it("an 'expiredStillWorking' period is also drawn to the range's right edge", () => {
+    const p = period({ startDate: "2026-02-01", timelineEffectiveEndDate: "2026-06-15", timelineLabel: "expiredStillWorking" });
+    const pos = computeBarPosition(p, range);
+    expect(pos.leftPercent + pos.widthPercent).toBeCloseTo(100, 5);
   });
 
-  it("a period entirely after the visible range returns null", () => {
-    const pos = computeBarPosition({ startDate: "2026-12-01", expectedFinishDate: null, actualFinishDate: null }, columns);
-    expect(pos).toBeNull();
+  it("an 'employed' period (future finish/expiry) ends exactly at its own effectiveEndDate, not the range edge", () => {
+    const p = period({ startDate: "2026-02-01", timelineEffectiveEndDate: "2026-08-01", timelineLabel: "employed" });
+    const pos = computeBarPosition(p, range);
+    expect(pos.leftPercent + pos.widthPercent).toBeCloseTo(percentInRange("2026-08-01", range), 5);
+  });
+});
+
+describe("buildTimelineMonthMarks", () => {
+  it("one mark per calendar month crossed, inclusive of both ends", () => {
+    const marks = buildTimelineMonthMarks({ start: "2026-01-15", end: "2026-04-05" });
+    expect(marks.map((m) => m.key)).toEqual(["2026-01-01", "2026-02-01", "2026-03-01", "2026-04-01"]);
   });
 
-  it("prefers actualFinishDate over expectedFinishDate when both are set", () => {
-    const pos = computeBarPosition({ startDate: "2026-06-01", expectedFinishDate: "2026-06-25", actualFinishDate: "2026-06-05" }, columns);
-    expect(pos?.endColIndex).toBe(4); // Jun 5 = index 4, not Jun 25's index
+  it("labels a year boundary (and the very first mark) with the year, other months with just the abbreviation", () => {
+    const marks = buildTimelineMonthMarks({ start: "2025-11-01", end: "2026-02-01" });
+    expect(marks.map((m) => m.label)).toEqual(["Nov 2025", "Dec", "Jan 2026", "Feb"]);
+  });
+
+  it("positions each mark by percentage within the range", () => {
+    const marks = buildTimelineMonthMarks({ start: "2026-01-01", end: "2026-12-31" });
+    expect(marks[0].leftPercent).toBe(0);
+    expect(marks[marks.length - 1].leftPercent).toBeGreaterThan(90);
   });
 });
 
@@ -193,11 +223,19 @@ describe("filterEmploymentTimelineEmployees", () => {
 });
 
 describe("buildEmploymentTimelineRows — table/export parity", () => {
-  it("produces one row per period with the expected columns, Unspecified fallbacks, and a — for missing dates as empty strings", () => {
+  it("produces one row per period with the expected columns, Unspecified fallbacks, and the shared timelineLabel text as Status", () => {
     const emp = employee({
       nationality: null,
       periods: [
-        period({ id: "p-a", startDate: "2026-01-01", expectedFinishDate: "2026-06-01", actualFinishDate: null, employmentType: null, workGroup: "Greenhouse", statuses: ["current", "finishingSoon"] }),
+        period({
+          id: "p-a",
+          startDate: "2026-01-01",
+          expectedFinishDate: "2026-06-01",
+          actualFinishDate: null,
+          employmentType: null,
+          workGroup: "Greenhouse",
+          timelineLabel: "employed",
+        }),
       ],
     });
     const rows = buildEmploymentTimelineRows([emp]);
@@ -210,8 +248,24 @@ describe("buildEmploymentTimelineRows — table/export parity", () => {
       startDate: "2026-01-01",
       expectedFinishDate: "2026-06-01",
       actualFinishDate: "",
-      status: "Finishing soon",
+      status: "Employed",
     });
+  });
+
+  it("uses the exact 'Expired — still working' / 'Ongoing' text for those timeline labels", () => {
+    const expired = employee({ id: "e1", periods: [period({ timelineLabel: "expiredStillWorking" })] });
+    const ongoing = employee({ id: "e2", periods: [period({ timelineLabel: "ongoing" })] });
+    const rows = buildEmploymentTimelineRows([expired, ongoing]);
+    expect(rows[0].status).toBe("Expired — still working");
+    expect(rows[1].status).toBe("Ongoing");
+  });
+
+  it("an employee with no usable dates gets exactly one flagged placeholder row, not zero rows", () => {
+    const flagged = employee({ hasUsableDates: false, periods: [] });
+    const rows = buildEmploymentTimelineRows([flagged]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("No employment dates recorded");
+    expect(rows[0].employeeName).toBe("Alice Smith");
   });
 
   it("is the exact same builder the table view and CSV/PDF export both call — same array reference shape for identical input", () => {
@@ -223,7 +277,10 @@ describe("buildEmploymentTimelineRows — table/export parity", () => {
 
   it("multiple periods for one employee produce multiple rows, one per period", () => {
     const emp = employee({
-      periods: [period({ id: "p1", startDate: "2024-01-01", actualFinishDate: "2024-06-01", statuses: ["completed"] }), period({ id: "p2", startDate: "2024-07-01", statuses: ["current"] })],
+      periods: [
+        period({ id: "p1", startDate: "2024-01-01", actualFinishDate: "2024-06-01", timelineLabel: "completed" }),
+        period({ id: "p2", startDate: "2024-07-01", timelineLabel: "ongoing" }),
+      ],
     });
     const rows = buildEmploymentTimelineRows([emp]);
     expect(rows).toHaveLength(2);

@@ -2,14 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../../../lib/api";
 import { useAuth } from "../../../context/AuthContext";
 import { todayInAppTimezone } from "../../../lib/timezone";
-import { getTimelineColumns, filterEmploymentTimelineEmployees, shiftAnchor, TimelineViewType, TimelineColumn } from "../../../lib/employmentTimeline";
-import { enumerateDates } from "../../../lib/timezone";
+import { computeFittedRange, filterEmploymentTimelineEmployees, TimelineRange } from "../../../lib/employmentTimeline";
 import { EmploymentTimelineEmployee, EmploymentPeriod, EMPTY_FILTER_STATE, EmploymentTimelineFilterState } from "../../../lib/employmentPeriodTypes";
 import { EmploymentTimelineGraph } from "../../../components/employees/EmploymentTimelineGraph";
 import { EmploymentTimelineTable } from "../../../components/employees/EmploymentTimelineTable";
 import { EmploymentTimelineFilters } from "../../../components/employees/EmploymentTimelineFilters";
 import { EmploymentPeriodModal } from "../../../components/employees/EmploymentPeriodModal";
 import { exportEmploymentTimelineCsv, exportEmploymentTimelinePdf, printEmploymentTimeline } from "../../../lib/employmentTimelineExport";
+import { DownloadIcon, PrintIcon } from "../../../components/ui/icons";
 
 type ViewMode = "graph" | "table";
 
@@ -18,6 +18,10 @@ interface ModalState {
   period: EmploymentPeriod | null; // null = adding a new period
 }
 
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 6;
+const ZOOM_STEP = 1;
+
 export function EmploymentTimelineTab() {
   const { employee: currentEmployee } = useAuth();
   const canEdit = currentEmployee?.securityRole === "Administrator";
@@ -25,11 +29,13 @@ export function EmploymentTimelineTab() {
   const [employees, setEmployees] = useState<EmploymentTimelineEmployee[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filters, setFilters] = useState<EmploymentTimelineFilterState>(EMPTY_FILTER_STATE);
-  const [view, setView] = useState<TimelineViewType>("month");
-  const [anchorDate, setAnchorDate] = useState(todayInAppTimezone());
   const [viewMode, setViewMode] = useState<ViewMode>("graph");
   const [modalState, setModalState] = useState<ModalState | null>(null);
+  // Optional manual override of the default "Fit all" range — unrelated to
+  // zoom (which just changes pixel density within whatever range is shown).
   const [rangeOverride, setRangeOverride] = useState<{ start: string; end: string } | null>(null);
+  const [zoom, setZoom] = useState(MIN_ZOOM);
+  const [scrollToTodayToken, setScrollToTodayToken] = useState(0);
 
   const load = useCallback(() => {
     api<{ employees: EmploymentTimelineEmployee[] }>("/api/employment-periods")
@@ -46,35 +52,28 @@ export function EmploymentTimelineTab() {
 
   const today = todayInAppTimezone();
 
-  const columns = useMemo<TimelineColumn[]>(() => {
-    if (rangeOverride && rangeOverride.start && rangeOverride.end && rangeOverride.start <= rangeOverride.end) {
-      // A custom date-range override renders at day granularity (Month-view
-      // style columns) spanning exactly the chosen range, overriding
-      // Prev/Next navigation entirely, per the brief's "date-range
-      // selection" requirement.
-      return enumerateDates(rangeOverride.start, rangeOverride.end).map((d) => ({
-        key: d,
-        label: String(Number(d.slice(8, 10))),
-        startDate: d,
-        endDate: d,
-      }));
-    }
-    return getTimelineColumns(view, anchorDate);
-  }, [view, anchorDate, rangeOverride]);
-
   const filteredEmployees = useMemo(() => (employees ? filterEmploymentTimelineEmployees(employees, filters) : []), [employees, filters]);
 
-  function handlePrev() {
+  // The default, primary view: fits the complete range of every currently
+  // visible (already filtered) employee — recalculated automatically
+  // whenever the filters change, simply by depending on filteredEmployees.
+  // A valid custom From/To override takes precedence when set.
+  const fittedRange = useMemo(() => computeFittedRange(filteredEmployees, today), [filteredEmployees, today]);
+  const range: TimelineRange | null =
+    rangeOverride && rangeOverride.start && rangeOverride.end && rangeOverride.start <= rangeOverride.end ? (rangeOverride as TimelineRange) : fittedRange;
+
+  function handleFitAll() {
     setRangeOverride(null);
-    setAnchorDate((prev) => shiftAnchor(view, prev, -1));
-  }
-  function handleNext() {
-    setRangeOverride(null);
-    setAnchorDate((prev) => shiftAnchor(view, prev, 1));
+    setZoom(MIN_ZOOM);
   }
   function handleToday() {
-    setRangeOverride(null);
-    setAnchorDate(todayInAppTimezone());
+    setScrollToTodayToken((t) => t + 1);
+  }
+  function handleZoomIn() {
+    setZoom((z) => Math.min(MAX_ZOOM, z + ZOOM_STEP));
+  }
+  function handleZoomOut() {
+    setZoom((z) => Math.max(MIN_ZOOM, z - ZOOM_STEP));
   }
 
   function handleModalSaved() {
@@ -87,27 +86,22 @@ export function EmploymentTimelineTab() {
   return (
     <div className="employment-timeline-view">
       <div className="employment-timeline-toolbar">
-        <div className="employment-timeline-view-switch">
-          <button type="button" className={view === "month" && !rangeOverride ? "active" : ""} onClick={() => { setRangeOverride(null); setView("month"); }}>
-            Month
+        <div className="employment-timeline-nav">
+          <button type="button" className="employment-timeline-fit-all" onClick={handleFitAll} aria-pressed={!rangeOverride && zoom === MIN_ZOOM}>
+            Full timeline
           </button>
-          <button type="button" className={view === "quarter" && !rangeOverride ? "active" : ""} onClick={() => { setRangeOverride(null); setView("quarter"); }}>
-            Quarter
-          </button>
-          <button type="button" className={view === "year" && !rangeOverride ? "active" : ""} onClick={() => { setRangeOverride(null); setView("year"); }}>
-            Year
+          <button type="button" className="employment-timeline-nav-today" onClick={handleToday}>
+            Today
           </button>
         </div>
 
-        <div className="employment-timeline-nav">
-          <button type="button" onClick={handlePrev} disabled={!!rangeOverride} aria-label="Previous">
-            ‹
+        <div className="employment-timeline-zoom" role="group" aria-label="Zoom">
+          <button type="button" className="employment-timeline-nav-arrow" onClick={handleZoomOut} disabled={zoom <= MIN_ZOOM} aria-label="Zoom out">
+            −
           </button>
-          <button type="button" onClick={handleToday}>
-            Today
-          </button>
-          <button type="button" onClick={handleNext} disabled={!!rangeOverride} aria-label="Next">
-            ›
+          <span className="employment-timeline-zoom-label">Zoom</span>
+          <button type="button" className="employment-timeline-nav-arrow" onClick={handleZoomIn} disabled={zoom >= MAX_ZOOM} aria-label="Zoom in">
+            +
           </button>
         </div>
 
@@ -130,21 +124,21 @@ export function EmploymentTimelineTab() {
           </label>
         </div>
 
-        <div className="employment-timeline-view-mode">
-          <button type="button" className={viewMode === "graph" ? "active" : ""} onClick={() => setViewMode("graph")}>
+        <div className="employment-timeline-view-mode" role="group" aria-label="View mode">
+          <button type="button" className={viewMode === "graph" ? "active" : ""} aria-pressed={viewMode === "graph"} onClick={() => setViewMode("graph")}>
             Graph
           </button>
-          <button type="button" className={viewMode === "table" ? "active" : ""} onClick={() => setViewMode("table")}>
+          <button type="button" className={viewMode === "table" ? "active" : ""} aria-pressed={viewMode === "table"} onClick={() => setViewMode("table")}>
             Table
           </button>
         </div>
 
         <div className="employment-timeline-export-actions">
           <button type="button" onClick={() => exportEmploymentTimelineCsv(filteredEmployees)}>
-            Export CSV
+            <DownloadIcon /> Export CSV
           </button>
           <button type="button" onClick={() => exportEmploymentTimelinePdf(filteredEmployees)}>
-            Export PDF
+            <DownloadIcon /> Export PDF
           </button>
           <button
             type="button"
@@ -157,7 +151,7 @@ export function EmploymentTimelineTab() {
               window.requestAnimationFrame(() => printEmploymentTimeline("landscape"));
             }}
           >
-            Print
+            <PrintIcon /> Print
           </button>
         </div>
       </div>
@@ -170,12 +164,16 @@ export function EmploymentTimelineTab() {
         <p>Loading...</p>
       ) : filteredEmployees.length === 0 ? (
         <p className="placeholder-page">No employees match the current filters.</p>
+      ) : !range ? (
+        <p className="placeholder-page">No employment dates recorded for any visible employee.</p>
       ) : viewMode === "graph" ? (
         <EmploymentTimelineGraph
           employees={filteredEmployees}
-          columns={columns}
+          range={range}
           today={today}
+          zoom={zoom}
           canEdit={canEdit}
+          scrollToTodayToken={scrollToTodayToken}
           onBarClick={(employee, period) => setModalState({ employee, period })}
           onAddPeriod={(employee) => setModalState({ employee, period: null })}
         />

@@ -6847,52 +6847,226 @@ input {
 }
 
 /* ---------- Employment Timeline (Employees section) ---------- */
+/* Every control below (segmented controls, icon buttons, secondary
+   buttons, date inputs, filter triggers) shares one 34px-tall, 6px-radius
+   control language built from the app's existing tokens/conventions
+   (--color-border/--color-surface/--color-primary, 0.85rem, 6px radius —
+   the same values .employees-toolbar select/.employees-add-button and
+   .inputs-date-trigger already use) rather than a new button style. */
 
 .employment-timeline-toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.6rem;
   margin-bottom: 0.75rem;
 }
 
-.employment-timeline-view-switch,
-.employment-timeline-nav,
-.employment-timeline-view-mode,
-.employment-timeline-export-actions {
-  display: flex;
-  gap: 0.25rem;
+.employment-timeline-toolbar button,
+.employment-timeline-toolbar input {
+  height: 34px;
+  font-size: 0.85rem;
+  font-family: inherit;
 }
 
-.employment-timeline-view-switch button,
+/* -- segmented control: Graph/Table -- */
+
+.employment-timeline-view-mode {
+  display: flex;
+}
+
 .employment-timeline-view-mode button {
-  padding: 0.35rem 0.7rem;
+  padding: 0 0.85rem;
   border: 1px solid var(--color-border);
   background: var(--color-surface);
-  border-radius: 4px;
-  font-size: 0.82rem;
+  color: var(--color-text);
+  position: relative;
 }
 
-.employment-timeline-view-switch button.active,
+.employment-timeline-view-mode button + button {
+  margin-left: -1px;
+}
+
+.employment-timeline-view-mode button:first-child {
+  border-radius: 6px 0 0 6px;
+}
+
+.employment-timeline-view-mode button:last-child {
+  border-radius: 0 6px 6px 0;
+}
+
+.employment-timeline-view-mode button:hover:not(.active) {
+  background: var(--color-bg);
+}
+
+.employment-timeline-view-mode button:focus-visible {
+  z-index: 1;
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
 .employment-timeline-view-mode button.active {
   background: var(--color-primary);
   border-color: var(--color-primary);
   color: white;
   font-weight: 600;
+  z-index: 1;
 }
+
+/* -- full timeline / today / zoom -- */
+
+.employment-timeline-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.employment-timeline-nav-arrow {
+  width: 34px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.employment-timeline-nav-today {
+  padding: 0 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.employment-timeline-nav-arrow:hover:not(:disabled),
+.employment-timeline-nav-today:hover {
+  background: var(--color-bg);
+}
+
+.employment-timeline-nav-arrow:focus-visible,
+.employment-timeline-nav-today:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+.employment-timeline-nav-arrow:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.employment-timeline-fit-all {
+  padding: 0 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.employment-timeline-fit-all:hover {
+  background: var(--color-bg);
+}
+
+.employment-timeline-fit-all:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+.employment-timeline-zoom {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.employment-timeline-zoom-label {
+  font-size: 0.78rem;
+  color: var(--color-muted);
+}
+
+/* -- from/to date range -- */
 
 .employment-timeline-range-picker {
   display: flex;
-  gap: 0.5rem;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 0.9rem;
 }
 
 .employment-timeline-range-picker label {
   display: flex;
-  flex-direction: column;
-  font-size: 0.72rem;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
   color: var(--color-muted);
-  gap: 0.15rem;
+  white-space: nowrap;
+}
+
+.employment-timeline-range-picker input[type="date"] {
+  padding: 0 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.employment-timeline-range-picker input[type="date"]:hover {
+  border-color: var(--color-muted);
+}
+
+.employment-timeline-range-picker input[type="date"]:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+/* -- export actions -- */
+
+.employment-timeline-export-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.employment-timeline-export-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.employment-timeline-export-actions button svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.employment-timeline-export-actions button:hover:not(:disabled) {
+  background: var(--color-bg);
+}
+
+.employment-timeline-export-actions button:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+.employment-timeline-export-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 900px) {
+  .employment-timeline-export-actions {
+    margin-left: 0;
+  }
 }
 
 /* -- filters -- */
@@ -6909,11 +7083,38 @@ input {
 }
 
 .employment-timeline-filter-trigger {
-  padding: 0.35rem 0.7rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 34px;
+  padding: 0 0.75rem;
   border: 1px solid var(--color-border);
   background: var(--color-surface);
-  border-radius: 4px;
-  font-size: 0.82rem;
+  color: var(--color-text);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-family: inherit;
+}
+
+.employment-timeline-filter-trigger:hover {
+  background: var(--color-bg);
+}
+
+.employment-timeline-filter-trigger:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+.employment-timeline-filter-chevron {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  color: var(--color-muted);
+  transition: transform 0.15s ease;
+}
+
+.employment-timeline-filter-trigger[aria-expanded="true"] .employment-timeline-filter-chevron {
+  transform: rotate(180deg);
 }
 
 .employment-timeline-filter-panel {
@@ -6934,11 +7135,39 @@ input {
 
 .employment-timeline-filter-search {
   width: 100%;
+  height: 32px;
+  padding: 0 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-family: inherit;
+}
+
+.employment-timeline-filter-search:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
 }
 
 .employment-timeline-filter-toolbar {
   display: flex;
   gap: 0.35rem;
+}
+
+.employment-timeline-filter-toolbar button {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-size: 0.78rem;
+}
+
+.employment-timeline-filter-toolbar button:hover:not(:disabled) {
+  background: var(--color-bg);
+}
+
+.employment-timeline-filter-toolbar button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .employment-timeline-filter-list {
@@ -6962,29 +7191,91 @@ input {
   gap: 0.4rem;
 }
 
+/* :not(.employment-timeline-filter-apply) throughout: a bare "button" +
+   class selector here otherwise outranks .employment-timeline-filter-apply's
+   single-class selector on specificity regardless of source order, which
+   previously left Apply's background/border overridden back to the
+   secondary style while its color: white stayed — invisible white-on-white
+   text. */
+.employment-timeline-filter-footer button:not(.employment-timeline-filter-apply) {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-size: 0.82rem;
+}
+
+.employment-timeline-filter-footer button:not(.employment-timeline-filter-apply):hover:not(:disabled) {
+  background: var(--color-bg);
+}
+
 .employment-timeline-filter-apply {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--color-primary);
+  border-radius: 6px;
+  font-size: 0.82rem;
   background: var(--color-primary);
-  border-color: var(--color-primary);
   color: white;
   font-weight: 600;
 }
 
+.employment-timeline-filter-apply:hover {
+  filter: brightness(0.95);
+}
+
 /* -- graph -- */
 
-.employment-timeline-graph-wrap {
-  overflow-x: auto;
+/* The border/radius live on the outer wrapper (not this element) — the
+   legend sits outside the scrolling area as a sibling (deliberately not
+   scrolling with the graph's own horizontal content, see the component's
+   own comment on that), and the outer wrapper's border makes the two still
+   read as one unified box. */
+.employment-timeline-graph-outer {
   border: 1px solid var(--color-border);
   border-radius: 6px;
+  overflow: hidden;
+}
+
+/* Two independent panels side by side — a frozen employee-names column
+   that is never inside any scrolling element (not "position: sticky"
+   inside the scrolling one) plus the horizontally-scrolling date track.
+   Earlier this was one CSS Grid with a sticky first column, matching
+   ReportPivotTable's sticky-column pattern — but a sticky descendant
+   several thousand pixels into a long horizontal scroll silently stopped
+   tracking (confirmed with a bare manual `scrollLeft` assignment, nothing
+   to do with React), discovered while screenshotting a multi-year "Fit
+   all" range. A genuinely separate, un-scrolled panel can't "un-freeze"
+   because it was never part of the scrolling content to begin with. */
+.employment-timeline-split {
+  display: flex;
+  align-items: flex-start;
+}
+
+.employment-timeline-names-panel {
+  flex-shrink: 0;
+  width: 220px;
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+}
+
+.employment-timeline-graph-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .employment-timeline-graph {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   font-size: 0.78rem;
 }
 
 .employment-timeline-header-cell {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 0.4rem 0.3rem;
-  text-align: center;
   font-weight: 600;
   color: var(--color-muted);
   border-bottom: 1px solid var(--color-border);
@@ -6992,27 +7283,30 @@ input {
   background: var(--color-bg);
 }
 
-/* Sticky left employee-name column — the same mechanism already solved for
-   ReportPivotTable's sticky columns (.report-pivot-employee-col), mirrored
-   to the left side here instead of the right. */
-.employment-timeline-employee-col {
-  position: sticky;
-  left: 0;
-  z-index: 2;
-  background: var(--color-surface);
-  border-right: 1px solid var(--color-border);
-  min-width: 220px;
-}
-
 .employment-timeline-name-cell {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
+  min-height: 32px; /* matches .employment-timeline-track's min-height exactly (border-box sizing) so both panels' rows stay pixel-aligned */
   padding: 0.4rem 0.6rem;
   border-bottom: 1px solid var(--color-border);
   font-weight: 500;
+}
+
+.employment-timeline-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+}
+
+.employment-timeline-no-dates {
+  margin-left: 0.4rem;
+  font-size: 0.72rem;
+  font-style: italic;
+  font-weight: 400;
+  color: var(--color-muted);
 }
 
 .employment-timeline-add-period-btn {
@@ -7028,9 +7322,54 @@ input {
   flex-shrink: 0;
 }
 
+/* Header row's date track — month/year marks positioned by percentage
+   across the fitted (or custom-overridden) range, not a discrete per-day
+   grid column, so this same markup covers a two-week range and a
+   multi-year one alike. */
+.employment-timeline-header-track {
+  position: relative;
+  min-height: 32px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg);
+}
+
+.employment-timeline-month-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  padding: 0.4rem 0 0 0.35rem;
+  border-left: 1px solid var(--color-border);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+
+/* Zero-width — exists only as a stable scrollIntoView target for the Today
+   button, independent of how many employee rows are rendered. */
+.employment-timeline-today-anchor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
 .employment-timeline-track {
   border-bottom: 1px solid var(--color-border);
   min-height: 32px;
+}
+
+/* Rendered inline in the sticky employee-name cell, not the scrolling
+   track — see the component's own comment on why (a flag placed in the
+   very wide track scrolls out of view the moment the user scrolls right). */
+.employment-timeline-no-dates {
+  display: block;
+  white-space: normal;
+  margin-top: 0.1rem;
+  font-size: 0.7rem;
+  font-style: italic;
+  font-weight: 400;
+  color: var(--color-muted);
 }
 
 .employment-timeline-today-marker {
@@ -7067,6 +7406,10 @@ input {
   min-width: 6px;
 }
 
+.employment-timeline-bar:disabled {
+  cursor: default;
+}
+
 .employment-timeline-bar-label {
   white-space: nowrap;
   overflow: hidden;
@@ -7076,26 +7419,38 @@ input {
   color: white;
 }
 
+/* "Employed" — a normal in-progress bar with a real, scheduled future
+   finish/expiry. */
 .employment-timeline-bar-current {
   background: var(--color-primary);
 }
 
-.employment-timeline-bar-planned {
+/* "Ongoing" — active, permanent, no end in sight; visually lighter than a
+   scheduled-finish bar so an open-ended run reads as distinct at a glance. */
+.employment-timeline-bar-ongoing {
   background: var(--color-primary);
-  opacity: 0.45;
+  opacity: 0.65;
 }
 
-.employment-timeline-bar-planned .employment-timeline-bar-label {
-  color: var(--color-text);
+/* "Expired — still working" — the explicit is_active-stays-true override;
+   deliberately the same visual alarm (striped danger) the old "Overdue"
+   state used, since it's the same underlying situation: an applicable
+   date already passed with nothing recorded to close it out. */
+.employment-timeline-bar-expired-still-working {
+  background: var(--color-danger);
+  background-image: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.25) 0, rgba(255, 255, 255, 0.25) 4px, transparent 4px, transparent 8px);
 }
 
 .employment-timeline-bar-completed {
   background: var(--color-muted);
 }
 
-.employment-timeline-bar-overdue {
-  background: var(--color-danger);
-  background-image: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.25) 0, rgba(255, 255, 255, 0.25) 4px, transparent 4px, transparent 8px);
+/* The one virtual, non-real period synthesized for an employee with no
+   employment_periods row (see employmentTimelineView.ts) — a dashed border
+   marks it as "not a real recorded period" at a glance, on top of it being
+   non-clickable (no real id to edit/delete). */
+.employment-timeline-bar-synthesized {
+  border: 1px dashed rgba(255, 255, 255, 0.7);
 }
 
 .employment-timeline-legend {

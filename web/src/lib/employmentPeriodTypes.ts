@@ -20,6 +20,19 @@ export const STATUS_LABELS: Record<EmploymentPeriodStatus, string> = {
   completed: "Completed",
 };
 
+// Employment Timeline redesign — computed server-side once, in
+// server/src/lib/employmentTimelineView.ts, and shipped on every period so
+// the Graph, Table, CSV, PDF and Print views all read the same values
+// rather than each re-deriving inclusion/labeling and risking disagreement.
+export type TimelineBarLabel = "completed" | "ongoing" | "employed" | "expiredStillWorking";
+
+export const TIMELINE_BAR_LABEL_TEXT: Record<TimelineBarLabel, string> = {
+  completed: "Completed",
+  ongoing: "Ongoing",
+  employed: "Employed",
+  expiredStillWorking: "Expired — still working",
+};
+
 export interface EmploymentPeriod {
   id: string;
   employeeId: string;
@@ -31,6 +44,17 @@ export interface EmploymentPeriod {
   workGroupOtherDescription: string | null;
   notes: string | null;
   statuses: EmploymentPeriodStatus[];
+  // Always a concrete YYYY-MM-DD (never null) — see computeTimelineBar's own
+  // comment for exactly how it's derived. "ongoing"/"expiredStillWorking"
+  // bars are drawn to the graph's actual right edge (always >= today), not
+  // literally clipped at this value.
+  timelineEffectiveEndDate: string;
+  timelineLabel: TimelineBarLabel;
+  // True only for the one virtual period the server synthesizes for an
+  // employee with zero real employment_periods rows but a usable
+  // employees.start_date — there is no real period behind it, so it must
+  // not be offered for edit/delete the way a real period is.
+  synthesized: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -49,6 +73,10 @@ export interface EmploymentTimelineEmployee {
   jobGroup: string | null;
   isActive: boolean;
   workPermit: EmploymentTimelineWorkPermit | null;
+  // False only when the employee has neither a usable employees.start_date
+  // nor any employment_periods row — nothing to draw a bar from. Renders as
+  // a flagged placeholder row rather than being silently omitted.
+  hasUsableDates: boolean;
   periods: EmploymentPeriod[];
 }
 

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDownIcon } from "../ui/icons";
 
 export interface MultiSelectFilterOption {
   value: string;
@@ -85,7 +86,7 @@ export function MultiSelectFilterDropdown({ label, options, selected, onChange, 
   return (
     <div className="employment-timeline-filter" ref={rootRef}>
       <button type="button" className="employment-timeline-filter-trigger" onClick={() => (open ? cancel() : openPanel())} aria-expanded={open}>
-        {triggerLabel} <span aria-hidden="true">{open ? "▲" : "▼"}</span>
+        {triggerLabel} <ChevronDownIcon className="employment-timeline-filter-chevron" />
       </button>
 
       {open && (
