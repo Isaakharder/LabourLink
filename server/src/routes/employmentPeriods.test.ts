@@ -368,6 +368,77 @@ async function main() {
       check(res.status === 200 && res.body.employees.length >= bulkCount, "15) the full-list read returns all bulk-inserted employees", res.body.employees.length);
       check(elapsedMs < 5000, "15b) the full-list read completes within a generous bound (< 5s) with 300+ employees", elapsedMs);
     }
+    // =====================================================================
+    // 16) Employment Timeline redesign — inclusion/labeling end-to-end
+    //     through the real route + real DB (pure math already covered by
+    //     src/lib/employmentTimelineView.test.ts).
+    // =====================================================================
+
+    // 16a) A deactivated employee is completely excluded from the read
+    // endpoint, even with a period that would otherwise render fine — the
+    // one guarantee the graph/table/CSV/PDF/Print all inherit for free by
+    // sharing this endpoint.
+    {
+      const deactivated = await makeEmployee("Deactivated", "Employee", { isActive: false });
+      await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: deactivated, startDate: "2020-01-01" } });
+      // POST itself doesn't gate on is_active, so insert directly to avoid
+      // fighting any future validation change there — this test is about
+      // the READ endpoint's exclusion, not whether POST allows it.
+      const res = await call("GET", `/api/employment-periods?employeeId=${deactivated}`, { token: adminToken });
+      const ids = res.body.employees.map((e: any) => e.id);
+      check(!ids.includes(deactivated), "16a) a deactivated employee never appears in the timeline read endpoint", ids);
+    }
+
+    // 16b) Active employee, zero employment_periods rows, no start_date —
+    // included but flagged (hasUsableDates: false), not silently dropped.
+    {
+      const noDates = await makeEmployee("NoDates", "Employee", { startDate: null });
+      const res = await call("GET", `/api/employment-periods?employeeId=${noDates}`, { token: adminToken });
+      const emp = res.body.employees.find((e: any) => e.id === noDates);
+      check(!!emp && emp.hasUsableDates === false && emp.periods.length === 0, "16b) no start_date and no periods is included but flagged hasUsableDates:false", emp);
+    }
+
+    // 16c) Active employee, zero employment_periods rows, but a real
+    // start_date — a synthesized "ongoing" virtual period appears.
+    {
+      const synth = await makeEmployee("Synthesized", "Employee", { startDate: "2021-03-01" });
+      const res = await call("GET", `/api/employment-periods?employeeId=${synth}`, { token: adminToken });
+      const emp = res.body.employees.find((e: any) => e.id === synth);
+      const period = emp?.periods?.[0];
+      check(
+        emp?.hasUsableDates === true && period?.synthesized === true && period?.startDate === "2021-03-01" && period?.timelineLabel === "ongoing",
+        "16c) zero periods with a real start_date synthesizes one ongoing virtual period",
+        emp
+      );
+    }
+
+    // 16d) Overdue expected finish + still-active employee -> the read
+    // endpoint's own timelineLabel says 'expiredStillWorking', extended to
+    // today, not the raw (already-past) expected finish date.
+    {
+      const stillWorking = await makeEmployee("ExpiredStillWorking", "Employee");
+      const created = await call("POST", "/api/employment-periods", {
+        token: adminToken,
+        body: { employeeId: stillWorking, startDate: "2020-01-01", expectedFinishDate: addDaysToDateStr(TODAY, -30) },
+      });
+      check(created.body?.period?.timelineLabel === "expiredStillWorking" && created.body?.period?.timelineEffectiveEndDate === TODAY, "16d) POST response itself carries timelineLabel/timelineEffectiveEndDate", created.body?.period);
+      const res = await call("GET", `/api/employment-periods?employeeId=${stillWorking}`, { token: adminToken });
+      const period = res.body.employees[0]?.periods?.[0];
+      check(period?.timelineLabel === "expiredStillWorking" && period?.timelineEffectiveEndDate === TODAY, "16e) the list read endpoint agrees: 'expiredStillWorking', ending today", period);
+    }
+
+    // 16f) A confirmed actual finish is absolute even with a still-valid,
+    // far-future work permit on file — 'completed', never re-extended.
+    {
+      const completedEmp = await makeEmployee("CompletedAbsolute", "Employee");
+      await call("PATCH", `/api/employees/${completedEmp}`, { token: adminToken, body: { workPermitExpiryDate: addDaysToDateStr(TODAY, 400) } });
+      const finishDate = addDaysToDateStr(TODAY, -10);
+      await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: completedEmp, startDate: "2020-01-01", actualFinishDate: finishDate } });
+      const res = await call("GET", `/api/employment-periods?employeeId=${completedEmp}`, { token: adminToken });
+      const period = res.body.employees[0]?.periods?.[0];
+      check(period?.timelineLabel === "completed" && period?.timelineEffectiveEndDate === finishDate, "16f) a recorded actual finish is absolute — 'completed', not extended by a valid future permit", period);
+    }
+
   } finally {
     for (const eid of employeeIds) {
       await pool

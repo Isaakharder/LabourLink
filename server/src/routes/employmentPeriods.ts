@@ -23,6 +23,7 @@ import {
   recordEmploymentPeriodHistory,
   WORK_GROUPS,
 } from "../lib/employmentPeriods";
+import { computeTimelineBar, resolveEmployeeTimeline, ResolvedTimelinePeriod } from "../lib/employmentTimelineView";
 
 const router = Router();
 
@@ -57,10 +58,10 @@ interface PeriodRow {
   updated_at: string;
 }
 
-function serializePeriod(row: PeriodRow, today: string) {
+// snake_case SQL row -> camelCase shape resolveEmployeeTimeline works with.
+function toTimelinePeriodInput(row: PeriodRow) {
   return {
     id: row.id,
-    employeeId: row.employee_id,
     startDate: row.start_date,
     expectedFinishDate: row.expected_finish_date,
     actualFinishDate: row.actual_finish_date,
@@ -68,13 +69,48 @@ function serializePeriod(row: PeriodRow, today: string) {
     workGroup: row.work_group,
     workGroupOtherDescription: row.work_group_other_description,
     notes: row.notes,
-    statuses: computePeriodStatuses(
-      { startDate: row.start_date, expectedFinishDate: row.expected_finish_date, actualFinishDate: row.actual_finish_date },
-      today
-    ),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function serializePeriod(employeeId: string, p: ResolvedTimelinePeriod, today: string) {
+  return {
+    id: p.id,
+    employeeId,
+    startDate: p.startDate,
+    expectedFinishDate: p.expectedFinishDate,
+    actualFinishDate: p.actualFinishDate,
+    employmentType: p.employmentType,
+    workGroup: p.workGroup,
+    workGroupOtherDescription: p.workGroupOtherDescription,
+    notes: p.notes,
+    statuses: computePeriodStatuses({ startDate: p.startDate, expectedFinishDate: p.expectedFinishDate, actualFinishDate: p.actualFinishDate }, today),
+    // Employment Timeline redesign fields — see employmentTimelineView.ts.
+    // timelineEffectiveEndDate is always concrete (never null); "ongoing"/
+    // "expiredStillWorking" bars are drawn to the graph's actual right edge
+    // by the client, not literally clipped at this value.
+    timelineEffectiveEndDate: p.timelineEffectiveEndDate,
+    timelineLabel: p.timelineLabel,
+    synthesized: p.synthesized,
+    createdAt: p.createdAt,
+    updatedAt: p.updatedAt,
+  };
+}
+
+// For the single-period POST/PATCH responses (not the list route, which
+// already has every employee's work-permit date loaded) — one extra lookup
+// so those responses carry the same timelineEffectiveEndDate/timelineLabel
+// fields, computed via the exact same computeTimelineBar the list route
+// uses, rather than the client having to guess them from a bare period.
+async function serializeRealPeriod(row: PeriodRow, today: string) {
+  const { rows } = await pool.query<{ work_permit_expiry_date: string | null }>(
+    `select to_char(work_permit_expiry_date, 'YYYY-MM-DD') as work_permit_expiry_date from employees where id = $1`,
+    [row.employee_id]
+  );
+  const input = toTimelinePeriodInput(row);
+  const bar = computeTimelineBar(input, rows[0]?.work_permit_expiry_date ?? null, today);
+  return serializePeriod(row.employee_id, { ...input, timelineEffectiveEndDate: bar.effectiveEndDate, timelineLabel: bar.label, synthesized: false }, today);
 }
 
 function rangesOverlap(aStart: string, aEnd: string | null, bStart: string, bEnd: string | null): boolean {
@@ -106,7 +142,11 @@ router.get(
     const rangeStart = isValidDate(req.query.rangeStart) ? (req.query.rangeStart as string) : null;
     const rangeEnd = isValidDate(req.query.rangeEnd) ? (req.query.rangeEnd as string) : null;
 
-    const conditions: string[] = [];
+    // is_active = true is unconditional, not just another optional filter —
+    // deactivated employees must be completely excluded from the graph,
+    // table, totals, and every export, and this is the one endpoint all of
+    // those read from, so excluding here guarantees it everywhere at once.
+    const conditions: string[] = ["e.is_active = true"];
     const params: unknown[] = [];
     if (nationalityFilter.length) {
       params.push(nationalityFilter);
@@ -116,10 +156,11 @@ router.get(
       params.push(employeeIdFilter);
       conditions.push(`e.id = any($${params.length}::uuid[])`);
     }
-    const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
+    const where = `where ${conditions.join(" and ")}`;
 
     const { rows: employeeRows } = await pool.query(
       `select e.id, e.first_name, e.last_name, e.nationality, e.job_group, e.is_active,
+              to_char(e.start_date, 'YYYY-MM-DD') as start_date,
               to_char(e.work_permit_expiry_date, 'YYYY-MM-DD') as work_permit_expiry_date
        from employees e
        ${where}
@@ -154,22 +195,17 @@ router.get(
     const hasStatusFilter = statusFilter.length > 0;
     const hasAnyPeriodFilter = hasWorkGroupFilter || hasEmploymentTypeFilter || hasStatusFilter;
 
-    function periodMatchesFilters(row: PeriodRow): boolean {
+    function periodMatchesFilters(p: ResolvedTimelinePeriod): boolean {
       if (hasWorkGroupFilter) {
-        const matches = row.work_group ? workGroupFilter.includes(row.work_group) : workGroupFilter.includes("Unspecified");
+        const matches = p.workGroup ? workGroupFilter.includes(p.workGroup) : workGroupFilter.includes("Unspecified");
         if (!matches) return false;
       }
       if (hasEmploymentTypeFilter) {
-        const matches = row.employment_type
-          ? employmentTypeFilter.includes(row.employment_type)
-          : employmentTypeFilter.includes("Unspecified");
+        const matches = p.employmentType ? employmentTypeFilter.includes(p.employmentType) : employmentTypeFilter.includes("Unspecified");
         if (!matches) return false;
       }
       if (hasStatusFilter) {
-        const statuses = computePeriodStatuses(
-          { startDate: row.start_date, expectedFinishDate: row.expected_finish_date, actualFinishDate: row.actual_finish_date },
-          today
-        );
+        const statuses = computePeriodStatuses({ startDate: p.startDate, expectedFinishDate: p.expectedFinishDate, actualFinishDate: p.actualFinishDate }, today);
         if (!statuses.some((s) => statusFilter.includes(s))) return false;
       }
       return true;
@@ -180,7 +216,19 @@ router.get(
 
     const employees = employeeRows
       .map((e) => {
-        const periods = periodsByEmployee.get(e.id) ?? [];
+        const rawPeriods = (periodsByEmployee.get(e.id) ?? []).map(toTimelinePeriodInput);
+        // The one shared inclusion/labeling function (employmentTimelineView.ts)
+        // — is_active is already guaranteed true by the SQL filter above, but
+        // resolving through the same function used by its own unit tests
+        // keeps this one code path as the single source of truth rather than
+        // re-deriving the rule here.
+        const resolved = resolveEmployeeTimeline(
+          { id: e.id, isActive: e.is_active, startDate: e.start_date, workPermitExpiryDate: e.work_permit_expiry_date },
+          rawPeriods,
+          today
+        );
+        if (!resolved.included) return null;
+
         // Row-visibility rule: qualifies if at least one period satisfies
         // every active period-level filter (a single period must match
         // Work Group AND Employment Type AND Status together — e.g.
@@ -188,14 +236,12 @@ router.get(
         // both Greenhouse and Seasonal, on a Guatemalan employee). Once
         // qualified, ALL of the employee's periods render (not just the
         // matching one), so employment history never shows misleading gaps.
-        if (hasAnyPeriodFilter && !periods.some(periodMatchesFilters)) return null;
+        if (hasAnyPeriodFilter && !resolved.periods.some(periodMatchesFilters)) return null;
 
         const visiblePeriods =
           rangeStart || rangeEnd
-            ? periods.filter((p) =>
-                rangesOverlap(rangeStart ?? "0001-01-01", rangeEnd ?? null, p.start_date, p.actual_finish_date ?? p.expected_finish_date)
-              )
-            : periods;
+            ? resolved.periods.filter((p) => rangesOverlap(rangeStart ?? "0001-01-01", rangeEnd ?? null, p.startDate, p.timelineEffectiveEndDate))
+            : resolved.periods;
 
         const workPermitExpiryDate: string | null = e.work_permit_expiry_date;
         const alert = alertByEmployee.get(e.id);
@@ -210,7 +256,12 @@ router.get(
           workPermit: workPermitExpiryDate
             ? { expiryDate: workPermitExpiryDate, remainingDays: alert?.remainingDays ?? null, severity: alert?.severity ?? null }
             : null,
-          periods: visiblePeriods.map((p) => serializePeriod(p, today)),
+          // False only when there's genuinely no start_date and no
+          // employment_periods row to draw anything from — the client
+          // renders a flagged placeholder row instead of a bar for these,
+          // rather than silently omitting the employee.
+          hasUsableDates: resolved.hasUsableDates,
+          periods: visiblePeriods.map((p) => serializePeriod(e.id, p, today)),
         };
       })
       .filter((e): e is NonNullable<typeof e> => e !== null);
@@ -406,7 +457,7 @@ router.post(
          from employee_employment_periods where id = $1`,
         [created.id]
       );
-      res.status(201).json({ period: serializePeriod(full[0], today) });
+      res.status(201).json({ period: await serializeRealPeriod(full[0], today) });
     } catch (err) {
       await client.query("rollback");
       if (isOverlapViolation(err)) {
@@ -491,7 +542,7 @@ router.patch(
          from employee_employment_periods where id = $1`,
         [id]
       );
-      res.json({ period: serializePeriod(full[0], today) });
+      res.json({ period: await serializeRealPeriod(full[0], today) });
     } catch (err) {
       await client.query("rollback");
       if (isOverlapViolation(err)) {
