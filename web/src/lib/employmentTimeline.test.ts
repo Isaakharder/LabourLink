@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   buildEmploymentTimelineRows,
-  buildTimelineMonthMarks,
+  buildTimelineHeaderMarks,
+  chooseHeaderGranularity,
   computeBarPosition,
+  computeFitAllPxPerDay,
   computeFittedRange,
   daysBetweenDateStrs,
   filterEmploymentTimelineEmployees,
+  MAX_PX_PER_DAY,
   percentInRange,
 } from "./employmentTimeline";
 import { EmploymentTimelineEmployee, EmploymentTimelineFilterState, EMPTY_FILTER_STATE } from "./employmentPeriodTypes";
@@ -90,6 +93,33 @@ describe("computeFittedRange", () => {
     // remaining list narrows accordingly.
     expect(computeFittedRange([b], TODAY)).toEqual({ start: "2023-01-01", end: TODAY });
   });
+
+  it("a saved displayStartOverride replaces the true earliest start on the left edge only", () => {
+    const a = employee({ periods: [period({ startDate: "2018-01-01", timelineEffectiveEndDate: "2020-01-01", timelineLabel: "completed" })] });
+    const range = computeFittedRange([a], TODAY, "2022-01-01");
+    expect(range).toEqual({ start: "2022-01-01", end: TODAY });
+  });
+
+  it("the right edge is never affected by displayStartOverride", () => {
+    const a = employee({ periods: [period({ startDate: "2018-01-01", timelineEffectiveEndDate: "2030-01-01", timelineLabel: "employed" })] });
+    const range = computeFittedRange([a], TODAY, "2022-01-01");
+    expect(range?.end).toBe("2030-01-01");
+  });
+
+  it("a null/omitted displayStartOverride falls back to the true earliest start, unchanged", () => {
+    const a = employee({ periods: [period({ startDate: "2018-01-01", timelineEffectiveEndDate: "2020-01-01", timelineLabel: "completed" })] });
+    expect(computeFittedRange([a], TODAY, null)).toEqual({ start: "2018-01-01", end: TODAY });
+    expect(computeFittedRange([a], TODAY)).toEqual({ start: "2018-01-01", end: TODAY });
+  });
+
+  it("recalculates the fit-all range inside the configured display start after filters narrow the employee set", () => {
+    const a = employee({ id: "a", periods: [period({ startDate: "2019-01-01", timelineEffectiveEndDate: "2019-06-01", timelineLabel: "completed" })] });
+    const b = employee({ id: "b", periods: [period({ startDate: "2023-01-01", timelineEffectiveEndDate: "2024-01-01", timelineLabel: "completed" })] });
+    // Saved cutoff is later than "a"'s real start — "a" alone would clip;
+    // filtering it out entirely still keeps the same configured left edge.
+    expect(computeFittedRange([a, b], TODAY, "2022-01-01")).toEqual({ start: "2022-01-01", end: TODAY });
+    expect(computeFittedRange([b], TODAY, "2022-01-01")).toEqual({ start: "2022-01-01", end: TODAY });
+  });
 });
 
 describe("percentInRange / computeBarPosition", () => {
@@ -129,23 +159,78 @@ describe("percentInRange / computeBarPosition", () => {
     const pos = computeBarPosition(p, range);
     expect(pos.leftPercent + pos.widthPercent).toBeCloseTo(percentInRange("2026-08-01", range), 5);
   });
+
+  it("flags clippedStart when the period's real start is before the displayed range's left edge", () => {
+    const p = period({ startDate: "2025-06-01", timelineEffectiveEndDate: "2026-06-15", timelineLabel: "ongoing" });
+    const pos = computeBarPosition(p, range); // range starts 2026-01-01, period started 2025-06-01
+    expect(pos.clippedStart).toBe(true);
+    expect(pos.leftPercent).toBe(0); // drawn from the display boundary, not the true (earlier) start
+  });
+
+  it("does not flag clippedStart when the period starts at or after the range's left edge", () => {
+    const atEdge = computeBarPosition(period({ startDate: "2026-01-01", timelineLabel: "ongoing" }), range);
+    const afterEdge = computeBarPosition(period({ startDate: "2026-02-01", timelineLabel: "ongoing" }), range);
+    expect(atEdge.clippedStart).toBe(false);
+    expect(afterEdge.clippedStart).toBe(false);
+  });
 });
 
-describe("buildTimelineMonthMarks", () => {
-  it("one mark per calendar month crossed, inclusive of both ends", () => {
-    const marks = buildTimelineMonthMarks({ start: "2026-01-15", end: "2026-04-05" });
+describe("computeFitAllPxPerDay", () => {
+  it("divides the container width evenly across the whole range", () => {
+    expect(computeFitAllPxPerDay(100, 1000)).toBe(10);
+  });
+
+  it("falls back to MAX_PX_PER_DAY for a degenerate (zero) range or container", () => {
+    expect(computeFitAllPxPerDay(0, 1000)).toBe(MAX_PX_PER_DAY);
+    expect(computeFitAllPxPerDay(100, 0)).toBe(MAX_PX_PER_DAY);
+  });
+});
+
+describe("chooseHeaderGranularity", () => {
+  it("picks the finest granularity whose marks are still comfortably spaced apart", () => {
+    expect(chooseHeaderGranularity(100)).toBe("day"); // 100px/day — plenty of room for daily marks
+    expect(chooseHeaderGranularity(10)).toBe("week"); // 70px/week
+    expect(chooseHeaderGranularity(3)).toBe("month"); // ~90px/month
+    expect(chooseHeaderGranularity(1)).toBe("quarter"); // ~91px/quarter
+    expect(chooseHeaderGranularity(0.05)).toBe("year"); // even a year is < 64px — coarsest available still used
+  });
+});
+
+describe("buildTimelineHeaderMarks", () => {
+  it("month granularity: one mark per calendar month crossed, inclusive of both ends", () => {
+    const marks = buildTimelineHeaderMarks({ start: "2026-01-15", end: "2026-04-05" }, 3);
     expect(marks.map((m) => m.key)).toEqual(["2026-01-01", "2026-02-01", "2026-03-01", "2026-04-01"]);
   });
 
-  it("labels a year boundary (and the very first mark) with the year, other months with just the abbreviation", () => {
-    const marks = buildTimelineMonthMarks({ start: "2025-11-01", end: "2026-02-01" });
+  it("month granularity labels a year boundary (and the very first mark) with the year, other months with just the abbreviation", () => {
+    const marks = buildTimelineHeaderMarks({ start: "2025-11-01", end: "2026-02-01" }, 3);
     expect(marks.map((m) => m.label)).toEqual(["Nov 2025", "Dec", "Jan 2026", "Feb"]);
   });
 
   it("positions each mark by percentage within the range", () => {
-    const marks = buildTimelineMonthMarks({ start: "2026-01-01", end: "2026-12-31" });
+    const marks = buildTimelineHeaderMarks({ start: "2026-01-01", end: "2026-12-31" }, 3);
     expect(marks[0].leftPercent).toBe(0);
     expect(marks[marks.length - 1].leftPercent).toBeGreaterThan(90);
+  });
+
+  it("year granularity: one mark per year crossed, when zoomed far out over a multi-year range", () => {
+    const marks = buildTimelineHeaderMarks({ start: "2020-06-01", end: "2026-03-01" }, 0.05);
+    expect(marks.map((m) => m.label)).toEqual(["2020", "2021", "2022", "2023", "2024", "2025", "2026"]);
+  });
+
+  it("quarter granularity: one mark per quarter, year shown at Q1 and the first mark", () => {
+    const marks = buildTimelineHeaderMarks({ start: "2025-11-01", end: "2026-08-01" }, 1);
+    expect(marks.map((m) => m.label)).toEqual(["Q4 2025", "Q1 2026", "Q2", "Q3"]);
+  });
+
+  it("week granularity: one mark per Monday-start week, when moderately zoomed in", () => {
+    const marks = buildTimelineHeaderMarks({ start: "2026-01-05", end: "2026-01-26" }, 10);
+    expect(marks.map((m) => m.key)).toEqual(["2026-01-05", "2026-01-12", "2026-01-19", "2026-01-26"]);
+  });
+
+  it("day granularity: one mark per day, when zoomed in close", () => {
+    const marks = buildTimelineHeaderMarks({ start: "2026-01-01", end: "2026-01-05" }, 100);
+    expect(marks.map((m) => m.key)).toEqual(["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04", "2026-01-05"]);
   });
 });
 

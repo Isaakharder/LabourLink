@@ -10,6 +10,12 @@ interface EmploymentPeriodModalProps {
   readOnly: boolean; // Manager viewer — no inputs, no save/delete
   onClose: () => void;
   onSaved: () => void;
+  // Only offered when editing a real, existing period — the entry point
+  // for adding a second/later period now lives here instead of a
+  // permanent per-row "+" button on the graph (removed so the date track
+  // can use the full available width; a bar's own label already
+  // identifies whose employment it is).
+  onAddAnother?: () => void;
 }
 
 interface FormState {
@@ -40,7 +46,7 @@ function toFormState(period: EmploymentPeriod | null): FormState {
 // same set of fields hitting the same POST/PATCH endpoint; the user's
 // intent decides which fields they actually touch, not a separate mode
 // switch in this component.
-export function EmploymentPeriodModal({ employeeId, employeeName, period, readOnly, onClose, onSaved }: EmploymentPeriodModalProps) {
+export function EmploymentPeriodModal({ employeeId, employeeName, period, readOnly, onClose, onSaved, onAddAnother }: EmploymentPeriodModalProps) {
   const [form, setForm] = useState<FormState>(toFormState(period));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -113,6 +119,11 @@ export function EmploymentPeriodModal({ employeeId, employeeName, period, readOn
             {period && (
               <button type="button" className="danger-button" onClick={() => setShowDeleteConfirm(true)} disabled={saving}>
                 Delete period
+              </button>
+            )}
+            {period && onAddAnother && (
+              <button type="button" onClick={onAddAnother} disabled={saving}>
+                Add another period
               </button>
             )}
             <button type="button" onClick={onClose} disabled={saving}>

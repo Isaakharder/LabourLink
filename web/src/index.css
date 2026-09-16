@@ -7023,6 +7023,66 @@ input {
   outline-offset: 1px;
 }
 
+/* -- "Timeline starts" saved display-cutoff setting -- */
+
+.employment-timeline-display-start {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+}
+
+.employment-timeline-display-start label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+
+.employment-timeline-display-start input[type="date"] {
+  height: 34px;
+  padding: 0 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.85rem;
+}
+
+.employment-timeline-display-start input[type="date"]:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.employment-timeline-display-start button {
+  height: 34px;
+  padding: 0 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.employment-timeline-display-start button:hover:not(:disabled) {
+  background: var(--color-bg);
+}
+
+.employment-timeline-display-start button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.employment-timeline-display-start-note {
+  font-size: 0.78rem;
+  font-style: italic;
+  color: var(--color-muted);
+}
+
 /* -- export actions -- */
 
 .employment-timeline-export-actions {
@@ -7236,31 +7296,13 @@ input {
   overflow: hidden;
 }
 
-/* Two independent panels side by side — a frozen employee-names column
-   that is never inside any scrolling element (not "position: sticky"
-   inside the scrolling one) plus the horizontally-scrolling date track.
-   Earlier this was one CSS Grid with a sticky first column, matching
-   ReportPivotTable's sticky-column pattern — but a sticky descendant
-   several thousand pixels into a long horizontal scroll silently stopped
-   tracking (confirmed with a bare manual `scrollLeft` assignment, nothing
-   to do with React), discovered while screenshotting a multi-year "Fit
-   all" range. A genuinely separate, un-scrolled panel can't "un-freeze"
-   because it was never part of the scrolling content to begin with. */
-.employment-timeline-split {
-  display: flex;
-  align-items: flex-start;
-}
-
-.employment-timeline-names-panel {
-  flex-shrink: 0;
-  width: 220px;
-  background: var(--color-surface);
-  border-right: 1px solid var(--color-border);
-}
-
+/* No frozen names column any more — every bar carries its own employee's
+   name (see EmploymentTimelineGraph's label), so the date track simply
+   uses the full available width. This used to be a sticky-column CSS Grid,
+   then a genuinely separate non-scrolling panel after sticky broke at
+   large scroll distances (see git history) — removed per redesign now
+   that each bar is self-identifying. */
 .employment-timeline-graph-wrap {
-  flex: 1 1 auto;
-  min-width: 0;
   overflow-x: auto;
 }
 
@@ -7268,58 +7310,6 @@ input {
   display: flex;
   flex-direction: column;
   font-size: 0.78rem;
-}
-
-.employment-timeline-header-cell {
-  min-height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0.4rem 0.3rem;
-  font-weight: 600;
-  color: var(--color-muted);
-  border-bottom: 1px solid var(--color-border);
-  white-space: nowrap;
-  background: var(--color-bg);
-}
-
-.employment-timeline-name-cell {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  min-height: 32px; /* matches .employment-timeline-track's min-height exactly (border-box sizing) so both panels' rows stay pixel-aligned */
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--color-border);
-  font-weight: 500;
-}
-
-.employment-timeline-name-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.employment-timeline-no-dates {
-  margin-left: 0.4rem;
-  font-size: 0.72rem;
-  font-style: italic;
-  font-weight: 400;
-  color: var(--color-muted);
-}
-
-.employment-timeline-add-period-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border-radius: 50%;
-  border: 1px solid var(--color-border);
-  background: var(--color-bg);
-  flex-shrink: 0;
 }
 
 /* Header row's date track — month/year marks positioned by percentage
@@ -7357,19 +7347,6 @@ input {
 .employment-timeline-track {
   border-bottom: 1px solid var(--color-border);
   min-height: 32px;
-}
-
-/* Rendered inline in the sticky employee-name cell, not the scrolling
-   track — see the component's own comment on why (a flag placed in the
-   very wide track scrolls out of view the moment the user scrolls right). */
-.employment-timeline-no-dates {
-  display: block;
-  white-space: normal;
-  margin-top: 0.1rem;
-  font-size: 0.7rem;
-  font-style: italic;
-  font-weight: 400;
-  color: var(--color-muted);
 }
 
 .employment-timeline-today-marker {
@@ -7410,10 +7387,21 @@ input {
   cursor: default;
 }
 
+/* z-index so the ring isn't visually clipped by an adjacent bar's own
+   box — every real (non-synthesized) bar is keyboard-focusable now that
+   clicking one always opens at least a read-only view. */
+.employment-timeline-bar:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+  z-index: 2;
+}
+
 .employment-timeline-bar-label {
+  width: 100%;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-align: left;
   font-size: 0.72rem;
   font-weight: 600;
   color: white;
@@ -7445,12 +7433,44 @@ input {
   background: var(--color-muted);
 }
 
+/* Full-width dashed neutral row for an employee with no usable dates at
+   all (no start_date, no employment_periods row) — deliberately NOT one
+   of the status colors above (there's no status to show), but still a
+   real button so it stays clickable/keyboard-focusable for correction. */
+.employment-timeline-bar-missing-dates {
+  background: var(--color-bg);
+  border: 1px dashed var(--color-border);
+}
+
+.employment-timeline-bar-missing-dates .employment-timeline-bar-label {
+  color: var(--color-muted);
+  font-style: italic;
+  font-weight: 500;
+}
+
+.employment-timeline-bar-missing-dates:disabled {
+  opacity: 0.85;
+}
+
 /* The one virtual, non-real period synthesized for an employee with no
    employment_periods row (see employmentTimelineView.ts) — a dashed border
    marks it as "not a real recorded period" at a glance, on top of it being
    non-clickable (no real id to edit/delete). */
 .employment-timeline-bar-synthesized {
   border: 1px dashed rgba(255, 255, 255, 0.7);
+}
+
+/* Continuation indicator for a bar clipped at the displayed range's left
+   edge (its real start is earlier — see BarPosition.clippedStart). The
+   bar's true dates are never altered to compensate; this is purely a
+   visual "keeps going before what you can see" cue, and the tooltip
+   spells out the real start date in words too. */
+.employment-timeline-bar-clip-notch {
+  flex-shrink: 0;
+  margin-right: 0.25rem;
+  font-size: 0.62rem;
+  line-height: 1;
+  opacity: 0.85;
 }
 
 .employment-timeline-legend {

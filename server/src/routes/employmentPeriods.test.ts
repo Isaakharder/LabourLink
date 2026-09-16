@@ -439,6 +439,46 @@ async function main() {
       check(period?.timelineLabel === "completed" && period?.timelineEffectiveEndDate === finishDate, "16f) a recorded actual finish is absolute — 'completed', not extended by a valid future permit", period);
     }
 
+    // =====================================================================
+    // 17) "Timeline starts" org setting — GET/PATCH round-trip and
+    //     permissions. org_settings is a singleton, so this restores the
+    //     original value before finishing (see the try/finally below).
+    // =====================================================================
+    {
+      const original = await call("GET", "/api/employment-periods/settings/display-start", { token: adminToken });
+      check(original.status === 200 && "displayStart" in original.body, "17a) GET display-start returns 200 with a displayStart field", original.body);
+
+      try {
+        const managerRead = await call("GET", "/api/employment-periods/settings/display-start", { token: managerToken });
+        check(managerRead.status === 200, "17b) a Manager CAN view the saved display-start setting", managerRead.status);
+
+        const managerWrite = await call("PATCH", "/api/employment-periods/settings/display-start", { token: managerToken, body: { displayStart: "2020-01-01" } });
+        check(managerWrite.status === 403, "17c) a Manager CANNOT change the display-start setting (Administrator-only)", managerWrite.body);
+
+        const plainRead = await call("GET", "/api/employment-periods/settings/display-start", { token: plainToken });
+        check(plainRead.status === 401 || plainRead.status === 403, "17d) a plain Employee cannot view the setting either", plainRead.status);
+
+        const invalid = await call("PATCH", "/api/employment-periods/settings/display-start", { token: adminToken, body: { displayStart: "not-a-date" } });
+        check(invalid.status === 400, "17e) an invalid date string is rejected (400)", invalid.body);
+
+        const saved = await call("PATCH", "/api/employment-periods/settings/display-start", { token: adminToken, body: { displayStart: "2022-06-15" } });
+        check(saved.status === 200 && saved.body.displayStart === "2022-06-15", "17f) an Administrator can save a valid display-start date", saved.body);
+
+        const reread = await call("GET", "/api/employment-periods/settings/display-start", { token: adminToken });
+        check(reread.body.displayStart === "2022-06-15", "17g) the saved date persists across a fresh GET (real DB row, not in-memory)", reread.body);
+
+        const reset = await call("PATCH", "/api/employment-periods/settings/display-start", { token: adminToken, body: { displayStart: null } });
+        check(reset.status === 200 && reset.body.displayStart === null, "17h) PATCHing displayStart: null resets/clears the saved cutoff", reset.body);
+
+        const rereadAfterReset = await call("GET", "/api/employment-periods/settings/display-start", { token: adminToken });
+        check(rereadAfterReset.body.displayStart === null, "17i) the cleared value persists across a fresh GET too", rereadAfterReset.body);
+      } finally {
+        // Restore whatever was saved before this test section touched it —
+        // org_settings is a real singleton shared by the whole database.
+        await call("PATCH", "/api/employment-periods/settings/display-start", { token: adminToken, body: { displayStart: original.body.displayStart } });
+      }
+    }
+
   } finally {
     for (const eid of employeeIds) {
       await pool

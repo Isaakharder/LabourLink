@@ -6,7 +6,7 @@
 // The graph's default and primary view is "Fit all": one continuous
 // date range spanning every included employee's employment, positioned by
 // percentage rather than a fixed per-day/week/month grid (a grid can't
-// reasonably span years of history). computeFittedRange/buildTimelineMonthMarks/
+// reasonably span years of history). computeFittedRange/buildTimelineHeaderMarks/
 // computeBarPosition below are that range-based system. Every date-range
 // rule (inclusion, effective end date, label) is already decided
 // server-side per period (employmentTimelineView.ts on the server) — this
@@ -139,28 +139,36 @@ export interface TimelineRange {
 }
 
 // The default "Fit all" range: begins at the earliest start date of any
-// included, dated employee/period and ends at the latest
-// timelineEffectiveEndDate among them — which is already `today` for any
-// "ongoing"/"expiredStillWorking" bar (see employmentTimelineView.ts) — so
-// today is naturally included without special-casing it here beyond the
-// final floor below. Returns null only when there is nothing datable to
-// show at all (e.g. every visible employee is flagged hasUsableDates:false).
-// Recompute this from whatever employee list is currently visible — it
-// naturally "recalculates after filters" simply by being called with the
+// included, dated employee/period (or the saved "Timeline starts" org
+// setting, when one is on file — see displayStartOverride) and ends at the
+// latest timelineEffectiveEndDate among them — which is already `today` for
+// any "ongoing"/"expiredStillWorking" bar (see employmentTimelineView.ts) —
+// so today is naturally included without special-casing it here beyond the
+// final floor below. The right edge is NEVER affected by
+// displayStartOverride, per spec: "The right edge remains the latest
+// applicable future end/expiry date or Today, whichever is later."
+// Returns null only when there is nothing datable to show at all (e.g.
+// every visible employee is flagged hasUsableDates:false). Recompute this
+// from whatever employee list is currently visible — it naturally
+// "recalculates after filters" simply by being called with the
 // already-filtered array, no separate filter-awareness needed here.
-export function computeFittedRange(employees: EmploymentTimelineEmployee[], today: string): TimelineRange | null {
-  let start: string | null = null;
+export function computeFittedRange(
+  employees: EmploymentTimelineEmployee[],
+  today: string,
+  displayStartOverride?: string | null
+): TimelineRange | null {
+  let trueEarliestStart: string | null = null;
   let end: string | null = null;
   for (const emp of employees) {
     if (!emp.hasUsableDates) continue;
     for (const p of emp.periods) {
-      if (start === null || p.startDate < start) start = p.startDate;
+      if (trueEarliestStart === null || p.startDate < trueEarliestStart) trueEarliestStart = p.startDate;
       if (end === null || p.timelineEffectiveEndDate > end) end = p.timelineEffectiveEndDate;
     }
   }
-  if (start === null) return null;
+  if (trueEarliestStart === null) return null;
   if (end === null || end < today) end = today;
-  return { start, end };
+  return { start: displayStartOverride ?? trueEarliestStart, end };
 }
 
 // Clamps a date into [0, 100] percent of `range` — a date before range.start
@@ -177,6 +185,15 @@ export function percentInRange(dateStr: string, range: TimelineRange): number {
 export interface BarPosition {
   leftPercent: number;
   widthPercent: number;
+  // True when the period's real startDate is earlier than the currently
+  // displayed range's left edge — most commonly because it started before
+  // the saved "Timeline starts" cutoff, but the same treatment applies
+  // whenever a custom From override does the same thing. The bar is never
+  // stretched or its true dates altered to compensate — it's simply drawn
+  // from the display boundary, flagged so the caller can render a
+  // continuation indicator, and the true startDate is still always
+  // available on `period` itself for the tooltip.
+  clippedStart: boolean;
 }
 
 // "Ongoing"/"expiredStillWorking" bars are drawn all the way to the range's
@@ -192,23 +209,106 @@ export function computeBarPosition(period: EmploymentPeriod, range: TimelineRang
   const endDate = extendsToEdge ? range.end : period.timelineEffectiveEndDate;
   const left = percentInRange(period.startDate, range);
   const right = extendsToEdge ? 100 : percentInRange(endDate, range);
-  return { leftPercent: left, widthPercent: Math.max(right - left, MIN_BAR_WIDTH_PERCENT) };
+  return { leftPercent: left, widthPercent: Math.max(right - left, MIN_BAR_WIDTH_PERCENT), clippedStart: period.startDate < range.start };
+}
+
+// -- zoom --------------------------------------------------------------
+
+// Close enough to inspect individual days without the bars/labels becoming
+// unusably fat — a day column this wide comfortably fits a short label.
+export const MAX_PX_PER_DAY = 60;
+// An absolute floor so pathological inputs (a zero-width container mid
+// layout, say) can't produce a zero/negative or infinite density. The REAL
+// zoomed-out floor in normal operation is whatever computeFitAllPxPerDay
+// returns for the actual container width — that's almost always larger
+// than this.
+export const MIN_PX_PER_DAY_FLOOR = 0.02;
+
+// The exact "farthest zoom-out" density: the whole range fits inside the
+// container's own measured width, with nothing left over to scroll. "Full
+// timeline" always resets to exactly this value, recomputed fresh (not
+// cached) so it stays exact across a container resize, a filter change, or
+// a saved-cutoff edit.
+export function computeFitAllPxPerDay(rangeDays: number, containerWidthPx: number): number {
+  if (rangeDays <= 0 || containerWidthPx <= 0) return MAX_PX_PER_DAY;
+  return Math.max(MIN_PX_PER_DAY_FLOOR, containerWidthPx / rangeDays);
 }
 
 const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-export interface TimelineMonthMark {
-  key: string; // YYYY-MM-01
-  label: string; // "Jan" normally, "Jan 2027" at a year boundary (incl. the very first mark)
+function addDaysStr(dateStr: string, days: number): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d) + days * 86400000);
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+}
+
+// Monday-start week (matches this codebase's existing startOfWeekMonday
+// convention in timezone.ts) containing `dateStr`.
+function startOfWeekMonday(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0=Sun..6=Sat
+  const backToMonday = (dow + 6) % 7;
+  return addDaysStr(dateStr, -backToMonday);
+}
+
+export interface TimelineHeaderMark {
+  key: string; // the mark's own start date, YYYY-MM-DD
+  label: string;
   leftPercent: number;
 }
 
-// One mark per calendar month boundary crossed by `range`, positioned by
-// percentage — sensible month/year headers for a range that can span from a
-// few weeks to several years, without needing a discrete per-day grid
-// column for every day in between.
-export function buildTimelineMonthMarks(range: TimelineRange): TimelineMonthMark[] {
-  const marks: TimelineMonthMark[] = [];
+export type TimelineHeaderGranularity = "year" | "quarter" | "month" | "week" | "day";
+
+// Headers get coarser as pxPerDay shrinks — picks the FINEST granularity
+// whose marks are still spaced at least this far apart on screen, so
+// labels never overlap however the range/zoom combine (a few weeks at
+// closest zoom shows days; a decade at "Fit all" shows years).
+const MIN_MARK_SPACING_PX = 64;
+
+export function chooseHeaderGranularity(pxPerDay: number): TimelineHeaderGranularity {
+  if (pxPerDay * 1 >= MIN_MARK_SPACING_PX) return "day";
+  if (pxPerDay * 7 >= MIN_MARK_SPACING_PX) return "week";
+  if (pxPerDay * 30 >= MIN_MARK_SPACING_PX) return "month";
+  if (pxPerDay * 91 >= MIN_MARK_SPACING_PX) return "quarter";
+  return "year";
+}
+
+function buildYearMarks(range: TimelineRange): TimelineHeaderMark[] {
+  const marks: TimelineHeaderMark[] = [];
+  const startY = Number(range.start.slice(0, 4));
+  const endY = Number(range.end.slice(0, 4));
+  for (let y = startY; y <= endY; y++) {
+    const key = `${y}-01-01`;
+    marks.push({ key, label: String(y), leftPercent: percentInRange(key, range) });
+  }
+  return marks;
+}
+
+function buildQuarterMarks(range: TimelineRange): TimelineHeaderMark[] {
+  const marks: TimelineHeaderMark[] = [];
+  const [startY, startM] = range.start.split("-").map(Number);
+  const [endY, endM] = range.end.split("-").map(Number);
+  let y = startY;
+  let q = Math.floor((startM - 1) / 3); // 0-3
+  const endQAbs = endY * 4 + Math.floor((endM - 1) / 3);
+  let first = true;
+  while (y * 4 + q <= endQAbs) {
+    const month = q * 3 + 1;
+    const key = `${y}-${String(month).padStart(2, "0")}-01`;
+    const label = first || q === 0 ? `Q${q + 1} ${y}` : `Q${q + 1}`;
+    marks.push({ key, label, leftPercent: percentInRange(key, range) });
+    first = false;
+    q += 1;
+    if (q > 3) {
+      q = 0;
+      y += 1;
+    }
+  }
+  return marks;
+}
+
+function buildMonthMarks(range: TimelineRange): TimelineHeaderMark[] {
+  const marks: TimelineHeaderMark[] = [];
   const [startY, startM] = range.start.split("-").map(Number);
   const [endY, endM] = range.end.split("-").map(Number);
   let y = startY;
@@ -226,4 +326,46 @@ export function buildTimelineMonthMarks(range: TimelineRange): TimelineMonthMark
     }
   }
   return marks;
+}
+
+function buildWeekMarks(range: TimelineRange): TimelineHeaderMark[] {
+  const marks: TimelineHeaderMark[] = [];
+  let cursor = startOfWeekMonday(range.start);
+  while (cursor <= range.end) {
+    const [, m, d] = cursor.split("-").map(Number);
+    marks.push({ key: cursor, label: `${MONTH_ABBR[m - 1]} ${d}`, leftPercent: percentInRange(cursor, range) });
+    cursor = addDaysStr(cursor, 7);
+  }
+  return marks;
+}
+
+function buildDayMarks(range: TimelineRange): TimelineHeaderMark[] {
+  const marks: TimelineHeaderMark[] = [];
+  let cursor = range.start;
+  while (cursor <= range.end) {
+    const [, m, d] = cursor.split("-").map(Number);
+    marks.push({ key: cursor, label: `${MONTH_ABBR[m - 1]} ${d}`, leftPercent: percentInRange(cursor, range) });
+    cursor = addDaysStr(cursor, 1);
+  }
+  return marks;
+}
+
+// Adaptive header marks — one mark per year/quarter/month/week/day boundary
+// crossed by `range`, whichever granularity chooseHeaderGranularity picks
+// for the current zoom density, positioned by percentage (not a discrete
+// grid column) so the same function covers a two-week range and a
+// multi-year one alike.
+export function buildTimelineHeaderMarks(range: TimelineRange, pxPerDay: number): TimelineHeaderMark[] {
+  switch (chooseHeaderGranularity(pxPerDay)) {
+    case "year":
+      return buildYearMarks(range);
+    case "quarter":
+      return buildQuarterMarks(range);
+    case "month":
+      return buildMonthMarks(range);
+    case "week":
+      return buildWeekMarks(range);
+    case "day":
+      return buildDayMarks(range);
+  }
 }

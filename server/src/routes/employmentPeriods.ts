@@ -24,6 +24,7 @@ import {
   WORK_GROUPS,
 } from "../lib/employmentPeriods";
 import { computeTimelineBar, resolveEmployeeTimeline, ResolvedTimelinePeriod } from "../lib/employmentTimelineView";
+import { getEmploymentTimelineDisplayStart, isValidDisplayStartDate, setEmploymentTimelineDisplayStart } from "../lib/employmentTimelineSettings";
 
 const router = Router();
 
@@ -267,6 +268,37 @@ router.get(
       .filter((e): e is NonNullable<typeof e> => e !== null);
 
     res.json({ employees });
+  })
+);
+
+// -- "Timeline starts" org setting --------------------------------------
+// A display-only cutoff for the default Fit-all graph range (see
+// employmentTimelineSettings.ts's own header comment) — never touches
+// employees.start_date or any employment_periods row. Same GET-broader/
+// PATCH-stricter role split as the rest of this router and as
+// dashboard.ts's own /org-settings endpoints.
+router.get(
+  "/settings/display-start",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (_req, res) => {
+    const displayStart = await getEmploymentTimelineDisplayStart();
+    res.json({ displayStart });
+  })
+);
+
+router.patch(
+  "/settings/display-start",
+  requireAuth,
+  requireRole("Administrator"),
+  asyncHandler(async (req, res) => {
+    const { displayStart } = (req.body ?? {}) as { displayStart?: string | null };
+    const value = displayStart === undefined ? null : displayStart;
+    if (!isValidDisplayStartDate(value)) {
+      return res.status(400).json({ error: "displayStart must be a YYYY-MM-DD date string, or null to reset to the earliest employee start" });
+    }
+    await setEmploymentTimelineDisplayStart(value, req.employee!.id);
+    res.json({ displayStart: value });
   })
 );
 
