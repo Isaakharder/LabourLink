@@ -161,11 +161,25 @@ export function AddBreakModal({ employeeId, employeeName, date, runs, breaks, on
   }
 
   return (
-    <Modal title="Add Break" onClose={submitting ? () => {} : onClose}>
-      <form onSubmit={handleSubmit} className="employee-form" noValidate>
+    <Modal
+      title="Add Break"
+      onClose={submitting ? () => {} : onClose}
+      wide
+      footer={
+        <div className="employee-form-actions">
+          <button type="button" onClick={onClose} disabled={submitting}>
+            Cancel
+          </button>
+          <button type="submit" form="add-break-form" className="employee-form-save" disabled={!canSubmit}>
+            {submitting ? "Adding…" : "Add Break"}
+          </button>
+        </div>
+      }
+    >
+      <form id="add-break-form" onSubmit={handleSubmit} className="employee-form add-break-form" noValidate>
         {loadError && <p className="error-text">{loadError}</p>}
 
-        <div className="employee-form-grid">
+        <div className="employee-form-grid add-break-grid">
           <label>
             Employee
             <input type="text" value={employeeName} disabled readOnly />
@@ -175,7 +189,7 @@ export function AddBreakModal({ employeeId, employeeName, date, runs, breaks, on
             <input type="text" value={formatDateLong(date)} disabled readOnly />
           </label>
 
-          <label>
+          <label className="add-break-type-field">
             Break type *
             <select
               value={selectedValue}
@@ -258,15 +272,6 @@ export function AddBreakModal({ employeeId, employeeName, date, runs, breaks, on
         {splitPreview && <p className="warning-text">{splitPreview}</p>}
 
         {error && <p className="error-text">{error}</p>}
-
-        <div className="employee-form-actions">
-          <button type="button" onClick={onClose} disabled={submitting}>
-            Cancel
-          </button>
-          <button type="submit" className="employees-add-button" disabled={!canSubmit}>
-            {submitting ? "Adding…" : "Add Break"}
-          </button>
-        </div>
       </form>
     </Modal>
   );

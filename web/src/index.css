@@ -2012,6 +2012,39 @@ input {
   font-weight: 600;
 }
 
+/* ---------- Inputs: Add Break modal ---------- */
+
+/* Scoped to this modal's own grid, not the shared .employee-form-grid — a
+   grid/flex item's default min-width is auto (its content's min-content
+   size), so a long employee name or a full break-type option label
+   ("Afternoon (3:00 PM–3:15 PM, Paid)") could force its track wider than
+   the grid, and the whole modal, was ever meant to be, which is what was
+   producing the horizontal scrollbar. min-width: 0 lets each field shrink
+   to its track instead; width: 100% makes the input/select actually fill
+   that track rather than sizing off the input's own `size` default. */
+.add-break-grid,
+.add-break-grid label,
+.add-break-grid input,
+.add-break-grid select {
+  min-width: 0;
+}
+
+.add-break-grid input,
+.add-break-grid select {
+  width: 100%;
+}
+
+/* Break type carries the longest content in the form (name + time range +
+   paid/unpaid), so it spans the full grid width instead of sharing a
+   column with Employee/Date, where it was getting clipped. */
+.add-break-type-field {
+  grid-column: 1 / -1;
+}
+
+.add-break-form {
+  overflow-wrap: break-word;
+}
+
 /* ---------- Tabs (Activities page) ---------- */
 
 .tabs {
