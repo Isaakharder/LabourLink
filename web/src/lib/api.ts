@@ -81,6 +81,40 @@ export class ApiError extends Error {
   }
 }
 
+// Desktop-only mechanism for "the server just told us the session is gone."
+// A bare 401 (no `code` — see device.ts's DeviceAuthErrorCode: a *coded*
+// 401 means something else entirely, e.g. a mobile device being
+// deactivated, and must never be treated as "the desktop session died")
+// from anything other than /api/auth/* means requireAuth rejected the
+// request: no cookie sent, or the JWT is expired/invalid. Every desktop
+// page that calls api() assumes it already has a live session — none of
+// them re-check /api/auth/me themselves — so without this, a background
+// poll just keeps failing forever (e.g. Inputs stuck on "Reconnecting…")
+// while the sidebar goes on showing the no-longer-real signed-in name.
+// AuthContext is the one subscriber: it clears that stale identity and
+// routes back to /login with an explanation.
+//
+// /api/auth/* is deliberately excluded: /login's own "Invalid email or
+// PIN" 401 and /me's initial "am I logged in" check (which 401s on every
+// ordinary logged-out page load — not a session dying, never logged in to
+// begin with) already handle their own errors locally in AuthContext/
+// LoginPage and must never trigger this.
+type SessionExpiredListener = (message: string) => void;
+const sessionExpiredListeners = new Set<SessionExpiredListener>();
+
+export function onSessionExpired(listener: SessionExpiredListener): () => void {
+  sessionExpiredListeners.add(listener);
+  return () => sessionExpiredListeners.delete(listener);
+}
+
+function notifySessionExpired(path: string, status: number, body: { error?: string; code?: unknown }) {
+  if (status !== 401) return;
+  if (path.startsWith("/api/auth/")) return;
+  if (typeof body.code === "string") return;
+  const message = body.error || "Your session has expired.";
+  sessionExpiredListeners.forEach((listener) => listener(message));
+}
+
 export interface ApiOptions extends RequestInit {
   // Overrides DEFAULT_TIMEOUT_MS for one call — no caller in this codebase
   // needs this today, but a genuinely long-running endpoint added later can
@@ -134,6 +168,7 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
+    notifySessionExpired(path, res.status, body);
     const firstFieldError = body.errors && Object.values(body.errors)[0];
     throw new ApiError(
       res.status,

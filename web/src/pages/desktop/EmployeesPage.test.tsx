@@ -32,6 +32,7 @@ vi.mock("../../lib/api", () => {
   }
   return {
     ApiError,
+    onSessionExpired: vi.fn(() => () => {}),
     api: vi.fn((path: string) => {
       if (path.startsWith("/api/auth/me")) return Promise.resolve(meResponse);
       if (path.startsWith("/api/employees/")) return Promise.resolve({ employee: employeesResponse.employees[0] });

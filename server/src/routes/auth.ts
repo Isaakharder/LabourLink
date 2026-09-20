@@ -14,11 +14,23 @@ const isProduction = process.env.NODE_ENV === "production";
 // origins — it would silently drop the session cookie on every request. In
 // production we need "none" (which itself requires secure: true). Locally,
 // where both run on localhost, "lax" is fine and avoids needing HTTPS in dev.
-const sessionCookieOptions: CookieOptions = {
-  httpOnly: true,
-  secure: isProduction,
-  sameSite: isProduction ? "none" : "lax",
-};
+//
+// This is a secondary line of defense only — the primary one is staying
+// same-origin in the first place (see web/serve-static.js's proxy and
+// web/src/lib/api.ts's resolveApiUrl()). sameSite: "none" cookies are still
+// subject to Safari's full third-party cookie blocking (ITP) when a request
+// actually is cross-site, which is silent (no error, the Set-Cookie is just
+// never stored) — see README's Railway deploy notes for the config mistake
+// that reintroduces that cross-site request in production.
+export function getSessionCookieOptions(isProd: boolean): CookieOptions {
+  return {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: isProd ? "none" : "lax",
+  };
+}
+
+const sessionCookieOptions: CookieOptions = getSessionCookieOptions(isProduction);
 
 router.post("/login", asyncHandler(async (req, res) => {
   console.log("[login] 1. Login request received");

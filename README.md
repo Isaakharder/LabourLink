@@ -546,9 +546,23 @@ environment variables.
    - `NODE_ENV` — `production`
    - `PORT` — set automatically by Railway, no action needed
 3. **web** service environment variables:
-   - `VITE_API_URL` — `https://${{api.RAILWAY_PUBLIC_DOMAIN}}` (Vite inlines this at
-     build time, so it must be set before the build runs, not just at runtime)
+   - `API_URL` — `https://${{api.RAILWAY_PUBLIC_DOMAIN}}` (runtime only, read by
+     `web/serve-static.js`, which proxies `/api/*` requests through the web origin to
+     the API service server-side)
    - `PORT` — set automatically by Railway, no action needed
+   - **Do not set `VITE_API_URL` on this service.** `web` and `api` are separate
+     Railway services on separate `*.up.railway.app` subdomains — genuinely different
+     *sites* for cookie purposes (`up.railway.app` is on the Public Suffix List), so a
+     direct browser → API request is cross-site. `VITE_API_URL` is a **build-time**
+     value Vite inlines into the bundle; setting it here makes every browser request
+     target the API's own cross-site origin directly, bypassing the `API_URL` proxy
+     above entirely. Safari's Intelligent Tracking Prevention then silently refuses to
+     store the session cookie on that cross-site response — while Chrome, which
+     doesn't block it by default, keeps working — so the failure shows up as "auth is
+     broken, but only in Safari" instead of a config mistake. `web/vite.config.ts`
+     fails the plain production build hard if `VITE_API_URL` is set, specifically to
+     catch this. `VITE_API_URL` belongs only in the Android build's env files
+     (`web/.env.android*`), which ship a native app with no proxy in front of it.
 4. Generate a public domain for both services (Settings → Networking → Generate Domain).
 5. Run `npm run migrate` and `npm run create-admin` once against the production
    `DATABASE_URL` (running them locally, pointed at prod via a temporary `server/.env`,

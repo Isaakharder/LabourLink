@@ -82,7 +82,9 @@
     "test:mobile-time-sync-events-scenarios": "ts-node src/routes/mobileTime.syncEvents.scenarios.test.ts",
     "test:mobile-time-sync-events-concurrent-load": "ts-node src/routes/mobileTime.syncEvents.concurrentLoad.test.ts",
     "test:mobile-time-rounding-boundary": "ts-node src/routes/mobileTime.roundingBoundary.test.ts",
-    "test:pairing": "ts-node src/routes/pairing.test.ts"
+    "test:pairing": "ts-node src/routes/pairing.test.ts",
+    "test:auth-middleware": "ts-node src/middleware/auth.test.ts",
+    "test:auth-session-cookie": "ts-node src/routes/auth.sessionCookie.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",

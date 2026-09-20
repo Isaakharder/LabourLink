@@ -48,6 +48,32 @@ function assertProductionAndroidApiUrl(mode: string, env: Record<string, string>
   }
 }
 
+// Mirror of the guard above for the *other* direction: the plain browser
+// build (`npm run build` — what web/railway.json's buildCommand actually
+// runs for the deployed web app) must NEVER have VITE_API_URL set. Vite
+// inlines it at build time, so setting it — e.g. by copying the Android
+// service's env vars onto the web Railway service, or by following an
+// out-of-date deployment note — silently makes every browser request
+// cross-site again (see resolveApiUrl() in src/lib/api.ts), which is
+// exactly what web/serve-static.js's same-origin proxy exists to prevent.
+// Safari's Intelligent Tracking Prevention then silently drops the session
+// cookie on that cross-site request while Chrome, which doesn't block it by
+// default, keeps working — a real production incident this reproduces
+// exactly, and one a missing/wrong env var should fail loudly for instead
+// of only surfacing as "auth is broken, but only in Safari."
+function assertNoBrowserApiUrlOverride(command: string, mode: string, env: Record<string, string>): void {
+  if (command !== "build" || mode !== "production") return;
+  if (env.VITE_API_URL) {
+    throw new Error(
+      `[same-origin-guard] VITE_API_URL ("${env.VITE_API_URL}") is set for the browser production build. ` +
+        "Leave it unset here — the deployed web app must stay same-origin with the API " +
+        "(see resolveApiUrl() in src/lib/api.ts) and reach it through web/serve-static.js's proxy " +
+        "instead, configured via the runtime API_URL env var on the web Railway service. " +
+        "VITE_API_URL belongs only in the Android build's env files (web/.env.android*), never here."
+    );
+  }
+}
+
 // Vitest reads its own `test` block straight out of this file (no separate
 // vitest.config.ts) so there's one source of truth for how modules resolve
 // — same aliasing/extensionless-import behavior tests see as the real app
@@ -57,12 +83,13 @@ function assertProductionAndroidApiUrl(mode: string, env: Record<string, string>
 // tests) opts into jsdom itself via a `// @vitest-environment jsdom`
 // pragma at the top of that one file, rather than paying jsdom's setup
 // cost for every other test.
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ command, mode }) => {
   // "VITE_" prefix matches Vite's own default client-exposure filter — this
   // reads exactly the values `import.meta.env` will see in the built code,
   // from the same .env.<mode> file Vite itself loads for this mode.
   const env = loadEnv(mode, process.cwd(), "VITE_");
   assertProductionAndroidApiUrl(mode, env);
+  assertNoBrowserApiUrlOverride(command, mode, env);
 
   return {
     plugins: [react()],

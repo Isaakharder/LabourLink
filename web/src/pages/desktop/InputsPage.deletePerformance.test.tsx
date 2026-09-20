@@ -58,6 +58,7 @@ vi.mock("../../lib/api", () => {
   }
   return {
     ApiError,
+    onSessionExpired: vi.fn(() => () => {}),
     api: vi.fn((path: string, options?: RequestInit) => {
       if (path.startsWith("/api/auth/me")) {
         return Promise.reject(new ApiError(401, "not authed"));

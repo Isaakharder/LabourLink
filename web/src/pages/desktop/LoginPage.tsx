@@ -57,7 +57,7 @@ function ForgotPinForm({ onBack }: { onBack: () => void }) {
 }
 
 export function LoginPage() {
-  const { login } = useAuth();
+  const { login, sessionExpiredMessage } = useAuth();
   const [mode, setMode] = useState<"login" | "forgot">("login");
   const [email, setEmail] = useState("");
   const [pin, setPin] = useState("");
@@ -89,6 +89,11 @@ export function LoginPage() {
     <div className="login-screen">
       <form className="login-card" onSubmit={handleSubmit}>
         <h1>LabourLink</h1>
+        {sessionExpiredMessage && (
+          <p className="warning-text" role="alert">
+            Your session expired — please sign in again.
+          </p>
+        )}
         <label>
           Email
           <input
