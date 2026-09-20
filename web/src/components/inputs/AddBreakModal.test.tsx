@@ -216,4 +216,84 @@ describe("AddBreakModal", () => {
     expect(onCreated).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Add Break" })).not.toBeDisabled();
   });
+
+  // jsdom never lays anything out (see EmploymentTimelineGraph.test.tsx's
+  // own comment on the same limitation), so these can't measure real
+  // pixels/scrollbars. Instead they pin down the structural contract the
+  // CSS in index.css actually relies on: the wider desktop panel, the
+  // overflow-safe grid classes, Break type's full-width span, and the
+  // pinned footer — regressing any of these silently reintroduces the
+  // clipped dropdown / white-on-white button / scrolling footer bugs this
+  // modal was fixed for, even though no unit test can literally screenshot
+  // the result.
+  it("renders the wider desktop panel with the overflow-safe grid classes and Break type spanning the full width", async () => {
+    renderModal();
+    await screen.findByText(/Lunch \(12:00 PM–1:00 PM, Unpaid\)/);
+
+    // .modal-panel-wide (index.css) caps the panel at 720px — within the
+    // requested ~700-760px range — instead of the cramped 480px default.
+    expect(screen.getByRole("dialog").className).toContain("modal-panel-wide");
+
+    // .add-break-grid (scoped, not the shared .employee-form-grid) is what
+    // carries min-width: 0 on the grid and its fields so a long employee
+    // name or option label can shrink to its track instead of forcing a
+    // horizontal scrollbar; .employee-form-grid is kept alongside it so the
+    // grid still collapses to one column under the existing 900px
+    // responsive breakpoint on narrow screens.
+    const grid = document.querySelector(".add-break-grid");
+    expect(grid).not.toBeNull();
+    expect(grid).toHaveClass("employee-form-grid");
+
+    // Break type carries the longest content in the form (name + time
+    // range + paid/unpaid) — .add-break-type-field spans the full grid
+    // width so it's never squeezed into a half-width column and clipped.
+    const breakTypeField = screen.getByLabelText(/Break type/).closest("label");
+    expect(breakTypeField).toHaveClass("add-break-type-field");
+  });
+
+  it("keeps the Add Break button readable (employee-form-save, not the shared toolbar button that goes invisible in this footer) whether enabled or disabled", async () => {
+    renderModal();
+    await screen.findByText(/Lunch \(12:00 PM–1:00 PM, Unpaid\)/);
+
+    // Nothing selected yet — the button is disabled but must still clearly
+    // read "Add Break", not vanish or fall back to "Save".
+    const disabledButton = screen.getByRole("button", { name: "Add Break" });
+    expect(disabledButton).toBeDisabled();
+    expect(disabledButton).toHaveTextContent("Add Break");
+    // .employees-add-button has no :disabled styling of its own and, worse,
+    // loses its background to `.employee-form-actions button` inside this
+    // footer (white-on-white) — .employee-form-save is the shared,
+    // !important-backed primary-button class used by every other
+    // cleaned-up LabourLink modal, which is immune to that override.
+    expect(disabledButton.className).toContain("employee-form-save");
+    expect(disabledButton.className).not.toContain("employees-add-button");
+
+    const user = userEvent.setup();
+    await user.selectOptions(screen.getByLabelText(/Break type/), "item-lunch");
+    await screen.findByText("12:00 PM–1:00 PM · 1 hour · Unpaid");
+
+    const enabledButton = screen.getByRole("button", { name: "Add Break" });
+    expect(enabledButton).not.toBeDisabled();
+    expect(enabledButton).toHaveTextContent("Add Break");
+    expect(enabledButton.className).toContain("employee-form-save");
+  });
+
+  it("pins Cancel/Add Break in the modal's footer, outside the scrollable form body, wired to the form by id", async () => {
+    renderModal();
+    await screen.findByText(/Lunch \(12:00 PM–1:00 PM, Unpaid\)/);
+
+    const addBreakButton = screen.getByRole("button", { name: "Add Break" });
+    // Rendered via Modal's `footer` prop (modal-footer, flex-shrink: 0,
+    // outside modal-body's own overflow-y: auto region) so it — and
+    // Cancel next to it — stay reachable regardless of how tall the form
+    // body gets, including at 125%/150% browser zoom on a laptop screen.
+    expect(addBreakButton.closest(".modal-footer")).not.toBeNull();
+    expect(addBreakButton.closest("form")).toBeNull();
+    // Still submits the form it visually belongs to via the standard HTML
+    // form= association, since it isn't a DOM descendant of it any more.
+    expect(addBreakButton).toHaveAttribute("form", "add-break-form");
+
+    const cancelButton = screen.getByRole("button", { name: "Cancel" });
+    expect(cancelButton.closest(".modal-footer")).not.toBeNull();
+  });
 });
