@@ -159,6 +159,7 @@ export function WorkdayDetailsCard({
                   <input
                     type="time"
                     step={1}
+                    className="inputs-time-input"
                     value={editWorkStartTimeValue}
                     onChange={(e) => onEditWorkStartTimeChange(e.target.value)}
                     onKeyDown={(e) => {
@@ -225,6 +226,7 @@ export function WorkdayDetailsCard({
                       <input
                         type="time"
                         step={1}
+                        className="inputs-time-input"
                         value={editBreakTimeValue}
                         onChange={(e) => onEditBreakTimeChange(e.target.value)}
                         onKeyDown={(e) => {
@@ -267,6 +269,7 @@ export function WorkdayDetailsCard({
                       <input
                         type="time"
                         step={1}
+                        className="inputs-time-input"
                         value={editBreakTimeValue}
                         onChange={(e) => onEditBreakTimeChange(e.target.value)}
                         onKeyDown={(e) => {

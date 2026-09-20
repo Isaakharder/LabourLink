@@ -2853,12 +2853,25 @@ input {
   display: table;
   table-layout: fixed;
   width: 100%;
-  min-width: 640px;
+  /* Sum of every .inputs-col-* below (1190px) — see those rules for how
+     each figure was chosen. This is the floor at which every column still
+     gets its full explicit width; below it the columns would otherwise be
+     squeezed proportionally to fit, which is exactly the "crushing"
+     behavior this whole fix exists to prevent (originally surfaced as the
+     Safari/WebKit End Time input collapsing to a few px — see
+     .inputs-time-input's comment — but the *same* squeeze, once the input
+     itself could no longer shrink, turned into the End Time editor's flex
+     overflow visually painting over the Duration and Start Time cells
+     instead, confirmed against real Safari at a ~1040px window). Below
+     this floor, .inputs-logs-table-scroll's overflow-x: auto takes over —
+     the table stays pinned at 1190px and scrolls horizontally rather than
+     any column or input shrinking further. */
+  min-width: 1190px;
   /* Flattens .employees-table's own background/border/radius — the table
      now sits flush inside .inputs-workspace's single shared border instead
      of drawing a nested card of its own. Also overrides its overflow:
-     hidden so the End Time editor's Save/Cancel buttons can spill past the
-     fixed-width column instead of being clipped. */
+     hidden so nothing inside is clipped before .inputs-logs-table-scroll's
+     own overflow-x: auto gets a chance to reveal it via horizontal scroll. */
   background: transparent;
   border: none;
   border-radius: 0;
@@ -2870,32 +2883,51 @@ input {
   padding: 0.5rem 1rem;
 }
 
+/* Every .inputs-col-* below is an explicit pixel width, not a percentage —
+   deliberately. table-layout: fixed with percentage columns that don't sum
+   to exactly 100% (ours summed to 114%) leaves the actual rendered column
+   widths ambiguous/browser-dependent once the table's own width is also
+   constrained (by min-width, a narrow container, etc.), which is what
+   produced the Safari-only collapse/overlap this fix addresses. Explicit
+   px columns are unambiguous in every browser: at or above the table's
+   min-width (their sum, see .inputs-logs-table) each one is exactly this
+   wide; a wider table (plenty of room on a normal desktop viewport, same
+   as today) scales them up proportionally to fill it, exactly like the
+   percentages did before — so normal desktop Chrome/Edge appearance is
+   unchanged, only the narrow/Safari failure mode is. */
 .inputs-col-activity {
-  width: 24%;
+  width: 190px;
 }
 
 .inputs-col-row {
-  width: 15%;
+  width: 100px;
 }
 
 .inputs-col-carrier {
-  width: 13%;
+  width: 110px;
 }
 
 .inputs-col-speed {
-  width: 14%;
+  width: 100px;
 }
 
+/* Fits .inputs-time-input (140px) plus the cell's own 2rem horizontal
+   padding, with a few px to spare — confirmed against real Safari. */
 .inputs-col-starttime {
-  width: 15%;
+  width: 175px;
 }
 
 .inputs-col-duration {
-  width: 14%;
+  width: 110px;
 }
 
+/* Fits .inputs-time-input (140px) + Save + Cancel + their gaps + the
+   cell's own 2rem horizontal padding, so the editor never needs to spill
+   onto Duration/Start Time the way it did before this column was widened
+   and switched from a percentage to an explicit px value (see
+   .inputs-logs-table's own comment). */
 .inputs-col-endtime {
-  width: 19%;
+  width: 305px;
 }
 
 .inputs-col-actions {
@@ -2939,7 +2971,46 @@ input {
   cursor: text;
 }
 
-.inputs-log-starttime input[type="time"] {
+/* Shared by every inline Start Time/End Time/Work start/Break time editor
+   on this page (ActivityLogsCard's run start+end, WorkdayDetailsCard's
+   work-start and break start+end) — one definition so every one of them
+   gets the identical fix for the Safari/WebKit time-input collapse bug
+   below, rather than N near-duplicate rules that could drift out of sync.
+
+   Root cause this exists for: input[type="time"] sits as a flex child
+   inside .inputs-endtime-editor/.inputs-time-editor (input + Save + Cancel
+   buttons), inside a table-layout: fixed cell. The buttons already had
+   flex-shrink: 0 (see below); the input didn't, so it was the ONLY
+   shrinkable item in the row and absorbed the entire space deficit
+   whenever the fixed-width column couldn't fit input+buttons at their
+   natural size. Per the flexbox spec, a shrinkable item's default
+   `min-width: auto` floor is normally its own min-content size — but
+   Chrome computes a real (non-trivial) min-content width for this specific
+   native control, while Safari/WebKit's is effectively near-zero, so only
+   Safari ever actually shrank it down to a few unreadable pixels; Chrome
+   never hit the floor because its own default already kept the control
+   legible. An explicit width + min-width + flex-shrink: 0 sidesteps that
+   divergence entirely: the browser is told the exact box to use and
+   forbidden from shrinking it below that, so neither browser's own
+   min-content heuristic for this control ever comes into play. No
+   -webkit-appearance override is needed — this isn't a rendering/appearance
+   difference, it's a sizing-inside-flex difference, and forcing an
+   explicit size fixes that directly without touching (or risking breaking)
+   Safari's native time-picker controls.
+
+   140px targets the widest realistic rendering — HH:MM:SS plus a 12-hour
+   AM/PM segment (step={1} enables the seconds field everywhere this class
+   is used). This alone stops the collapse; getting the *column* widths
+   (.inputs-col-starttime/.inputs-col-endtime below) large enough that the
+   now non-collapsing editor doesn't instead overflow and visually paint
+   over Duration/Start Time was a second, separate fix — both confirmed
+   together against real macOS Safari at desktop (~1440px), Safari-narrow
+   (~1040px), and iPad-portrait (~820px) window widths, not just
+   Chromium/jsdom. */
+.inputs-time-input {
+  width: 140px;
+  min-width: 140px;
+  flex-shrink: 0;
   font-variant-numeric: tabular-nums;
   padding: 0.2rem 0.4rem;
   border: 1px solid var(--color-primary);
@@ -2968,15 +3039,6 @@ input {
   align-items: center;
   justify-content: flex-end;
   gap: 0.4rem;
-}
-
-.inputs-endtime-editor input[type="time"],
-.inputs-time-editor input[type="time"] {
-  font-variant-numeric: tabular-nums;
-  padding: 0.2rem 0.4rem;
-  border: 1px solid var(--color-primary);
-  border-radius: 4px;
-  font-size: 0.85rem;
 }
 
 .inputs-endtime-editor button,

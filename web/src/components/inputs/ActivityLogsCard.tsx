@@ -250,6 +250,7 @@ export function ActivityLogsCard({
                       <input
                         type="time"
                         step={1}
+                        className="inputs-time-input"
                         value={editStartTimeValue}
                         onChange={(e) => onEditStartTimeChange(e.target.value)}
                         onKeyDown={(e) => {
@@ -302,6 +303,7 @@ export function ActivityLogsCard({
                         <input
                           type="time"
                           step={1}
+                          className="inputs-time-input"
                           value={editEndTimeValue}
                           onChange={(e) => onEditEndTimeChange(e.target.value)}
                           onKeyDown={(e) => {
