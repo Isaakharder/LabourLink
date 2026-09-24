@@ -54,7 +54,14 @@ function round2(n: number): number {
 // a stems/hour bar and apply an hours-based cutoff.
 router.get(
   "/productive-tv/pruning-speed",
-  requireIntegrationToken,
+  // Wrapped the same as the route handler below — requireIntegrationToken
+  // is async and Express 4 never catches a rejected promise from
+  // middleware on its own (the same reason every async route handler in
+  // this codebase goes through asyncHandler); without this, a transient DB
+  // error inside the auth check would be an unhandled rejection with no
+  // global handler registered in index.ts, capable of crashing the whole
+  // process rather than just failing this one request.
+  asyncHandler(requireIntegrationToken),
   asyncHandler(async (req, res) => {
     const { from, to } = req.query as { from?: string; to?: string };
     if (!isValidDate(from) || !isValidDate(to)) {
