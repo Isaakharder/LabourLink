@@ -108,6 +108,32 @@ router.post(
           .json({ error: "Selected entries do not all refer to the same row, activity, and density" });
       }
 
+      // Row-work cycles (rowCompletionCandidates.ts's CYCLE_GAP_DAYS): the
+      // same row+activity+density is no longer one lifetime ambiguity group
+      // — a visit from months ago and one from this week are unrelated
+      // passes over the row, so combining across that gap must be refused
+      // the same way combining across two different activities already is
+      // above. Reads via the shared pool (not `client`) is safe here — this
+      // transaction hasn't inserted anything yet, so it sees exactly the
+      // same not-yet-completed state the admin's review modal was built
+      // from.
+      const candidates = await getUnresolvedRunsForRow(
+        first.greenhouse_row_id,
+        first.activity_id,
+        first.density_type as "plants" | "stems"
+      );
+      const cycleIndexBySegmentId = new Map<string, number>();
+      for (const c of candidates) {
+        for (const segId of c.segmentIds) cycleIndexBySegmentId.set(segId, c.cycleIndex);
+      }
+      const cycleIndexesUsed = new Set(timeEntryIds.map((id) => cycleIndexBySegmentId.get(id)));
+      if (cycleIndexesUsed.size > 1 || cycleIndexesUsed.has(undefined)) {
+        await client.query("rollback");
+        return res.status(400).json({
+          error: "Selected entries span more than one row-work cycle (more than 7 calendar days apart) and cannot be combined together",
+        });
+      }
+
       const { rows: created } = await client.query(
         `insert into row_completions (greenhouse_row_id, activity_id, density_type, quantity_per_row, confirmed_by_employee_id)
          values ($1, $2, $3, $4, $5)

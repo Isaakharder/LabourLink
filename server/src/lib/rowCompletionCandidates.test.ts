@@ -102,6 +102,35 @@ async function main() {
       return rows[0].id;
     }
 
+    // Same as insertWork, but lets a cycle-partitioning test place a segment
+    // on a specific calendar day instead of the fixed 2019-06-20 every other
+    // scenario in this file uses — insertWork itself is left untouched so
+    // every existing call site above stays unaffected.
+    async function insertWorkOnDate(
+      employeeId: string,
+      activityId: string,
+      rowId: string,
+      month: number,
+      day: number,
+      startHour: number,
+      startMinute: number,
+      endHour: number,
+      endMinute: number,
+      densityType: "plants" | "stems",
+      densityCountPerRow: number
+    ): Promise<string> {
+      const startedAt = zonedWallTimeToUtc(2019, month, day, startHour, startMinute, 0);
+      const endedAt = zonedWallTimeToUtc(2019, month, day, endHour, endMinute, 0);
+      const { rows } = await pool.query(
+        `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source,
+                                    greenhouse_row_id, density_type, density_count_per_row)
+         values ($1, null, 'work', $2, gen_random_uuid(), $3, $4, 'manual', $5, $6, $7) returning id`,
+        [employeeId, activityId, startedAt, endedAt, rowId, densityType, densityCountPerRow]
+      );
+      timeEntryIds.push(rows[0].id);
+      return rows[0].id;
+    }
+
     async function insertBreak(employeeId: string, startHour: number, startMinute: number, endHour: number, endMinute: number): Promise<string> {
       const startedAt = zonedWallTimeToUtc(2019, 6, 20, startHour, startMinute, 0);
       const endedAt = zonedWallTimeToUtc(2019, 6, 20, endHour, endMinute, 0);
@@ -320,6 +349,179 @@ async function main() {
           new Set(windingAfter.flatMap((c) => c.segmentIds)).has(windingEntry2),
         "11) Winding & Pruning's own ambiguity is completely untouched by resolving Picking Peppers' unrelated completion",
         windingAfter
+      );
+    }
+    // -----------------------------------------------------------------
+    // 12) Row-work cycle partitioning (Row 194) — the same row+activity is
+    //     no longer one lifetime ambiguity group. A new cycle starts once
+    //     more than 7 calendar days have elapsed since the preceding
+    //     segment: Sept 3 is its own cycle (alone, unambiguous); the two
+    //     Sept 10 segments (same day — no bridging needed to co-belong)
+    //     form a second cycle together (genuinely ambiguous, 2 candidates);
+    //     Sept 23 is a third cycle, alone again. None of the three cycles
+    //     may ever be combined with, or trigger review from, another.
+    // -----------------------------------------------------------------
+    const rowH = await insertRow(194);
+    {
+      const sept3 = await insertWorkOnDate(emp1, activity, rowH, 9, 3, 8, 0, 9, 0, "stems", 500);
+      const sept10a = await insertWorkOnDate(emp1, activity, rowH, 9, 10, 8, 0, 9, 0, "stems", 500);
+      const sept10b = await insertWorkOnDate(emp2, activity, rowH, 9, 10, 10, 0, 11, 0, "stems", 500);
+      const sept23 = await insertWorkOnDate(emp1, activity, rowH, 9, 23, 8, 0, 9, 0, "stems", 500);
+
+      const candidates = await getUnresolvedRunsForRow(rowH, activity, "stems");
+      check(candidates.length === 4, "12) all four segments remain individually pending candidates (nothing wrongly auto-merged)", candidates);
+
+      const byFirstSegmentId = new Map(candidates.map((c) => [c.segmentIds[0], c]));
+      const cSept3 = byFirstSegmentId.get(sept3);
+      const cSept10a = byFirstSegmentId.get(sept10a);
+      const cSept10b = byFirstSegmentId.get(sept10b);
+      const cSept23 = byFirstSegmentId.get(sept23);
+      check(!!cSept3 && !!cSept10a && !!cSept10b && !!cSept23, "12) every inserted segment surfaces as its own candidate", candidates);
+
+      check(
+        cSept3!.cycleIndex !== cSept10a!.cycleIndex,
+        "12) Sept 3 is a separate cycle from Sept 10 — more than 7 calendar days elapsed",
+        { cSept3, cSept10a }
+      );
+      check(
+        cSept10a!.cycleIndex === cSept10b!.cycleIndex,
+        "12) both Sept 10 segments (same day) belong to the same cycle",
+        { cSept10a, cSept10b }
+      );
+      check(
+        cSept10a!.cycleIndex !== cSept23!.cycleIndex,
+        "12) Sept 23 is a separate cycle from Sept 10 — more than 7 calendar days elapsed",
+        { cSept10a, cSept23 }
+      );
+      check(
+        cSept3!.cycleIndex !== cSept23!.cycleIndex,
+        "12) Sept 3 and Sept 23 are also different cycles from each other, not just both different from Sept 10",
+        { cSept3, cSept23 }
+      );
+
+      // Only the Sept 10 pair is genuinely ambiguous (same cycle, 2
+      // candidates, no bridging) — Sept 3 and Sept 23 must each stay a
+      // lone, unambiguous candidate in their own cycle, never pulled into
+      // review just because SOME candidate exists somewhere else in time
+      // for this row+activity+type.
+      const sameCycleAsSept10 = candidates.filter((c) => c.cycleIndex === cSept10a!.cycleIndex);
+      check(sameCycleAsSept10.length === 2, "12) exactly two candidates share the Sept 10 cycle", sameCycleAsSept10);
+
+      const sameCycleAsSept3 = candidates.filter((c) => c.cycleIndex === cSept3!.cycleIndex);
+      check(sameCycleAsSept3.length === 1, "12) Sept 3's cycle has exactly one candidate (unambiguous on its own)", sameCycleAsSept3);
+
+      const sameCycleAsSept23 = candidates.filter((c) => c.cycleIndex === cSept23!.cycleIndex);
+      check(sameCycleAsSept23.length === 1, "12) Sept 23's cycle has exactly one candidate (unambiguous on its own)", sameCycleAsSept23);
+    }
+
+    // -----------------------------------------------------------------
+    // 13) Boundary: exactly 6 calendar dates apart must remain one cycle —
+    //     the cutoff is "at least 7 calendar dates after", so 6 is still
+    //     inside the same cycle no matter the time of day either segment
+    //     falls on.
+    // -----------------------------------------------------------------
+    const rowSixApart = await insertRow(195);
+    {
+      const first = await insertWorkOnDate(emp1, activity, rowSixApart, 9, 3, 20, 0, 21, 0, "stems", 500);
+      const sixDatesLater = await insertWorkOnDate(emp2, activity, rowSixApart, 9, 9, 6, 0, 7, 0, "stems", 500);
+
+      const candidates = await getUnresolvedRunsForRow(rowSixApart, activity, "stems");
+      const byFirstSegmentId = new Map(candidates.map((c) => [c.segmentIds[0], c]));
+      const cFirst = byFirstSegmentId.get(first);
+      const cSixDatesLater = byFirstSegmentId.get(sixDatesLater);
+      check(
+        !!cFirst && !!cSixDatesLater && cFirst.cycleIndex === cSixDatesLater.cycleIndex,
+        "13) segments exactly six calendar dates apart remain in the same cycle",
+        { cFirst, cSixDatesLater }
+      );
+    }
+
+    // -----------------------------------------------------------------
+    // 14) Boundary: exactly 7 calendar dates apart must start a new cycle
+    //     regardless of time-of-day — tested both with the later visit
+    //     EARLIER in the day than the first (so raw elapsed hours is well
+    //     under 7*24) and LATER in the day (so raw elapsed hours is over
+    //     7*24). Both must split into a new cycle: the rule is "the next
+    //     segment's work date is at least 7 calendar days after the
+    //     preceding segment's work date", never a raw hour count.
+    // -----------------------------------------------------------------
+    const rowSevenApartEarlier = await insertRow(196);
+    {
+      // First visit late in the day (20:00); the visit exactly seven dates
+      // later is EARLY in the day (6:00) — under an hours-based check this
+      // gap is only ~5 days 10 hours of raw elapsed time, well short of
+      // 168 hours, yet the calendar-date rule must still start a new cycle.
+      const first = await insertWorkOnDate(emp1, activity, rowSevenApartEarlier, 9, 3, 20, 0, 21, 0, "stems", 500);
+      const sevenDatesLaterEarlier = await insertWorkOnDate(emp2, activity, rowSevenApartEarlier, 9, 10, 6, 0, 7, 0, "stems", 500);
+
+      const candidates = await getUnresolvedRunsForRow(rowSevenApartEarlier, activity, "stems");
+      const byFirstSegmentId = new Map(candidates.map((c) => [c.segmentIds[0], c]));
+      const cFirst = byFirstSegmentId.get(first);
+      const cSevenDatesLaterEarlier = byFirstSegmentId.get(sevenDatesLaterEarlier);
+      check(
+        !!cFirst && !!cSevenDatesLaterEarlier && cFirst.cycleIndex !== cSevenDatesLaterEarlier.cycleIndex,
+        "14) exactly seven calendar dates apart starts a new cycle when the later visit falls EARLIER in the day (raw elapsed hours well under 168)",
+        { cFirst, cSevenDatesLaterEarlier }
+      );
+    }
+    const rowSevenApartLater = await insertRow(197);
+    {
+      // First visit early in the day (6:00); the visit exactly seven dates
+      // later is LATE in the day (20:00) — raw elapsed time here is over
+      // 168 hours, the opposite time-of-day direction from the case above.
+      // Both must agree: new cycle either way.
+      const first = await insertWorkOnDate(emp1, activity, rowSevenApartLater, 9, 3, 6, 0, 7, 0, "stems", 500);
+      const sevenDatesLaterLater = await insertWorkOnDate(emp2, activity, rowSevenApartLater, 9, 10, 20, 0, 21, 0, "stems", 500);
+
+      const candidates = await getUnresolvedRunsForRow(rowSevenApartLater, activity, "stems");
+      const byFirstSegmentId = new Map(candidates.map((c) => [c.segmentIds[0], c]));
+      const cFirst = byFirstSegmentId.get(first);
+      const cSevenDatesLaterLater = byFirstSegmentId.get(sevenDatesLaterLater);
+      check(
+        !!cFirst && !!cSevenDatesLaterLater && cFirst.cycleIndex !== cSevenDatesLaterLater.cycleIndex,
+        "14) exactly seven calendar dates apart starts a new cycle when the later visit falls LATER in the day (raw elapsed hours well over 168)",
+        { cFirst, cSevenDatesLaterLater }
+      );
+    }
+
+    // -----------------------------------------------------------------
+    // 15) DST: the cycle boundary is genuine APP_TIMEZONE (America/Toronto)
+    //     calendar-date arithmetic, not a fixed elapsed-hours count, so it
+    //     must stay correct across a DST transition. 2019-03-06 ->
+    //     2019-03-13 is exactly 7 calendar dates apart in Toronto, but
+    //     spans the March 10, 2019 "spring forward" (2am -> 3am) — a
+    //     same-wall-clock-time week here is a real 167 hours, not 168. An
+    //     elapsed-hours implementation checking "duration >= 168h" would
+    //     wrongly keep these in one cycle; the calendar-date rule must
+    //     still correctly start a new cycle, proving the boundary is
+    //     driven by local calendar dates, immune to the DST shift.
+    // -----------------------------------------------------------------
+    const rowDstSpringForward = await insertRow(198);
+    {
+      const beforeDst = await insertWorkOnDate(emp1, activity, rowDstSpringForward, 3, 6, 8, 0, 9, 0, "stems", 500);
+      const afterDst = await insertWorkOnDate(emp2, activity, rowDstSpringForward, 3, 13, 8, 0, 9, 0, "stems", 500);
+
+      const candidates = await getUnresolvedRunsForRow(rowDstSpringForward, activity, "stems");
+      const byFirstSegmentId = new Map(candidates.map((c) => [c.segmentIds[0], c]));
+      const cBeforeDst = byFirstSegmentId.get(beforeDst);
+      const cAfterDst = byFirstSegmentId.get(afterDst);
+      check(!!cBeforeDst && !!cAfterDst, "15) both DST-fixture segments surface as their own candidates", { cBeforeDst, cAfterDst });
+
+      const rawElapsedHours = (new Date(cAfterDst!.startedAt).getTime() - new Date(cBeforeDst!.startedAt).getTime()) / 3600000;
+      check(
+        // The real elapsed gap here is 167 hours (a DST spring-forward week
+        // is 23 hours short of a normal 168), well under a raw "168 hours"
+        // cutoff — confirming this test actually exercises the DST edge
+        // case an hours-based implementation would get wrong, not a
+        // coincidentally-passing 169+ hour gap.
+        rawElapsedHours < 168,
+        "15) the DST week between these two fixtures is genuinely under 168 raw hours (sanity-checks the test itself)",
+        { rawElapsedHours }
+      );
+      check(
+        cBeforeDst!.cycleIndex !== cAfterDst!.cycleIndex,
+        "15) a 7-calendar-date gap spanning a DST spring-forward transition still correctly starts a new cycle",
+        { cBeforeDst, cAfterDst }
       );
     }
   } finally {

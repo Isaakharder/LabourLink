@@ -19,7 +19,7 @@
 // from auto-counting (see 045_row_completion_activity_id.sql).
 import { pool } from "../db";
 import { groupIntoActivityRuns, RunSegment } from "./activityRuns";
-import { calendarDateInAppTimezone, getDayBoundsUtc } from "./timezone";
+import { calendarDateInAppTimezone, getDayBoundsUtc, inclusiveDayCount } from "./timezone";
 
 export interface CandidateRun {
   runId: string;
@@ -34,6 +34,15 @@ export interface CandidateRun {
   startedAt: string;
   endedAt: string | null;
   durationSeconds: number;
+  // Which chronological "row-work cycle" (see CYCLE_GAP_DAYS below) this
+  // candidate belongs to, 0-based and only ever compared against another
+  // candidate's cycleIndex for the SAME row+activity+densityType key (the
+  // outer Map key in getUnresolvedRunsForRows/getUnresolvedRunsForRow) — it
+  // is not a globally unique id on its own. Two candidates in the same
+  // cycle may be combined or jointly trigger "Needs review"; two candidates
+  // in different cycles never may, no matter how many other candidates
+  // exist for that key elsewhere in time.
+  cycleIndex: number;
 }
 
 export interface RowActivityDensityKey {
@@ -44,6 +53,68 @@ export interface RowActivityDensityKey {
 
 function pairKey(k: RowActivityDensityKey): string {
   return `${k.greenhouseRowId}:${k.activityId}:${k.densityType}`;
+}
+
+// A row+activity+densityType pair is otherwise grouped for its entire
+// history — "the same row and activity" was becoming one lifetime review
+// group, so a visit from months ago and one from this week could get lumped
+// into the same ambiguity check (or worse, be combinable together) despite
+// being two obviously unrelated passes over the row. Splitting into
+// chronological "cycles" fixes that: candidates within CYCLE_GAP_DAYS of
+// each other stay one cycle, candidates further apart than that start a new
+// one, and ambiguity/combining is only ever checked within a single cycle
+// (see inputs.ts's per-cycle ambiguity check and rowCompletions.ts's POST
+// cross-cycle rejection, both keyed off this same cycleIndex).
+//
+// Deliberately calendar-DATE arithmetic, never elapsed real time: a new
+// cycle starts when the next candidate's own work date (CandidateRun.date —
+// already computed as calendarDateInAppTimezone(startedAt), i.e. the
+// organization's local calendar date in APP_TIMEZONE, not UTC) is at least
+// CYCLE_GAP_DAYS calendar dates after the preceding candidate's work date —
+// entirely independent of either segment's time-of-day, and of how many
+// real hours happen to separate them. This matters on two fronts a raw
+// "elapsed hours >= 168" check would get wrong:
+//  1. Two segments exactly 7 dates apart must both start a new cycle
+//     whether the later one falls earlier or later in the day than the
+//     first — an hours-based check would only sometimes cross 168h
+//     depending on time-of-day, which is exactly the inconsistency this
+//     avoids.
+//  2. A week spanning a DST transition in APP_TIMEZONE is a real 167 or 169
+//     hours, not 168 — an hours-based ">= 168h" check would misclassify a
+//     genuine 7-calendar-date gap that happens to span a DST "spring
+//     forward" (167h). Calendar-date subtraction (inclusiveDayCount below,
+//     itself plain Y/M/D arithmetic once each side has already been
+//     resolved to a local date string) is unaffected either way — see
+//     rowCompletionCandidates.test.ts's dedicated DST regression case.
+//
+// inclusiveDayCount (timezone.ts) counts BOTH endpoints — e.g.
+// inclusiveDayCount("2019-09-03", "2019-09-10") is 8, not 7 — so "more than
+// CYCLE_GAP_DAYS calendar days elapsed" cuts a new cycle once the plain date
+// difference reaches exactly CYCLE_GAP_DAYS (Sept 3 -> Sept 10), matching
+// the accepted regression fixture (Row 194: Sept 3 alone, both Sept 10
+// segments together, Sept 23 alone) and "at least 7 calendar days after".
+// Six calendar dates apart (inclusiveDayCount of 7, not > 7) stays one
+// cycle; two candidates on the same calendar date always compute to a
+// same-date span (inclusiveDayCount of 1, well under the threshold), so
+// contiguous/same-day segments are automatically kept in one cycle with no
+// special-casing needed here.
+const CYCLE_GAP_DAYS = 7;
+
+// candidates must already be sorted by startedAt ascending (every caller
+// below sorts its list immediately before calling this). Anchors each gap
+// check on the PRECEDING candidate's own work date (CandidateRun.date), per
+// the rule above — never its end time, and never a raw millisecond/hour
+// difference.
+function assignCycleIndexes(candidates: CandidateRun[]): void {
+  let cycleIndex = 0;
+  let prevWorkDate: string | null = null;
+  for (const candidate of candidates) {
+    if (prevWorkDate !== null && inclusiveDayCount(prevWorkDate, candidate.date) > CYCLE_GAP_DAYS) {
+      cycleIndex++;
+    }
+    candidate.cycleIndex = cycleIndex;
+    prevWorkDate = candidate.date;
+  }
 }
 
 interface DayFetchRow {
@@ -317,6 +388,11 @@ export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): 
           startedAt: root.startedAt.toISOString(),
           endedAt: thisDayEndedAt?.toISOString() ?? null,
           durationSeconds: thisDayDuration,
+          // Placeholder — assignCycleIndexes (below) overwrites this once
+          // every day in this batch has been processed and each key's list
+          // is fully built and sorted; cycle membership can only be
+          // determined once the whole chronological list is known.
+          cycleIndex: 0,
         };
         result.get(key)!.push(candidate);
         candidateByRootId.set(root.id, candidate);
@@ -339,6 +415,7 @@ export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): 
 
   for (const list of result.values()) {
     list.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    assignCycleIndexes(list);
   }
   return result;
 }

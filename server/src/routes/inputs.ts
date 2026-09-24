@@ -9,7 +9,7 @@ import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { reconcileMidnightCutoff } from "../lib/midnightCutoff";
 import { aggregateDensitySpeed } from "../lib/densitySpeed";
 import { computeWorkdayTotals, groupByEmployeeDay, WorkdayBoundaryEntry } from "../lib/workdayTotals";
-import { getRolloverPriorDurationSeconds, getUnresolvedRunsForRows } from "../lib/rowCompletionCandidates";
+import { CandidateRun, getRolloverPriorDurationSeconds, getUnresolvedRunsForRows } from "../lib/rowCompletionCandidates";
 import {
   loadCarrierOptions,
   loadEmployeeActivitiesWithQuestions,
@@ -733,7 +733,7 @@ router.get(
     // redundantly re-fetched that SAME employee's whole day 14 times over,
     // and GET /daily took ~5.6s; batched, it's one round trip regardless of
     // how many pairs this day has.
-    const [completionTotals, ambiguousPairKeys] = await Promise.all([
+    const [completionTotals, candidatesByKey] = await Promise.all([
       (async () => {
         const map = new Map<string, { quantity: number; durationSeconds: number; segmentCount: number }>();
         if (completionIdsNeeded.size > 0) {
@@ -757,20 +757,13 @@ router.get(
         }
         return map;
       })(),
-      (async () => {
-        const keys = new Set<string>();
-        const candidatesByKey = await getUnresolvedRunsForRows(
-          [...unresolvedPairs.values()].map((pair) => ({
-            greenhouseRowId: pair.greenhouseRowId,
-            activityId: pair.activityId,
-            densityType: pair.densityType,
-          }))
-        );
-        for (const key of unresolvedPairs.keys()) {
-          if ((candidatesByKey.get(key)?.length ?? 0) > 1) keys.add(key);
-        }
-        return keys;
-      })(),
+      getUnresolvedRunsForRows(
+        [...unresolvedPairs.values()].map((pair) => ({
+          greenhouseRowId: pair.greenhouseRowId,
+          activityId: pair.activityId,
+          densityType: pair.densityType,
+        }))
+      ),
     ]);
 
     const speedByCompletionId = new Map<string, number | null>();
@@ -779,6 +772,46 @@ router.get(
         id,
         aggregateDensitySpeed([{ quantityPerRow: totals.quantity, durationSeconds: totals.durationSeconds }])
       );
+    }
+
+    // Row-work cycles (rowCompletionCandidates.ts's CYCLE_GAP_DAYS): the
+    // same row+activity+densityType is no longer one lifetime ambiguity
+    // group — a visit from months ago and one from this week are unrelated
+    // passes over the row and must never be checked against each other.
+    // Ambiguity ("Needs review") and speed exclusion are decided per CYCLE,
+    // never per key alone. candidateBySegmentId maps every returned
+    // candidate's own segments back to itself so a run computed locally in
+    // THIS file (via visitRoot below) can find its matching candidate —
+    // and therefore its cycleIndex — even after getUnresolvedRunsForRows
+    // has merged it across a midnight rollover or a density-type split
+    // into another day's candidate object; a run's OWN first segment is
+    // always present somewhere in its candidate's combined segmentIds
+    // regardless of which day/chain member produced it.
+    const candidateBySegmentId = new Map<string, CandidateRun>();
+    for (const list of candidatesByKey.values()) {
+      for (const candidate of list) {
+        for (const segId of candidate.segmentIds) candidateBySegmentId.set(segId, candidate);
+      }
+    }
+    const ambiguousCycleKeys = new Set<string>();
+    for (const [key, list] of candidatesByKey) {
+      const countByCycle = new Map<number, number>();
+      for (const candidate of list) {
+        countByCycle.set(candidate.cycleIndex, (countByCycle.get(candidate.cycleIndex) ?? 0) + 1);
+      }
+      for (const [cycleIndex, count] of countByCycle) {
+        if (count > 1) ambiguousCycleKeys.add(`${key}:${cycleIndex}`);
+      }
+    }
+    // Falls back to the plain key (no cycle suffix) — never a real entry in
+    // ambiguousCycleKeys (its keys are always "key:cycleIndex") — for the
+    // rare case a root's own segment isn't found in any candidate at all
+    // (e.g. it was resolved by a completion between the two independent
+    // queries above); safe by construction, never treated as ambiguous.
+    function cycleKeyFor(root: (typeof runs)[number]): string {
+      const key = `${root.greenhouseRowId}:${root.activityId}:${root.densityType}`;
+      const candidate = candidateBySegmentId.get(root.segmentIds[0]);
+      return candidate ? `${key}:${candidate.cycleIndex}` : key;
     }
 
     // Rule 2 (see comment above densityEligibleRuns): a not-yet-completed
@@ -800,8 +833,7 @@ router.get(
     for (const r of densityEligibleRuns) {
       if (runCompletionId.has(r.id)) continue;
       const root = runById.get(visitRootByRunId.get(r.id)!)!;
-      const key = `${root.greenhouseRowId}:${root.activityId}:${root.densityType}`;
-      if (ambiguousPairKeys.has(key)) {
+      if (ambiguousCycleKeys.has(cycleKeyFor(root))) {
         isUnresolvedByRunId.set(r.id, true);
       }
     }
@@ -816,7 +848,7 @@ router.get(
     // A root whose OWN first segment is a midnight-rollover continuation
     // (see activityRuns.ts) began on an earlier calendar day this query
     // never fetched — chainDurationByRootId above only has TODAY's slice of
-    // what may be a longer visit. getUnresolvedRunsForRows (ambiguousPairKeys,
+    // what may be a longer visit. getUnresolvedRunsForRows (ambiguousCycleKeys,
     // above) already correctly treats the whole cross-day chain as one
     // candidate; this fills in the matching missing duration so the speed
     // shown here divides the row's full frozen quantity by the visit's FULL
@@ -833,8 +865,7 @@ router.get(
     const speedByRootId = new Map<string, number | null>();
     for (const [rootId, durationSeconds] of chainDurationByRootId) {
       const root = runById.get(rootId)!;
-      const key = `${root.greenhouseRowId}:${root.activityId}:${root.densityType}`;
-      if (ambiguousPairKeys.has(key)) continue;
+      if (ambiguousCycleKeys.has(cycleKeyFor(root))) continue;
       speedByRootId.set(rootId, aggregateDensitySpeed([{ quantityPerRow: root.densityCountPerRow!, durationSeconds }]));
     }
 
@@ -960,7 +991,7 @@ router.get(
           // set once when the entry was opened) — deliberately distinct from
           // activityDensitySource above, which is the activity's CURRENT,
           // live density_source. isUnresolvedRowCompletion is computed from
-          // THIS frozen value (see unresolvedPairs/ambiguousPairKeys above),
+          // THIS frozen value (see unresolvedPairs/ambiguousCycleKeys above),
           // so any caller that needs to re-query the same ambiguity (e.g.
           // opening the review modal) must use densityType here, never
           // activityDensitySource — if an activity's density_source is ever
