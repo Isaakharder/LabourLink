@@ -14,6 +14,7 @@
     "migrate:production": "ts-node src/migrateProduction.ts",
     "create-admin": "ts-node src/cli/createAdmin.ts",
     "create-greenhouse-display": "ts-node src/cli/createGreenhouseDisplay.ts",
+    "create-integration-token": "ts-node src/cli/createIntegrationToken.ts",
     "cutoff:run": "ts-node src/cli/dailyCutoffRun.ts",
     "cutoff:repair": "ts-node src/cli/repairStaleEntries.ts",
     "midnight-cutoff:run": "ts-node src/cli/midnightCutoffRun.ts",
@@ -85,7 +86,8 @@
     "test:mobile-time-rounding-boundary": "ts-node src/routes/mobileTime.roundingBoundary.test.ts",
     "test:pairing": "ts-node src/routes/pairing.test.ts",
     "test:auth-middleware": "ts-node src/middleware/auth.test.ts",
-    "test:auth-session-cookie": "ts-node src/routes/auth.sessionCookie.test.ts"
+    "test:auth-session-cookie": "ts-node src/routes/auth.sessionCookie.test.ts",
+    "test:integrations-productive-tv-pruning-speed": "ts-node src/routes/integrations.productiveTvPruningSpeed.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",

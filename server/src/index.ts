@@ -27,6 +27,7 @@ import mobilePushRoutes from "./routes/mobilePush";
 import mobileStatsRoutes from "./routes/mobileStats";
 import mobileSyncConflictsRoutes from "./routes/mobileSyncConflicts";
 import mobileTimeRoutes from "./routes/mobileTime";
+import integrationsRoutes from "./routes/integrations";
 import nfcTagsRoutes from "./routes/nfcTags";
 import pairingRoutes from "./routes/pairing";
 import passwordResetRoutes from "./routes/passwordReset";
@@ -75,6 +76,7 @@ app.use("/api/mobile-sync", mobileSyncConflictsRoutes);
 app.use("/api/messages", messagesRoutes);
 app.use("/api/inputs", inputsRoutes);
 app.use("/api/reports", reportsRoutes);
+app.use("/api/integrations", integrationsRoutes);
 
 // Safety net: any error forwarded via next(err) (see asyncHandler) lands
 // here instead of crashing the process. Logged server-side; the client only
