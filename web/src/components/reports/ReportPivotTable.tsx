@@ -22,19 +22,20 @@ interface ReportPivotTableProps {
 // grid values directly rather than through this component) keeps the full
 // spelled-out unit — see reportTypes.ts's abbreviateSpeedCellText comment.
 //
-// The trailing "Total Paid Time" column is entirely driven by whether
-// grid.totalPaidTimeGrandTotal is set (buildActivityPivotGrid only sets it
-// when the report's Paid time metric is checked — see ReportViewPage.tsx)
-// — a single source of truth so this table, the Print/PDF preview (which
-// reuses this same component), and CSV/PDF export can never disagree about
-// whether the column should appear. It stays visible no matter which
-// metric the "Show:" dropdown has selected, since its own value never
-// comes from `metric`.
+// The trailing "Employee Paid Time" column (whole-shift, every activity
+// combined — deliberately separate from any activity-scoped metric) is
+// entirely driven by whether grid.totalPaidTimeGrandTotal is set
+// (buildActivityPivotGrid only sets it when the report's Paid time metric
+// is checked — see ReportViewPage.tsx) — a single source of truth so this
+// table, the Print/PDF preview (which reuses this same component), and
+// CSV/PDF export can never disagree about whether the column should
+// appear. It stays visible no matter which metric the "Show:" dropdown has
+// selected, since its own value never comes from `metric`.
 export function ReportPivotTable({ grid }: ReportPivotTableProps) {
   const showPaidTimeTotal = grid.totalPaidTimeGrandTotal !== undefined;
   // Both total columns are pinned (sticky) to the right edge — when both
-  // are present, Employee Total needs to shift left by Total Paid Time's
-  // own width so the two don't render on top of each other; see the
+  // are present, Employee Total needs to shift left by Employee Paid
+  // Time's own width so the two don't render on top of each other; see the
   // matching CSS in index.css.
   const employeeTotalHeaderClass = `report-pivot-grand-col${showPaidTimeTotal ? " report-pivot-grand-col-with-paidtime" : ""}`;
   const employeeTotalCellClass = `report-pivot-grand-col report-pivot-grand-cell${
@@ -53,7 +54,7 @@ export function ReportPivotTable({ grid }: ReportPivotTableProps) {
               </th>
             ))}
             <th className={employeeTotalHeaderClass}>Employee Total</th>
-            {showPaidTimeTotal && <th className="report-pivot-grand-col report-pivot-paidtime-col">Total Paid Time</th>}
+            {showPaidTimeTotal && <th className="report-pivot-grand-col report-pivot-paidtime-col">Employee Paid Time</th>}
           </tr>
         </thead>
         <tbody>

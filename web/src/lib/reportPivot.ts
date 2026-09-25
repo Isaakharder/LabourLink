@@ -11,6 +11,7 @@ import {
   PayrollReportData,
   payrollPivotCellValue,
   pivotCellValue,
+  secondsToHoursMinutes,
 } from "./reportTypes";
 
 export interface PivotEmployeeRow {
@@ -19,12 +20,16 @@ export interface PivotEmployeeRow {
   cells: string[]; // one per date in PivotGrid.dates, "—" when the employee has no row that date
   grandTotal: string;
   // Independent of whichever metric currently drives cells/grandTotal (the
-  // "Show:" dropdown selection) — this employee's Paid time across the
-  // whole selected range, using the report's own existing Paid time
-  // formula (pivotCellValue's "paidTime" case: workSeconds +
-  // paidBreakSeconds, summed from the underlying per-day seconds on
-  // ActivityEmployeeTotal, never derived by re-adding already-rounded
-  // display strings). Only ever set by buildActivityPivotGrid when the
+  // "Show:" dropdown selection) — this employee's WHOLE-SHIFT paid time
+  // across the whole selected range (ActivityEmployeeTotal.
+  // employeePaidSeconds, itself computeWorkdayTotals-based — every activity
+  // combined, the same span-based formula Payroll/Inputs use — summed from
+  // the underlying per-day seconds, never derived by re-adding
+  // already-rounded display strings). Rendered as "Employee Paid Time";
+  // deliberately NOT the same formula as the "Paid time" ACTIVITY_METRIC
+  // (workSeconds + paidBreakSeconds, scoped to just this one activity) —
+  // the two can genuinely differ on a day the employee also worked a
+  // different activity. Only ever set by buildActivityPivotGrid when the
   // caller passes includePaidTimeTotal — undefined otherwise (including
   // always on a Payroll grid), which is exactly when every consumer
   // (ReportPivotTable, ReportPreviewModal, CSV/PDF export) knows to hide
@@ -37,8 +42,9 @@ export interface PivotGrid {
   employees: PivotEmployeeRow[];
   columnTotals: string[]; // one per date, across all employees
   grandTotal: string; // bottom-right corner
-  // Bottom-row combined Paid time across every DISPLAYED employee (a
-  // total, not a per-employee average) — see PivotEmployeeRow.totalPaidTime.
+  // Bottom-row combined whole-shift Employee Paid Time across every
+  // DISPLAYED employee (a total, not a per-employee average) — see
+  // PivotEmployeeRow.totalPaidTime.
   totalPaidTimeGrandTotal?: string;
 }
 
@@ -73,7 +79,12 @@ export function buildActivityPivotGrid(
       // sum of the underlying seconds across the whole range (see
       // reportQueries.ts's employeeSeconds accumulation) — formatted once
       // here, never built from this grid's own already-rounded daily cells.
-      totalPaidTime: includePaidTimeTotal ? pivotCellValue("paidTime", et, speedUnit) : undefined,
+      // Formats employeePaidSeconds directly, NOT via
+      // pivotCellValue("paidTime", ...) — that's the activity-scoped "Paid
+      // time" metric (workSeconds + paidBreakSeconds for just this
+      // activity), a different, narrower number from the genuine
+      // whole-shift Employee Paid Time this column shows.
+      totalPaidTime: includePaidTimeTotal ? secondsToHoursMinutes(et.employeePaidSeconds) : undefined,
     }));
 
   const dateTotalByDate = new Map(data.dateTotals.map((dt) => [dt.date, dt]));
@@ -83,7 +94,7 @@ export function buildActivityPivotGrid(
   });
 
   const grandTotal = pivotCellValue(metric, data.totals, speedUnit);
-  const totalPaidTimeGrandTotal = includePaidTimeTotal ? pivotCellValue("paidTime", data.totals, speedUnit) : undefined;
+  const totalPaidTimeGrandTotal = includePaidTimeTotal ? secondsToHoursMinutes(data.totals.employeePaidSeconds) : undefined;
 
   return { dates, employees, columnTotals, grandTotal, totalPaidTimeGrandTotal };
 }

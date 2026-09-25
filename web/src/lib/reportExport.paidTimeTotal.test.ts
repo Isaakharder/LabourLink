@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Covers the "Total Paid Time" column in CSV and PDF export — the same
+// Covers the "Employee Paid Time" column in CSV and PDF export — the same
 // values ReportPivotTable renders on screen (reportPivot.activityPaidTimeTotal.test.ts,
 // ReportPivotTable.paidTimeTotal.test.tsx), read from the same PivotGrid,
 // present exactly when grid.totalPaidTimeGrandTotal is set and completely
@@ -92,13 +92,13 @@ async function captureCsvText(exportFn: () => void): Promise<string> {
   return capturedText;
 }
 
-describe("exportPivotCsv — Total Paid Time column", () => {
-  it("includes a 'Total Paid Time' header and every employee's/DAY TOTAL's value when the grid has them", async () => {
+describe("exportPivotCsv — Employee Paid Time column", () => {
+  it("includes an 'Employee Paid Time' header and every employee's/DAY TOTAL's value when the grid has them", async () => {
     const { exportPivotCsv } = await import("./reportExport");
     const text = await captureCsvText(() => exportPivotCsv(report, gridWithPaidTime, "Work time"));
 
     const lines = text.split("\r\n");
-    expect(lines[0]).toBe("Employee,Aug 17,Employee Total,Total Paid Time");
+    expect(lines[0]).toBe("Employee,Aug 17,Employee Total,Employee Paid Time");
     expect(lines).toContain("Alice,4:00,4:00,4:30");
     expect(lines).toContain("Bob,2:00,2:00,2:00");
     expect(lines).toContain("DAY TOTAL,6:00,6:00,6:30");
@@ -115,13 +115,13 @@ describe("exportPivotCsv — Total Paid Time column", () => {
   });
 });
 
-describe("exportPivotPdf — Total Paid Time column", () => {
-  it("adds a 'Total Paid Time' head column and every row's value when the grid has them", async () => {
+describe("exportPivotPdf — Employee Paid Time column", () => {
+  it("adds an 'Employee Paid Time' head column and every row's value when the grid has them", async () => {
     const { exportPivotPdf } = await import("./reportExport");
     exportPivotPdf(report, { start: "2026-08-17", end: "2026-08-17" }, gridWithPaidTime, "Work time", "landscape", null);
 
     expect(lastAutoTableConfig).toBeTruthy();
-    expect(lastAutoTableConfig.head[0]).toEqual(["Employee", "Aug 17", "Employee Total", "Total Paid Time"]);
+    expect(lastAutoTableConfig.head[0]).toEqual(["Employee", "Aug 17", "Employee Total", "Employee Paid Time"]);
     const bodyText = JSON.stringify(lastAutoTableConfig.body);
     expect(bodyText).toContain("4:30");
     expect(bodyText).toContain("2:00");
@@ -134,15 +134,15 @@ describe("exportPivotPdf — Total Paid Time column", () => {
 
     expect(lastAutoTableConfig.head[0]).toEqual(["Employee", "Aug 17", "Employee Total"]);
     const bodyText = JSON.stringify(lastAutoTableConfig.body);
-    expect(bodyText).not.toContain("Total Paid Time");
+    expect(bodyText).not.toContain("Employee Paid Time");
   });
 
-  it("bolds both total columns (Employee Total and Total Paid Time), not just the last one", async () => {
+  it("bolds both total columns (Employee Total and Employee Paid Time), not just the last one", async () => {
     const { exportPivotPdf } = await import("./reportExport");
     exportPivotPdf(report, { start: "2026-08-17", end: "2026-08-17" }, gridWithPaidTime, "Work time", "landscape", null);
 
     const didParseCell = lastAutoTableConfig.didParseCell as (data: any) => void;
-    // Employee Total is column index 2 (Employee, date, Employee Total, Total Paid Time).
+    // Employee Total is column index 2 (Employee, date, Employee Total, Employee Paid Time).
     const employeeTotalCell = { row: { index: 0 }, column: { index: 2 }, section: "body", cell: { styles: {} as { fontStyle?: string } } };
     didParseCell(employeeTotalCell);
     expect(employeeTotalCell.cell.styles.fontStyle).toBe("bold");

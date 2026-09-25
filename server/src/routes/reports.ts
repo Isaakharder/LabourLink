@@ -30,7 +30,9 @@ const ACTIVITY_METRICS = [
   "quantityWorked",
   "startTime",
   "endTime",
-  "totalHours",
+  // Renamed from "totalHours" — see web/src/lib/reportTypes.ts's identical
+  // rename comment. Must stay in sync with that file's ACTIVITY_METRICS.
+  "activityHours",
   "averageSpeed",
   "date",
 ] as const;

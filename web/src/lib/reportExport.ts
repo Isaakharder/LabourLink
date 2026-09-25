@@ -42,7 +42,7 @@ export function exportPivotCsv(report: SavedReportDetail, grid: PivotGrid, metri
   const showPaidTimeTotal = grid.totalPaidTimeGrandTotal !== undefined;
   const lines: string[] = [];
   const header = ["Employee", ...grid.dates.map(formatPivotDateHeader), "Employee Total"];
-  if (showPaidTimeTotal) header.push("Total Paid Time");
+  if (showPaidTimeTotal) header.push("Employee Paid Time");
   lines.push(header.map(csvEscape).join(","));
   for (const row of grid.employees) {
     const cells = [row.employeeName, ...row.cells, row.grandTotal];
@@ -99,7 +99,7 @@ export function exportPivotPdf(
   // exportPivotCsv's own comment.
   const showPaidTimeTotal = grid.totalPaidTimeGrandTotal !== undefined;
   const head = ["Employee", ...grid.dates.map(formatPivotDateHeader), "Employee Total"];
-  if (showPaidTimeTotal) head.push("Total Paid Time");
+  if (showPaidTimeTotal) head.push("Employee Paid Time");
   // Abbreviated the same way the on-screen table is (abbreviateSpeedCellText
   // is a no-op for any non-speed cell) — the PDF is a visual document like
   // the screen, not a data interchange format like CSV, so it gets the
@@ -129,7 +129,7 @@ export function exportPivotPdf(
     // on each one rather than only appearing once at the top.
     showHead: "everyPage",
     // Bolds the DAY TOTAL row (last body row) and every total COLUMN —
-    // Employee Total always, plus Total Paid Time when present (the new
+    // Employee Total always, plus Employee Paid Time when present (the new
     // trailing column, not necessarily the visually-last one if this ever
     // grows a third) — a visual cue only, the values themselves come
     // straight from PivotGrid either way.

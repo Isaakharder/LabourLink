@@ -1,12 +1,26 @@
-// Verifies the data the new Activity Report "Total Paid Time" column reads
-// from (ActivityEmployeeTotal.workSeconds/paidBreakSeconds, via
-// getActivityReportData in reportQueries.ts) is correct at the source —
-// the client-side column (web/src/lib/reportPivot.ts) only ever formats
-// these already-computed numbers with the report's own existing Paid time
-// formula (pivotCellValue's "paidTime" case: workSeconds + paidBreakSeconds),
-// so proving THIS data is right is what the new column's correctness
-// actually rests on. No dedicated server-side test of getActivityReportData
-// existed before this file.
+// Verifies the data the Activity Report reads from getActivityReportData
+// (reportQueries.ts) is correct at the source:
+//
+//  - "Activity Hours" (ActivityEmployeeTotal.workSeconds) is the exact,
+//    unrounded accumulated duration of THIS activity's own work entries
+//    only — never another activity's, never a break's, and never adjusted
+//    by work-start/work-finish rounding (which only ever touches the
+//    overall shift's clock-in/clock-out, workStartRounding.ts, never an
+//    individual activity segment's boundaries).
+//  - "Employee Paid Time" (ActivityEmployeeTotal.employeePaidSeconds) is
+//    the employee's WHOLE SHIFT for that day — every activity combined,
+//    via computeWorkdayTotals, the same span-based formula Payroll/Inputs
+//    already use — deliberately NOT "this activity's workSeconds + the
+//    day's paidBreakSeconds" (which would undercount on any day the
+//    employee also worked a different activity — see test 7).
+//  - Average Speed divides the activity's total VALID quantity by its
+//    exact Activity Hours (workSeconds), never by a narrower subset
+//    (e.g. only the segments that happened to yield a resolvable density)
+//    — see test 8.
+//
+// The client-side columns (web/src/lib/reportPivot.ts, reportTypes.ts) only
+// ever format these already-computed numbers, so proving THIS data is right
+// is what the report's on-screen/CSV/PDF correctness actually rests on.
 //
 // Run with: npm run test:reports-activity-paid-time
 import "dotenv/config";
@@ -58,6 +72,9 @@ async function main() {
   const timeEntryIds: string[] = [];
   const reportIds: string[] = [];
   const activityIds: string[] = [];
+  let landId: string | undefined;
+  let phaseId: string | undefined;
+  let rowId: string | undefined;
 
   try {
     const teamRoleId = (await pool.query(`select id from team_roles where name = 'Team Member'`)).rows[0].id;
@@ -100,7 +117,44 @@ async function main() {
     ).rows[0].id;
     activityIds.push(activityId);
 
-    async function makeWork(employeeId: string, start: string, end: string, opts?: { deleted?: boolean }): Promise<string> {
+    // A second, entirely separate activity — used only by test 7 to prove
+    // Employee Paid Time reflects the employee's WHOLE shift (both
+    // activities combined), never just the one activity the report happens
+    // to be scoped to.
+    const secondActivityId = (
+      await pool.query(`insert into activities (name, is_active) values ($1, true) returning id`, [`QA ReportPaidTime SecondActivity ${RUN_ID}`])
+    ).rows[0].id;
+    activityIds.push(secondActivityId);
+
+    // A density-tracked activity plus one real greenhouse row — used only
+    // by test 8 to prove Average Speed's denominator is the activity's full
+    // Activity Hours, not the narrower subset of time that happened to
+    // yield a resolvable row/density quantity.
+    const densityActivityId = (
+      await pool.query(`insert into activities (name, is_active, density_source) values ($1, true, 'stems') returning id`, [
+        `QA ReportPaidTime DensityActivity ${RUN_ID}`,
+      ])
+    ).rows[0].id;
+    activityIds.push(densityActivityId);
+    landId = (
+      await pool.query(`insert into greenhouse_lands (name, north_south_feet, east_west_feet) values ($1, 300, 100) returning id`, [
+        `QA ReportPaidTime Land ${RUN_ID}`,
+      ])
+    ).rows[0].id;
+    phaseId = (
+      await pool.query(`insert into greenhouse_phases (land_id, name, north_south_feet, east_west_feet) values ($1, $2, 300, 100) returning id`, [
+        landId,
+        `QA ReportPaidTime Phase ${RUN_ID}`,
+      ])
+    ).rows[0].id;
+    rowId = (
+      await pool.query(
+        `insert into greenhouse_rows (phase_id, row_number, x_ft, y_ft, width_ft, length_ft, orientation) values ($1, 1, 0, 3, 2, 20, 'horizontal') returning id`,
+        [phaseId]
+      )
+    ).rows[0].id;
+
+    async function makeWorkOn(activityIdArg: string, employeeId: string, start: string, end: string, opts?: { deleted?: boolean }): Promise<string> {
       const id = (
         await pool.query(
           `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source, deleted_at, deleted_by_employee_id, deletion_reason)
@@ -108,13 +162,36 @@ async function main() {
           [
             employeeId,
             deviceId,
-            activityId,
+            activityIdArg,
             start,
             end,
             opts?.deleted ? new Date() : null,
             opts?.deleted ? adminId : null,
             opts?.deleted ? "QA deleted for test" : null,
           ]
+        )
+      ).rows[0].id;
+      timeEntryIds.push(id);
+      return id;
+    }
+    function makeWork(employeeId: string, start: string, end: string, opts?: { deleted?: boolean }): Promise<string> {
+      return makeWorkOn(activityId, employeeId, start, end, opts);
+    }
+    // Density-tracked work, only for test 8 — greenhouseRowId null means
+    // "counts toward Activity Hours but yields no resolvable quantity" (no
+    // row/density to attribute), matching real non-row-based work.
+    async function makeDensityWork(
+      employeeId: string,
+      start: string,
+      end: string,
+      greenhouseRowId: string | null,
+      densityCountPerRow: number | null
+    ): Promise<string> {
+      const id = (
+        await pool.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source, greenhouse_row_id, density_type, density_count_per_row)
+           values ($1, $2, 'work', $3, gen_random_uuid(), $4, $5, 'manual', $6, $7, $8) returning id`,
+          [employeeId, deviceId, densityActivityId, start, end, greenhouseRowId, greenhouseRowId ? "stems" : null, densityCountPerRow]
         )
       ).rows[0].id;
       timeEntryIds.push(id);
@@ -131,12 +208,12 @@ async function main() {
       timeEntryIds.push(id);
       return id;
     }
-    async function createActivityReport(name: string, mode: "all" | "selected", ids: string[]): Promise<string> {
+    async function createActivityReport(name: string, mode: "all" | "selected", ids: string[], activityIdArg: string = activityId): Promise<string> {
       const res = await call("POST", "/api/reports", adminToken, {
         name: `QA ${name} ${RUN_ID}`,
         reportType: "activity",
-        activityId,
-        metrics: ["employee", "paidTime", "workTime"],
+        activityId: activityIdArg,
+        metrics: ["employee", "paidTime", "workTime", "activityHours", "averageSpeed"],
         employeeSelectionMode: mode,
         employeeIds: ids,
       });
@@ -169,10 +246,13 @@ async function main() {
     }
 
     // -----------------------------------------------------------------
-    // 2) Paid vs unpaid breaks follow the existing paid-time rule: Paid
-    //    time = workSeconds + paidBreakSeconds ONLY — an unpaid break
-    //    contributes to breakSeconds/unpaidBreakSeconds but never to
-    //    paidBreakSeconds (and therefore never to Total Paid Time).
+    // 2) Paid vs unpaid breaks: Activity Hours (workSeconds) never includes
+    //    EITHER kind of break — only the activity's own work-entry time.
+    //    Employee Paid Time (the whole-shift figure, computeWorkdayTotals)
+    //    folds in the paid break but never the unpaid one — on this single-
+    //    activity day it happens to equal workSeconds + paidBreakSeconds
+    //    (4:45 + 0:15 = 5:00), but that's this fixture's coincidence, not
+    //    the formula (see test 7 for a day where the two genuinely differ).
     // -----------------------------------------------------------------
     {
       const emp = await makeEmployee("PaidUnpaid");
@@ -183,15 +263,10 @@ async function main() {
 
       const reportId = await createActivityReport("PaidUnpaid", "all", []);
       const total = await getEmployeeTotal(reportId, "2026-08-12", "2026-08-12", emp);
-      check(total?.workSeconds === (2 + 2.75) * 3600, "2) work seconds sum both work segments (4:45)", total);
+      check(total?.workSeconds === (2 + 2.75) * 3600, "2) Activity Hours (workSeconds) sum both work segments only (4:45), no break of either kind", total);
       check(total?.paidBreakSeconds === 15 * 60, "2) paidBreakSeconds is exactly the 15-minute PAID break", total);
       check(total?.unpaidBreakSeconds === 30 * 60, "2) unpaidBreakSeconds is exactly the 30-minute UNPAID break, kept separate", total);
-      // Total Paid Time = workSeconds + paidBreakSeconds, the report's own
-      // existing formula (reportTypes.ts's pivotCellValue) — proven here
-      // against the real server data: 4:45 work + 0:15 paid break = 5:00,
-      // the 30-minute unpaid break correctly excluded entirely.
-      const totalPaidTimeSeconds = total.workSeconds + total.paidBreakSeconds;
-      check(totalPaidTimeSeconds === 5 * 3600, "2) Total Paid Time (workSeconds + paidBreakSeconds) is exactly 5:00, excluding the unpaid break", totalPaidTimeSeconds);
+      check(total?.employeePaidSeconds === 5 * 3600, "2) Employee Paid Time (whole-shift) is 5:00 — the unpaid break correctly excluded", total);
     }
 
     // -----------------------------------------------------------------
@@ -257,12 +332,70 @@ async function main() {
       const total = await getEmployeeTotal(reportId, "2026-08-16", "2026-08-17", emp);
       check(total?.workSeconds === 5 * 3600, "6) partial range (16-17) sums only those two days (2h + 3h = 5h), excluding day 18 entirely", total);
     }
+
+    // -----------------------------------------------------------------
+    // 7) MULTI-ACTIVITY DAY: Activity Hours (workSeconds) for the reported
+    //    activity stays exact and narrow — it never absorbs a different
+    //    activity's time — while Employee Paid Time reflects the
+    //    employee's WHOLE shift (both activities plus the paid break
+    //    combined). This is exactly the "3:12 vs 9:12" confusion the old
+    //    "Total Hours" metric invited: an employee with 2:00 of THIS
+    //    activity and 3:00 of another must show Activity Hours = 2:00,
+    //    never 5:00 (Total Hours' old workSeconds+breakSeconds formula)
+    //    and never 5:15 (the whole shift).
+    // -----------------------------------------------------------------
+    {
+      const emp = await makeEmployee("MultiActivity");
+      await makeWork(emp, "2026-08-19T12:00:00Z", "2026-08-19T14:00:00Z"); // 2h on the REPORTED activity
+      await makeBreak(emp, "2026-08-19T14:00:00Z", "2026-08-19T14:15:00Z", true); // 15m PAID
+      await makeWorkOn(secondActivityId, emp, "2026-08-19T14:15:00Z", "2026-08-19T17:15:00Z"); // 3h on a DIFFERENT activity, contiguous
+
+      const reportId = await createActivityReport("MultiActivity", "all", []);
+      const total = await getEmployeeTotal(reportId, "2026-08-19", "2026-08-19", emp);
+      check(total?.workSeconds === 2 * 3600, "7) Activity Hours is exactly 2:00 — the OTHER activity's 3:00 never leaks in", total);
+      check(
+        total?.employeePaidSeconds === 5.25 * 3600,
+        "7) Employee Paid Time is the full 5:15 whole shift (2:00 + 0:15 paid break + 3:00 other activity)",
+        total
+      );
+      check(
+        total?.employeePaidSeconds !== total?.workSeconds + total?.paidBreakSeconds,
+        "7) Employee Paid Time is genuinely NOT the old (this-activity-workSeconds + whole-day-paidBreakSeconds) formula — it's larger here",
+        total
+      );
+    }
+
+    // -----------------------------------------------------------------
+    // 8) AVERAGE SPEED denominator is Activity Hours (workSeconds), not a
+    //    narrower density-attribution duration: one hour of this
+    //    activity's work is tracked against a real greenhouse row
+    //    (yielding 300 stems), and a second hour is ordinary work with no
+    //    row/density at all (e.g. a non-row-based task). Both hours count
+    //    toward Activity Hours, but only the first contributes a
+    //    resolvable quantity. Average Speed must be 300 / 2:00 = 150/hour,
+    //    never 300 / 1:00 = 300/hour (the old, narrower denominator).
+    // -----------------------------------------------------------------
+    {
+      const emp = await makeEmployee("Speed");
+      await makeDensityWork(emp, "2026-08-20T12:00:00Z", "2026-08-20T13:00:00Z", rowId ?? null, 300); // 1h, real row+density
+      await makeDensityWork(emp, "2026-08-20T13:00:00Z", "2026-08-20T14:00:00Z", null, null); // 1h, no row at all
+
+      const reportId = await createActivityReport("Speed", "all", [], densityActivityId);
+      const total = await getEmployeeTotal(reportId, "2026-08-20", "2026-08-20", emp);
+      check(total?.workSeconds === 2 * 3600, "8) Activity Hours is the full 2:00 — both segments count, row or not", total);
+      check(total?.quantityWorked === 300, "8) the resolvable quantity is exactly 300 (only the row-tracked segment)", total);
+      check(total?.averageSpeed === 150, "8) Average Speed is 300 stems / 2:00 Activity Hours = 150/hour, not 300 stems / 1:00 = 300/hour", total);
+    }
   } finally {
     for (const rid of reportIds) await pool.query("delete from saved_reports where id = $1", [rid]).catch(() => {});
     if (timeEntryIds.length) await pool.query(`delete from time_entries where id = any($1::uuid[])`, [timeEntryIds]).catch(() => {});
     if (activityIds.length) await pool.query(`delete from activities where id = any($1::uuid[])`, [activityIds]).catch(() => {});
     if (deviceIds.length) await pool.query(`delete from devices where id = any($1::uuid[])`, [deviceIds]).catch(() => {});
     if (employeeIds.length) await pool.query(`delete from employees where id = any($1::uuid[])`, [employeeIds]).catch(() => {});
+    // Greenhouse fixtures (test 8 only) — rows before phases before lands.
+    if (rowId) await pool.query(`delete from greenhouse_rows where id = $1`, [rowId]).catch(() => {});
+    if (phaseId) await pool.query(`delete from greenhouse_phases where id = $1`, [phaseId]).catch(() => {});
+    if (landId) await pool.query(`delete from greenhouse_lands where id = $1`, [landId]).catch(() => {});
     server.close();
   }
 

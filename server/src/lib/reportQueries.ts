@@ -18,6 +18,14 @@ export interface ActivityReportRow {
   date: string; // YYYY-MM-DD
   startedAt: string;
   endedAt: string;
+  // This activity's own exact, unrounded work-entry time only — excludes
+  // breaks and every other activity (see the SQL below: `activity_id = $1`,
+  // entry_type = 'work'). This IS "Activity Hours" (reportTypes.ts's
+  // ACTIVITY_METRIC_LABELS.activityHours) — an employee with 3:12 of this
+  // activity and 6:00 of other work shows exactly 3:12 here, never 9:12 and
+  // never rounded to a shift-boundary interval (work-start/work-finish
+  // rounding, workStartRounding.ts, only ever touches the overall shift's
+  // clock-in/clock-out, never an individual activity segment).
   workSeconds: number;
   breakSeconds: number;
   paidBreakSeconds: number;
@@ -29,7 +37,20 @@ export interface ActivityReportRow {
   // belonging to it, on every day it touches").
   quantityWorked: number | null;
   rowsCompleted: number;
+  // quantityWorked / this row's own workSeconds (Activity Hours) — see
+  // aggregateDensitySpeed's call site below for why the denominator is
+  // workSeconds, not attribution's own (possibly narrower) durationSeconds.
   averageSpeed: number | null;
+  // The employee's WHOLE SHIFT paid time for this one calendar day — every
+  // activity combined, computed the exact same way Payroll/Inputs already
+  // do (computeWorkdayTotals's span-based workedSeconds, which already
+  // folds in paid breaks — see getPayrollReportData's identical
+  // `paidSeconds: workSeconds` comment). Deliberately NOT
+  // `workSeconds + paidBreakSeconds` scoped to this one activity — that
+  // undercounts on any day the employee also worked a different activity.
+  // Surfaced as "Employee Paid Time" (reportTypes.ts), always kept visually
+  // and semantically separate from this activity's own metrics.
+  employeePaidSeconds: number;
 }
 
 // Per-employee (pivot table's right-hand Grand Total column) and per-date
@@ -47,6 +68,7 @@ export interface ActivityEmployeeTotal {
   quantityWorked: number | null;
   rowsCompleted: number;
   averageSpeed: number | null;
+  employeePaidSeconds: number;
 }
 
 export interface ActivityDateTotal {
@@ -59,6 +81,7 @@ export interface ActivityDateTotal {
   quantityWorked: number | null;
   rowsCompleted: number;
   averageSpeed: number | null;
+  employeePaidSeconds: number;
 }
 
 export interface ActivityReportData {
@@ -75,6 +98,7 @@ export interface ActivityReportData {
     rowsCompleted: number;
     rowsTouched: number;
     averageSpeed: number | null;
+    employeePaidSeconds: number;
   };
 }
 
@@ -392,6 +416,38 @@ export async function getActivityReportData(
     });
   }
 
+  // Employee Paid Time — the employee's WHOLE SHIFT for each day they
+  // touched this activity, every activity combined, never scoped to just
+  // this one. Deliberately a completely separate query from workRes above
+  // (not activity-scoped at all) and computed via computeWorkdayTotals —
+  // the same span-based formula Payroll/Inputs already use — rather than
+  // "this activity's workSeconds + the day's paidBreakSeconds", which
+  // undercounts on any day the employee also worked a different activity.
+  const wholeShiftRes = workEmployeeIds.length
+    ? await pool.query(
+        `select te.employee_id, te.entry_type, te.started_at, te.ended_at, te.is_paid
+         from time_entries te
+         where te.deleted_at is null and te.ended_at is not null
+           and te.employee_id = any($1::uuid[]) and te.started_at >= $2 and te.started_at < $3
+         order by te.employee_id, te.started_at`,
+        [workEmployeeIds, start, end]
+      )
+    : { rows: [] as { employee_id: string; entry_type: "work" | "break"; started_at: Date; ended_at: Date; is_paid: boolean | null }[] };
+  interface WholeShiftEntry extends WorkdayBoundaryEntry {
+    employeeId: string;
+  }
+  const wholeShiftEntries: WholeShiftEntry[] = wholeShiftRes.rows.map((r) => ({
+    employeeId: r.employee_id,
+    entryType: r.entry_type,
+    startedAt: r.started_at,
+    endedAt: r.ended_at,
+    isPaid: r.is_paid,
+  }));
+  const employeePaidByKey = new Map<string, number>();
+  for (const [key, entries] of groupByEmployeeDay(wholeShiftEntries)) {
+    employeePaidByKey.set(key, toSeconds(computeWorkdayTotals(entries).workedSeconds));
+  }
+
   const attribution = await getActivityDensityAttribution(activityId, start, end, { employeeIds: employeeIds ?? undefined });
 
   const rows: ActivityReportRow[] = workRes.rows.map((r) => {
@@ -401,22 +457,26 @@ export async function getActivityReportData(
       paidBreakSeconds: 0,
       unpaidBreakSeconds: 0,
     };
-    // That day's own safely-attributable quantity/speed only — never the
+    const rowWorkSeconds = toSeconds(r.work_seconds);
+    // That day's own safely-attributable quantity only — never the
     // employee's whole-range figure. A day with real density work that
     // happened to be part of a multi-day-spanning completion/run correctly
     // shows blank here (see getActivityDensityAttribution) even though it
-    // still contributes to the range totals below.
+    // still contributes to the range totals below. Speed's denominator is
+    // this row's own Activity Hours (rowWorkSeconds) — the activity's full
+    // exact productive time that day — not attribution's own durationSeconds,
+    // which only covers segments that happened to yield a resolvable
+    // quantity and can be narrower (e.g. non-row-based work, or an
+    // unresolved/ambiguous row) than the day's real Activity Hours.
     const daily = attribution.byEmployeeDay.get(`${r.employee_id}:${dateStr}`) ?? null;
-    const dailySpeed = daily
-      ? aggregateDensitySpeed([{ quantityPerRow: daily.quantity, durationSeconds: daily.durationSeconds }])
-      : null;
+    const dailySpeed = daily ? aggregateDensitySpeed([{ quantityPerRow: daily.quantity, durationSeconds: rowWorkSeconds }]) : null;
     return {
       employeeId: r.employee_id,
       employeeName: `${r.first_name} ${r.last_name}`,
       date: dateStr,
       startedAt: r.started_at,
       endedAt: r.ended_at,
-      workSeconds: toSeconds(r.work_seconds),
+      workSeconds: rowWorkSeconds,
       breakSeconds: breakInfo.breakSeconds,
       paidBreakSeconds: breakInfo.paidBreakSeconds,
       unpaidBreakSeconds: breakInfo.unpaidBreakSeconds,
@@ -424,6 +484,7 @@ export async function getActivityReportData(
       quantityWorked: daily ? daily.quantity : null,
       rowsCompleted: daily ? daily.completions : 0,
       averageSpeed: dailySpeed,
+      employeePaidSeconds: employeePaidByKey.get(`${r.employee_id}:${dateStr}`) ?? 0,
     };
   });
 
@@ -451,20 +512,21 @@ export async function getActivityReportData(
   // for the whole selected range (attribution.byEmployee), never an average
   // of the per-day speeds shown on the rows above. This is also where a
   // multi-day-spanning completion/run actually counts, even though it
-  // couldn't be pinned to any single day-row.
+  // couldn't be pinned to any single day-row. The denominator is the
+  // range's total Activity Hours (totalWorkSeconds, already summed above),
+  // not attribution's own duration — see the per-row comment above for why.
   let totalQuantity = 0;
-  let totalDuration = 0;
   let totalCompletions = 0;
   let anyQuantity = false;
   for (const c of attribution.byEmployee.values()) {
     totalQuantity += c.quantity;
-    totalDuration += c.durationSeconds;
     totalCompletions += c.completions;
     anyQuantity = true;
   }
   const overallSpeed = anyQuantity
-    ? aggregateDensitySpeed([{ quantityPerRow: totalQuantity, durationSeconds: totalDuration }])
+    ? aggregateDensitySpeed([{ quantityPerRow: totalQuantity, durationSeconds: totalWorkSeconds }])
     : null;
+  const totalEmployeePaidSeconds = rows.reduce((s, r) => s + r.employeePaidSeconds, 0);
 
   // Pivot table Grand Total column (per employee) and Grand Total row (per
   // date, across employees) — grouped from `rows`/`attribution`, already
@@ -477,25 +539,39 @@ export async function getActivityReportData(
   const employeeIdToName = new Map(rows.map((r) => [r.employeeId, r.employeeName]));
   const employeeSeconds = new Map<
     string,
-    { workSeconds: number; breakSeconds: number; paidBreakSeconds: number; unpaidBreakSeconds: number }
+    { workSeconds: number; breakSeconds: number; paidBreakSeconds: number; unpaidBreakSeconds: number; employeePaidSeconds: number }
   >();
   const dateSeconds = new Map<
     string,
-    { workSeconds: number; breakSeconds: number; paidBreakSeconds: number; unpaidBreakSeconds: number }
+    { workSeconds: number; breakSeconds: number; paidBreakSeconds: number; unpaidBreakSeconds: number; employeePaidSeconds: number }
   >();
   for (const r of rows) {
-    const e = employeeSeconds.get(r.employeeId) ?? { workSeconds: 0, breakSeconds: 0, paidBreakSeconds: 0, unpaidBreakSeconds: 0 };
+    const e = employeeSeconds.get(r.employeeId) ?? {
+      workSeconds: 0,
+      breakSeconds: 0,
+      paidBreakSeconds: 0,
+      unpaidBreakSeconds: 0,
+      employeePaidSeconds: 0,
+    };
     e.workSeconds += r.workSeconds;
     e.breakSeconds += r.breakSeconds;
     e.paidBreakSeconds += r.paidBreakSeconds;
     e.unpaidBreakSeconds += r.unpaidBreakSeconds;
+    e.employeePaidSeconds += r.employeePaidSeconds;
     employeeSeconds.set(r.employeeId, e);
 
-    const d = dateSeconds.get(r.date) ?? { workSeconds: 0, breakSeconds: 0, paidBreakSeconds: 0, unpaidBreakSeconds: 0 };
+    const d = dateSeconds.get(r.date) ?? {
+      workSeconds: 0,
+      breakSeconds: 0,
+      paidBreakSeconds: 0,
+      unpaidBreakSeconds: 0,
+      employeePaidSeconds: 0,
+    };
     d.workSeconds += r.workSeconds;
     d.breakSeconds += r.breakSeconds;
     d.paidBreakSeconds += r.paidBreakSeconds;
     d.unpaidBreakSeconds += r.unpaidBreakSeconds;
+    d.employeePaidSeconds += r.employeePaidSeconds;
     dateSeconds.set(r.date, d);
   }
 
@@ -548,9 +624,10 @@ export async function getActivityReportData(
       rowsTouched: employeeRowsTouched.get(employeeId) ?? 0,
       quantityWorked: density ? density.quantity : null,
       rowsCompleted: density ? density.completions : 0,
-      averageSpeed: density
-        ? aggregateDensitySpeed([{ quantityPerRow: density.quantity, durationSeconds: density.durationSeconds }])
-        : null,
+      // Denominator is this employee's own Activity Hours (secs.workSeconds)
+      // for the whole range, not density's own durationSeconds — see the
+      // per-row comment above.
+      averageSpeed: density ? aggregateDensitySpeed([{ quantityPerRow: density.quantity, durationSeconds: secs.workSeconds }]) : null,
     };
   });
 
@@ -563,9 +640,7 @@ export async function getActivityReportData(
         rowsTouched: dateRowsTouched.get(date) ?? 0,
         quantityWorked: density ? density.quantity : null,
         rowsCompleted: density ? density.completions : 0,
-        averageSpeed: density
-          ? aggregateDensitySpeed([{ quantityPerRow: density.quantity, durationSeconds: density.durationSeconds }])
-          : null,
+        averageSpeed: density ? aggregateDensitySpeed([{ quantityPerRow: density.quantity, durationSeconds: secs.workSeconds }]) : null,
       };
     })
     .sort((a, b) => a.date.localeCompare(b.date));
@@ -585,6 +660,7 @@ export async function getActivityReportData(
       breakSeconds: totalBreakSeconds,
       paidBreakSeconds: totalPaidBreakSeconds,
       unpaidBreakSeconds: totalUnpaidBreakSeconds,
+      employeePaidSeconds: totalEmployeePaidSeconds,
       quantityWorked: anyQuantity ? totalQuantity : null,
       rowsCompleted: totalCompletions,
       rowsTouched: totalRowsTouched,

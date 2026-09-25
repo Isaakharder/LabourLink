@@ -17,7 +17,7 @@ export const ACTIVITY_METRICS = [
   "quantityWorked",
   "startTime",
   "endTime",
-  "totalHours",
+  "activityHours",
   "averageSpeed",
   "date",
 ] as const;
@@ -52,7 +52,12 @@ export const ACTIVITY_METRIC_LABELS: Record<ActivityMetric, string> = {
   quantityWorked: "Quantity worked",
   startTime: "Start time",
   endTime: "End time",
-  totalHours: "Total hours",
+  // Renamed from "Total hours" — this is the selected activity's own exact
+  // work-entry time only (excludes breaks and every other activity, see
+  // reportQueries.ts's ActivityReportRow.workSeconds), never the employee's
+  // full-week/whole-shift hours. "Total Hours" invited exactly that
+  // confusion.
+  activityHours: "Activity hours",
   averageSpeed: "Average speed",
   date: "Date",
 };
@@ -124,6 +129,11 @@ export interface ActivityReportRow {
   quantityWorked: number | null;
   rowsCompleted: number;
   averageSpeed: number | null;
+  // The employee's whole shift for this one day — every activity combined,
+  // not just this one. See reportQueries.ts's identically-named field.
+  // Surfaced as "Employee Paid Time", always kept separate from this
+  // activity's own metrics.
+  employeePaidSeconds: number;
 }
 
 export interface ActivityEmployeeTotal {
@@ -137,6 +147,7 @@ export interface ActivityEmployeeTotal {
   quantityWorked: number | null;
   rowsCompleted: number;
   averageSpeed: number | null;
+  employeePaidSeconds: number;
 }
 
 export interface ActivityDateTotal {
@@ -149,6 +160,7 @@ export interface ActivityDateTotal {
   quantityWorked: number | null;
   rowsCompleted: number;
   averageSpeed: number | null;
+  employeePaidSeconds: number;
 }
 
 export interface ActivityReportData {
@@ -167,6 +179,7 @@ export interface ActivityReportData {
     rowsCompleted: number;
     rowsTouched: number;
     averageSpeed: number | null;
+    employeePaidSeconds: number;
   };
 }
 
@@ -184,7 +197,7 @@ export const PIVOT_ELIGIBLE_ACTIVITY_METRICS: ActivityMetric[] = [
   "workTime",
   "breakTime",
   "paidTime",
-  "totalHours",
+  "activityHours",
   "rows",
   "rowsCompleted",
   "quantityWorked",
@@ -215,8 +228,12 @@ export function pivotCellValue(metric: ActivityMetric, source: PivotCellSource, 
       return secondsToHoursMinutes(source.breakSeconds);
     case "paidTime":
       return secondsToHoursMinutes(source.workSeconds + source.paidBreakSeconds);
-    case "totalHours":
-      return secondsToHoursMinutes(source.workSeconds + source.breakSeconds);
+    case "activityHours":
+      // Exactly this activity's own accumulated work-entry time — never
+      // + breakSeconds (breaks aren't this activity's time at all) and
+      // never rounded beyond secondsToHoursMinutes' own display-only
+      // nearest-minute formatting.
+      return secondsToHoursMinutes(source.workSeconds);
     case "rows":
       return String(source.rowsTouched);
     case "rowsCompleted":

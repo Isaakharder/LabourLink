@@ -27,7 +27,7 @@ const DEFAULT_ACTIVITY_METRICS: ActivityMetric[] = [
   "date",
   "workTime",
   "breakTime",
-  "totalHours",
+  "activityHours",
   "quantityWorked",
   "averageSpeed",
 ];

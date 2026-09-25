@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Proves the "Total Paid Time" column's ON-SCREEN rendering contract:
+// Proves the "Employee Paid Time" column's ON-SCREEN rendering contract:
 // present (header + one cell per employee + a combined DAY TOTAL-row cell)
 // exactly when grid.totalPaidTimeGrandTotal is set, entirely absent
 // otherwise — the same single source of truth CSV/PDF export read from
@@ -15,12 +15,12 @@ import { PivotGrid } from "../../lib/reportPivot";
 // Explicit rather than relying on auto-registration — this project's
 // vitest config doesn't set test.globals: true, so each render() would
 // otherwise accumulate in the document across tests in this file (several
-// share literal text like "Total Paid Time" and "DAY TOTAL").
+// share literal text like "Employee Paid Time" and "DAY TOTAL").
 afterEach(() => {
   cleanup();
 });
 
-describe("ReportPivotTable — Total Paid Time column", () => {
+describe("ReportPivotTable — Employee Paid Time column", () => {
   it("renders the column (header, per-employee cell, and combined DAY TOTAL cell) when the grid has totalPaidTime values", () => {
     const grid: PivotGrid = {
       dates: ["2026-08-17"],
@@ -34,7 +34,7 @@ describe("ReportPivotTable — Total Paid Time column", () => {
     };
     render(<ReportPivotTable grid={grid} />);
 
-    expect(screen.getByText("Total Paid Time")).toBeInTheDocument();
+    expect(screen.getByText("Employee Paid Time")).toBeInTheDocument();
     expect(screen.getByText("4:30")).toBeInTheDocument();
     expect(screen.getByText("2:00")).toBeInTheDocument();
     // The bottom row's own leading label ("DAY TOTAL") already establishes
@@ -56,7 +56,7 @@ describe("ReportPivotTable — Total Paid Time column", () => {
       grandTotal: "10:25",
     };
     render(<ReportPivotTable grid={grid} />);
-    expect(screen.queryByText("Total Paid Time")).not.toBeInTheDocument();
+    expect(screen.queryByText("Employee Paid Time")).not.toBeInTheDocument();
   });
 
   it("stays visible even when the Show metric is something else entirely (e.g. rows completed), never tied to the selected metric", () => {
@@ -68,7 +68,7 @@ describe("ReportPivotTable — Total Paid Time column", () => {
       totalPaidTimeGrandTotal: "8:15",
     };
     render(<ReportPivotTable grid={grid} />);
-    expect(screen.getByText("Total Paid Time")).toBeInTheDocument();
+    expect(screen.getByText("Employee Paid Time")).toBeInTheDocument();
     expect(screen.getByText("8:00")).toBeInTheDocument(); // per-employee cell
     expect(screen.getByText("8:15")).toBeInTheDocument(); // combined DAY TOTAL cell — deliberately different, proving each is its own value
     // "5" (rows-completed grand total, shown twice here — the single
@@ -87,7 +87,7 @@ describe("ReportPivotTable — Total Paid Time column", () => {
       totalPaidTimeGrandTotal: "0:45",
     };
     render(<ReportPivotTable grid={grid} />);
-    expect(screen.getByText("Total Paid Time")).toBeInTheDocument();
+    expect(screen.getByText("Employee Paid Time")).toBeInTheDocument();
     expect(screen.getByText("—")).toBeInTheDocument();
   });
 });

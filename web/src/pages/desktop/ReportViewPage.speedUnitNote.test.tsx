@@ -45,6 +45,7 @@ function makeData(speedUnit: string | null): ActivityReportData {
         quantityWorked: 200,
         rowsCompleted: 1,
         averageSpeed: 51.8,
+        employeePaidSeconds: 14400,
       },
     ],
     employeeTotals: [
@@ -59,12 +60,34 @@ function makeData(speedUnit: string | null): ActivityReportData {
         quantityWorked: 200,
         rowsCompleted: 1,
         averageSpeed: 48.0,
+        employeePaidSeconds: 14400,
       },
     ],
     dateTotals: [
-      { date: "2026-08-17", workSeconds: 14400, breakSeconds: 0, paidBreakSeconds: 0, unpaidBreakSeconds: 0, rowsTouched: 2, quantityWorked: 200, rowsCompleted: 1, averageSpeed: 45.0 },
+      {
+        date: "2026-08-17",
+        workSeconds: 14400,
+        breakSeconds: 0,
+        paidBreakSeconds: 0,
+        unpaidBreakSeconds: 0,
+        rowsTouched: 2,
+        quantityWorked: 200,
+        rowsCompleted: 1,
+        averageSpeed: 45.0,
+        employeePaidSeconds: 14400,
+      },
     ],
-    totals: { workSeconds: 14400, breakSeconds: 0, paidBreakSeconds: 0, unpaidBreakSeconds: 0, rowsTouched: 2, quantityWorked: 200, rowsCompleted: 1, averageSpeed: 46.5 },
+    totals: {
+      workSeconds: 14400,
+      breakSeconds: 0,
+      paidBreakSeconds: 0,
+      unpaidBreakSeconds: 0,
+      rowsTouched: 2,
+      quantityWorked: 200,
+      rowsCompleted: 1,
+      averageSpeed: 46.5,
+      employeePaidSeconds: 14400,
+    },
   };
 }
 
