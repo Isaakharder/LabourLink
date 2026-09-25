@@ -7,10 +7,10 @@
 // count) from Inputs' single-day grain to a date range; it never introduces
 // a second speed formula.
 import { pool } from "../db";
-import { addDaysToDateStr, APP_TIMEZONE, calendarDateInAppTimezone, getRangeBoundsUtc } from "./timezone";
+import { addDaysToDateStr, APP_TIMEZONE, calendarDateInAppTimezone, getDayBoundsUtc, getRangeBoundsUtc } from "./timezone";
 import { aggregateDensitySpeed } from "./densitySpeed";
 import { computeWorkdayTotals, groupByEmployeeDay, WorkdayBoundaryEntry } from "./workdayTotals";
-import { getUnresolvedRunsForRows } from "./rowCompletionCandidates";
+import { CandidateRun, getUnresolvedRunsForRows } from "./rowCompletionCandidates";
 
 export interface ActivityReportRow {
   employeeId: string;
@@ -133,11 +133,27 @@ function isoWeekStartDateStr(dateStr: string): string {
 //     than guessing an allocation (same "exclude when not cleanly
 //     attributable" caution Inputs already applies to ambiguous runs).
 //  2. A not-yet-completed row is auto-counted only when it's the *only*
-//     candidate anywhere for that row+activity+density type (checked via the
-//     same getUnresolvedRunsForRows Inputs uses) — reused directly rather
-//     than reimplemented, so this can never drift from Inputs' own
-//     resolution. A different activity sharing this row+density type is
+//     candidate in its own row-work CYCLE (rowCompletionCandidates.ts's
+//     CYCLE_GAP_DAYS) for that row+activity+density type — checked via the
+//     same getUnresolvedRunsForRows Inputs uses, and ambiguity decided the
+//     exact same PER-CYCLE way inputs.ts's ambiguousCycleKeys does (see
+//     computeAmbiguousCycleKeys below). Checking raw candidate COUNT with no
+//     cycle scoping — the bug this replaced — wrongly treated a genuinely
+//     unrelated, unfinished visit from months ago as making THIS week's
+//     otherwise-clean, unambiguous visit "ambiguous" too, silently dropping
+//     its entire quantity from every report/dashboard/stats consumer of
+//     this function. A different activity sharing this row+density type is
 //     never itself a candidate here, and never suppresses this one either.
+//
+// A contribution whose segments span more than one APP_TIMEZONE calendar
+// day (a row worked across two real work sessions, or a shift closed and
+// reopened at midnight rollover) is never dropped from the per-day view and
+// never double-counted: its one frozen quantity is allocated across the
+// days it touches in proportion to each day's own share of the
+// contribution's total productive duration (splitDurationByCalendarDay
+// below) — which, by construction, gives every day the SAME resulting
+// speed as the contribution's own overall speed, matching what Inputs
+// itself shows on every day/run belonging to one completion/visit.
 export interface DensityTotals {
   quantity: number;
   durationSeconds: number;
@@ -151,12 +167,11 @@ export interface DensityAttribution {
   // / total productive hours across the *entire* selected range, never an
   // average of the daily speeds below.
   byEmployee: Map<string, DensityTotals>;
-  // Subset of the above that CAN be safely pinned to one calendar day (in
-  // APP_TIMEZONE) — keyed `${employeeId}:${date}`. A contribution whose
-  // segments span more than one calendar day is deliberately left out of
-  // this map (there's only one quantity_per_row for the whole thing; it
-  // can't be split by day without guessing an allocation) even though it's
-  // still included in byEmployee above.
+  // Every qualifying contribution's quantity, allocated to the calendar
+  // day(s) (APP_TIMEZONE) it was actually earned on — keyed
+  // `${employeeId}:${date}`. A contribution touching only one day lands
+  // here whole; one spanning several days is split proportionally by
+  // duration (see the file-level comment above) rather than omitted.
   byEmployeeDay: Map<string, DensityTotals>;
 }
 
@@ -168,6 +183,52 @@ function filterToUuidArray(employeeIds?: string[]): string[] | null {
   if (!employeeIds || employeeIds.length === 0) return null;
   const deduped = [...new Set(employeeIds)];
   return deduped.length ? deduped : null;
+}
+
+// A segment's [startedAt, endedAt) sliced against APP_TIMEZONE calendar-day
+// boundaries — the shared building block for "how much of this
+// completion/run's duration falls on each date it touches". Loops rather
+// than assuming a segment never itself straddles a calendar day (normal
+// midnight-rollover processing closes/reopens an entry exactly at the
+// boundary, so a raw segment straddling midnight shouldn't happen in
+// practice, but this stays correct even if one ever does, e.g. a
+// hand-edited manual entry). Multiple segments' shares for the same date
+// accumulate naturally since the caller sums this map across every segment
+// in a contribution.
+function splitDurationByCalendarDay(segments: { startedAt: Date; endedAt: Date }[]): Map<string, number> {
+  const byDate = new Map<string, number>();
+  for (const seg of segments) {
+    let cursor = seg.startedAt;
+    while (cursor < seg.endedAt) {
+      const date = calendarDateInAppTimezone(cursor);
+      const { end: dayEnd } = getDayBoundsUtc(date);
+      const sliceEnd = dayEnd < seg.endedAt ? dayEnd : seg.endedAt;
+      const seconds = (sliceEnd.getTime() - cursor.getTime()) / 1000;
+      byDate.set(date, (byDate.get(date) ?? 0) + seconds);
+      cursor = sliceEnd;
+    }
+  }
+  return byDate;
+}
+
+// Exactly inputs.ts's own ambiguousCycleKeys logic (see its comment there) —
+// factored out here so the Report/Dashboard/Stats attribution below and the
+// read-only production audit (getActivityDensityAudit) can never drift from
+// each other, or from what Inputs itself decides. A "row-work cycle" is
+// candidates within CYCLE_GAP_DAYS of each other (rowCompletionCandidates.ts);
+// a key ("pairKey:cycleIndex") is ambiguous when 2+ candidates share it.
+function computeAmbiguousCycleKeys(candidatesByKey: Map<string, CandidateRun[]>): Set<string> {
+  const ambiguousCycleKeys = new Set<string>();
+  for (const [key, list] of candidatesByKey) {
+    const countByCycle = new Map<number, number>();
+    for (const candidate of list) {
+      countByCycle.set(candidate.cycleIndex, (countByCycle.get(candidate.cycleIndex) ?? 0) + 1);
+    }
+    for (const [cycleIndex, count] of countByCycle) {
+      if (count > 1) ambiguousCycleKeys.add(`${key}:${cycleIndex}`);
+    }
+  }
+  return ambiguousCycleKeys;
 }
 
 // Exported so callers outside this file's own range-report shape (e.g. the
@@ -194,58 +255,97 @@ export async function getActivityDensityAttribution(
     map.set(key, cur);
   };
 
-  // Rule 1: confirmed completions. Aggregated over the completion's FULL
-  // segment set (not filtered to this activity/range yet) so the
-  // single-employee/single-activity/in-range checks below see the whole
-  // picture — filtering the CTE itself would silently hide a completion
-  // that also has segments outside this activity or range, corrupting the
-  // "is this cleanly attributable" check.
-  const { rows: completionRows } = await pool.query(
-    `with segs as (
-       select rc.id as completion_id, rc.quantity_per_row, te.employee_id, te.activity_id,
-              te.started_at, te.ended_at
-       from row_completions rc
-       join row_completion_segments rcs on rcs.row_completion_id = rc.id
-       join time_entries te on te.id = rcs.time_entry_id
-       where te.deleted_at is null
-         and ($5::uuid[] is null or te.employee_id = any($5::uuid[]))
-     )
-     select completion_id,
-            max(quantity_per_row) as quantity_per_row,
-            count(distinct employee_id) as employee_count,
-            count(distinct activity_id) as activity_count,
-            -- uuid has no built-in max()/min() aggregate — text is a stand-in
-            -- sort just to pick one consistent value; only ever trusted below
-            -- when employee_count/activity_count = 1, where every row's
-            -- value is identical anyway.
-            max(employee_id::text)::uuid as sole_employee_id,
-            max(activity_id::text)::uuid as sole_activity_id,
-            bool_and(started_at >= $2 and started_at < $3) as all_in_range,
-            -- Same "only trust it when there's exactly one" pattern as
-            -- sole_employee_id/sole_activity_id above, applied to which
-            -- calendar day (APP_TIMEZONE) every segment falls on.
-            count(distinct to_char((started_at at time zone $4)::date, 'YYYY-MM-DD')) as distinct_days,
-            max(to_char((started_at at time zone $4)::date, 'YYYY-MM-DD')) as sole_day,
-            sum(extract(epoch from (ended_at - started_at))) as total_duration_seconds
-     from segs
-     group by completion_id
-     having bool_or(activity_id = $1) or count(distinct activity_id) > 1`,
-    [activityId, rangeStart, rangeEnd, APP_TIMEZONE, employeeIds]
-  );
-  for (const c of completionRows) {
-    if (Number(c.employee_count) !== 1) continue;
-    if (Number(c.activity_count) !== 1) continue;
-    if (c.sole_activity_id !== activityId) continue;
-    if (!c.all_in_range) continue;
-    const quantity = Number(c.quantity_per_row);
-    const durationSeconds = Number(c.total_duration_seconds);
-    addTo(byEmployee, c.sole_employee_id, quantity, durationSeconds, 1);
-    if (Number(c.distinct_days) === 1) {
-      addTo(byEmployeeDay, `${c.sole_employee_id}:${c.sole_day}`, quantity, durationSeconds, 1);
+  // Distributes one contribution's frozen quantity across the calendar
+  // day(s) it touches, proportional to each day's own share of duration —
+  // see the file-level comment above. The "completions" count (a whole-row
+  // metric, not something meaningful to split fractionally) is attributed
+  // in full to whichever day carries the largest share of the duration;
+  // ties keep the earliest date, both purely deterministic tie-breaks with
+  // no effect on quantity/speed.
+  function attributeByDay(employeeId: string, quantity: number, segments: { startedAt: Date; endedAt: Date }[], completions: number) {
+    const perDay = splitDurationByCalendarDay(segments);
+    if (perDay.size <= 1) {
+      const [date] = [...perDay.keys()];
+      const durationSeconds = perDay.get(date) ?? 0;
+      if (date) addTo(byEmployeeDay, `${employeeId}:${date}`, quantity, durationSeconds, completions);
+      return;
     }
-    // else: this completion's segments span more than one calendar day —
-    // it still counts toward byEmployee's range total above, but is left
-    // out of every day-row it touches (see DensityAttribution's comment).
+    const totalDuration = [...perDay.values()].reduce((s, d) => s + d, 0);
+    let bestDate = "";
+    let bestDuration = -1;
+    for (const [date, duration] of perDay) {
+      addTo(byEmployeeDay, `${employeeId}:${date}`, Math.round(quantity * (duration / totalDuration)), duration, 0);
+      if (duration > bestDuration) {
+        bestDuration = duration;
+        bestDate = date;
+      }
+    }
+    if (completions > 0 && bestDate) addTo(byEmployeeDay, `${employeeId}:${bestDate}`, 0, 0, completions);
+  }
+
+  // Rule 1: confirmed completions. Fetches every linked segment (not
+  // filtered to this activity/range yet) so the single-employee/
+  // single-activity/in-range checks below see the whole picture — filtering
+  // earlier would silently hide a completion that also has segments outside
+  // this activity or range, corrupting the "is this cleanly attributable"
+  // check. The candidate_ids CTE keeps this scoped to completions that
+  // could plausibly matter to this activity (same "having" shape as
+  // before), then the full per-segment detail is fetched separately so a
+  // multi-day completion's duration can be split by day below, not just
+  // aggregated.
+  const { rows: candidateIdRows } = await pool.query(
+    `select rc.id as completion_id
+     from row_completions rc
+     join row_completion_segments rcs on rcs.row_completion_id = rc.id
+     join time_entries te on te.id = rcs.time_entry_id
+     where te.deleted_at is null
+       and ($2::uuid[] is null or te.employee_id = any($2::uuid[]))
+     group by rc.id
+     having bool_or(te.activity_id = $1) or count(distinct te.activity_id) > 1`,
+    [activityId, employeeIds]
+  );
+  const completionIds: string[] = candidateIdRows.map((r) => r.completion_id);
+  const completionSegRows = completionIds.length
+    ? (
+        await pool.query(
+          `select rc.id as completion_id, rc.quantity_per_row, te.employee_id, te.activity_id, te.started_at, te.ended_at
+           from row_completions rc
+           join row_completion_segments rcs on rcs.row_completion_id = rc.id
+           join time_entries te on te.id = rcs.time_entry_id
+           where rc.id = any($1::uuid[])
+           order by rc.id, te.started_at`,
+          [completionIds]
+        )
+      ).rows
+    : [];
+
+  interface CompletionSeg {
+    employeeId: string;
+    activityId: string;
+    startedAt: Date;
+    endedAt: Date;
+  }
+  const completionSegsById = new Map<string, { quantityPerRow: number; segs: CompletionSeg[] }>();
+  for (const r of completionSegRows) {
+    const g = completionSegsById.get(r.completion_id) ?? { quantityPerRow: Number(r.quantity_per_row), segs: [] };
+    g.segs.push({ employeeId: r.employee_id, activityId: r.activity_id, startedAt: r.started_at, endedAt: r.ended_at });
+    completionSegsById.set(r.completion_id, g);
+  }
+
+  for (const { quantityPerRow, segs } of completionSegsById.values()) {
+    const employeeIdsInGroup = new Set(segs.map((s) => s.employeeId));
+    const activityIdsInGroup = new Set(segs.map((s) => s.activityId));
+    if (employeeIdsInGroup.size !== 1) continue;
+    if (activityIdsInGroup.size !== 1) continue;
+    const [soleActivityId] = activityIdsInGroup;
+    if (soleActivityId !== activityId) continue;
+    const [soleEmployeeId] = employeeIdsInGroup;
+    const allInRange = segs.every((s) => s.startedAt >= rangeStart && s.startedAt < rangeEnd);
+    if (!allInRange) continue;
+
+    const totalDurationSeconds = segs.reduce((sum, s) => sum + (s.endedAt.getTime() - s.startedAt.getTime()) / 1000, 0);
+    addTo(byEmployee, soleEmployeeId, quantityPerRow, totalDurationSeconds, 1);
+    attributeByDay(soleEmployeeId, quantityPerRow, segs, 1);
   }
 
   // Rule 2: unresolved (not-yet-completed) runs. Bounded by distinct rows
@@ -278,32 +378,41 @@ export async function getActivityDensityAttribution(
   const candidatesByKey = await getUnresolvedRunsForRows(
     candidateRowsRes.map((pair) => ({ greenhouseRowId: pair.greenhouse_row_id, activityId, densityType: pair.density_type }))
   );
-  const candidateResults = candidateRowsRes.map(
-    (pair) => candidatesByKey.get(`${pair.greenhouse_row_id}:${activityId}:${pair.density_type}`) ?? []
-  );
+  const ambiguousCycleKeys = computeAmbiguousCycleKeys(candidatesByKey);
 
   interface AcceptedRun {
-    only: (typeof candidateResults)[number][number];
+    only: CandidateRun;
     startedAt: Date;
     endedAt: Date;
   }
   const accepted: AcceptedRun[] = [];
-  for (const candidates of candidateResults) {
-    if (candidates.length !== 1) continue; // ambiguous (2+) — excluded, same as Inputs
-    const only = candidates[0];
-    // Belt-and-suspenders: getUnresolvedRunsForRows is itself called with
-    // activityId (see above), so this can never actually be false — kept as
-    // a cheap invariant check rather than trusted-but-unverified.
-    if (only.activityId !== activityId) continue;
-    // Attribute only the portion of this run's own recorded segments that
-    // fall inside the range — a run can't be split by quantity (there's
-    // only one quantity_per_row for the whole row visit), so this follows
-    // the same all-in-range rule as completions above rather than
-    // guessing a partial share.
-    const startedAt = new Date(only.startedAt);
-    const endedAt = only.endedAt ? new Date(only.endedAt) : null;
-    if (!endedAt || startedAt < rangeStart || endedAt > rangeEnd) continue;
-    accepted.push({ only, startedAt, endedAt });
+  for (const pair of candidateRowsRes) {
+    const key = `${pair.greenhouse_row_id}:${activityId}:${pair.density_type}`;
+    const candidates = candidatesByKey.get(key) ?? [];
+    for (const candidate of candidates) {
+      // Ambiguous WITHIN ITS OWN ROW-WORK CYCLE, never across the row's
+      // whole lifetime — see computeAmbiguousCycleKeys/this function's own
+      // header comment for the bug this fixes.
+      if (ambiguousCycleKeys.has(`${key}:${candidate.cycleIndex}`)) continue;
+      // Belt-and-suspenders: getUnresolvedRunsForRows is itself called with
+      // activityId (see above), so this can never actually be false — kept
+      // as a cheap invariant check rather than trusted-but-unverified.
+      if (candidate.activityId !== activityId) continue;
+      const startedAt = new Date(candidate.startedAt);
+      const endedAt = candidate.endedAt ? new Date(candidate.endedAt) : null;
+      // In progress (no ended_at yet) — Activity Hours still count
+      // elsewhere, but there is no finished visit to attribute a quantity
+      // to; never invented.
+      if (!endedAt) continue;
+      // Attribute only a run whose own recorded segments fall entirely
+      // inside the requested RANGE — a run that starts before or ends after
+      // the report's own date window can't be cleanly resolved against a
+      // range boundary. This is distinct from spanning multiple calendar
+      // DAYS *within* the range, which is now split proportionally below
+      // rather than excluded.
+      if (startedAt < rangeStart || endedAt > rangeEnd) continue;
+      accepted.push({ only: candidate, startedAt, endedAt });
+    }
   }
 
   // Reuses the frozen density_count_per_row already resolved onto each
@@ -324,27 +433,285 @@ export async function getActivityDensityAttribution(
   // chain's actual originally-frozen quantity), silently misattributing the
   // wrong number some of the time. segmentIds[0] is deterministic and is
   // always the value that belongs to `only`'s own densityType.
-  const densityResults = await Promise.all(
-    accepted.map(({ only }) => pool.query(`select density_count_per_row from time_entries where id = $1`, [only.segmentIds[0]]))
-  );
+  //
+  // Every segment's own started_at/ended_at is fetched too (not just
+  // segmentIds[0]'s) so a run spanning more than one calendar day (a
+  // midnight-rollover-continued shift) can have its single frozen quantity
+  // split by day proportional to duration, the same as a multi-day
+  // completion above, rather than omitted from every day it touches.
+  const [densityResults, segmentDetailResults] = await Promise.all([
+    Promise.all(accepted.map(({ only }) => pool.query(`select density_count_per_row from time_entries where id = $1`, [only.segmentIds[0]]))),
+    Promise.all(
+      accepted.map(({ only }) => pool.query(`select started_at, ended_at from time_entries where id = any($1::uuid[])`, [only.segmentIds]))
+    ),
+  ]);
 
-  accepted.forEach(({ only, startedAt, endedAt }, i) => {
+  accepted.forEach(({ only }, i) => {
     const quantityPerRow = densityResults[i].rows[0]?.density_count_per_row;
     if (quantityPerRow == null) return;
     const quantity = Number(quantityPerRow);
+    const segs = segmentDetailResults[i].rows.map((r) => ({ startedAt: r.started_at as Date, endedAt: r.ended_at as Date }));
     addTo(byEmployee, only.employeeId, quantity, only.durationSeconds, 0);
-    // A run crossing midnight (started one calendar day, ended the next)
-    // has the same "can't split one quantity across days" problem as a
-    // multi-day completion above — counted in the range total, left out of
-    // any single day-row.
-    const startDay = calendarDateInAppTimezone(startedAt);
-    const endDay = calendarDateInAppTimezone(endedAt);
-    if (startDay === endDay) {
-      addTo(byEmployeeDay, `${only.employeeId}:${startDay}`, quantity, only.durationSeconds, 0);
-    }
+    attributeByDay(only.employeeId, quantity, segs, 0);
   });
 
   return { byEmployee, byEmployeeDay };
+}
+
+// One raw work segment's own resolution detail — the read-only production
+// audit behind the "why doesn't this quantity show up in the report"
+// question. Deliberately re-derives its verdict from the SAME underlying
+// data/rules getActivityDensityAttribution uses (row_completion_segments,
+// getUnresolvedRunsForRows, computeAmbiguousCycleKeys, the same
+// employee/activity purity and in-range checks) rather than a separate,
+// potentially-drifting calculation — this is a diagnostic VIEW of that
+// exact logic, not a second implementation of it.
+export type DensityAuditGrouping =
+  | { kind: "completed"; completionId: string; groupQuantityPerRow: number; groupDurationSeconds: number; groupSegmentCount: number }
+  | { kind: "unresolved"; cycleIndex: number; candidatesInCycle: number; ambiguous: boolean; groupDurationSeconds: number; groupSegmentCount: number }
+  | { kind: "in-progress" }
+  | { kind: "not-density-eligible" };
+
+export interface DensityAuditSegment {
+  segmentId: string;
+  employeeId: string;
+  employeeName: string;
+  rowLabel: string;
+  // This segment's OWN calendar date (APP_TIMEZONE) — not necessarily the
+  // same date its completion/run's quantity is ultimately anchored to when
+  // that group spans more than one day (see groupDurationSeconds/
+  // attributedQuantity, which are this segment's own proportional share).
+  date: string;
+  startedAt: string;
+  endedAt: string | null;
+  durationSeconds: number;
+  densityType: "plants" | "stems" | null;
+  densityCountPerRow: number | null;
+  completionGrouping: DensityAuditGrouping;
+  // This segment's own share of its group's quantity, proportional to
+  // duration (one decimal place — a diagnostic view, not the report's own
+  // integer-rounded internal figure) — null whenever includedInReport is
+  // false.
+  attributedQuantity: number | null;
+  includedInReport: boolean;
+  exclusionReason: string | null;
+}
+
+// Scoped to ONE employee (an audit is a targeted "why" investigation, never
+// a bulk export) across a caller-supplied date range — the same [start,
+// end) an Activity Report for this activity would use, so "included in
+// report" here means exactly what it would mean in that report.
+export async function getActivityDensityAudit(
+  activityId: string,
+  employeeId: string,
+  startDate: string,
+  endDate: string
+): Promise<DensityAuditSegment[]> {
+  const { start, end } = getRangeBoundsUtc(startDate, endDate);
+
+  const { rows: segRows } = await pool.query(
+    `select te.id, te.employee_id, e.first_name, e.last_name, te.started_at, te.ended_at,
+            te.greenhouse_row_id, te.density_type, te.density_count_per_row,
+            gp.name as phase_name, gr.row_number,
+            rcs.row_completion_id
+     from time_entries te
+     join employees e on e.id = te.employee_id
+     left join greenhouse_rows gr on gr.id = te.greenhouse_row_id
+     left join greenhouse_phases gp on gp.id = gr.phase_id
+     left join row_completion_segments rcs on rcs.time_entry_id = te.id
+     where te.employee_id = $1 and te.activity_id = $2 and te.entry_type = 'work' and te.deleted_at is null
+       and te.started_at >= $3 and te.started_at < $4
+     order by te.started_at`,
+    [employeeId, activityId, start, end]
+  );
+
+  // Completed segments: batch-fetch each distinct completion's FULL segment
+  // set (every employee/activity/day it actually touches, not just this
+  // employee's own slice) so the same employee/activity-purity and
+  // in-range checks Rule 1 applies can be reproduced exactly here.
+  const completionIds = [...new Set(segRows.filter((r) => r.row_completion_id).map((r) => r.row_completion_id as string))];
+  interface CompletionSeg {
+    employeeId: string;
+    activityId: string;
+    startedAt: Date;
+    endedAt: Date;
+  }
+  const completionGroups = new Map<string, { quantityPerRow: number; segs: CompletionSeg[] }>();
+  if (completionIds.length) {
+    const { rows: groupRows } = await pool.query(
+      `select rc.id as completion_id, rc.quantity_per_row, te.employee_id, te.activity_id, te.started_at, te.ended_at
+       from row_completions rc
+       join row_completion_segments rcs on rcs.row_completion_id = rc.id
+       join time_entries te on te.id = rcs.time_entry_id
+       where rc.id = any($1::uuid[])`,
+      [completionIds]
+    );
+    for (const r of groupRows) {
+      const g = completionGroups.get(r.completion_id) ?? { quantityPerRow: Number(r.quantity_per_row), segs: [] };
+      g.segs.push({ employeeId: r.employee_id, activityId: r.activity_id, startedAt: r.started_at, endedAt: r.ended_at });
+      completionGroups.set(r.completion_id, g);
+    }
+  }
+
+  // Unresolved segments: batch by (row, densityType) pair, reusing the same
+  // getUnresolvedRunsForRows + computeAmbiguousCycleKeys the real report
+  // uses. Scoped to finished (ended_at not null) segments only — an
+  // in-progress one is reported separately below, never sent through
+  // candidate resolution.
+  const unresolvedSegs = segRows.filter((r) => !r.row_completion_id && r.greenhouse_row_id && r.density_type && r.ended_at);
+  const candidatesByKey = await getUnresolvedRunsForRows(
+    unresolvedSegs.map((r) => ({ greenhouseRowId: r.greenhouse_row_id, activityId, densityType: r.density_type }))
+  );
+  const ambiguousCycleKeys = computeAmbiguousCycleKeys(candidatesByKey);
+  const candidateBySegmentId = new Map<string, CandidateRun>();
+  for (const list of candidatesByKey.values()) {
+    for (const candidate of list) {
+      for (const segId of candidate.segmentIds) candidateBySegmentId.set(segId, candidate);
+    }
+  }
+  // Cached across segments sharing the same candidate root — avoids
+  // re-querying the same run's frozen density value once per one of its own
+  // multiple segments.
+  const densityByFirstSegmentId = new Map<string, number | null>();
+  async function frozenDensityFor(candidate: CandidateRun): Promise<number | null> {
+    const firstId = candidate.segmentIds[0];
+    if (densityByFirstSegmentId.has(firstId)) return densityByFirstSegmentId.get(firstId)!;
+    const res = await pool.query(`select density_count_per_row from time_entries where id = $1`, [firstId]);
+    const value = res.rows[0]?.density_count_per_row != null ? Number(res.rows[0].density_count_per_row) : null;
+    densityByFirstSegmentId.set(firstId, value);
+    return value;
+  }
+
+  const rows: DensityAuditSegment[] = [];
+  for (const r of segRows) {
+    const durationSeconds = r.ended_at ? Math.round((r.ended_at.getTime() - r.started_at.getTime()) / 1000) : 0;
+    const base = {
+      segmentId: r.id as string,
+      employeeId: r.employee_id as string,
+      employeeName: `${r.first_name} ${r.last_name}`,
+      rowLabel: r.phase_name ? `${r.phase_name} · Row ${r.row_number}` : "—",
+      date: calendarDateInAppTimezone(r.started_at),
+      startedAt: (r.started_at as Date).toISOString(),
+      endedAt: r.ended_at ? (r.ended_at as Date).toISOString() : null,
+      durationSeconds,
+      densityType: r.density_type as "plants" | "stems" | null,
+      densityCountPerRow: r.density_count_per_row != null ? Number(r.density_count_per_row) : null,
+    };
+
+    if (!r.greenhouse_row_id || !r.density_type) {
+      rows.push({
+        ...base,
+        completionGrouping: { kind: "not-density-eligible" },
+        attributedQuantity: null,
+        includedInReport: false,
+        exclusionReason: "Not linked to a density-tracked greenhouse row",
+      });
+      continue;
+    }
+    if (!r.ended_at) {
+      rows.push({
+        ...base,
+        completionGrouping: { kind: "in-progress" },
+        attributedQuantity: null,
+        includedInReport: false,
+        exclusionReason: "Still in progress — no end time yet, so Activity Hours (once finished) but never an invented quantity",
+      });
+      continue;
+    }
+
+    if (r.row_completion_id) {
+      const group = completionGroups.get(r.row_completion_id)!;
+      const employeeIdsInGroup = new Set(group.segs.map((s) => s.employeeId));
+      const activityIdsInGroup = new Set(group.segs.map((s) => s.activityId));
+      const groupDurationSeconds = group.segs.reduce((s, seg) => s + (seg.endedAt.getTime() - seg.startedAt.getTime()) / 1000, 0);
+      let reason: string | null = null;
+      if (employeeIdsInGroup.size !== 1) {
+        reason = "This completion's segments span more than one employee — not cleanly attributable";
+      } else if (activityIdsInGroup.size !== 1 || [...activityIdsInGroup][0] !== activityId) {
+        reason = "This completion's segments span more than one activity — not cleanly attributable";
+      } else if (!group.segs.every((s) => s.startedAt >= start && s.startedAt < end)) {
+        reason = "One or more of this completion's segments fall outside the audited date range";
+      }
+      const included = reason === null;
+      const attributedQuantity = included && groupDurationSeconds > 0 ? group.quantityPerRow * (durationSeconds / groupDurationSeconds) : null;
+      rows.push({
+        ...base,
+        completionGrouping: {
+          kind: "completed",
+          completionId: r.row_completion_id,
+          groupQuantityPerRow: group.quantityPerRow,
+          groupDurationSeconds,
+          groupSegmentCount: group.segs.length,
+        },
+        attributedQuantity: attributedQuantity != null ? Math.round(attributedQuantity * 10) / 10 : null,
+        includedInReport: included,
+        exclusionReason: reason,
+      });
+      continue;
+    }
+
+    // Unresolved.
+    const key = `${r.greenhouse_row_id}:${activityId}:${r.density_type}`;
+    const candidate = candidateBySegmentId.get(r.id);
+    if (!candidate) {
+      // Should not happen (every unresolved segment sent into
+      // getUnresolvedRunsForRows resolves to some candidate) — surfaced
+      // rather than silently guessed at, in case of a genuine data anomaly.
+      rows.push({
+        ...base,
+        completionGrouping: { kind: "not-density-eligible" },
+        attributedQuantity: null,
+        includedInReport: false,
+        exclusionReason: "Could not resolve a candidate run for this segment",
+      });
+      continue;
+    }
+    const candidatesInCycle = (candidatesByKey.get(key) ?? []).filter((c) => c.cycleIndex === candidate.cycleIndex).length;
+    const ambiguous = ambiguousCycleKeys.has(`${key}:${candidate.cycleIndex}`);
+    if (ambiguous) {
+      rows.push({
+        ...base,
+        completionGrouping: {
+          kind: "unresolved",
+          cycleIndex: candidate.cycleIndex,
+          candidatesInCycle,
+          ambiguous: true,
+          groupDurationSeconds: candidate.durationSeconds,
+          groupSegmentCount: candidate.segmentIds.length,
+        },
+        attributedQuantity: null,
+        includedInReport: false,
+        exclusionReason: `Ambiguous — ${candidatesInCycle} unresolved candidates for this row in the same ~7-day work cycle (needs admin review via Row Completion Review)`,
+      });
+      continue;
+    }
+    const quantityPerRow = await frozenDensityFor(candidate);
+    const candidateStartedAt = new Date(candidate.startedAt);
+    const candidateEndedAt = candidate.endedAt ? new Date(candidate.endedAt) : null;
+    const inRange = !!candidateEndedAt && candidateStartedAt >= start && candidateEndedAt < end;
+    let reason: string | null = null;
+    if (quantityPerRow == null) reason = "No resolvable density value for this run";
+    else if (!inRange) reason = "This run extends outside the audited date range";
+    const included = reason === null;
+    const attributedQuantity =
+      included && quantityPerRow != null && candidate.durationSeconds > 0 ? quantityPerRow * (durationSeconds / candidate.durationSeconds) : null;
+    rows.push({
+      ...base,
+      completionGrouping: {
+        kind: "unresolved",
+        cycleIndex: candidate.cycleIndex,
+        candidatesInCycle,
+        ambiguous: false,
+        groupDurationSeconds: candidate.durationSeconds,
+        groupSegmentCount: candidate.segmentIds.length,
+      },
+      attributedQuantity: attributedQuantity != null ? Math.round(attributedQuantity * 10) / 10 : null,
+      includedInReport: included,
+      exclusionReason: reason,
+    });
+  }
+
+  return rows;
 }
 
 export async function getActivityReportData(

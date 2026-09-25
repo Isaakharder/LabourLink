@@ -6347,6 +6347,24 @@ input {
   display: none;
 }
 
+/* ---------- Reports: Production Audit (read-only diagnostic) ---------- */
+
+.report-density-audit-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 1rem;
+  margin: 0.75rem 0 1.25rem;
+}
+
+.report-density-audit-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
 /* ---------- Reports: Print/PDF preview modal ---------- */
 
 .report-preview-meta {

@@ -2,7 +2,7 @@ import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { getActivityReportData, getPayrollReportData } from "../lib/reportQueries";
+import { getActivityDensityAudit, getActivityReportData, getPayrollReportData } from "../lib/reportQueries";
 
 const router = Router();
 
@@ -491,6 +491,51 @@ router.get(
 
     const data = await getPayrollReportData(start, end, { employeeIds: employeeIdsFilter });
     res.json({ data });
+  })
+);
+
+// Read-only production audit: for one employee's density-tracked work on
+// one activity across a date range, shows every raw work segment's own
+// completion-grouping/ambiguity verdict and whether it's actually included
+// in that same activity's report totals — a debugging tool for "why doesn't
+// this quantity show up", not part of the report itself. Re-derives its
+// answer from the exact same rules getActivityReportData's Average Speed
+// uses (see getActivityDensityAudit's own comment) rather than a second,
+// possibly-drifting calculation. Independent of any saved report — scoped
+// directly by activityId/employeeId/date range, not a report id, since an
+// admin investigating a discrepancy may not have (or want to create) a
+// saved report for the activity in question.
+router.get(
+  "/audit/density-attribution",
+  requireAuth,
+  requireRole(...VIEW_ROLES),
+  asyncHandler(async (req, res) => {
+    const { activityId, employeeId, start, end } = req.query as {
+      activityId?: string;
+      employeeId?: string;
+      start?: string;
+      end?: string;
+    };
+    if (!activityId || !UUID_RE.test(activityId)) return res.status(400).json({ error: "A valid activityId is required" });
+    if (!employeeId || !UUID_RE.test(employeeId)) return res.status(400).json({ error: "A valid employeeId is required" });
+    if (!isValidDate(start) || !isValidDate(end)) {
+      return res.status(400).json({ error: "A valid start and end date (YYYY-MM-DD) are required" });
+    }
+    if (start > end) {
+      return res.status(400).json({ error: "start must not be after end" });
+    }
+
+    const activityCheck = await pool.query("select id, name from activities where id = $1", [activityId]);
+    if (!activityCheck.rows[0]) return res.status(404).json({ error: "Activity not found" });
+    const employeeCheck = await pool.query("select id, first_name, last_name from employees where id = $1", [employeeId]);
+    if (!employeeCheck.rows[0]) return res.status(404).json({ error: "Employee not found" });
+
+    const segments = await getActivityDensityAudit(activityId, employeeId, start, end);
+    res.json({
+      activity: { id: activityCheck.rows[0].id, name: activityCheck.rows[0].name },
+      employee: { id: employeeCheck.rows[0].id, firstName: employeeCheck.rows[0].first_name, lastName: employeeCheck.rows[0].last_name },
+      segments,
+    });
   })
 );
 

@@ -90,12 +90,12 @@ router.get(
       // week's own [start, end) — deliberately not one 4-week call bucketed
       // afterward by calendar day. attribution.byEmployee (the whole-range
       // ratio-of-sums total) is what Reports' own Grand Total shows for a
-      // range and is the only figure that still counts a completion/run
-      // whose segments cross a calendar-day boundary within the range;
-      // attribution.byEmployeeDay excludes those entirely (see
-      // reportQueries.ts), so bucketing a wider call by day would silently
-      // drop real quantity a same-week, cross-midnight completion earned —
-      // a discrepancy from what Reports itself would show for that week.
+      // range; it's also what this page always reads (see below), so this
+      // stays correct regardless of how reportQueries.ts's byEmployeeDay
+      // allocates a completion/run spanning more than one calendar day
+      // (proportionally by duration, per that file's own comment) — a
+      // week-scoped call here is simply the natural unit this page needs,
+      // not a workaround for anything byEmployeeDay does or doesn't do.
       for (const activityId of candidateActivityIds) {
         const meta = activityMeta.get(activityId);
         if (!meta) continue;

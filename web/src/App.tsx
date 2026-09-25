@@ -12,6 +12,7 @@ import { GreenhouseDisplayPage } from "./pages/desktop/GreenhouseDisplayPage";
 import { GreenhousePage } from "./pages/desktop/GreenhousePage";
 import { InputsPage } from "./pages/desktop/InputsPage";
 import { LoginPage } from "./pages/desktop/LoginPage";
+import { ReportDensityAuditPage } from "./pages/desktop/ReportDensityAuditPage";
 import { ReportsPage } from "./pages/desktop/ReportsPage";
 import { ReportViewPage } from "./pages/desktop/ReportViewPage";
 import { ResetPinPage } from "./pages/desktop/ResetPinPage";
@@ -79,6 +80,14 @@ function DesktopApp() {
           element={
             <RequireRole roles={["Administrator", "Manager"]}>
               <ReportsPage />
+            </RequireRole>
+          }
+        />
+        <Route
+          path="reports/audit"
+          element={
+            <RequireRole roles={["Administrator", "Manager"]}>
+              <ReportDensityAuditPage />
             </RequireRole>
           }
         />

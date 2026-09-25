@@ -65,6 +65,9 @@ export function ReportsPage() {
         <span className="employees-count">
           {reports ? `${reports.length} report${reports.length === 1 ? "" : "s"}` : ""}
         </span>
+        <button type="button" onClick={() => navigate("/reports/audit")}>
+          Production Audit
+        </button>
         {canManage && (
           <button type="button" className="employees-add-button" onClick={() => setCreating(true)}>
             Create Report

@@ -28,6 +28,8 @@
     "test:reports-employee-selection": "ts-node src/routes/reports.employeeSelection.test.ts",
     "test:reports-activity-paid-time": "ts-node src/routes/reports.activityPaidTime.test.ts",
     "test:reports-metric-configuration": "ts-node src/routes/reports.metricConfiguration.test.ts",
+    "test:reports-density-multi-row": "ts-node src/routes/reports.densityMultiRowAttribution.test.ts",
+    "test:reports-density-attribution-audit": "ts-node src/routes/reports.densityAttributionAudit.test.ts",
     "test:employment-periods-logic": "ts-node src/lib/employmentPeriods.test.ts",
     "test:employment-timeline-view": "ts-node src/lib/employmentTimelineView.test.ts",
     "test:employment-periods": "ts-node src/routes/employmentPeriods.test.ts",
