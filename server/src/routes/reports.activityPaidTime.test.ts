@@ -213,7 +213,8 @@ async function main() {
         name: `QA ${name} ${RUN_ID}`,
         reportType: "activity",
         activityId: activityIdArg,
-        metrics: ["employee", "paidTime", "workTime", "activityHours", "averageSpeed"],
+        dailyMetric: "workTime",
+        weeklyTotals: ["activityHours", "averageSpeed", "employeePaidTime"],
         employeeSelectionMode: mode,
         employeeIds: ids,
       });

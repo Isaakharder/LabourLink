@@ -2,7 +2,7 @@
 //
 // Covers the on-screen half of the Activity Report speed-unit abbreviation
 // feature: the "Speed shown as st/hr..." note only appears when the
-// selected pivot metric is Average Speed AND the activity's speed unit has
+// report's daily metric is Average Speed AND the activity's speed unit has
 // a defined abbreviation, and the pivot cells themselves render abbreviated
 // on screen. Same api() mocking convention as ReportViewPage.payrollFormat
 // .test.tsx.
@@ -19,7 +19,7 @@ function makeReport(): SavedReportDetail {
     name: "Winding & Pruning",
     reportType: "activity",
     activity: { id: "act-1", name: "Winding & Pruning" },
-    configuration: { metrics: ["employee", "averageSpeed"], lastDateRange: { start: "2026-08-17", end: "2026-08-17" } },
+    configuration: { dailyMetric: "averageSpeed", weeklyTotals: ["activityHours"], lastDateRange: { start: "2026-08-17", end: "2026-08-17" } },
     employeeSelectionMode: "all",
     employeeIds: [],
     createdAt: "2026-08-01T00:00:00.000Z",
@@ -134,10 +134,15 @@ describe("ReportViewPage — Activity Report speed-unit abbreviation note", () =
     renderPage();
 
     expect(await screen.findByText("Speed shown as st/hr (stems per hour).")).toBeInTheDocument();
+    // The daily cell (per employee/day) and the DAY TOTAL column (per date,
+    // across employees) both come from the daily metric (Average Speed).
+    // There is no more per-employee "Employee Total" driven by the daily
+    // metric — Activity reports only show whatever's in the saved weekly
+    // totals (activityHours by default here), so the old employeeTotals/
+    // grand-total average-speed figures (48.0/46.5) are no longer rendered
+    // at all.
     expect(screen.getByText("51.8 st/hr")).toBeInTheDocument();
-    expect(screen.getByText("48.0 st/hr")).toBeInTheDocument();
     expect(screen.getByText("45.0 st/hr")).toBeInTheDocument();
-    expect(screen.getByText("46.5 st/hr")).toBeInTheDocument();
     expect(screen.queryByText(/stems\/hour/)).not.toBeInTheDocument();
   });
 

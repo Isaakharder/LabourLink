@@ -7,13 +7,25 @@ interface ReportPivotTableProps {
 
 // Spreadsheet-style matrix shared by both report types: exactly one row per
 // employee (employeeId is the row key — see PivotGrid/reportQueries.ts,
-// never one row per time_entries/run), one column per calendar day in the
-// selected range, an Employee Total column on the right (per employee,
-// ratio-of-sums for any speed metric — see reportQueries.ts), and a DAY
-// TOTAL row on the bottom (per date, across employees). Both the employee
-// column and the Employee Total column stay pinned (sticky) while the date
-// columns scroll horizontally — a long date range stays usable by
-// scrolling instead of shrinking every cell to illegibility.
+// never one row per time_entries/run) and one column per calendar day in
+// the selected range, plus a DAY TOTAL row on the bottom (per date, across
+// employees). The employee column always stays pinned (sticky) while the
+// date columns scroll horizontally.
+//
+// The trailing column(s) differ by report type — discriminated by
+// grid.weeklyTotalColumns's presence, never by reportType directly, so this
+// component (also reused for Print/PDF preview) stays a pure PivotGrid
+// consumer:
+//   - Payroll: a single sticky "Employee Total" column (grid.grandTotal /
+//     row.grandTotal) for whichever metric the checkbox editor/"Show:"
+//     dropdown currently has selected.
+//   - Activity: N columns, one per the report's own saved
+//     configuration.weeklyTotals (grid.weeklyTotalColumns / row.
+//     weeklyTotals) — e.g. "Weekly Activity Hours" alongside "Employee
+//     Paid Time" (deliberately un-prefixed — the one whole-shift column
+//     among otherwise activity-scoped ones). These are NOT sticky (a
+//     variable-width N-column area doesn't generalize the way a single
+//     fixed column does), so they simply scroll off with the date columns.
 //
 // Every cell is passed through abbreviateSpeedCellText — a harmless no-op
 // for any non-speed metric's text, since only an Average Speed cell can
@@ -21,26 +33,10 @@ interface ReportPivotTableProps {
 // display-only: PivotGrid itself (and therefore CSV export, which reads
 // grid values directly rather than through this component) keeps the full
 // spelled-out unit — see reportTypes.ts's abbreviateSpeedCellText comment.
-//
-// The trailing "Employee Paid Time" column (whole-shift, every activity
-// combined — deliberately separate from any activity-scoped metric) is
-// entirely driven by whether grid.totalPaidTimeGrandTotal is set
-// (buildActivityPivotGrid only sets it when the report's Paid time metric
-// is checked — see ReportViewPage.tsx) — a single source of truth so this
-// table, the Print/PDF preview (which reuses this same component), and
-// CSV/PDF export can never disagree about whether the column should
-// appear. It stays visible no matter which metric the "Show:" dropdown has
-// selected, since its own value never comes from `metric`.
 export function ReportPivotTable({ grid }: ReportPivotTableProps) {
-  const showPaidTimeTotal = grid.totalPaidTimeGrandTotal !== undefined;
-  // Both total columns are pinned (sticky) to the right edge — when both
-  // are present, Employee Total needs to shift left by Employee Paid
-  // Time's own width so the two don't render on top of each other; see the
-  // matching CSS in index.css.
-  const employeeTotalHeaderClass = `report-pivot-grand-col${showPaidTimeTotal ? " report-pivot-grand-col-with-paidtime" : ""}`;
-  const employeeTotalCellClass = `report-pivot-grand-col report-pivot-grand-cell${
-    showPaidTimeTotal ? " report-pivot-grand-col-with-paidtime" : ""
-  }`;
+  const weeklyColumns = grid.weeklyTotalColumns;
+  const isActivity = weeklyColumns !== undefined;
+
   return (
     <div className="report-pivot-wrap">
       <table className="report-pivot-table">
@@ -53,8 +49,15 @@ export function ReportPivotTable({ grid }: ReportPivotTableProps) {
                 <span className="report-pivot-date-bottom">{formatPivotDateHeader(d)}</span>
               </th>
             ))}
-            <th className={employeeTotalHeaderClass}>Employee Total</th>
-            {showPaidTimeTotal && <th className="report-pivot-grand-col report-pivot-paidtime-col">Employee Paid Time</th>}
+            {isActivity
+              ? weeklyColumns.map((col) => (
+                  <th key={col.key} className="report-pivot-weekly-col">
+                    {col.label}
+                  </th>
+                ))
+              : (
+                  <th className="report-pivot-grand-col">Employee Total</th>
+                )}
           </tr>
         </thead>
         <tbody>
@@ -66,12 +69,17 @@ export function ReportPivotTable({ grid }: ReportPivotTableProps) {
                   {abbreviateSpeedCellText(cell)}
                 </td>
               ))}
-              <td className={employeeTotalCellClass}>{abbreviateSpeedCellText(row.grandTotal)}</td>
-              {showPaidTimeTotal && (
-                <td className="report-pivot-grand-col report-pivot-grand-cell report-pivot-paidtime-col">
-                  {row.totalPaidTime ?? "—"}
-                </td>
-              )}
+              {isActivity
+                ? weeklyColumns.map((col, i) => (
+                    <td key={col.key} className="report-pivot-weekly-col">
+                      {row.weeklyTotals?.[i] ?? "—"}
+                    </td>
+                  ))
+                : (
+                    <td className="report-pivot-grand-col report-pivot-grand-cell">
+                      {abbreviateSpeedCellText(row.grandTotal ?? "—")}
+                    </td>
+                  )}
             </tr>
           ))}
         </tbody>
@@ -83,12 +91,17 @@ export function ReportPivotTable({ grid }: ReportPivotTableProps) {
                 {abbreviateSpeedCellText(total)}
               </td>
             ))}
-            <td className={employeeTotalCellClass}>{abbreviateSpeedCellText(grid.grandTotal)}</td>
-            {showPaidTimeTotal && (
-              <td className="report-pivot-grand-col report-pivot-grand-cell report-pivot-paidtime-col">
-                {grid.totalPaidTimeGrandTotal}
-              </td>
-            )}
+            {isActivity
+              ? weeklyColumns.map((col, i) => (
+                  <td key={col.key} className="report-pivot-weekly-col">
+                    {grid.weeklyTotalColumnTotals?.[i] ?? "—"}
+                  </td>
+                ))
+              : (
+                  <td className="report-pivot-grand-col report-pivot-grand-cell">
+                    {abbreviateSpeedCellText(grid.grandTotal ?? "—")}
+                  </td>
+                )}
           </tr>
         </tfoot>
       </table>

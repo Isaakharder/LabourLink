@@ -19,6 +19,14 @@ export const ACTIVITY_METRICS = [
   "endTime",
   "activityHours",
   "averageSpeed",
+  // Whole-shift, every activity combined for that employee/day — only ever
+  // valid as a WEEKLY TOTAL column (see WEEKLY_TOTAL_ELIGIBLE_ACTIVITY_METRICS
+  // below), never as the daily metric shown under Monday-Sunday (a per-day
+  // whole-shift figure next to per-day activity-scoped figures would read as
+  // if it were this activity's own number). Deliberately a different key
+  // from "paidTime" above (workSeconds + paidBreakSeconds, scoped to just
+  // this activity) — the two can genuinely disagree on a multi-activity day.
+  "employeePaidTime",
   "date",
 ] as const;
 export type ActivityMetric = (typeof ACTIVITY_METRICS)[number];
@@ -59,6 +67,7 @@ export const ACTIVITY_METRIC_LABELS: Record<ActivityMetric, string> = {
   // confusion.
   activityHours: "Activity hours",
   averageSpeed: "Average speed",
+  employeePaidTime: "Employee Paid Time",
   date: "Date",
 };
 
@@ -104,7 +113,14 @@ export interface SavedReportDetail {
   name: string;
   reportType: ReportType;
   activity: { id: string; name: string } | null;
-  configuration: { metrics?: string[]; lastDateRange?: DateRange };
+  // Payroll reports keep the flat `metrics` checkbox list unchanged.
+  // Activity reports use the two-field model instead: `dailyMetric` (single,
+  // shown under Monday-Sunday) and `weeklyTotals` (one or more activity-
+  // scoped/whole-shift summary columns) — see reportPivot.ts's
+  // buildActivityPivotGrid. Both optional so an Activity report saved
+  // before this redesign still loads (ReportViewPage/reportPivot.ts apply
+  // sensible defaults when absent).
+  configuration: { metrics?: string[]; dailyMetric?: string; weeklyTotals?: string[]; lastDateRange?: DateRange };
   // Persisted server-side on the report itself — see
   // server/migrations/046_saved_reports_employee_selection.sql. "all" is
   // dynamic (includes newly eligible employees automatically); "selected"
@@ -203,6 +219,41 @@ export const PIVOT_ELIGIBLE_ACTIVITY_METRICS: ActivityMetric[] = [
   "quantityWorked",
   "averageSpeed",
 ];
+
+// The "Daily metric" selector's own candidate list — literally the same set
+// as PIVOT_ELIGIBLE_ACTIVITY_METRICS above (one metric shown under each
+// Monday-Sunday date column), kept as its own named export so the "daily"
+// and "weekly" concepts read as distinct choices in the UI/persistence code
+// even though today they happen to share one list.
+export const DAILY_METRIC_ELIGIBLE_ACTIVITY_METRICS: ActivityMetric[] = PIVOT_ELIGIBLE_ACTIVITY_METRICS;
+
+// The "Weekly totals" multi-select's candidate list — every daily-eligible
+// metric (each becomes that metric's own whole-range total, e.g. "Weekly
+// Activity Hours" is Activity Hours summed across the selected range for
+// that one employee) PLUS employeePaidTime, which only ever appears here,
+// never as a daily metric (see ACTIVITY_METRICS' own comment on why).
+export const WEEKLY_TOTAL_ELIGIBLE_ACTIVITY_METRICS: ActivityMetric[] = [...PIVOT_ELIGIBLE_ACTIVITY_METRICS, "employeePaidTime"];
+
+// Column-header labels for the Weekly totals area specifically — distinct
+// from ACTIVITY_METRIC_LABELS because the SAME metric reads differently as
+// a whole-range summary column than as a per-day pivot cell header ("Weekly
+// Activity Hours" here vs. "Activity hours" for the daily selector). Every
+// activity-scoped entry is prefixed "Weekly ..."; employeePaidTime
+// deliberately is NOT — the missing prefix is what keeps it "clearly
+// identified as a whole-shift metric" (never confusable with the
+// activity-scoped columns sitting right next to it).
+export const WEEKLY_TOTAL_METRIC_LABELS: Record<ActivityMetric, string> = {
+  ...ACTIVITY_METRIC_LABELS,
+  workTime: "Weekly Productive/Work Time",
+  breakTime: "Weekly Break Time",
+  paidTime: "Weekly Paid Time",
+  activityHours: "Weekly Activity Hours",
+  rows: "Weekly Rows",
+  rowsCompleted: "Weekly Rows Completed",
+  quantityWorked: "Weekly Quantity Worked",
+  averageSpeed: "Weekly Average Speed",
+  employeePaidTime: "Employee Paid Time",
+};
 
 // Common shape every pivot cell's data source (a day-row, an employee Grand
 // Total, or a date Grand Total) already satisfies — lets one function read

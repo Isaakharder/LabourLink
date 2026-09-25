@@ -34,8 +34,31 @@ const ACTIVITY_METRICS = [
   // rename comment. Must stay in sync with that file's ACTIVITY_METRICS.
   "activityHours",
   "averageSpeed",
+  // Whole-shift, every activity combined — weekly-totals-only, never a
+  // daily metric. See web/src/lib/reportTypes.ts's identical entry; must
+  // stay in sync with that file's ACTIVITY_METRICS.
+  "employeePaidTime",
   "date",
 ] as const;
+
+// Activity reports no longer use the flat ACTIVITY_METRICS checkbox list
+// above for their own configuration (Payroll still does) — they save a
+// "daily metric" (single) plus "weekly totals" (one or more) instead. These
+// two lists mirror web/src/lib/reportTypes.ts's
+// DAILY_METRIC_ELIGIBLE_ACTIVITY_METRICS / WEEKLY_TOTAL_ELIGIBLE_ACTIVITY_METRICS
+// exactly — keep both pairs in sync if either changes.
+const ACTIVITY_DAILY_METRIC_ELIGIBLE = [
+  "workTime",
+  "breakTime",
+  "paidTime",
+  "activityHours",
+  "rows",
+  "rowsCompleted",
+  "quantityWorked",
+  "averageSpeed",
+] as const;
+
+const ACTIVITY_WEEKLY_TOTAL_ELIGIBLE = [...ACTIVITY_DAILY_METRIC_ELIGIBLE, "employeePaidTime"] as const;
 
 const PAYROLL_METRICS = [
   "employee",
@@ -116,6 +139,18 @@ function validateMetrics(reportType: "activity" | "payroll", metrics: unknown): 
   return deduped as string[];
 }
 
+function validateDailyMetric(dailyMetric: unknown): string | null {
+  if (typeof dailyMetric !== "string") return null;
+  return (ACTIVITY_DAILY_METRIC_ELIGIBLE as readonly string[]).includes(dailyMetric) ? dailyMetric : null;
+}
+
+function validateWeeklyTotals(weeklyTotals: unknown): string[] | null {
+  if (!Array.isArray(weeklyTotals) || weeklyTotals.length === 0) return null;
+  const deduped = [...new Set(weeklyTotals)];
+  if (!deduped.every((m) => typeof m === "string" && (ACTIVITY_WEEKLY_TOTAL_ELIGIBLE as readonly string[]).includes(m))) return null;
+  return deduped as string[];
+}
+
 function serializeSummary(row: {
   id: string;
   name: string;
@@ -188,11 +223,13 @@ router.post(
   requireAuth,
   requireRole(...MANAGE_ROLES),
   asyncHandler(async (req, res) => {
-    const { name, reportType, activityId, metrics, employeeSelectionMode, employeeIds } = req.body as {
+    const { name, reportType, activityId, metrics, dailyMetric, weeklyTotals, employeeSelectionMode, employeeIds } = req.body as {
       name?: string;
       reportType?: string;
       activityId?: string | null;
       metrics?: unknown;
+      dailyMetric?: unknown;
+      weeklyTotals?: unknown;
       employeeSelectionMode?: unknown;
       employeeIds?: unknown;
     };
@@ -211,8 +248,22 @@ router.post(
         resolvedActivityId = activityId;
       }
     }
-    const validMetrics = reportType === "activity" || reportType === "payroll" ? validateMetrics(reportType, metrics) : null;
-    if (!validMetrics) errors.metrics = "At least one valid metric must be selected";
+
+    // Activity reports save {dailyMetric, weeklyTotals} instead of the flat
+    // {metrics} list Payroll still uses — see ACTIVITY_DAILY_METRIC_ELIGIBLE/
+    // ACTIVITY_WEEKLY_TOTAL_ELIGIBLE's own comment.
+    let validMetrics: string[] | null = null;
+    let validDailyMetric: string | null = null;
+    let validWeeklyTotals: string[] | null = null;
+    if (reportType === "payroll") {
+      validMetrics = validateMetrics("payroll", metrics);
+      if (!validMetrics) errors.metrics = "At least one valid metric must be selected";
+    } else if (reportType === "activity") {
+      validDailyMetric = validateDailyMetric(dailyMetric);
+      if (!validDailyMetric) errors.dailyMetric = "A valid daily metric must be selected";
+      validWeeklyTotals = validateWeeklyTotals(weeklyTotals);
+      if (!validWeeklyTotals) errors.weeklyTotals = "At least one valid weekly total must be selected";
+    }
 
     if (Object.keys(errors).length > 0) {
       return res.status(400).json({ error: "Invalid report", errors });
@@ -238,6 +289,9 @@ router.post(
       }
     }
 
+    const configuration =
+      reportType === "activity" ? { dailyMetric: validDailyMetric, weeklyTotals: validWeeklyTotals } : { metrics: validMetrics };
+
     const { rows } = await pool.query(
       `insert into saved_reports (name, report_type, activity_id, configuration, employee_selection_mode, employee_ids, created_by)
        values ($1, $2, $3, $4, $5, $6, $7)
@@ -246,7 +300,7 @@ router.post(
         trimmedName,
         reportType,
         resolvedActivityId,
-        JSON.stringify({ metrics: validMetrics }),
+        JSON.stringify(configuration),
         employeeSelection.mode,
         employeeSelection.ids,
         req.employee!.id,
@@ -268,10 +322,12 @@ router.patch(
     const existing = existingRes.rows[0];
     if (!existing) return res.status(404).json({ error: "Report not found" });
 
-    const { name, activityId, metrics, lastDateRange, employeeSelectionMode, employeeIds } = req.body as {
+    const { name, activityId, metrics, dailyMetric, weeklyTotals, lastDateRange, employeeSelectionMode, employeeIds } = req.body as {
       name?: string;
       activityId?: string | null;
       metrics?: unknown;
+      dailyMetric?: unknown;
+      weeklyTotals?: unknown;
       lastDateRange?: { start?: string; end?: string } | null;
       employeeSelectionMode?: unknown;
       employeeIds?: unknown;
@@ -299,13 +355,43 @@ router.patch(
       updates.push(`activity_id = $${params.length}`);
     }
 
-    let nextConfiguration = existing.configuration as { metrics?: string[]; lastDateRange?: { start: string; end: string } };
-    if (metrics !== undefined) {
-      const validMetrics = validateMetrics(existing.report_type as "activity" | "payroll", metrics);
+    let nextConfiguration = existing.configuration as {
+      metrics?: string[];
+      dailyMetric?: string;
+      weeklyTotals?: string[];
+      lastDateRange?: { start: string; end: string };
+    };
+    let configurationChanged = false;
+
+    if (existing.report_type === "payroll" && metrics !== undefined) {
+      const validMetrics = validateMetrics("payroll", metrics);
       if (!validMetrics) {
         return res.status(400).json({ error: "Invalid report", errors: { metrics: "At least one valid metric must be selected" } });
       }
       nextConfiguration = { ...nextConfiguration, metrics: validMetrics };
+      configurationChanged = true;
+    }
+    // Activity reports save {dailyMetric, weeklyTotals} instead of {metrics}
+    // — see ACTIVITY_DAILY_METRIC_ELIGIBLE/ACTIVITY_WEEKLY_TOTAL_ELIGIBLE's
+    // own comment. Each field is independently patchable (e.g. changing just
+    // the weekly totals without touching the daily metric).
+    if (existing.report_type === "activity" && dailyMetric !== undefined) {
+      const validDailyMetric = validateDailyMetric(dailyMetric);
+      if (!validDailyMetric) {
+        return res.status(400).json({ error: "Invalid report", errors: { dailyMetric: "A valid daily metric must be selected" } });
+      }
+      nextConfiguration = { ...nextConfiguration, dailyMetric: validDailyMetric };
+      configurationChanged = true;
+    }
+    if (existing.report_type === "activity" && weeklyTotals !== undefined) {
+      const validWeeklyTotals = validateWeeklyTotals(weeklyTotals);
+      if (!validWeeklyTotals) {
+        return res
+          .status(400)
+          .json({ error: "Invalid report", errors: { weeklyTotals: "At least one valid weekly total must be selected" } });
+      }
+      nextConfiguration = { ...nextConfiguration, weeklyTotals: validWeeklyTotals };
+      configurationChanged = true;
     }
     if (lastDateRange !== undefined) {
       if (lastDateRange === null) {
@@ -317,8 +403,9 @@ router.patch(
       } else {
         return res.status(400).json({ error: "Invalid report", errors: { lastDateRange: "A valid start and end date are required" } });
       }
+      configurationChanged = true;
     }
-    if (metrics !== undefined || lastDateRange !== undefined) {
+    if (configurationChanged) {
       params.push(JSON.stringify(nextConfiguration));
       updates.push(`configuration = $${params.length}`);
     }

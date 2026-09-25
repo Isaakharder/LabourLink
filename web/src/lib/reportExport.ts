@@ -29,28 +29,33 @@ function csvEscape(value: string): string {
 // Matrix-shaped exports — the same PivotGrid the on-screen ReportPivotTable
 // renders from, so CSV/PDF/screen can never disagree about a value. One
 // employee per row (employeeId is PivotGrid.employees' key), one column per
-// selected date, Employee Total on the right, DAY TOTAL on the bottom.
-// Deliberately reads grid values as-is, never through
-// abbreviateSpeedCellText — an Average Speed CSV must stay unambiguous
-// outside the app's own visual context (no accompanying note column/row
-// exists in a CSV the way there is above the on-screen/PDF table), so the
-// unit stays fully spelled out ("stems/hour"/"plants/hour") here.
+// selected date, DAY TOTAL on the bottom. Deliberately reads grid values
+// as-is, never through abbreviateSpeedCellText — an Average Speed CSV must
+// stay unambiguous outside the app's own visual context (no accompanying
+// note column/row exists in a CSV the way there is above the on-screen/PDF
+// table), so the unit stays fully spelled out ("stems/hour"/"plants/hour")
+// here.
 export function exportPivotCsv(report: SavedReportDetail, grid: PivotGrid, metricLabel: string) {
-  // Same single source of truth ReportPivotTable uses — the column appears
-  // here exactly when (and only when) it appears on screen/PDF, since all
-  // three read the same grid.totalPaidTimeGrandTotal presence.
-  const showPaidTimeTotal = grid.totalPaidTimeGrandTotal !== undefined;
+  // Same single source of truth ReportPivotTable uses — Payroll's single
+  // "Employee Total" column vs Activity's N saved weekly-total columns,
+  // discriminated by grid.weeklyTotalColumns's presence, so all three
+  // surfaces (screen/CSV/PDF) can never disagree about which columns
+  // appear or in what order.
+  const weeklyColumns = grid.weeklyTotalColumns;
+  const isActivity = weeklyColumns !== undefined;
   const lines: string[] = [];
-  const header = ["Employee", ...grid.dates.map(formatPivotDateHeader), "Employee Total"];
-  if (showPaidTimeTotal) header.push("Employee Paid Time");
+  const header = ["Employee", ...grid.dates.map(formatPivotDateHeader)];
+  header.push(...(isActivity ? weeklyColumns.map((c) => c.label) : ["Employee Total"]));
   lines.push(header.map(csvEscape).join(","));
   for (const row of grid.employees) {
-    const cells = [row.employeeName, ...row.cells, row.grandTotal];
-    if (showPaidTimeTotal) cells.push(row.totalPaidTime ?? "—");
+    const cells = [row.employeeName, ...row.cells];
+    cells.push(...(isActivity ? weeklyColumns.map((_, i) => row.weeklyTotals?.[i] ?? "—") : [row.grandTotal ?? "—"]));
     lines.push(cells.map(csvEscape).join(","));
   }
-  const totalsRow = ["DAY TOTAL", ...grid.columnTotals, grid.grandTotal];
-  if (showPaidTimeTotal) totalsRow.push(grid.totalPaidTimeGrandTotal!);
+  const totalsRow = ["DAY TOTAL", ...grid.columnTotals];
+  totalsRow.push(
+    ...(isActivity ? weeklyColumns.map((_, i) => grid.weeklyTotalColumnTotals?.[i] ?? "—") : [grid.grandTotal ?? "—"])
+  );
   lines.push(totalsRow.map(csvEscape).join(","));
   const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
   triggerDownload(blob, `${report.name.replace(/[^\w\- ]+/g, "")} - ${metricLabel}.csv`);
@@ -97,20 +102,26 @@ export function exportPivotPdf(
 
   // Same single source of truth ReportPivotTable/CSV use — see
   // exportPivotCsv's own comment.
-  const showPaidTimeTotal = grid.totalPaidTimeGrandTotal !== undefined;
-  const head = ["Employee", ...grid.dates.map(formatPivotDateHeader), "Employee Total"];
-  if (showPaidTimeTotal) head.push("Employee Paid Time");
+  const weeklyColumns = grid.weeklyTotalColumns;
+  const isActivity = weeklyColumns !== undefined;
+  const trailingColumnCount = isActivity ? weeklyColumns.length : 1;
+  const head = ["Employee", ...grid.dates.map(formatPivotDateHeader)];
+  head.push(...(isActivity ? weeklyColumns.map((c) => c.label) : ["Employee Total"]));
   // Abbreviated the same way the on-screen table is (abbreviateSpeedCellText
   // is a no-op for any non-speed cell) — the PDF is a visual document like
   // the screen, not a data interchange format like CSV, so it gets the
   // compact form plus the note above, not the full spelled-out unit.
   const body = grid.employees.map((row) => {
-    const cells = [row.employeeName, ...row.cells.map(abbreviateSpeedCellText), abbreviateSpeedCellText(row.grandTotal)];
-    if (showPaidTimeTotal) cells.push(row.totalPaidTime ?? "—");
+    const cells = [row.employeeName, ...row.cells.map(abbreviateSpeedCellText)];
+    cells.push(...(isActivity ? weeklyColumns.map((_, i) => row.weeklyTotals?.[i] ?? "—") : [abbreviateSpeedCellText(row.grandTotal ?? "—")]));
     return cells;
   });
-  const totalsRow = ["DAY TOTAL", ...grid.columnTotals.map(abbreviateSpeedCellText), abbreviateSpeedCellText(grid.grandTotal)];
-  if (showPaidTimeTotal) totalsRow.push(grid.totalPaidTimeGrandTotal!);
+  const totalsRow = ["DAY TOTAL", ...grid.columnTotals.map(abbreviateSpeedCellText)];
+  totalsRow.push(
+    ...(isActivity
+      ? weeklyColumns.map((_, i) => grid.weeklyTotalColumnTotals?.[i] ?? "—")
+      : [abbreviateSpeedCellText(grid.grandTotal ?? "—")])
+  );
   body.push(totalsRow);
 
   autoTable(doc, {
@@ -128,15 +139,13 @@ export function exportPivotPdf(
     // employee list spans multiple PDF pages, and the header must repeat
     // on each one rather than only appearing once at the top.
     showHead: "everyPage",
-    // Bolds the DAY TOTAL row (last body row) and every total COLUMN —
-    // Employee Total always, plus Employee Paid Time when present (the new
-    // trailing column, not necessarily the visually-last one if this ever
-    // grows a third) — a visual cue only, the values themselves come
+    // Bolds the DAY TOTAL row (last body row) and every trailing total
+    // COLUMN — Employee Total for Payroll, or all of the saved weekly-total
+    // columns for Activity — a visual cue only, the values themselves come
     // straight from PivotGrid either way.
     didParseCell: (data) => {
       const isTotalRow = data.row.index === body.length - 1 && data.section === "body";
-      const employeeTotalColIndex = showPaidTimeTotal ? head.length - 2 : head.length - 1;
-      const isTotalCol = data.column.index === employeeTotalColIndex || (showPaidTimeTotal && data.column.index === head.length - 1);
+      const isTotalCol = data.column.index >= head.length - trailingColumnCount;
       if (isTotalRow || isTotalCol) {
         data.cell.styles.fontStyle = "bold";
       }
