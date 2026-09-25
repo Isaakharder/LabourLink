@@ -22,6 +22,10 @@ let postBreakStatus: number | null; // null = succeed; otherwise reject with thi
 let postBreakMessage: string;
 let postBreakResponseBody: any = { ok: true };
 let lastPostBreakBody: any = null;
+let postAddAllStatus: number | null; // null = succeed; otherwise reject with this status
+let postAddAllMessage: string;
+let postAddAllResponseBody: any = { ok: true, added: [] };
+let lastPostAddAllBody: any = null;
 
 vi.mock("../../lib/api", () => {
   class ApiError extends Error {
@@ -49,6 +53,13 @@ vi.mock("../../lib/api", () => {
         // makes that distinction invisible (and irrelevant) to the caller.
         return Promise.resolve(postBreakResponseBody);
       }
+      if (path === "/api/inputs/breaks/add-all" && options?.method === "POST") {
+        lastPostAddAllBody = options?.body ? JSON.parse(options.body as string) : null;
+        if (postAddAllStatus !== null) {
+          return Promise.reject(new ApiError(postAddAllStatus, postAddAllMessage));
+        }
+        return Promise.resolve(postAddAllResponseBody);
+      }
       return Promise.reject(new Error(`Unhandled mock api() call in test: ${path}`));
     }),
   };
@@ -58,7 +69,14 @@ const lunchItem: EmployeeBreakItemOption = { id: "item-lunch", name: "Lunch", st
 const morningItem: EmployeeBreakItemOption = { id: "item-morning", name: "Morning", startTime: "09:00:00", endTime: "09:15:00", isPaid: false };
 const afternoonItem: EmployeeBreakItemOption = { id: "item-afternoon", name: "Afternoon", startTime: "15:00:00", endTime: "15:15:00", isPaid: true };
 
-function renderModal(overrides: { breaks?: { breakProfileItemId: string | null }[]; runs?: any[] } = {}) {
+function renderModal(
+  overrides: {
+    breaks?: { breakProfileItemId: string | null; startedAt: string; endedAt: string | null }[];
+    runs?: any[];
+    workStartTime?: string | null;
+    workEndTime?: string | null;
+  } = {}
+) {
   const onClose = vi.fn();
   const onCreated = vi.fn();
   const utils = render(
@@ -68,6 +86,8 @@ function renderModal(overrides: { breaks?: { breakProfileItemId: string | null }
       date="2026-08-11"
       runs={overrides.runs ?? []}
       breaks={overrides.breaks ?? []}
+      workStartTime={overrides.workStartTime ?? null}
+      workEndTime={overrides.workEndTime ?? null}
       onClose={onClose}
       onCreated={onCreated}
     />
@@ -84,6 +104,10 @@ beforeEach(() => {
   postBreakMessage = "";
   postBreakResponseBody = { ok: true };
   lastPostBreakBody = null;
+  postAddAllStatus = null;
+  postAddAllMessage = "";
+  postAddAllResponseBody = { ok: true, added: [] };
+  lastPostAddAllBody = null;
 });
 
 afterEach(() => {
@@ -161,7 +185,9 @@ describe("AddBreakModal", () => {
   });
 
   it("marks a preset already added today as 'Already added' and disabled in the list", async () => {
-    renderModal({ breaks: [{ breakProfileItemId: "item-lunch" }] });
+    renderModal({
+      breaks: [{ breakProfileItemId: "item-lunch", startedAt: "2026-08-11T16:00:00.000Z", endedAt: "2026-08-11T17:00:00.000Z" }],
+    });
     await screen.findByText(/Lunch.*Already added/);
     const lunchOption = screen.getByRole("option", { name: /Lunch/ }) as HTMLOptionElement;
     expect(lunchOption.disabled).toBe(true);
@@ -295,5 +321,112 @@ describe("AddBreakModal", () => {
 
     const cancelButton = screen.getByRole("button", { name: "Cancel" });
     expect(cancelButton.closest(".modal-footer")).not.toBeNull();
+  });
+});
+
+// "Add All Applicable Breaks" — the employee's recorded work start/finish
+// (workStartTime/workEndTime, GET /daily) define the window; every preset
+// whose full start/end falls inside it, isn't already recorded, and doesn't
+// overlap an already-recorded break (preset or custom) is "missing". All
+// times below use the same Toronto (EDT, UTC-4 in August) conversion the
+// existing tests above already document: e.g. Lunch 12:00 PM-1:00 PM
+// Toronto = 16:00-17:00 UTC.
+describe("AddBreakModal — Add All Applicable Breaks", () => {
+  const FULL_SHIFT_START = "2026-08-11T10:45:00.000Z"; // 6:45 AM Toronto
+  const FULL_SHIFT_END = "2026-08-11T22:00:00.000Z"; // 6:00 PM Toronto
+
+  it("a full shift finds all three presets and previews their times", async () => {
+    renderModal({ workStartTime: FULL_SHIFT_START, workEndTime: FULL_SHIFT_END });
+    await screen.findByText(/Lunch \(12:00 PM–1:00 PM, Unpaid\)/);
+
+    expect(screen.getByRole("button", { name: "Add All Breaks (3)" })).not.toBeDisabled();
+    expect(screen.getByText("3 missing breaks: 9:00–9:15, 12:00–1:00, 3:00–3:15")).toBeInTheDocument();
+  });
+
+  it("a partial shift covering only lunch finds just the one applicable preset", async () => {
+    renderModal({ workStartTime: "2026-08-11T15:30:00.000Z", workEndTime: "2026-08-11T17:30:00.000Z" });
+    await screen.findByText(/Lunch \(12:00 PM–1:00 PM, Unpaid\)/);
+
+    expect(screen.getByRole("button", { name: "Add All Breaks (1)" })).not.toBeDisabled();
+    expect(screen.getByText("1 missing break: 12:00–1:00")).toBeInTheDocument();
+  });
+
+  it("excludes a preset already recorded for this employee/date", async () => {
+    renderModal({
+      workStartTime: FULL_SHIFT_START,
+      workEndTime: FULL_SHIFT_END,
+      breaks: [{ breakProfileItemId: "item-lunch", startedAt: "2026-08-11T16:00:00.000Z", endedAt: "2026-08-11T17:00:00.000Z" }],
+    });
+    await screen.findByText(/Lunch \(12:00 PM–1:00 PM, Unpaid\)/);
+
+    expect(screen.getByRole("button", { name: "Add All Breaks (2)" })).not.toBeDisabled();
+    expect(screen.getByText("2 missing breaks: 9:00–9:15, 3:00–3:15")).toBeInTheDocument();
+  });
+
+  it("excludes a preset that overlaps an already-recorded CUSTOM break, even with no matching breakProfileItemId", async () => {
+    renderModal({
+      workStartTime: FULL_SHIFT_START,
+      workEndTime: FULL_SHIFT_END,
+      // A custom break from 2:45-3:05 PM Toronto (18:45-19:05 UTC) overlaps
+      // the Afternoon preset's 3:00-3:15 PM slot (19:00-19:15 UTC) without
+      // sharing its breakProfileItemId at all — the by-id duplicate check
+      // alone would miss this.
+      breaks: [{ breakProfileItemId: null, startedAt: "2026-08-11T18:45:00.000Z", endedAt: "2026-08-11T19:05:00.000Z" }],
+    });
+    await screen.findByText(/Lunch \(12:00 PM–1:00 PM, Unpaid\)/);
+
+    expect(screen.getByRole("button", { name: "Add All Breaks (2)" })).not.toBeDisabled();
+    expect(screen.getByText("2 missing breaks: 9:00–9:15, 12:00–1:00")).toBeInTheDocument();
+  });
+
+  it("disables the button and shows 'No missing breaks' once every applicable break is already present", async () => {
+    renderModal({
+      workStartTime: FULL_SHIFT_START,
+      workEndTime: FULL_SHIFT_END,
+      breaks: [
+        { breakProfileItemId: "item-morning", startedAt: "2026-08-11T13:00:00.000Z", endedAt: "2026-08-11T13:15:00.000Z" },
+        { breakProfileItemId: "item-lunch", startedAt: "2026-08-11T16:00:00.000Z", endedAt: "2026-08-11T17:00:00.000Z" },
+        { breakProfileItemId: "item-afternoon", startedAt: "2026-08-11T19:00:00.000Z", endedAt: "2026-08-11T19:15:00.000Z" },
+      ],
+    });
+    await screen.findByText(/Lunch \(12:00 PM–1:00 PM, Unpaid\)/);
+
+    const button = screen.getByRole("button", { name: "No missing breaks" });
+    expect(button).toBeDisabled();
+    // The preview paragraph (distinct from the button's own "No missing
+    // breaks" label, which itself contains the substring "missing break").
+    expect(screen.queryByText(/^\d+ missing breaks?:/)).not.toBeInTheDocument();
+  });
+
+  it("has no work window yet (no work recorded) — treated the same as no missing breaks", async () => {
+    renderModal({ workStartTime: null, workEndTime: null });
+    await screen.findByText(/Lunch \(12:00 PM–1:00 PM, Unpaid\)/);
+
+    expect(screen.getByRole("button", { name: "No missing breaks" })).toBeDisabled();
+  });
+
+  it("clicking Add All Breaks posts to /breaks/add-all with just employeeId/date and refreshes on success", async () => {
+    const { onCreated } = renderModal({ workStartTime: FULL_SHIFT_START, workEndTime: FULL_SHIFT_END });
+    await screen.findByText(/Lunch \(12:00 PM–1:00 PM, Unpaid\)/);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Add All Breaks (3)" }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    expect(lastPostAddAllBody).toEqual({ employeeId: "emp-1", date: "2026-08-11" });
+  });
+
+  it("shows the server's error and re-enables the button when the bulk add fails (e.g. a rolled-back batch)", async () => {
+    postAddAllStatus = 409;
+    postAddAllMessage = "One of these breaks conflicts with an existing entry";
+    const { onCreated } = renderModal({ workStartTime: FULL_SHIFT_START, workEndTime: FULL_SHIFT_END });
+    await screen.findByText(/Lunch \(12:00 PM–1:00 PM, Unpaid\)/);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Add All Breaks (3)" }));
+
+    await screen.findByText("One of these breaks conflicts with an existing entry");
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Add All Breaks (3)" })).not.toBeDisabled();
   });
 });

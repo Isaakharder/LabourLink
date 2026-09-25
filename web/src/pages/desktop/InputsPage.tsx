@@ -958,6 +958,8 @@ export function InputsPage() {
           date={date}
           runs={daily.runs}
           breaks={daily.breaks}
+          workStartTime={daily.workStartTime}
+          workEndTime={daily.workEndTime}
           onClose={() => setAddModal(null)}
           onCreated={() => handleManualEntryCreated("Break added.")}
         />

@@ -88,6 +88,7 @@ function buildDaily(date: string): DailyInputsResponse {
     employee: { id: "emp-a", firstName: "Alice", lastName: "Anderson", photoUrl: null },
     date,
     workStartTime: null,
+    workEndTime: null,
     workStartOriginalTime: null,
     workStartCorrectedFrom: null,
     workStartManualEntry: null,

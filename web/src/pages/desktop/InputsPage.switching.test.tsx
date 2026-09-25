@@ -139,6 +139,7 @@ function buildDaily(emp: InputsEmployee, date: string, activityName: string, bre
     employee: { id: emp.id, firstName: emp.firstName, lastName: emp.lastName, photoUrl: null },
     date,
     workStartTime: null,
+    workEndTime: null,
     workStartOriginalTime: null,
     workStartCorrectedFrom: null,
     workStartManualEntry: null,

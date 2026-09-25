@@ -21,6 +21,15 @@ function formatTimeOfDay12h(hms: string): string {
   return `${h12}:${String(m).padStart(2, "0")} ${period}`;
 }
 
+// "9:30" — a compact time-of-day for the missing-breaks preview list
+// (deliberately no AM/PM, unlike formatTimeOfDay12h above: the preview is a
+// dense inline list of several times, not one standalone label).
+function formatCompactTimeOfDay(hms: string): string {
+  const [h, m] = hms.split(":").map(Number);
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${String(m).padStart(2, "0")}`;
+}
+
 // "1 hour", "1 hour 30 min", "15 min" — the configured duration between two
 // "HH:MM:SS" time-of-day strings on the same day.
 function formatDurationLabel(startHms: string, endHms: string): string {
@@ -53,7 +62,19 @@ interface AddBreakModalProps {
   // duplicate; this is a heads-up, not a second implementation of that
   // check, so it can go stale if today's data changes underneath the
   // modal without ever letting a duplicate actually through.
-  breaks: { breakProfileItemId: string | null }[];
+  // startedAt/endedAt are needed alongside breakProfileItemId (not just for
+  // the by-preset duplicate check) so "Add All Applicable Breaks" can also
+  // exclude a candidate that overlaps an already-recorded CUSTOM break —
+  // one with no breakProfileItemId, invisible to an id-only check.
+  breaks: { breakProfileItemId: string | null; startedAt: string; endedAt: string | null }[];
+  // The employee's recorded work start/finish for `date` (GET /daily's
+  // workStartTime/workEndTime) — the window "Add All Applicable Breaks"
+  // requires a preset's full start/end to fall inside. Either being null
+  // (no work recorded yet, or the day isn't finished — an entry somewhere
+  // is still open) means the window isn't known yet, so nothing is treated
+  // as missing until it is.
+  workStartTime: string | null;
+  workEndTime: string | null;
   onClose: () => void;
   onCreated: () => void;
 }
@@ -71,7 +92,17 @@ interface AddBreakModalProps {
 // time is ever typed here or trusted from this form. Custom keeps the
 // original exact-administrator-entered-time behavior, with its own
 // editable fields and paid/unpaid choice.
-export function AddBreakModal({ employeeId, employeeName, date, runs, breaks, onClose, onCreated }: AddBreakModalProps) {
+export function AddBreakModal({
+  employeeId,
+  employeeName,
+  date,
+  runs,
+  breaks,
+  workStartTime,
+  workEndTime,
+  onClose,
+  onCreated,
+}: AddBreakModalProps) {
   const [items, setItems] = useState<EmployeeBreakItemOption[] | null>(null);
   const [breakProfileName, setBreakProfileName] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -82,6 +113,7 @@ export function AddBreakModal({ employeeId, employeeName, date, runs, breaks, on
   const [endTime, setEndTime] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [bulkSubmitting, setBulkSubmitting] = useState(false);
 
   useEffect(() => {
     api<{ breakProfile: { id: string; name: string } | null; items: EmployeeBreakItemOption[] }>(
@@ -98,6 +130,39 @@ export function AddBreakModal({ employeeId, employeeName, date, runs, breaks, on
     () => new Set(breaks.map((b) => b.breakProfileItemId).filter((id): id is string => id !== null)),
     [breaks]
   );
+
+  // Client-side mirror of POST /breaks/add-all's own selection — purely for
+  // the button's count and the preview list below; the server independently
+  // recomputes this from live data at submit time and is the sole real
+  // authority (same "preview vs. authoritative" split breakSplitPreview.ts
+  // already uses for the single-break flow), so a stale/mismatched client
+  // computation here can only ever under- or over-preview, never actually
+  // create a wrong break.
+  const missingBreaks = useMemo(() => {
+    if (!items || !workStartTime || !workEndTime) return [];
+    const workStartMs = new Date(workStartTime).getTime();
+    const workEndMs = new Date(workEndTime).getTime();
+    // Every already-recorded break's own range (preset or custom) — used to
+    // exclude a candidate that would overlap one, not just an exact
+    // duplicate of the same preset (alreadyAddedItemIds above already
+    // handles that narrower case).
+    const existingRanges = breaks
+      .filter((b) => b.endedAt !== null)
+      .map((b) => ({ start: new Date(b.startedAt).getTime(), end: new Date(b.endedAt as string).getTime() }));
+
+    return items
+      .filter((item) => !alreadyAddedItemIds.has(item.id))
+      .map((item) => ({
+        item,
+        startMs: new Date(combineDateAndTimeToUtcIso(date, item.startTime)).getTime(),
+        endMs: new Date(combineDateAndTimeToUtcIso(date, item.endTime)).getTime(),
+      }))
+      // Fully inside the work window — never extends beyond work start or
+      // finish (touching a boundary is fine, going past it is not).
+      .filter(({ startMs, endMs }) => startMs >= workStartMs && endMs <= workEndMs)
+      .filter(({ startMs, endMs }) => !existingRanges.some((r) => startMs < r.end && endMs > r.start))
+      .sort((a, b) => a.startMs - b.startMs);
+  }, [items, breaks, workStartTime, workEndTime, date, alreadyAddedItemIds]);
 
   const selectedItem = items?.find((i) => i.id === selectedValue);
   const isCustom = selectedValue === CUSTOM_VALUE;
@@ -160,17 +225,44 @@ export function AddBreakModal({ employeeId, employeeName, date, runs, breaks, on
     }
   }
 
+  // Adds every break in missingBreaks in one request — the server
+  // independently recomputes and applies the applicable set atomically
+  // (POST /breaks/add-all), never trusting this client-side list as the
+  // actual set to insert.
+  async function handleAddAll() {
+    if (missingBreaks.length === 0 || submitting || bulkSubmitting) return;
+    setBulkSubmitting(true);
+    setError(null);
+    try {
+      await api("/api/inputs/breaks/add-all", {
+        method: "POST",
+        body: JSON.stringify({ employeeId, date }),
+      });
+      onCreated();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not add all breaks");
+      setBulkSubmitting(false);
+    }
+  }
+
   return (
     <Modal
       title="Add Break"
-      onClose={submitting ? () => {} : onClose}
+      onClose={submitting || bulkSubmitting ? () => {} : onClose}
       wide
       footer={
         <div className="employee-form-actions">
-          <button type="button" onClick={onClose} disabled={submitting}>
+          <button type="button" onClick={onClose} disabled={submitting || bulkSubmitting}>
             Cancel
           </button>
-          <button type="submit" form="add-break-form" className="employee-form-save" disabled={!canSubmit}>
+          <button
+            type="button"
+            onClick={handleAddAll}
+            disabled={submitting || bulkSubmitting || !items || missingBreaks.length === 0}
+          >
+            {bulkSubmitting ? "Adding…" : missingBreaks.length > 0 ? `Add All Breaks (${missingBreaks.length})` : "No missing breaks"}
+          </button>
+          <button type="submit" form="add-break-form" className="employee-form-save" disabled={!canSubmit || bulkSubmitting}>
             {submitting ? "Adding…" : "Add Break"}
           </button>
         </div>
@@ -270,6 +362,15 @@ export function AddBreakModal({ employeeId, employeeName, date, runs, breaks, on
         {isDuplicate && <p className="error-text">This break has already been added for this employee today.</p>}
 
         {splitPreview && <p className="warning-text">{splitPreview}</p>}
+
+        {missingBreaks.length > 0 && (
+          <p className="field-hint">
+            {missingBreaks.length} missing break{missingBreaks.length === 1 ? "" : "s"}:{" "}
+            {missingBreaks
+              .map(({ item }) => `${formatCompactTimeOfDay(item.startTime)}–${formatCompactTimeOfDay(item.endTime)}`)
+              .join(", ")}
+          </p>
+        )}
 
         {error && <p className="error-text">{error}</p>}
       </form>

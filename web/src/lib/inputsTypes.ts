@@ -191,6 +191,11 @@ export interface DailyInputsResponse {
   employee: { id: string; firstName: string; lastName: string; photoUrl: string | null };
   date: string;
   workStartTime: string | null;
+  // The day's finish — the latest ended_at across every entry (work or
+  // break) this date, or null while anything that day is still open. Used
+  // by Add Break's "Add All Applicable Breaks" to determine the employee's
+  // full work window without a second calculation.
+  workEndTime: string | null;
   // The employee's original (pre-rounding) button-press timestamp — only
   // non-null when work-start rounding was active for this entry (see
   // server/src/lib/workStartRounding.ts). Equal to workStartTime when

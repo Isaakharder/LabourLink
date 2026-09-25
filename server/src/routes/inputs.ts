@@ -18,8 +18,10 @@ import {
   validateActivityAndAnswers,
 } from "../lib/activitySelection";
 import {
+  applyBreakInsertionPlan,
   describeConflict,
   findOverlappingEntry,
+  insertBreakEntry,
   lockEmployeeForManualEntry,
   planActivityInsertion,
   planBreakInsertion,
@@ -905,6 +907,14 @@ router.get(
       },
       date,
       workStartTime: workStart ? workStart.started_at : null,
+      // The day's finish — the latest ended_at across every entry (work or
+      // break — the day can end mid-break) this date, or null while
+      // anything that day is still open. Already computed by
+      // computeWorkdayTotals below for the "Worked" total; exposed here too
+      // (rather than making the client re-derive it from runs/breaks) so
+      // Add Break's "Add All Applicable Breaks" can determine the
+      // employee's full work window without a second calculation.
+      workEndTime: workdayTotals.workEndTime,
       // The employee's original button-press timestamp, only present when
       // work-start rounding actually applied to this entry (see
       // server/src/lib/workStartRounding.ts and mobileTime.ts's POST
@@ -2460,72 +2470,22 @@ router.post(
         return res.status(409).json({ error: plan.error });
       }
 
-      for (const trim of plan.trims) {
-        await client.query(`update time_entries set ${trim.field} = $1 where id = $2`, [trim.newValue, trim.id]);
-        await client.query(
-          `insert into time_entry_corrections
-             (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
-           values ($1, $2, $3, $4, $5, $6, $7)`,
-          [
-            trim.id,
-            employeeId,
-            req.employee!.id,
-            trim.field,
-            trim.oldValue.toISOString(),
-            trim.newValue.toISOString(),
-            AUTO_CORRECTION_REASON,
-          ]
-        );
-      }
+      await applyBreakInsertionPlan(client, employeeId, req.employee!.id, plan, {
+        trimReason: AUTO_CORRECTION_REASON,
+        deletionReason: BREAK_SPLIT_DELETION_REASON,
+        continuationReason: BREAK_MANUAL_ADD_REASON,
+      });
 
-      for (const del of plan.deletions) {
-        await client.query(
-          `update time_entries set deleted_at = now(), deleted_by_employee_id = $1, deletion_reason = $2 where id = $3`,
-          [req.employee!.id, BREAK_SPLIT_DELETION_REASON, del.id]
-        );
-        await client.query(
-          `insert into time_entry_deletions
-             (employee_id, deleted_by_employee_id, deletion_type, affected_time_entry_ids, reason)
-           values ($1, $2, 'activity_run', $3, $4)`,
-          [employeeId, req.employee!.id, [del.id], BREAK_SPLIT_DELETION_REASON]
-        );
-      }
-
-      // The continuation entry's creation reason mirrors the break's own —
-      // the split exists BECAUSE of this break, so "why was this second
-      // half created" and "why was this break added" are the same answer —
-      // both now the same fixed, server-generated string.
-      for (const cont of plan.continuations) {
-        await client.query(
-          `insert into time_entries
-             (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source,
-              greenhouse_row_id, carrier_id, density_type, density_count_per_row,
-              created_by_employee_id, creation_reason)
-           values ($1, $2, 'work', $3, gen_random_uuid(), $4, $5, 'manual', $6, $7, $8, $9, $10, $11)`,
-          [
-            employeeId,
-            cont.deviceId,
-            cont.activityId,
-            cont.startedAt,
-            cont.endedAt,
-            cont.greenhouseRowId,
-            cont.carrierId,
-            cont.densityType,
-            cont.densityCountPerRow,
-            req.employee!.id,
-            BREAK_MANUAL_ADD_REASON,
-          ]
-        );
-      }
-
-      await client.query(
-        `insert into time_entries
-           (employee_id, device_id, entry_type, idempotency_key, started_at, ended_at, source,
-            break_profile_item_id, scheduled_break_date, is_paid,
-            created_by_employee_id, creation_reason)
-         values ($1, null, 'break', gen_random_uuid(), $2, $3, 'manual', $4, $5, $6, $7, $8)`,
-        [employeeId, start, end, validatedItemId, date, resolvedIsPaid, req.employee!.id, BREAK_MANUAL_ADD_REASON]
-      );
+      await insertBreakEntry(client, {
+        employeeId,
+        start,
+        end,
+        breakProfileItemId: validatedItemId,
+        scheduledBreakDate: date,
+        isPaid: resolvedIsPaid,
+        actingEmployeeId: req.employee!.id,
+        creationReason: BREAK_MANUAL_ADD_REASON,
+      });
 
       await client.query("commit");
     } catch (err) {
@@ -2536,6 +2496,171 @@ router.post(
     }
 
     res.status(201).json({ ok: true });
+  })
+);
+
+// Adds every configured break preset that's missing from the employee's day
+// AND fully falls inside their actual work window (recorded work start
+// through work finish) — the "Add All Applicable Breaks" button next to the
+// single Add Break flow above. Computes the applicable set itself from live
+// data rather than trusting a client-supplied list (the same "server is the
+// sole authority" convention POST /breaks already follows for a single
+// preset's resolved time), and applies every resulting break in one
+// transaction via the exact same planBreakInsertion / applyBreakInsertionPlan
+// / insertBreakEntry helpers POST /breaks itself uses per break — so the
+// split/trim/merge behavior around each inserted break is identical, never a
+// second, looser implementation of that logic. If ANY candidate fails to
+// plan (a genuine race — e.g. another admin adds a conflicting entry between
+// this request's own read and its lock), the whole request rolls back;
+// nothing is added, matching POST /breaks's own reject-everything-or-commit
+// shape at the level of one break, extended here to a whole batch.
+router.post(
+  "/breaks/add-all",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const { employeeId, date } = req.body as { employeeId?: string; date?: string };
+    if (!employeeId || !UUID_RE.test(employeeId)) {
+      return res.status(400).json({ error: "A valid employeeId is required" });
+    }
+    if (!isValidDate(date)) {
+      return res.status(400).json({ error: "A valid date (YYYY-MM-DD) is required" });
+    }
+
+    const empRes = await pool.query(
+      "select id, break_profile_id from employees where id = $1 and is_active = true",
+      [employeeId]
+    );
+    const employee = empRes.rows[0];
+    if (!employee) return res.status(404).json({ error: "Employee not found or inactive" });
+
+    const added: { id: string; breakProfileItemId: string; name: string | null; startedAt: string; endedAt: string; isPaid: boolean }[] = [];
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await lockEmployeeForManualEntry(client, employeeId);
+
+      // Fresh read, inside the lock — the same day's-entries shape /daily
+      // itself builds workdayEntries from (see computeWorkdayTotals's own
+      // caller above), so the work window computed here can never disagree
+      // with what the Inputs page already shows for this date.
+      const { start: dayStart, end: dayEnd } = getDayBoundsUtc(date as string);
+      const { rows: entryRows } = await client.query(
+        `select entry_type, started_at, ended_at, is_paid, break_profile_item_id
+         from time_entries
+         where employee_id = $1 and deleted_at is null
+           and started_at >= $2 and started_at < $3
+         order by started_at asc`,
+        [employeeId, dayStart, dayEnd]
+      );
+
+      const workdayEntries: WorkdayBoundaryEntry[] = entryRows.map((r) => ({
+        entryType: r.entry_type,
+        startedAt: r.started_at,
+        endedAt: r.ended_at,
+        isPaid: r.is_paid,
+      }));
+      const { workStartTime, workEndTime } = computeWorkdayTotals(workdayEntries);
+
+      // No work window to check a preset against yet — no work recorded at
+      // all, or the day is still open (something hasn't ended). Nothing is
+      // "missing" until the day is complete; this is a genuine success with
+      // nothing to do, not an error.
+      if (!workStartTime || !workEndTime || !employee.break_profile_id) {
+        await client.query("commit");
+        return res.status(200).json({ ok: true, added: [] });
+      }
+
+      const { rows: itemRows } = await client.query(
+        `select bpi.id, bpi.name, bpi.start_time, bpi.end_time, bpi.is_paid
+         from break_profile_items bpi
+         join break_profiles bp on bp.id = bpi.break_profile_id and bp.is_active = true
+         where bpi.break_profile_id = $1 and bpi.is_active = true
+         order by bpi.sort_order`,
+        [employee.break_profile_id]
+      );
+
+      const existingBreaks = entryRows.filter((r) => r.entry_type === "break");
+      const existingItemIds = new Set<string>(
+        existingBreaks.map((r) => r.break_profile_item_id).filter((id: string | null): id is string => id !== null)
+      );
+
+      const [y, mo, d] = (date as string).split("-").map(Number);
+      const candidates = itemRows
+        .filter((item) => !existingItemIds.has(item.id))
+        .map((item) => {
+          const [sh, sm, ss] = parseTimeParts(item.start_time);
+          const [eh, em, es] = parseTimeParts(item.end_time);
+          return { item, start: zonedWallTimeToUtc(y, mo, d, sh, sm, ss), end: zonedWallTimeToUtc(y, mo, d, eh, em, es) };
+        })
+        // Fully inside the work window — never extends beyond work start
+        // or finish (boundary-touching is fine, "beyond" is not).
+        .filter(({ start, end }) => start.getTime() >= workStartTime.getTime() && end.getTime() <= workEndTime.getTime())
+        // Excludes anything overlapping an ALREADY-recorded break of any
+        // kind — another preset, or a custom break someone already typed
+        // into that slot — not just an exact duplicate of the same preset
+        // (already excluded above by id). Two breaks can never overlap
+        // (planBreakInsertion's own invariant for a single Add Break); this
+        // keeps that true for a whole batch without ever attempting, and
+        // then rejecting, an insertion that was never going to succeed.
+        .filter(({ start, end }) => {
+          return !existingBreaks.some((b) => {
+            const existingStart = new Date(b.started_at).getTime();
+            const existingEnd = b.ended_at ? new Date(b.ended_at).getTime() : Infinity;
+            return start.getTime() < existingEnd && end.getTime() > existingStart;
+          });
+        })
+        .sort((a, b) => a.start.getTime() - b.start.getTime());
+
+      if (candidates.length === 0) {
+        await client.query("commit");
+        return res.status(200).json({ ok: true, added: [] });
+      }
+
+      for (const { item, start, end } of candidates) {
+        const plan = await planBreakInsertion(client, employeeId, start, end);
+        if (!plan.ok) {
+          await client.query("rollback");
+          return res.status(409).json({ error: plan.error });
+        }
+
+        await applyBreakInsertionPlan(client, employeeId, req.employee!.id, plan, {
+          trimReason: AUTO_CORRECTION_REASON,
+          deletionReason: BREAK_SPLIT_DELETION_REASON,
+          continuationReason: BREAK_MANUAL_ADD_REASON,
+        });
+
+        const insertedId = await insertBreakEntry(client, {
+          employeeId,
+          start,
+          end,
+          breakProfileItemId: item.id,
+          scheduledBreakDate: date as string,
+          isPaid: item.is_paid,
+          actingEmployeeId: req.employee!.id,
+          creationReason: BREAK_MANUAL_ADD_REASON,
+        });
+
+        added.push({
+          id: insertedId,
+          breakProfileItemId: item.id,
+          name: item.name,
+          startedAt: start.toISOString(),
+          endedAt: end.toISOString(),
+          isPaid: item.is_paid,
+        });
+      }
+
+      await client.query("commit");
+    } catch (err) {
+      await client.query("rollback");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    res.status(added.length > 0 ? 201 : 200).json({ ok: true, added });
   })
 );
 

@@ -241,6 +241,121 @@ export type BreakInsertionPlan =
   | { ok: true; trims: ActivityTrim[]; continuations: BreakSplitContinuation[]; deletions: BreakCoveredDeletion[] }
   | { ok: false; error: string };
 
+// The three reasons recorded against every trim/deletion/continuation a
+// break insertion produces — always the same three strings today (POST
+// /breaks and POST /breaks/add-all both use the single, unconditional
+// reason each of those three ever needs), but kept as an explicit
+// parameter object rather than hardcoded here so this stays a pure
+// DB-application helper with no dependency on inputs.ts's own constants.
+export interface ApplyBreakInsertionPlanReasons {
+  trimReason: string;
+  deletionReason: string;
+  continuationReason: string;
+}
+
+// Applies an already-computed BreakInsertionPlan's trims/deletions/
+// continuations to the database — the exact same three loops POST /breaks
+// (Add Break) used inline before this was extracted, now shared with POST
+// /breaks/add-all (Add All Applicable Breaks) so the two creation paths can
+// never silently drift into applying a plan two different ways. Does NOT
+// insert the break entry itself — see insertBreakEntry below — since a
+// caller inserting several breaks in one transaction (add-all) needs to
+// apply each one's plan and then insert that one break before moving on to
+// the next candidate (a later candidate's own planBreakInsertion call must
+// see the previous break's row already in place).
+export async function applyBreakInsertionPlan(
+  client: PoolClient,
+  employeeId: string,
+  actingEmployeeId: string,
+  plan: { trims: ActivityTrim[]; continuations: BreakSplitContinuation[]; deletions: BreakCoveredDeletion[] },
+  reasons: ApplyBreakInsertionPlanReasons
+): Promise<void> {
+  for (const trim of plan.trims) {
+    await client.query(`update time_entries set ${trim.field} = $1 where id = $2`, [trim.newValue, trim.id]);
+    await client.query(
+      `insert into time_entry_corrections
+         (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+       values ($1, $2, $3, $4, $5, $6, $7)`,
+      [trim.id, employeeId, actingEmployeeId, trim.field, trim.oldValue.toISOString(), trim.newValue.toISOString(), reasons.trimReason]
+    );
+  }
+
+  for (const del of plan.deletions) {
+    await client.query(
+      `update time_entries set deleted_at = now(), deleted_by_employee_id = $1, deletion_reason = $2 where id = $3`,
+      [actingEmployeeId, reasons.deletionReason, del.id]
+    );
+    await client.query(
+      `insert into time_entry_deletions
+         (employee_id, deleted_by_employee_id, deletion_type, affected_time_entry_ids, reason)
+       values ($1, $2, 'activity_run', $3, $4)`,
+      [employeeId, actingEmployeeId, [del.id], reasons.deletionReason]
+    );
+  }
+
+  // The continuation entry's creation reason mirrors the break's own — the
+  // split exists BECAUSE of this break, so "why was this second half
+  // created" and "why was this break added" are the same answer.
+  for (const cont of plan.continuations) {
+    await client.query(
+      `insert into time_entries
+         (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source,
+          greenhouse_row_id, carrier_id, density_type, density_count_per_row,
+          created_by_employee_id, creation_reason)
+       values ($1, $2, 'work', $3, gen_random_uuid(), $4, $5, 'manual', $6, $7, $8, $9, $10, $11)`,
+      [
+        employeeId,
+        cont.deviceId,
+        cont.activityId,
+        cont.startedAt,
+        cont.endedAt,
+        cont.greenhouseRowId,
+        cont.carrierId,
+        cont.densityType,
+        cont.densityCountPerRow,
+        actingEmployeeId,
+        reasons.continuationReason,
+      ]
+    );
+  }
+}
+
+export interface InsertBreakEntryParams {
+  employeeId: string;
+  start: Date;
+  end: Date;
+  breakProfileItemId: string | null;
+  scheduledBreakDate: string;
+  isPaid: boolean;
+  actingEmployeeId: string;
+  creationReason: string;
+}
+
+// Inserts the break row itself — the same insert POST /breaks used inline
+// before this was extracted, now shared with POST /breaks/add-all. Returns
+// the new row's id so a bulk caller can report exactly what it created.
+export async function insertBreakEntry(client: PoolClient, params: InsertBreakEntryParams): Promise<string> {
+  const { rows } = await client.query(
+    `insert into time_entries
+       (employee_id, device_id, entry_type, idempotency_key, started_at, ended_at, source,
+        break_profile_item_id, scheduled_break_date, is_paid,
+        created_by_employee_id, creation_reason)
+     values ($1, null, 'break', gen_random_uuid(), $2, $3, 'manual', $4, $5, $6, $7, $8)
+     returning id`,
+    [
+      params.employeeId,
+      params.start,
+      params.end,
+      params.breakProfileItemId,
+      params.scheduledBreakDate,
+      params.isPaid,
+      params.actingEmployeeId,
+      params.creationReason,
+    ]
+  );
+  return rows[0].id;
+}
+
 // Used by POST /breaks (Add Break) for the requested [start, end) break
 // range — the mirror image of planActivityInsertion above, but for a break
 // arriving into a schedule of (mostly) work entries instead of a work entry

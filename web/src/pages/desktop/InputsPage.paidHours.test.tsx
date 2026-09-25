@@ -120,6 +120,7 @@ function buildDaily(employeeId: string, firstName: string, lastName: string, dat
     employee: { id: employeeId, firstName, lastName, photoUrl: null },
     date,
     workStartTime: null,
+    workEndTime: null,
     workStartOriginalTime: null,
     workStartCorrectedFrom: null,
     workStartManualEntry: null,
