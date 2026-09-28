@@ -24,6 +24,7 @@ import {
   resolveDensitySnapshot,
   validateActivityAndAnswers,
 } from "../lib/activitySelection";
+import { completeRowVisitIfApplicable } from "../lib/rowCompletionAutomation";
 
 const router = Router();
 router.use(asyncHandler(requireDevice));
@@ -168,7 +169,16 @@ async function openEntry(
       [employeeId]
     );
     const open = openRes.rows[0] as
-      | { id: string; entry_type: "work" | "break"; started_at: string; idempotency_key: string }
+      | {
+          id: string;
+          entry_type: "work" | "break";
+          activity_id: string | null;
+          started_at: string;
+          greenhouse_row_id: string | null;
+          density_type: "plants" | "stems" | null;
+          density_count_per_row: number | null;
+          idempotency_key: string;
+        }
       | undefined;
 
     if (open && open.idempotency_key === idempotencyKey) {
@@ -293,6 +303,33 @@ async function openEntry(
          where employee_id = $1 and ended_at is null and deleted_at is null and idempotency_key <> $2`,
         [employeeId, idempotencyKey, overrides.startedAt ?? null, overrides.actualEndedAt ?? null]
       );
+
+      // Automatic row completion (server/src/lib/rowCompletionAutomation.ts):
+      // the employee just genuinely LEFT a row-based work entry — either a
+      // different work activity, or the same activity on a different row
+      // (never a break: entryType === "break" is deliberately excluded, so
+      // going on break never completes the row it interrupts — resuming the
+      // same row/activity/carrier/density afterward stays the same open
+      // visit, exactly like every other run-contiguity check in this app).
+      // Runs inside this SAME transaction — if it fails, the close above
+      // rolls back with it rather than leaving the two inconsistent.
+      if (
+        open &&
+        open.entry_type === "work" &&
+        open.greenhouse_row_id &&
+        open.density_type &&
+        open.density_count_per_row != null &&
+        entryType === "work" &&
+        (activityId !== open.activity_id || (overrides.greenhouseRowId ?? null) !== open.greenhouse_row_id)
+      ) {
+        await completeRowVisitIfApplicable(client, {
+          activityId: open.activity_id!,
+          greenhouseRowId: open.greenhouse_row_id,
+          densityType: open.density_type,
+          densityCountPerRow: Number(open.density_count_per_row),
+          endedAt: closeBoundary,
+        });
+      }
     }
 
     // Frozen at the moment this work entry is opened (see
@@ -1173,12 +1210,23 @@ router.post(
       // before" table needed, and it's what makes "replaying must not round
       // twice or create another entry" true for free.
       const openRes = await client.query(
-        `select id, started_at from time_entries
+        `select id, entry_type, activity_id, started_at, greenhouse_row_id, density_type, density_count_per_row
+         from time_entries
          where employee_id = $1 and ended_at is null and deleted_at is null
          for update`,
         [d.employeeId]
       );
-      const open = openRes.rows[0];
+      const open = openRes.rows[0] as
+        | {
+            id: string;
+            entry_type: "work" | "break";
+            activity_id: string | null;
+            started_at: string;
+            greenhouse_row_id: string | null;
+            density_type: "plants" | "stems" | null;
+            density_count_per_row: number | null;
+          }
+        | undefined;
 
       if (open) {
         const now = new Date();
@@ -1234,6 +1282,22 @@ router.post(
           effectiveEnd,
           actualEndedAt,
         ]);
+
+        // Finish Work unambiguously leaves whatever row was open — the
+        // employee is no longer working it, full stop — so this is treated
+        // as the same kind of "genuine exit" as switching to a different
+        // row/activity (see the identical hook in openEntry() above),
+        // rather than leaving the row silently "in progress" until whenever
+        // they next tap something, possibly days later.
+        if (open.entry_type === "work" && open.greenhouse_row_id && open.density_type && open.density_count_per_row != null) {
+          await completeRowVisitIfApplicable(client, {
+            activityId: open.activity_id!,
+            greenhouseRowId: open.greenhouse_row_id,
+            densityType: open.density_type,
+            densityCountPerRow: Number(open.density_count_per_row),
+            endedAt: effectiveEnd,
+          });
+        }
       }
 
       await client.query("commit");

@@ -298,7 +298,7 @@ export async function getActivityDensityAttribution(
      from row_completions rc
      join row_completion_segments rcs on rcs.row_completion_id = rc.id
      join time_entries te on te.id = rcs.time_entry_id
-     where te.deleted_at is null
+     where te.deleted_at is null and rc.status = 'active'
        and ($2::uuid[] is null or te.employee_id = any($2::uuid[]))
      group by rc.id
      having bool_or(te.activity_id = $1) or count(distinct te.activity_id) > 1`,
@@ -312,7 +312,7 @@ export async function getActivityDensityAttribution(
            from row_completions rc
            join row_completion_segments rcs on rcs.row_completion_id = rc.id
            join time_entries te on te.id = rcs.time_entry_id
-           where rc.id = any($1::uuid[])
+           where rc.id = any($1::uuid[]) and rc.status = 'active' and te.deleted_at is null
            order by rc.id, te.started_at`,
           [completionIds]
         )
@@ -333,19 +333,46 @@ export async function getActivityDensityAttribution(
   }
 
   for (const { quantityPerRow, segs } of completionSegsById.values()) {
-    const employeeIdsInGroup = new Set(segs.map((s) => s.employeeId));
     const activityIdsInGroup = new Set(segs.map((s) => s.activityId));
-    if (employeeIdsInGroup.size !== 1) continue;
     if (activityIdsInGroup.size !== 1) continue;
     const [soleActivityId] = activityIdsInGroup;
     if (soleActivityId !== activityId) continue;
-    const [soleEmployeeId] = employeeIdsInGroup;
     const allInRange = segs.every((s) => s.startedAt >= rangeStart && s.startedAt < rangeEnd);
     if (!allInRange) continue;
 
     const totalDurationSeconds = segs.reduce((sum, s) => sum + (s.endedAt.getTime() - s.startedAt.getTime()) / 1000, 0);
-    addTo(byEmployee, soleEmployeeId, quantityPerRow, totalDurationSeconds, 1);
-    attributeByDay(soleEmployeeId, quantityPerRow, segs, 1);
+    if (totalDurationSeconds <= 0) continue;
+
+    const employeeIdsInGroup = [...new Set(segs.map((s) => s.employeeId))];
+    if (employeeIdsInGroup.length === 1) {
+      // Common case — one employee, the row's own frozen quantity counts
+      // exactly once, no split needed.
+      const [soleEmployeeId] = employeeIdsInGroup;
+      addTo(byEmployee, soleEmployeeId, quantityPerRow, totalDurationSeconds, 1);
+      attributeByDay(soleEmployeeId, quantityPerRow, segs, 1);
+    } else {
+      // Multiple employees (automatic re-entry/reopen combined a different
+      // employee's continuation into this same physical row — see
+      // rowCompletionAutomation.ts) — allocate the one frozen quantity
+      // proportionally by each employee's own share of the completion's
+      // total duration, the same principle attributeByDay already applies
+      // across days. "completions" (a whole-row metric, not fractional)
+      // credits whichever employee contributed the largest share.
+      let bestEmployeeId = "";
+      let bestDuration = -1;
+      for (const empId of employeeIdsInGroup) {
+        const empSegs = segs.filter((s) => s.employeeId === empId);
+        const empDuration = empSegs.reduce((sum, s) => sum + (s.endedAt.getTime() - s.startedAt.getTime()) / 1000, 0);
+        const empQuantity = Math.round(quantityPerRow * (empDuration / totalDurationSeconds));
+        addTo(byEmployee, empId, empQuantity, empDuration, 0);
+        attributeByDay(empId, empQuantity, empSegs, 0);
+        if (empDuration > bestDuration) {
+          bestDuration = empDuration;
+          bestEmployeeId = empId;
+        }
+      }
+      if (bestEmployeeId) addTo(byEmployee, bestEmployeeId, 0, 0, 1);
+    }
   }
 
   // Rule 2: unresolved (not-yet-completed) runs. Bounded by distinct rows
@@ -739,6 +766,14 @@ export async function getActivityReportData(
             -- identical to_char(...,'YYYY-MM-DD') use for
             -- scheduled_break_date).
             to_char((te.started_at at time zone $4)::date, 'YYYY-MM-DD') as work_date,
+            -- Deliberately NOT filtered to ended_at is not null (see the
+            -- WHERE clause below) — an in-progress row still counts toward
+            -- rows_touched (the employee has genuinely entered it, whether
+            -- or not they've left yet) and must appear in this report row
+            -- at all, even before it has any finished duration. work_seconds
+            -- stays exactly correct regardless: SUM ignores the NULL an
+            -- open segment's own (ended_at - started_at) produces, so no
+            -- invented duration is ever added for it.
             sum(extract(epoch from (te.ended_at - te.started_at))) as work_seconds,
             min(te.started_at) as started_at,
             max(te.ended_at) as ended_at,
@@ -746,7 +781,7 @@ export async function getActivityReportData(
      from time_entries te
      join employees e on e.id = te.employee_id
      where te.activity_id = $1 and te.entry_type = 'work' and te.deleted_at is null
-       and te.ended_at is not null and te.started_at >= $2 and te.started_at < $3
+       and te.started_at >= $2 and te.started_at < $3
        and ($5::uuid[] is null or te.employee_id = any($5::uuid[]))
      group by te.employee_id, e.first_name, e.last_name, work_date
      order by work_date, e.first_name, e.last_name`,
@@ -842,7 +877,14 @@ export async function getActivityReportData(
       employeeName: `${r.first_name} ${r.last_name}`,
       date: dateStr,
       startedAt: r.started_at,
-      endedAt: r.ended_at,
+      // max(te.ended_at) is null when every one of this employee/day's
+      // entries is still in progress (no finished segment yet) — falls
+      // back to startedAt rather than storing a literal null against this
+      // field's non-nullable type. Never rendered as a metric today
+      // (startTime/endTime have no pivot-eligible Grand Total — see
+      // reportTypes.ts), so this is a type-safety guard, not a visible
+      // display concern.
+      endedAt: r.ended_at ?? r.started_at,
       workSeconds: rowWorkSeconds,
       breakSeconds: breakInfo.breakSeconds,
       paidBreakSeconds: breakInfo.paidBreakSeconds,

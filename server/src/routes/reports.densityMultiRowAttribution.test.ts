@@ -432,6 +432,56 @@ async function main() {
       check(dayRow?.quantityWorked === 250, "8) quantityWorked is only the finished row's 250 — no invented in-progress quantity", dayRow);
       check(dayRow?.averageSpeed === 250, "8) Average Speed is 250/1h=250/hour", dayRow);
     }
+
+    // -----------------------------------------------------------------
+    // 9) "Rows" (rowsTouched) reconciliation bug: an in-progress row must
+    //    count toward rowsTouched (and the employee's own day-row must
+    //    still appear at all) the same way the DAY TOTAL/Weekly Rows
+    //    totals already did — previously the per-employee-day query
+    //    required ended_at is not null (needed for the workSeconds SUM,
+    //    which already correctly ignores a null-duration open segment on
+    //    its own) while the three total queries never did, so an
+    //    employee currently mid-row was invisible in their own "Rows"
+    //    cell yet still counted in the totals — DAY TOTAL/Weekly Rows
+    //    could exceed the sum of the visible per-employee cells, exactly
+    //    the reported "Monday Rows add to 26 but DAY TOTAL/Weekly Rows
+    //    show 31" symptom.
+    // -----------------------------------------------------------------
+    {
+      const emp = await makeEmployee("RowsReconcile");
+      const rowFinished = await makeRow();
+      const rowInProgress = await makeRow();
+      await makeWork(emp, rowFinished, "2026-08-20T12:00:00Z", "2026-08-20T13:00:00Z", { densityCountPerRow: 100 }); // 1h finished
+      await makeOpenWork(emp, rowInProgress, "2026-08-20T13:00:00Z", 100); // still open — no ended_at
+
+      const reportId = await createActivityReport();
+      const data = await getData(reportId, "2026-08-20", "2026-08-20");
+      const dayRow = findRow(data, emp, "2026-08-20");
+      check(dayRow?.rowsTouched === 2, "9) the employee's own day-row counts BOTH rows touched — the in-progress one is not invisible", dayRow);
+
+      const total = findEmployeeTotal(data, emp);
+      check(total?.rowsTouched === 2, "9) the employee's Weekly Rows total also counts both — matches their own visible day-row exactly", total);
+
+      const dateTotal = (data?.dateTotals ?? []).find((d: any) => d.date === "2026-08-20");
+      check(
+        dateTotal?.rowsTouched === dayRow?.rowsTouched,
+        "9) the DAY TOTAL for this date exactly reconciles with the (single) employee's own visible Rows cell — never higher, never lower",
+        { dateTotal, dayRow }
+      );
+
+      // An employee whose ENTIRE day is a single still-open row (no
+      // finished segment at all) must still appear in the report's own
+      // per-day rows — not be silently absent while still being counted
+      // in the totals.
+      const emp2 = await makeEmployee("RowsReconcileOpenOnly");
+      const rowOnly = await makeRow();
+      await makeOpenWork(emp2, rowOnly, "2026-08-20T14:00:00Z", 100);
+      const data2 = await getData(reportId, "2026-08-20", "2026-08-20");
+      const dayRow2 = findRow(data2, emp2, "2026-08-20");
+      check(!!dayRow2, "9) an employee whose entire day is one still-open row still gets their own day-row (never silently absent)", dayRow2);
+      check(dayRow2?.workSeconds === 0, "9) that day-row's Activity Hours is exactly 0 (no invented duration for the open segment)", dayRow2);
+      check(dayRow2?.rowsTouched === 1, "9) that day-row's Rows count is 1 (the open row still counts as touched)", dayRow2);
+    }
   } finally {
     for (const rid of reportIds) await pool.query("delete from saved_reports where id = $1", [rid]).catch(() => {});
     // row_completions FIRST — row_completion_segments.time_entry_id has no
