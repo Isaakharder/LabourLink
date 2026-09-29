@@ -91,7 +91,8 @@
     "test:pairing": "ts-node src/routes/pairing.test.ts",
     "test:auth-middleware": "ts-node src/middleware/auth.test.ts",
     "test:auth-session-cookie": "ts-node src/routes/auth.sessionCookie.test.ts",
-    "test:integrations-productive-tv-pruning-speed": "ts-node src/routes/integrations.productiveTvPruningSpeed.test.ts"
+    "test:integrations-productive-tv-pruning-speed": "ts-node src/routes/integrations.productiveTvPruningSpeed.test.ts",
+    "test:integrations-productive-tv-picking-speed": "ts-node src/routes/integrations.productiveTvPickingSpeed.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",

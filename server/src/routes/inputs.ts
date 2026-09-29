@@ -739,13 +739,18 @@ router.get(
       (async () => {
         const map = new Map<string, { quantity: number; durationSeconds: number; segmentCount: number }>();
         if (completionIdsNeeded.size > 0) {
+          // te.deleted_at is null matters: without it, a segment an admin
+          // later soft-deletes (activity-run correction/deletion) keeps
+          // being counted in this completion's speed/duration display
+          // forever — see reportQueries.ts's identical filter on its own
+          // completion query.
           const { rows: compRows } = await pool.query(
             `select rc.id, rc.quantity_per_row, count(*) as segment_count,
                     sum(extract(epoch from (te.ended_at - te.started_at))) as total_duration_seconds
              from row_completions rc
              join row_completion_segments rcs on rcs.row_completion_id = rc.id
              join time_entries te on te.id = rcs.time_entry_id
-             where rc.id = any($1::uuid[])
+             where rc.id = any($1::uuid[]) and te.deleted_at is null
              group by rc.id, rc.quantity_per_row`,
             [[...completionIdsNeeded]]
           );

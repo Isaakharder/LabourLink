@@ -293,6 +293,13 @@ export async function getActivityDensityAttribution(
   // before), then the full per-segment detail is fetched separately so a
   // multi-day completion's duration can be split by day below, not just
   // aggregated.
+  // Every row currently in row_completions is, definitionally, the
+  // manually confirmed/combined "current" completion for its
+  // row+activity+density (there is no 'reopened'/'superseded' concept in
+  // this schema) — a future automatic-completion feature would add a
+  // status column and a matching "and rc.status = 'active'" filter to both
+  // queries below; until that ships, this stays exactly as production's
+  // schema actually is.
   const { rows: candidateIdRows } = await pool.query(
     `select rc.id as completion_id
      from row_completions rc
@@ -333,19 +340,47 @@ export async function getActivityDensityAttribution(
   }
 
   for (const { quantityPerRow, segs } of completionSegsById.values()) {
-    const employeeIdsInGroup = new Set(segs.map((s) => s.employeeId));
     const activityIdsInGroup = new Set(segs.map((s) => s.activityId));
-    if (employeeIdsInGroup.size !== 1) continue;
     if (activityIdsInGroup.size !== 1) continue;
     const [soleActivityId] = activityIdsInGroup;
     if (soleActivityId !== activityId) continue;
-    const [soleEmployeeId] = employeeIdsInGroup;
     const allInRange = segs.every((s) => s.startedAt >= rangeStart && s.startedAt < rangeEnd);
     if (!allInRange) continue;
 
     const totalDurationSeconds = segs.reduce((sum, s) => sum + (s.endedAt.getTime() - s.startedAt.getTime()) / 1000, 0);
-    addTo(byEmployee, soleEmployeeId, quantityPerRow, totalDurationSeconds, 1);
-    attributeByDay(soleEmployeeId, quantityPerRow, segs, 1);
+    if (totalDurationSeconds <= 0) continue;
+
+    const employeeIdsInGroup = [...new Set(segs.map((s) => s.employeeId))];
+    if (employeeIdsInGroup.length === 1) {
+      // Common case — one employee, the row's own frozen quantity counts
+      // exactly once, no split needed.
+      const [soleEmployeeId] = employeeIdsInGroup;
+      addTo(byEmployee, soleEmployeeId, quantityPerRow, totalDurationSeconds, 1);
+      attributeByDay(soleEmployeeId, quantityPerRow, segs, 1);
+    } else {
+      // Multiple employees share this one confirmed/combined completion (an
+      // admin merged a re-entry's segments into the original row via the
+      // Row Completion Review modal — POST /api/row-completions) — allocate
+      // the one frozen quantity proportionally by each employee's own share
+      // of the completion's total duration, the same principle
+      // attributeByDay already applies across days. "completions" (a
+      // whole-row metric, not fractional) credits whichever employee
+      // contributed the largest share — never both, never neither.
+      let bestEmployeeId = "";
+      let bestDuration = -1;
+      for (const empId of employeeIdsInGroup) {
+        const empSegs = segs.filter((s) => s.employeeId === empId);
+        const empDuration = empSegs.reduce((sum, s) => sum + (s.endedAt.getTime() - s.startedAt.getTime()) / 1000, 0);
+        const empQuantity = Math.round(quantityPerRow * (empDuration / totalDurationSeconds));
+        addTo(byEmployee, empId, empQuantity, empDuration, 0);
+        attributeByDay(empId, empQuantity, empSegs, 0);
+        if (empDuration > bestDuration) {
+          bestDuration = empDuration;
+          bestEmployeeId = empId;
+        }
+      }
+      if (bestEmployeeId) addTo(byEmployee, bestEmployeeId, 0, 0, 1);
+    }
   }
 
   // Rule 2: unresolved (not-yet-completed) runs. Bounded by distinct rows
