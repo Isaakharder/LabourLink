@@ -97,6 +97,34 @@ export function startOfWeekMonday(dateStr: string): string {
   return addCalendarDays(dateStr, -offset);
 }
 
+// Sunday of the calendar week containing `dateStr` — used by the Inputs
+// date picker, which displays Sunday-through-Saturday rows (unlike the
+// Monday-start weeks used elsewhere, e.g. Reports). getUTCDay() is already
+// 0=Sun..6=Sat, so the offset back to Sunday is just the day number itself.
+export function startOfWeekSunday(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const day = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  return addCalendarDays(dateStr, -day);
+}
+
+// ISO 8601 week number for `dateStr` — standard "shift to the Thursday of
+// the Monday-based week, then count weeks from the year's first Thursday"
+// algorithm. Works for any date within a Monday-based week (not just the
+// Monday itself), so callers displaying Sunday-start rows can pass that
+// row's Monday (its 2nd day) to label the row correctly across year
+// boundaries (e.g. late-December dates in an ISO week 1 belonging to the
+// next year).
+export function isoWeekNumber(dateStr: string): number {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  const mondayBasedDay = (date.getUTCDay() + 6) % 7; // Mon=0..Sun=6
+  date.setUTCDate(date.getUTCDate() - mondayBasedDay + 3); // nearest Thursday
+  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  const firstThursdayOffset = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstThursdayOffset + 3);
+  return 1 + Math.round((date.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
+}
+
 // Adds `months` CALENDAR months to a YYYY-MM-DD string — "1 month after
 // Jan 31" means Feb 28/29 (end-of-month clamping to the last real day of
 // the shorter month), not a fixed 30-day approximation. Pure
