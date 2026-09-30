@@ -2555,7 +2555,7 @@ input {
   border-radius: 10px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
   padding: 0.75rem;
-  width: 280px;
+  width: 320px;
 }
 
 .inputs-date-calendar-header {
@@ -2594,7 +2594,7 @@ input {
 
 .inputs-date-calendar-weekdays {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  grid-template-columns: 1.85rem repeat(7, 1fr);
   margin-bottom: 0.25rem;
 }
 
@@ -2606,15 +2606,38 @@ input {
 }
 
 .inputs-date-calendar-grid {
+  display: flex;
+  flex-direction: column;
+}
+
+.inputs-date-calendar-week {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  gap: 2px;
+  grid-template-columns: 1.85rem repeat(7, 1fr);
+  align-items: center;
+  border-bottom: 1px solid var(--color-border);
+  padding: 2px 0;
+}
+
+.inputs-date-calendar-week:last-child {
+  border-bottom: none;
+}
+
+.inputs-date-calendar-week-current {
+  background: var(--color-bg);
+  border-radius: 6px;
+}
+
+.inputs-date-calendar-week-number,
+.inputs-date-calendar-week-number-header {
+  font-size: 0.65rem;
+  color: var(--color-muted);
+  text-align: center;
 }
 
 .inputs-date-calendar-day {
   width: 100%;
   aspect-ratio: 1 / 1;
-  border: 1px solid transparent;
+  border: none;
   border-radius: 6px;
   background: transparent;
   font-size: 0.85rem;
@@ -2631,13 +2654,16 @@ input {
 }
 
 .inputs-date-calendar-day-today {
-  border-color: var(--color-primary);
+  background: #dcf5df;
   font-weight: 600;
+}
+
+.inputs-date-calendar-day-today:hover {
+  background: #cdeed3;
 }
 
 .inputs-date-calendar-day-selected {
   background: var(--color-primary);
-  border-color: var(--color-primary);
   color: #fff;
 }
 
@@ -2652,9 +2678,10 @@ input {
   }
 
   .inputs-date-calendar {
-    width: 260px;
+    width: 300px;
   }
 }
+
 
 .inputs-workspace-placeholder {
   flex-shrink: 0;

@@ -2,8 +2,9 @@ import { KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   addCalendarDays,
   endOfMonth,
+  isoWeekNumber,
   startOfMonth,
-  startOfWeekMonday,
+  startOfWeekSunday,
   todayInAppTimezone,
 } from "../../lib/timezone";
 
@@ -17,7 +18,7 @@ interface InputsDateCalendarProps {
   onClose: () => void;
 }
 
-const WEEKDAY_LABELS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+const WEEKDAY_LABELS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
 
 function parseYmd(dateStr: string): { year: number; month: number; day: number } {
   const [y, m, d] = dateStr.split("-").map(Number);
@@ -40,19 +41,35 @@ function addCalendarMonths(dateStr: string, deltaMonths: number): string {
   return toYmd(targetYear, targetMonth, 1);
 }
 
-// 42 consecutive YYYY-MM-DD cells (6 Monday-start weeks) covering the month
-// containing `visibleMonth` — a fixed 6 rows so the grid's height never
-// jumps as the user navigates between months.
-function buildCalendarGrid(visibleMonth: string): string[] {
-  const gridStart = startOfWeekMonday(startOfMonth(visibleMonth));
-  const cells: string[] = [];
-  let cursor = gridStart;
-  for (let i = 0; i < 42; i++) {
-    cells.push(cursor);
-    cursor = addCalendarDays(cursor, 1);
-  }
-  return cells;
+// A calendar week row: an ISO week number label plus its 7 consecutive
+// YYYY-MM-DD cells, Sunday through Saturday.
+interface CalendarWeek {
+  weekNumber: number;
+  days: string[];
 }
+
+// 6 consecutive Sunday-start weeks (42 cells) covering the month containing
+// `visibleMonth` — a fixed 6 rows so the grid's height never jumps as the
+// user navigates between months. Each row's week number is the ISO week
+// number of its Monday (the row's 2nd day) — ISO weeks are Monday-based, so
+// labelling a Sunday-start row this way is the one that stays correct
+// across year boundaries (e.g. a Dec 28–Jan 3 row is ISO week 1, taken from
+// the Monday, Dec 29, that falls in the new year).
+function buildCalendarWeeks(visibleMonth: string): CalendarWeek[] {
+  const gridStart = startOfWeekSunday(startOfMonth(visibleMonth));
+  const weeks: CalendarWeek[] = [];
+  let cursor = gridStart;
+  for (let w = 0; w < 6; w++) {
+    const days: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      days.push(cursor);
+      cursor = addCalendarDays(cursor, 1);
+    }
+    weeks.push({ weekNumber: isoWeekNumber(days[1]), days });
+  }
+  return weeks;
+}
+
 
 const MONTH_NAMES = [
   "January",
@@ -75,7 +92,8 @@ export function InputsDateCalendar({ selectedDate, onSelect, onClose }: InputsDa
   const [focusedDate, setFocusedDate] = useState(selectedDate);
   const dayButtonRefs = useRef(new Map<string, HTMLButtonElement | null>());
 
-  const grid = useMemo(() => buildCalendarGrid(visibleMonth), [visibleMonth]);
+  const weeks = useMemo(() => buildCalendarWeeks(visibleMonth), [visibleMonth]);
+  const currentWeekStart = useMemo(() => startOfWeekSunday(today), [today]);
   const { year: visibleYear, month: visibleMonthNum } = parseYmd(visibleMonth);
 
   // Wide but bounded so the year <select> stays a reasonable size while
@@ -128,10 +146,10 @@ export function InputsDateCalendar({ selectedDate, onSelect, onClose }: InputsDa
         target = addCalendarDays(focusedDate, 7);
         break;
       case "Home":
-        target = startOfWeekMonday(focusedDate);
+        target = startOfWeekSunday(focusedDate);
         break;
       case "End":
-        target = addCalendarDays(startOfWeekMonday(focusedDate), 6);
+        target = addCalendarDays(startOfWeekSunday(focusedDate), 6);
         break;
       case "PageUp":
         target = addCalendarMonths(focusedDate, e.shiftKey ? -12 : -1);
@@ -202,43 +220,63 @@ export function InputsDateCalendar({ selectedDate, onSelect, onClose }: InputsDa
       </div>
 
       <div className="inputs-date-calendar-weekdays">
+        <span className="inputs-date-calendar-week-number-header" aria-hidden="true" />
         {WEEKDAY_LABELS.map((label) => (
           <span key={label}>{label}</span>
         ))}
       </div>
 
       <div className="inputs-date-calendar-grid" onKeyDown={handleGridKeyDown}>
-        {grid.map((cellDate) => {
-          const inMonth = startOfMonth(cellDate) === visibleMonth;
-          const isToday = cellDate === today;
-          const isSelected = cellDate === selectedDate;
-          const day = parseYmd(cellDate).day;
+        {weeks.map((week) => {
+          const isCurrentWeek = week.days[0] === currentWeekStart;
           return (
-            <button
-              key={cellDate}
-              type="button"
-              ref={(el) => {
-                dayButtonRefs.current.set(cellDate, el);
-              }}
-              tabIndex={cellDate === focusedDate ? 0 : -1}
+            <div
+              key={week.days[0]}
               className={[
-                "inputs-date-calendar-day",
-                !inMonth ? "inputs-date-calendar-day-outside" : "",
-                isToday ? "inputs-date-calendar-day-today" : "",
-                isSelected ? "inputs-date-calendar-day-selected" : "",
+                "inputs-date-calendar-week",
+                isCurrentWeek ? "inputs-date-calendar-week-current" : "",
               ]
                 .filter(Boolean)
                 .join(" ")}
-              onClick={() => selectDay(cellDate)}
-              onFocus={() => setFocusedDate(cellDate)}
-              aria-current={isToday ? "date" : undefined}
-              aria-pressed={isSelected}
             >
-              {day}
-            </button>
+              <span className="inputs-date-calendar-week-number" aria-hidden="true">
+                W{String(week.weekNumber).padStart(2, "0")}
+              </span>
+              {week.days.map((cellDate) => {
+                const inMonth = startOfMonth(cellDate) === visibleMonth;
+                const isToday = cellDate === today;
+                const isSelected = cellDate === selectedDate;
+                const day = parseYmd(cellDate).day;
+                return (
+                  <button
+                    key={cellDate}
+                    type="button"
+                    ref={(el) => {
+                      dayButtonRefs.current.set(cellDate, el);
+                    }}
+                    tabIndex={cellDate === focusedDate ? 0 : -1}
+                    className={[
+                      "inputs-date-calendar-day",
+                      !inMonth ? "inputs-date-calendar-day-outside" : "",
+                      isToday ? "inputs-date-calendar-day-today" : "",
+                      isSelected ? "inputs-date-calendar-day-selected" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    onClick={() => selectDay(cellDate)}
+                    onFocus={() => setFocusedDate(cellDate)}
+                    aria-current={isToday ? "date" : undefined}
+                    aria-pressed={isSelected}
+                  >
+                    {day}
+                  </button>
+                );
+              })}
+            </div>
           );
         })}
       </div>
     </div>
   );
 }
+
