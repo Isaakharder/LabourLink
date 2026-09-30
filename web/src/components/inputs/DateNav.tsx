@@ -39,7 +39,12 @@ export function DateNav({ date, onChange }: DateNavProps) {
 
   return (
     <div className="inputs-date-nav">
-      <button type="button" onClick={() => onChange(addCalendarDays(date, -1))} aria-label="Previous day">
+      <button
+        type="button"
+        className="inputs-date-nav-arrow"
+        onClick={() => onChange(addCalendarDays(date, -1))}
+        aria-label="Previous day"
+      >
         ←
       </button>
       <div className="inputs-date-display" ref={containerRef}>
@@ -65,7 +70,12 @@ export function DateNav({ date, onChange }: DateNavProps) {
           />
         )}
       </div>
-      <button type="button" onClick={() => onChange(addCalendarDays(date, 1))} aria-label="Next day">
+      <button
+        type="button"
+        className="inputs-date-nav-arrow"
+        onClick={() => onChange(addCalendarDays(date, 1))}
+        aria-label="Next day"
+      >
         →
       </button>
     </div>
