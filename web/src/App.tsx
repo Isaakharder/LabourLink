@@ -131,6 +131,21 @@ function MobileApp() {
     return <p className="centered-message">Loading...</p>;
   }
 
+  // Identity recovery hung (see DevicePairingContext's "recoveryFailed").
+  // Reload only — never the pairing screen, which would mint a new identity.
+  if (status === "recoveryFailed") {
+    return (
+      <div className="boot-screen" role="alert">
+        <p className="boot-title">LabourLink couldn’t start</p>
+        <p className="boot-text">Your saved work is safe on this phone. Tap Retry to try again.</p>
+        <button type="button" className="boot-retry" onClick={() => window.location.reload()}>
+          Retry
+        </button>
+        <p className="boot-code">Code: IDENTITY-TIMEOUT</p>
+      </div>
+    );
+  }
+
   if (status === "unpaired") {
     return <PairingScreen />;
   }

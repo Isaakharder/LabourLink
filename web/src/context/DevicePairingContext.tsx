@@ -26,7 +26,16 @@ import {
 // specific "contact an administrator" message and waits for an explicit
 // "start pairing again" tap (see beginRepairing) rather than silently
 // requesting a new pairing code the way plain "unpaired" does.
-type PairingStatus = "checking" | "paired" | "unpaired" | "deactivated";
+//
+// "recoveryFailed" is reached only when that recovery step has not settled
+// within IDENTITY_RECOVERY_TIMEOUT_MS (a hung IndexedDB open — one of the
+// white/"Loading..."-forever startup paths found in the Ulefone morning-
+// startup investigation, 2026-10-01). It shows a Retry screen, never the
+// pairing screen: pairing would mint a brand-new identity and orphan the
+// one still sitting in the IndexedDB backup.
+type PairingStatus = "checking" | "paired" | "unpaired" | "deactivated" | "recoveryFailed";
+
+export const IDENTITY_RECOVERY_TIMEOUT_MS = 5000;
 
 interface DevicePairingContextValue {
   status: PairingStatus;
@@ -75,8 +84,16 @@ export function DevicePairingProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     console.log("[device-identity] DevicePairingProvider mounted, starting recovery");
     let cancelled = false;
-    recoverDeviceIdentityFromBackup().finally(() => {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
       if (cancelled) return;
+      console.error(`[device-identity] recovery did not settle within ${IDENTITY_RECOVERY_TIMEOUT_MS}ms`);
+      setStatus("recoveryFailed");
+    }, IDENTITY_RECOVERY_TIMEOUT_MS);
+    recoverDeviceIdentityFromBackup().finally(() => {
+      clearTimeout(timer);
+      if (cancelled || timedOut) return;
       setCachedEmployee(getCachedEmployeeSummary());
       const paired = isDevicePaired();
       console.log(`[device-identity] boot resolved status=${paired ? "paired" : "unpaired"}`);
@@ -84,6 +101,7 @@ export function DevicePairingProvider({ children }: { children: ReactNode }) {
     });
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, []);
 

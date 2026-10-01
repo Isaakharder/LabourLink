@@ -1,12 +1,14 @@
 package com.linklogictechnologies.labourlink;
 
 import android.graphics.Color;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.ViewGroup;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebView;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -115,6 +117,26 @@ public class MainActivity extends BridgeActivity {
                 @Override
                 public void onPageLoaded(WebView webView) {
                     markPageStarted();
+                }
+
+                // Capacitor's default returns false, which tells Android to
+                // kill the whole app process when the WebView renderer dies
+                // (reclaimed while backgrounded overnight, or crashed). A
+                // process death is exactly what feeds the "process is bad"
+                // renderer-spawn cooldown documented above, i.e. a white
+                // screen on the next open. Handle it in place instead:
+                // rebuild the WebView via recreate(), same as the
+                // watchdog's own recovery. Local SQLite/localStorage are
+                // untouched, so identity and pending events survive.
+                @Override
+                public boolean onRenderProcessGone(WebView webView, RenderProcessGoneDetail detail) {
+                    // Only ever invoked on API 26+ (minSdk is 24), hence the guard.
+                    String why = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                        ? "didCrash=" + detail.didCrash() + ", rendererPriorityAtExit=" + detail.rendererPriorityAtExit()
+                        : "no detail";
+                    Log.e(TAG, "WebView render process gone (" + why + ") — recreating the activity instead of letting the process die");
+                    watchdogHandler.post(MainActivity.this::recreate);
+                    return true;
                 }
             }
         );

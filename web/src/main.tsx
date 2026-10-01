@@ -1,8 +1,15 @@
 import { Capacitor } from "@capacitor/core";
-import React from "react";
+import React, { useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
+import { AppErrorBoundary } from "./components/AppErrorBoundary";
+
+declare global {
+  interface Window {
+    __llBootGuard?: { markBooted: () => void };
+  }
+}
 import { getLocalEventStore } from "./lib/localEventStore";
 import { initSyncLifecycleTriggers } from "./lib/syncEngine";
 import "./index.css";
@@ -45,10 +52,23 @@ if ("serviceWorker" in navigator) {
 // very hard to distinguish from a single page load calling something twice.
 console.log(`[device-identity] main.tsx executing, load=${Math.random().toString(36).slice(2, 8)}`);
 
+// Tells public/boot-guard.js that React committed its first render, so its
+// "couldn't start" timeout stands down. Runs after commit, i.e. only once
+// something real is actually on screen.
+function BootSignal() {
+  useEffect(() => {
+    window.__llBootGuard?.markBooted();
+  }, []);
+  return null;
+}
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
+    <AppErrorBoundary>
+      <BootSignal />
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </AppErrorBoundary>
   </React.StrictMode>
 );

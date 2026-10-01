@@ -152,7 +152,49 @@ async function runSync(): Promise<void> {
   }
 }
 
-const runSyncExclusive = singleFlight(runSync);
+// Outer bound on one whole sync attempt. api() already times out the HTTP
+// request (DEFAULT_TIMEOUT_MS), but runSync's local-store awaits
+// (getPendingEvents, markSyncResult, setSyncMeta, ...) had none — and
+// because runSync sits behind singleFlight, ONE such await that never
+// settles would make every later trySyncSoon() join that same dead promise
+// for the rest of the JS context's life: local taps keep committing, but
+// nothing syncs until the app is fully restarted. That's the shape of
+// Jhang Jhang's phone on 2026-09-29..10-01 (events recorded locally on time
+// all day, none received for ~45h, then 54 flushed at once).
+//
+// On timeout the guard is released and a normal backoff retry is
+// scheduled. If the stalled attempt later resumes and re-posts events the
+// next attempt also sends, that's safe: the server dedupes on
+// (device_id, client_event_id) and answers "duplicate", and nothing here
+// ever deletes a pending event that hasn't been acknowledged.
+export const SYNC_ATTEMPT_TIMEOUT_MS = 60_000;
+
+export class SyncAttemptTimeoutError extends Error {
+  constructor() {
+    super(`sync attempt did not settle within ${SYNC_ATTEMPT_TIMEOUT_MS}ms`);
+    this.name = "SyncAttemptTimeoutError";
+  }
+}
+
+async function runSyncBounded(): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new SyncAttemptTimeoutError()), SYNC_ATTEMPT_TIMEOUT_MS);
+  });
+  try {
+    await Promise.race([runSync(), timeout]);
+  } catch (err) {
+    if (!(err instanceof SyncAttemptTimeoutError)) throw err;
+    console.error("[sync-engine]", err.message);
+    consecutiveFailures = Math.min(consecutiveFailures + 1, 10);
+    notifySettled();
+    scheduleRetry(nextBackoffMs());
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+const runSyncExclusive = singleFlight(runSyncBounded);
 
 function scheduleRetry(delayMs: number): void {
   if (backoffTimer !== null) return;
