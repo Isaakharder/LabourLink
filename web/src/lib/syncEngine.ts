@@ -98,18 +98,63 @@ function notifySettled(): void {
   for (const listener of settledListeners) listener();
 }
 
+// Bound on each LOCAL-STORE step of a sync attempt. api() already times
+// out the HTTP request itself (DEFAULT_TIMEOUT_MS), but these awaits had
+// none — and because runSync sits behind singleFlight, ONE such await that
+// never settled made every later trySyncSoon() join that same dead promise
+// for the rest of the JS context's life: local taps kept committing, but
+// nothing synced until the app was fully restarted. That's the shape of
+// Jhang Jhang's phone on 2026-09-29..10-01 (events recorded locally on time
+// all day, none received for ~45h, then 54 flushed at once).
+//
+// Deliberately per step, not one timer around the whole attempt: a
+// whole-attempt timer releases singleFlight while the stalled attempt is
+// still alive, so if it later resumed it would run its remaining steps
+// (POST, markSyncResult, retry scheduling) concurrently with the next
+// attempt. Bounding each step instead makes runSync ITSELF settle — once a
+// step times out, the attempt's own continuation is over, singleFlight is
+// released only then, and a normal backoff retry is scheduled. Whatever
+// the abandoned native call eventually does is either a read (discarded)
+// or an idempotent per-clientEventId status write; nothing is ever
+// deleted or resequenced here, so a pending event can't be lost.
+export const SYNC_STEP_TIMEOUT_MS = 20_000;
+
+export class SyncStepTimeoutError extends Error {
+  constructor(step: string) {
+    super(`sync step "${step}" did not settle within ${SYNC_STEP_TIMEOUT_MS}ms`);
+    this.name = "SyncStepTimeoutError";
+  }
+}
+
+function bounded<T>(step: string, promise: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new SyncStepTimeoutError(step)), SYNC_STEP_TIMEOUT_MS);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 async function runSync(): Promise<void> {
   if (!navigator.onLine) return;
   const deviceId = getOrCreateDeviceIdentifier();
   const store = getLocalEventStore();
-  const pending = await store.getPendingEvents(deviceId, BATCH_SIZE);
-  if (pending.length === 0) {
-    consecutiveFailures = 0;
-    return;
-  }
-
   const attemptedAt = new Date().toISOString();
+
   try {
+    const pending = await bounded("getPendingEvents", store.getPendingEvents(deviceId, BATCH_SIZE));
+    if (pending.length === 0) {
+      consecutiveFailures = 0;
+      return;
+    }
+
     const response = await api<{
       results: { clientEventId: string; status: SyncResultStatus; detail?: unknown }[];
       // Best-effort — see localSequenceAssignment.ts's SequenceFloorInputs
@@ -120,13 +165,16 @@ async function runSync(): Promise<void> {
       deviceLastProcessedSeq?: number;
     }>("/api/mobile/sync/events", { method: "POST", body: JSON.stringify({ events: pending.map(toWire) }) });
     for (const result of response.results) {
-      await store.markSyncResult(result.clientEventId, { clientEventId: result.clientEventId, status: result.status, detail: result.detail });
+      await bounded(
+        "markSyncResult",
+        store.markSyncResult(result.clientEventId, { clientEventId: result.clientEventId, status: result.status, detail: result.detail })
+      );
     }
     if (typeof response.deviceLastProcessedSeq === "number") {
-      await store.setServerLastProcessedSeq(deviceId, response.deviceLastProcessedSeq);
+      await bounded("setServerLastProcessedSeq", store.setServerLastProcessedSeq(deviceId, response.deviceLastProcessedSeq));
     }
     consecutiveFailures = 0;
-    await store.setSyncMeta(deviceId, { lastSuccessfulSyncAt: attemptedAt, lastAttemptedSyncAt: attemptedAt, lastError: null });
+    await bounded("setSyncMeta", store.setSyncMeta(deviceId, { lastSuccessfulSyncAt: attemptedAt, lastAttemptedSyncAt: attemptedAt, lastError: null }));
     notifySettled();
 
     // Either more than one batch's worth was pending, or a sequence_gap/
@@ -134,67 +182,35 @@ async function runSync(): Promise<void> {
     // attempt might now clear (e.g. the gap-filling event arrived in this
     // same batch) — keep draining without waiting for the next external
     // trigger.
-    const remaining = await store.getPendingCount(deviceId);
+    const remaining = await bounded("getPendingCount", store.getPendingCount(deviceId));
     if (remaining > 0) scheduleRetry(0);
   } catch (err) {
     consecutiveFailures = Math.min(consecutiveFailures + 1, 10);
     if (!isServerUnreachableError(err)) {
-      console.error("[sync-engine] batch submit failed unexpectedly:", err);
+      console.error("[sync-engine] sync attempt failed unexpectedly:", err);
     }
-    const prevMeta = await store.getSyncMeta(deviceId);
-    await store.setSyncMeta(deviceId, {
-      lastSuccessfulSyncAt: prevMeta.lastSuccessfulSyncAt,
-      lastAttemptedSyncAt: attemptedAt,
-      lastError: err instanceof Error ? err.message : String(err),
-    });
+    // Best-effort diagnostics only — the store may be the very thing that's
+    // stuck, so this must never be what keeps the attempt from settling or
+    // the retry from being scheduled.
+    try {
+      const prevMeta = await bounded("getSyncMeta", store.getSyncMeta(deviceId));
+      await bounded(
+        "setSyncMeta",
+        store.setSyncMeta(deviceId, {
+          lastSuccessfulSyncAt: prevMeta.lastSuccessfulSyncAt,
+          lastAttemptedSyncAt: attemptedAt,
+          lastError: err instanceof Error ? err.message : String(err),
+        })
+      );
+    } catch (metaErr) {
+      console.error("[sync-engine] could not record sync failure:", metaErr);
+    }
     notifySettled();
     scheduleRetry(nextBackoffMs());
   }
 }
 
-// Outer bound on one whole sync attempt. api() already times out the HTTP
-// request (DEFAULT_TIMEOUT_MS), but runSync's local-store awaits
-// (getPendingEvents, markSyncResult, setSyncMeta, ...) had none — and
-// because runSync sits behind singleFlight, ONE such await that never
-// settles would make every later trySyncSoon() join that same dead promise
-// for the rest of the JS context's life: local taps keep committing, but
-// nothing syncs until the app is fully restarted. That's the shape of
-// Jhang Jhang's phone on 2026-09-29..10-01 (events recorded locally on time
-// all day, none received for ~45h, then 54 flushed at once).
-//
-// On timeout the guard is released and a normal backoff retry is
-// scheduled. If the stalled attempt later resumes and re-posts events the
-// next attempt also sends, that's safe: the server dedupes on
-// (device_id, client_event_id) and answers "duplicate", and nothing here
-// ever deletes a pending event that hasn't been acknowledged.
-export const SYNC_ATTEMPT_TIMEOUT_MS = 60_000;
-
-export class SyncAttemptTimeoutError extends Error {
-  constructor() {
-    super(`sync attempt did not settle within ${SYNC_ATTEMPT_TIMEOUT_MS}ms`);
-    this.name = "SyncAttemptTimeoutError";
-  }
-}
-
-async function runSyncBounded(): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new SyncAttemptTimeoutError()), SYNC_ATTEMPT_TIMEOUT_MS);
-  });
-  try {
-    await Promise.race([runSync(), timeout]);
-  } catch (err) {
-    if (!(err instanceof SyncAttemptTimeoutError)) throw err;
-    console.error("[sync-engine]", err.message);
-    consecutiveFailures = Math.min(consecutiveFailures + 1, 10);
-    notifySettled();
-    scheduleRetry(nextBackoffMs());
-  } finally {
-    if (timer !== null) clearTimeout(timer);
-  }
-}
-
-const runSyncExclusive = singleFlight(runSyncBounded);
+const runSyncExclusive = singleFlight(runSync);
 
 function scheduleRetry(delayMs: number): void {
   if (backoffTimer !== null) return;
