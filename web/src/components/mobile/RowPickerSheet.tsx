@@ -55,6 +55,14 @@ interface RowPickerSheetProps {
   // this sheet purely for manual target selection and want the original
   // behavior unchanged.
   onNfcScan?: (resolved: ResolvedTagTarget) => void;
+  // Job selection (HomeScreen: job starts and row switches) passes true:
+  // the sheet is titled "Choose a row" and shows every row from every phase
+  // in one naturally sorted grid — no intermediate phase-selection step. A
+  // row number that exists in more than one phase gets a small phase label
+  // so the two are distinguishable; the confirmed value is still the row's
+  // own id. Omitted by the tag-registration screens, which keep the
+  // phase -> row drill-down exactly as before.
+  directRowList?: boolean;
 }
 
 // Same bottom-sheet visual pattern as ActivityPicker/ConfirmEndDayModal
@@ -115,6 +123,37 @@ function phaseDisplayName(phase: FlatPhase): string {
   return phase.showLandName ? `${phase.name} — ${phase.landName}` : phase.name;
 }
 
+// One row in directRowList mode, with the phase it belongs to. phaseLabel is
+// set only when this row number also exists in another phase.
+interface DirectRow {
+  row: RowPickerRow;
+  phaseName: string;
+  phaseLabel?: string;
+}
+
+const naturalCompare = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" }).compare;
+
+// Rows come from the same already-filtered lands data the phase drill-down
+// uses (active lands/phases/rows only), so eligibility is unchanged — this
+// only changes how they're laid out.
+function buildDirectRows(phases: FlatPhase[]): DirectRow[] {
+  const numberCounts = new Map<number, number>();
+  for (const phase of phases) {
+    for (const row of phase.rows) numberCounts.set(row.rowNumber, (numberCounts.get(row.rowNumber) ?? 0) + 1);
+  }
+  const rows: DirectRow[] = [];
+  for (const phase of phases) {
+    const phaseName = phaseDisplayName(phase);
+    for (const row of phase.rows) {
+      rows.push({ row, phaseName, phaseLabel: (numberCounts.get(row.rowNumber) ?? 0) > 1 ? phaseName : undefined });
+    }
+  }
+  // Natural order by row number; identical numbers then ordered by phase
+  // name the same natural way ("Phase 2" before "Phase 10").
+  rows.sort((a, b) => a.row.rowNumber - b.row.rowNumber || naturalCompare(a.phaseName, b.phaseName));
+  return rows;
+}
+
 export function RowPickerSheet({
   activityName,
   questionLabel,
@@ -130,6 +169,7 @@ export function RowPickerSheet({
   onCancel,
   language,
   onNfcScan,
+  directRowList = false,
 }: RowPickerSheetProps) {
   const [expandedPhaseId, setExpandedPhaseId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -138,6 +178,20 @@ export function RowPickerSheet({
   const [nfcHint, setNfcHint] = useState<string | null>(null);
 
   const phases = useMemo(() => (lands ? flattenPhases(lands) : null), [lands]);
+  const directRows = useMemo(() => (directRowList && phases ? buildDirectRows(phases) : null), [directRowList, phases]);
+  const title = directRowList ? t(language, "chooseRow") : questionLabel;
+
+  // In the flat list a pre-selected row (Back from a later step, or editing
+  // the current row) may be far down the grid — bring it into view once.
+  // "nearest" scrolls only the grid's own overflow container, not the page.
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const scrolledToInitialRef = useRef(false);
+  useEffect(() => {
+    if (!directRows || scrolledToInitialRef.current || !initialSelectedRowId) return;
+    scrolledToInitialRef.current = true;
+    const el = gridRef.current?.querySelector<HTMLElement>(`[data-row-id="${initialSelectedRowId}"]`);
+    el?.scrollIntoView?.({ block: "nearest" });
+  }, [directRows, initialSelectedRowId]);
 
   // Read inside the NFC scan callback below instead of `phases` directly —
   // the callback is registered once (see the scan effect's `[]` deps, so a
@@ -165,7 +219,7 @@ export function RowPickerSheet({
   // selection) or once already drilled in. Land is never part of this
   // restoration — there's no land-level navigation state to restore.
   useEffect(() => {
-    if (!phases || !initialSelectedRowId || expandedPhaseId) return;
+    if (directRowList || !phases || !initialSelectedRowId || expandedPhaseId) return;
     const phase = phases.find((p) => p.rows.some((r) => r.id === initialSelectedRowId));
     if (phase) setExpandedPhaseId(phase.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -268,6 +322,7 @@ export function RowPickerSheet({
       <button
         key={row.id}
         type="button"
+        data-row-id={row.id}
         className={`mobile-row-grid-item${selected ? " mobile-row-grid-item-selected" : ""}`}
         disabled={busy}
         onClick={() => setSelectedRowId(row.id)}
@@ -285,12 +340,12 @@ export function RowPickerSheet({
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label={questionLabel}
+        aria-label={title}
       >
         <div className="mobile-sheet-header">
           <div>
             {stepLabel && <p className="mobile-step-indicator">{stepLabel}</p>}
-            <h2>{questionLabel}</h2>
+            <h2>{title}</h2>
             <p className="mobile-row-picker-subtitle">{activityName}</p>
           </div>
           {!busy && (
@@ -322,13 +377,25 @@ export function RowPickerSheet({
               />
             </div>
 
-            {showBack && !search && (
+            {!directRowList && showBack && !search && (
               <button type="button" className="mobile-row-back" onClick={handleBack} disabled={busy}>
                 {t(language, "backDrillDown")}
               </button>
             )}
 
-            {searchResults ? (
+            {directRows ? (
+              (() => {
+                const q = search.trim();
+                const visible = q ? directRows.filter((d) => String(d.row.rowNumber).startsWith(q)) : directRows;
+                return visible.length === 0 ? (
+                  <p className="mobile-sheet-empty">{t(language, "noMatchingRows")}</p>
+                ) : (
+                  <div className="mobile-row-grid" ref={gridRef}>
+                    {visible.map((d) => rowButton(d.row, d.phaseLabel))}
+                  </div>
+                );
+              })()
+            ) : searchResults ? (
               searchResults.length === 0 ? (
                 <p className="mobile-sheet-empty">{t(language, "noMatchingRows")}</p>
               ) : (

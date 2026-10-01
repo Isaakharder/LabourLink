@@ -921,6 +921,7 @@ export function HomeScreen() {
             const priorRowId = priorAnswer?.questionType === "greenhouse_row" ? priorAnswer.greenhouseRowId : null;
             return (
               <RowPickerSheet
+                directRowList
                 activityName={questionFlow.activityName}
                 questionLabel={currentQuestion.label}
                 stepLabel={stepLabel}
@@ -1006,6 +1007,7 @@ export function HomeScreen() {
           if (q.questionType === "greenhouse_row") {
             return (
               <RowPickerSheet
+                directRowList
                 activityName={singleQuestionEdit.activityName}
                 questionLabel={q.label}
                 allowSkip={!q.isRequired}

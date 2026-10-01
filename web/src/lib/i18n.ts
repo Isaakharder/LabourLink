@@ -53,6 +53,7 @@ const TRANSLATIONS_EN = {
 
   // --- Primary actions ---
   chooseJob: "Choose a job",
+  chooseRow: "Choose a row",
   current: "Current",
   recentJobs: "Recent jobs",
   noRecentJobs: "No recent jobs yet.",
@@ -190,6 +191,7 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   switchingToPending: (p) => `Cambiando a ${p.name} — se sincronizará cuando vuelva la conexión`,
 
   chooseJob: "Elegir un trabajo",
+  chooseRow: "Elegir una fila",
   current: "Actual",
   recentJobs: "Trabajos recientes",
   noRecentJobs: "Aún no hay trabajos recientes.",
