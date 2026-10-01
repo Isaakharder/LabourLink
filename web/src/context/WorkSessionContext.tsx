@@ -46,6 +46,26 @@ class LocalCommitTimeoutError extends Error {
   }
 }
 
+// Short, non-sensitive code appended to a local-save failure message so a
+// screenshot alone identifies the failure class and the exact tap — the
+// Christopher Ramirez incident (2026-10-01) showed only a bare "Something
+// went wrong" and needed a full production + build-history investigation
+// to infer the cause. Only a fixed category and the first 8 chars of the
+// event's own clientEventId (same "Diagnostic ID" convention as
+// SyncStatusScreen) — never the raw error text, which can carry ids/SQL.
+// The clientEventId prefix also matches the logCheckpoint lines in logcat.
+// Matched by name, not instanceof, so this file needn't import the class.
+export function localFailureDiagnostic(err: unknown, clientEventId: string): string {
+  const name = err instanceof Error ? err.name : "";
+  const message = err instanceof Error ? err.message : String(err);
+  let code = "LOCAL";
+  if (name === "LocalSequenceAllocationError") code = "SEQ";
+  else if (/UNIQUE constraint/i.test(message)) code = "UNIQUE";
+  else if (/transaction/i.test(message)) code = "TXN";
+  else if (/sqlite|database/i.test(message)) code = "DB";
+  return `${code}-${clientEventId.slice(0, 8)}`;
+}
+
 function withCommitTimeout<T>(promise: Promise<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new LocalCommitTimeoutError()), LOCAL_COMMIT_TIMEOUT_MS);
@@ -699,7 +719,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
           // reuses clientEventId, so a write that actually succeeded a
           // moment after all is never duplicated).
           console.error("[work-session] local commit failed:", err instanceof Error ? err.name : "", err);
-          setError(t(language, "localSaveFailed"));
+          setError(`${t(language, "localSaveFailed")} (${localFailureDiagnostic(err, clientEventId)})`);
           setRetryAction(() => () => {
             void performInternal(path, body, options, clientEventId);
           });
@@ -743,7 +763,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
           });
         } else {
           console.error("[work-session] break start failed:", err instanceof Error ? err.name : "", err);
-          setError(t(language, "localSaveFailed"));
+          setError(`${t(language, "localSaveFailed")} (${localFailureDiagnostic(err, clientEventId)})`);
           setRetryAction(() => () => {
             void startBreakInternal(clientEventId);
           });
@@ -818,7 +838,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
           });
         } else {
           console.error("[work-session] break end failed:", err instanceof Error ? err.name : "", err);
-          setError(t(language, "localSaveFailed"));
+          setError(`${t(language, "localSaveFailed")} (${localFailureDiagnostic(err, clientEventId)})`);
           setRetryAction(() => () => {
             void endBreakInternal(clientEventId);
           });
@@ -872,8 +892,14 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
             void confirmEndDayInternal(clientEventId);
           });
         } else {
-          console.error("[work-session] end day failed:", err);
-          setEndDayError(t(language, "somethingWentWrong"));
+          // Was the bare "somethingWentWrong" with no Retry — the same hidden
+          // failure the job-start path already fixed. The write never landed,
+          // so retrying the identical event is safe.
+          console.error("[work-session] end day failed:", err instanceof Error ? err.name : "", err);
+          setEndDayError(`${t(language, "couldNotFinishWork")} (${localFailureDiagnostic(err, clientEventId)})`);
+          setEndDayRetryAction(() => () => {
+            void confirmEndDayInternal(clientEventId);
+          });
         }
       } finally {
         setEndDaySubmitting(false);

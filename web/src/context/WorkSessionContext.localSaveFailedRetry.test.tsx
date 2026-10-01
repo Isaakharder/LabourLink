@@ -64,7 +64,7 @@ vi.mock("../context/DevicePairingContext", () => ({
   }),
 }));
 
-import { WorkSessionProvider, useWorkSession } from "./WorkSessionContext";
+import { WorkSessionProvider, useWorkSession, localFailureDiagnostic } from "./WorkSessionContext";
 import { LocalSequenceAllocationError } from "../lib/localEventStore";
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -122,7 +122,7 @@ describe("perform() recovers from a local write that fails outright (not a timeo
 
     expect(result.current.busy).toBe(false);
     // The specific, actionable text — not "Something went wrong".
-    expect(result.current.error).toBe("Couldn't save this job on the phone. Tap Retry. Your current job is still active.");
+    expect(result.current.error).toBe("Couldn't save this job on the phone. Tap Retry. Your current job is still active. (SEQ-tap-pick)");
     expect(result.current.retryAction).not.toBeNull();
     expect(capturedFirstEventId).toBe(idempotencyKey);
 
@@ -152,5 +152,66 @@ describe("perform() recovers from a local write that fails outright (not a timeo
     expect(result.current.retryAction).toBeNull();
     expect(capturedRetryEventId).toBe(idempotencyKey);
     expect(mockAppendEvent).toHaveBeenCalledTimes(2); // the failed attempt + the retry, never more
+  });
+});
+
+// Christopher Ramirez incident (2026-10-01): a phone still on build 7 (1.6)
+// showed only a bare "Something went wrong" in the job sheet, and nothing
+// on the server identified why. The message must now carry a short,
+// non-sensitive category + tap id, and End Day (which still showed the bare
+// message with no Retry) must get the same treatment.
+describe("local-save failures are diagnosable from a screenshot", () => {
+  it("classifies failures without leaking the raw error text", () => {
+    const uniqueErr = new Error("UNIQUE constraint failed: pending_events.device_id, pending_events.device_seq");
+    expect(localFailureDiagnostic(uniqueErr, "15c3a265-a4ed-4d5c")).toBe("UNIQUE-15c3a265");
+    expect(localFailureDiagnostic(new LocalSequenceAllocationError("x"), "abcdef0123")).toBe("SEQ-abcdef01");
+    expect(localFailureDiagnostic(new Error("cannot start a transaction within a transaction"), "abcdef0123")).toBe("TXN-abcdef01");
+    expect(localFailureDiagnostic(new Error("SQLITE_BUSY: database is locked"), "abcdef0123")).toBe("DB-abcdef01");
+    expect(localFailureDiagnostic("weird", "abcdef0123")).toBe("LOCAL-abcdef01");
+    expect(localFailureDiagnostic(uniqueErr, "15c3a265-a4ed")).not.toContain("pending_events");
+  });
+
+  it("End Day shows a specific coded message (never the bare generic one) and Retry reuses the same event id", async () => {
+    let firstId: string | undefined;
+    mockAppendEvent.mockImplementationOnce((event: { clientEventId?: string }) => {
+      firstId = event.clientEventId;
+      return Promise.reject(new Error("UNIQUE constraint failed: pending_events.device_id, pending_events.device_seq"));
+    });
+
+    const { result } = renderHook(() => useWorkSession(), { wrapper });
+    await waitFor(() => expect(mockApi).toHaveBeenCalledWith("/api/mobile/me"));
+
+    await act(async () => {
+      result.current.openEndDayConfirm();
+    });
+    await act(async () => {
+      await result.current.confirmEndDay();
+    });
+
+    expect(result.current.endDayError).not.toBe("Something went wrong");
+    expect(result.current.endDayError).toBe(`Could not finish work. Please try again. (UNIQUE-${firstId!.slice(0, 8)})`);
+    expect(result.current.endDayRetryAction).not.toBeNull();
+
+    let retryId: string | undefined;
+    mockAppendEvent.mockImplementationOnce((event: { clientEventId?: string }) => {
+      retryId = event.clientEventId;
+      return Promise.resolve({
+        ...event,
+        deviceSeq: 458,
+        localTzOffsetMinutes: -240,
+        createdAtLocal: new Date().toISOString(),
+        syncStatus: "pending",
+        syncAttempts: 0,
+        lastSyncError: null,
+        serverResultJson: null,
+      });
+    });
+    await act(async () => {
+      await result.current.endDayRetryAction?.();
+    });
+
+    expect(retryId).toBe(firstId);
+    expect(result.current.endDayError).toBeNull();
+    expect(mockAppendEvent).toHaveBeenCalledTimes(2);
   });
 });
