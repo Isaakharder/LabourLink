@@ -193,67 +193,75 @@ export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): 
 
   // Step 2: row-label / employee-name / activity-name lookups, each batched
   // across every distinct id involved — once each, never once per pair.
+  // Started here and awaited together with Step 3's query below. None of the
+  // four depends on another, so they cost one round trip instead of four.
   const distinctRowIds = [...new Set(dedupedPairs.map((p) => p.greenhouseRowId))];
-  const rowInfoRes = await pool.query(
+  const rowInfoQuery = pool.query(
     `select gr.id, gr.row_number, gp.name as phase_name from greenhouse_rows gr
      join greenhouse_phases gp on gp.id = gr.phase_id where gr.id = any($1::uuid[])`,
     [distinctRowIds]
   );
-  const rowLabelById = new Map(rowInfoRes.rows.map((r) => [r.id, `${r.phase_name} · Row ${r.row_number}`]));
 
   const employeeIds = [...daysByEmployee.keys()];
-  const empRes = await pool.query(`select id, first_name, last_name from employees where id = any($1::uuid[])`, [employeeIds]);
-  const employeeNameById = new Map(empRes.rows.map((r) => [r.id, `${r.first_name} ${r.last_name}`]));
+  const empQuery = pool.query(`select id, first_name, last_name from employees where id = any($1::uuid[])`, [employeeIds]);
 
   // Only ever looked up for a run whose root already matches one of the
   // requested pairs (see the final filter below), so the requested pairs'
   // own activity ids are the complete set this needs — never one query per
   // employee-day like the old per-day `left join activities` did.
   const distinctActivityIds = [...new Set(dedupedPairs.map((p) => p.activityId))];
-  const activityRes = await pool.query(`select id, name from activities where id = any($1::uuid[])`, [distinctActivityIds]);
+  const activityQuery = pool.query(`select id, name from activities where id = any($1::uuid[])`, [distinctActivityIds]);
+
+  // Step 3: fetch every distinct employee+day EXACTLY ONCE, all in a single
+  // round trip. Each day is still its own [start, end) window for one
+  // employee, ordered by started_at ascending, so every day's row list is
+  // identical to what a standalone per-day query would return. Only the
+  // number of round trips changes.
+  //
+  // This used to be one query per employee-day, fired concurrently. That
+  // made the round-trip count grow with each candidate row's whole history,
+  // not with the requested range. Measured against a production-sized
+  // dataset, it was 350-1000 queries for a 1-4 day Productive TV request.
+  // At real DB latency that was 15-25s. Those queries also flooded the
+  // 10-connection pool past its 8s connectionTimeoutMillis, which is where
+  // the intermittent "timeout exceeded when trying to connect" 500s came
+  // from.
+  //
+  // Same shape as GET /daily's own run computation (work AND break, never
+  // just the work segments touching one row): a row-scoped, work-only
+  // fetch can never see the break entry that bridges a break-split visit
+  // back into one run, since a break always has greenhouse_row_id = null.
+  const dayKeys: { employeeId: string; date: string }[] = [];
+  for (const [employeeId, dates] of daysByEmployee) {
+    for (const date of dates) dayKeys.push({ employeeId, date });
+  }
+  const dayBounds = dayKeys.map(({ date }) => getDayBoundsUtc(date));
+  const dayQuery = pool.query<DayFetchRow & { day_idx: number }>(
+    `select d.day_idx::int as day_idx,
+            te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
+            te.greenhouse_row_id, te.carrier_id, te.density_type, te.density_count_per_row,
+            te.rollover_of_entry_id,
+            (rcs.time_entry_id is not null) as is_resolved
+     from unnest($1::uuid[], $2::timestamptz[], $3::timestamptz[]) with ordinality as d(employee_id, day_start, day_end, day_idx)
+     join time_entries te
+       on te.employee_id = d.employee_id and te.started_at >= d.day_start and te.started_at < d.day_end
+     left join row_completion_segments rcs on rcs.time_entry_id = te.id
+     where te.deleted_at is null
+     order by d.day_idx, te.started_at asc`,
+    [dayKeys.map((k) => k.employeeId), dayBounds.map((b) => b.start), dayBounds.map((b) => b.end)]
+  );
+
+  const [rowInfoRes, empRes, activityRes, { rows: allDayRows }] = await Promise.all([rowInfoQuery, empQuery, activityQuery, dayQuery]);
+  const rowLabelById = new Map(rowInfoRes.rows.map((r) => [r.id, `${r.phase_name} · Row ${r.row_number}`]));
+  const employeeNameById = new Map(empRes.rows.map((r) => [r.id, `${r.first_name} ${r.last_name}`]));
   const activityNameById = new Map(activityRes.rows.map((r) => [r.id, r.name]));
 
-  // Step 3: fetch each distinct employee+day EXACTLY ONCE, concurrently — a
-  // Map of in-flight promises keyed by employee+day is the dedup: a second
-  // request for the same day while the first is still in flight reuses the
-  // same promise instead of firing a second query.
-  const dayFetches = new Map<string, Promise<DayFetchRow[]>>();
-  function fetchDay(employeeId: string, date: string): Promise<DayFetchRow[]> {
-    const dayKey = `${employeeId}:${date}`;
-    let p = dayFetches.get(dayKey);
-    if (!p) {
-      // Step 3's own query — the exact same shape GET /daily's own run
-      // computation uses (work AND break, never just the work segments
-      // touching one row): a row-scoped, work-only fetch can never see the
-      // break entry that bridges a break-split visit back into one run,
-      // since a break always has greenhouse_row_id = null. No `activities`
-      // join here (unlike the old per-day query) — activity names are
-      // already batched once in Step 2 above, from the requested pairs'
-      // own activity ids.
-      p = (async () => {
-        const { start, end } = getDayBoundsUtc(date);
-        const { rows } = await pool.query(
-          `select te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
-                  te.greenhouse_row_id, te.carrier_id, te.density_type, te.density_count_per_row,
-                  te.rollover_of_entry_id,
-                  (rcs.time_entry_id is not null) as is_resolved
-           from time_entries te
-           left join row_completion_segments rcs on rcs.time_entry_id = te.id
-           where te.employee_id = $1 and te.deleted_at is null
-             and te.started_at >= $2 and te.started_at < $3
-           order by te.started_at asc`,
-          [employeeId, start, end]
-        );
-        return rows;
-      })();
-      dayFetches.set(dayKey, p);
-    }
-    return p;
+  const dayRowsByKey = new Map<string, DayFetchRow[]>(dayKeys.map((k) => [`${k.employeeId}:${k.date}`, []]));
+  for (const { day_idx, ...row } of allDayRows) {
+    const k = dayKeys[day_idx - 1]; // `with ordinality` is 1-based
+    dayRowsByKey.get(`${k.employeeId}:${k.date}`)!.push(row);
   }
-  for (const [employeeId, dates] of daysByEmployee) {
-    for (const date of dates) fetchDay(employeeId, date); // kicks off concurrently; Map above dedupes
-  }
-  await Promise.all(dayFetches.values());
+  const fetchDay = (employeeId: string, date: string): DayFetchRow[] => dayRowsByKey.get(`${employeeId}:${date}`) ?? [];
 
   // Step 4: for each employee+day, compute its runs ONCE, then hand every
   // resulting root to whichever requested pair(s) it actually matches — the
@@ -273,7 +281,7 @@ export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): 
   for (const [employeeId, dateSet] of daysByEmployee) {
     const dates = [...dateSet].sort();
     for (const date of dates) {
-      const dayRows = await fetchDay(employeeId, date); // already resolved — Step 3 awaited every entry above
+      const dayRows = fetchDay(employeeId, date); // already fetched by Step 3's single batched query above
 
       const resolvedSegmentIds = new Set(dayRows.filter((r) => r.is_resolved).map((r) => r.id));
       const segments: RunSegment[] = dayRows.map((r) => ({

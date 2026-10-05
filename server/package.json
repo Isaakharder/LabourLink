@@ -93,7 +93,8 @@
     "test:auth-session-cookie": "ts-node src/routes/auth.sessionCookie.test.ts",
     "test:integrations-productive-tv-pruning-speed": "ts-node src/routes/integrations.productiveTvPruningSpeed.test.ts",
     "test:integrations-productive-tv-picking-speed": "ts-node src/routes/integrations.productiveTvPickingSpeed.test.ts",
-    "test:row-completion-visit-cycles": "ts-node src/routes/rowCompletions.visitCycles.test.ts"
+    "test:row-completion-visit-cycles": "ts-node src/routes/rowCompletions.visitCycles.test.ts",
+    "test:reports-query-count": "ts-node src/lib/reportQueries.queryCount.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",

@@ -300,31 +300,76 @@ export async function getActivityDensityAttribution(
   // status column and a matching "and rc.status = 'active'" filter to both
   // queries below; until that ships, this stays exactly as production's
   // schema actually is.
-  const { rows: candidateIdRows } = await pool.query(
-    `select rc.id as completion_id
-     from row_completions rc
-     join row_completion_segments rcs on rcs.row_completion_id = rc.id
-     join time_entries te on te.id = rcs.time_entry_id
-     where te.deleted_at is null
-       and ($2::uuid[] is null or te.employee_id = any($2::uuid[]))
-     group by rc.id
-     having bool_or(te.activity_id = $1) or count(distinct te.activity_id) > 1`,
-    [activityId, employeeIds]
-  );
-  const completionIds: string[] = candidateIdRows.map((r) => r.completion_id);
-  const completionSegRows = completionIds.length
-    ? (
-        await pool.query(
-          `select rc.id as completion_id, rc.quantity_per_row, te.employee_id, te.activity_id, te.started_at, te.ended_at
-           from row_completions rc
-           join row_completion_segments rcs on rcs.row_completion_id = rc.id
-           join time_entries te on te.id = rcs.time_entry_id
-           where rc.id = any($1::uuid[])
-           order by rc.id, te.started_at`,
-          [completionIds]
-        )
-      ).rows
-    : [];
+  //
+  // The final `bool_or(... in range)` only narrows the scan to completions
+  // with at least one segment starting inside the range, instead of every
+  // completion in history. It can never drop one that would count: the
+  // allInRange check below requires EVERY segment to start in range.
+  //
+  // Rule 1's fetch and Rule 2's discovery (below) are independent reads, so
+  // both start here and run concurrently. Contributions are still applied
+  // strictly in the original order (all of Rule 1, then Rule 2), so every
+  // floating-point sum comes out identical.
+  const rule1Fetch = (async () => {
+    const { rows: candidateIdRows } = await pool.query(
+      `select rc.id as completion_id
+       from row_completions rc
+       join row_completion_segments rcs on rcs.row_completion_id = rc.id
+       join time_entries te on te.id = rcs.time_entry_id
+       where te.deleted_at is null
+         and ($2::uuid[] is null or te.employee_id = any($2::uuid[]))
+       group by rc.id
+       having (bool_or(te.activity_id = $1) or count(distinct te.activity_id) > 1)
+          and bool_or(te.started_at >= $3 and te.started_at < $4)`,
+      [activityId, employeeIds, rangeStart, rangeEnd]
+    );
+    const completionIds: string[] = candidateIdRows.map((r) => r.completion_id);
+    if (!completionIds.length) return [];
+    const { rows } = await pool.query(
+      `select rc.id as completion_id, rc.quantity_per_row, te.employee_id, te.activity_id, te.started_at, te.ended_at
+       from row_completions rc
+       join row_completion_segments rcs on rcs.row_completion_id = rc.id
+       join time_entries te on te.id = rcs.time_entry_id
+       where rc.id = any($1::uuid[])
+       order by rc.id, te.started_at`,
+      [completionIds]
+    );
+    return rows;
+  })();
+
+  // Rule 2's discovery: unresolved (not-yet-completed) runs. Bounded by
+  // distinct rows touched in this activity+range, not by employee/day — a
+  // greenhouse has dozens to low hundreds of rows, never thousands of
+  // employee-days.
+  const rule2Fetch = (async () => {
+    const { rows: candidateRowsRes } = await pool.query(
+      `select distinct te.greenhouse_row_id, te.density_type
+       from time_entries te
+       left join row_completion_segments rcs on rcs.time_entry_id = te.id
+       where te.activity_id = $1 and te.entry_type = 'work' and te.deleted_at is null
+         and te.density_type is not null and te.greenhouse_row_id is not null
+         and te.started_at >= $2 and te.started_at < $3
+         and ($4::uuid[] is null or te.employee_id = any($4::uuid[]))
+         and rcs.time_entry_id is null`,
+      [activityId, rangeStart, rangeEnd, employeeIds]
+    );
+    // Resolved as ONE batched call, not one-per-candidate-row (even
+    // concurrently). A previous fix here moved from a sequential per-row
+    // loop to Promise.all (~17s for one busy activity with dozens of
+    // candidate rows, down to something tolerable), but each concurrent
+    // call still re-fetched any employee-day shared by more than one
+    // candidate row. getUnresolvedRunsForRows (see its own comment)
+    // fetches every needed employee-day in a single query. Same
+    // byte-identical totals; the per-run selection logic is unchanged.
+    const candidatesByKey = await getUnresolvedRunsForRows(
+      candidateRowsRes.map((pair) => ({ greenhouseRowId: pair.greenhouse_row_id, activityId, densityType: pair.density_type }))
+    );
+    return { candidateRowsRes, candidatesByKey };
+  })();
+
+  // Both started above; awaiting them together means a rejection from
+  // either is handled, never left unobserved.
+  const [completionSegRows, { candidateRowsRes, candidatesByKey }] = await Promise.all([rule1Fetch, rule2Fetch]);
 
   interface CompletionSeg {
     employeeId: string;
@@ -383,36 +428,8 @@ export async function getActivityDensityAttribution(
     }
   }
 
-  // Rule 2: unresolved (not-yet-completed) runs. Bounded by distinct rows
-  // touched in this activity+range, not by employee/day — a greenhouse has
-  // dozens to low hundreds of rows, never thousands of employee-days.
-  const { rows: candidateRowsRes } = await pool.query(
-    `select distinct te.greenhouse_row_id, te.density_type
-     from time_entries te
-     left join row_completion_segments rcs on rcs.time_entry_id = te.id
-     where te.activity_id = $1 and te.entry_type = 'work' and te.deleted_at is null
-       and te.density_type is not null and te.greenhouse_row_id is not null
-       and te.started_at >= $2 and te.started_at < $3
-       and ($4::uuid[] is null or te.employee_id = any($4::uuid[]))
-       and rcs.time_entry_id is null`,
-     [activityId, rangeStart, rangeEnd, employeeIds]
-  );
-  // Resolved as ONE batched call, not one-per-candidate-row (even
-  // concurrently) — a previous fix here moved from a sequential per-row
-  // loop to Promise.all (confirmed: ~17s for a single busy activity with
-  // dozens of candidate rows, down to something tolerable), but each
-  // concurrent call still independently re-fetched any employee-day shared
-  // by more than one candidate row — the common case for one busy employee
-  // touching many rows in a day. getUnresolvedRunsForRows (see its own
-  // comment) fetches each distinct employee-day at most once no matter how
-  // many candidate rows here share it, cutting the query count (not just
-  // wall-clock time) down to roughly the number of distinct employee-days
-  // involved, not the number of candidate rows. Same "byte-identical
-  // totals, just far faster" guarantee — the underlying per-run selection
-  // logic is unchanged, only how many times it's computed from scratch.
-  const candidatesByKey = await getUnresolvedRunsForRows(
-    candidateRowsRes.map((pair) => ({ greenhouseRowId: pair.greenhouse_row_id, activityId, densityType: pair.density_type }))
-  );
+  // Rule 2: unresolved (not-yet-completed) runs, fetched concurrently with
+  // Rule 1 above.
   const ambiguousCycleKeys = computeAmbiguousCycleKeys(candidatesByKey);
 
   interface AcceptedRun {
@@ -453,9 +470,9 @@ export async function getActivityDensityAttribution(
   // Reuses the frozen density_count_per_row already resolved onto each
   // run's segments — refetched here (not carried on CandidateRun) since
   // getUnresolvedRunsForRows doesn't expose it; the query pattern mirrors
-  // Inputs' own densityContributionsByActivity lookup. Also concurrent —
-  // only as many of these fire as there are ACCEPTED (unambiguous,
-  // in-range) candidates, typically far fewer than candidateRowsRes.
+  // Inputs' own densityContributionsByActivity lookup. ONE query for every
+  // accepted run's segments together. This used to be two queries per
+  // accepted run, which reached 1,600 queries for a 90-day range.
   //
   // Reads only segmentIds[0] — the chain's OWN root's first segment (see
   // getUnresolvedRunsForRows: chainSegmentIdsByRootId always accumulates the
@@ -474,18 +491,29 @@ export async function getActivityDensityAttribution(
   // midnight-rollover-continued shift) can have its single frozen quantity
   // split by day proportional to duration, the same as a multi-day
   // completion above, rather than omitted from every day it touches.
-  const [densityResults, segmentDetailResults] = await Promise.all([
-    Promise.all(accepted.map(({ only }) => pool.query(`select density_count_per_row from time_entries where id = $1`, [only.segmentIds[0]]))),
-    Promise.all(
-      accepted.map(({ only }) => pool.query(`select started_at, ended_at from time_entries where id = any($1::uuid[])`, [only.segmentIds]))
-    ),
-  ]);
+  //
+  // Ordered by id, the same order the old per-run `id = any(...)` primary-key
+  // lookup returned. Each run's segments are taken from the result in that
+  // order, so the per-day duration sums below add up in the same order too.
+  const acceptedSegmentIds = [...new Set(accepted.flatMap(({ only }) => only.segmentIds))];
+  const segmentRows = acceptedSegmentIds.length
+    ? (
+        await pool.query<{ id: string; density_count_per_row: number | null; started_at: Date; ended_at: Date }>(
+          `select id, density_count_per_row, started_at, ended_at from time_entries where id = any($1::uuid[]) order by id`,
+          [acceptedSegmentIds]
+        )
+      ).rows
+    : [];
+  const segmentRowById = new Map(segmentRows.map((r) => [r.id, r]));
 
-  accepted.forEach(({ only }, i) => {
-    const quantityPerRow = densityResults[i].rows[0]?.density_count_per_row;
+  accepted.forEach(({ only }) => {
+    const quantityPerRow = segmentRowById.get(only.segmentIds[0])?.density_count_per_row;
     if (quantityPerRow == null) return;
     const quantity = Number(quantityPerRow);
-    const segs = segmentDetailResults[i].rows.map((r) => ({ startedAt: r.started_at as Date, endedAt: r.ended_at as Date }));
+    const runSegmentIds = new Set(only.segmentIds);
+    const segs = segmentRows
+      .filter((r) => runSegmentIds.has(r.id))
+      .map((r) => ({ startedAt: r.started_at as Date, endedAt: r.ended_at as Date }));
     // A sole, finished, unambiguous visit IS one completed row for its
     // employee, exactly like a confirmed completion: its row's stems count
     // once, and it counts once toward Rows Completed. (It used to add 0
@@ -754,23 +782,107 @@ export async function getActivityDensityAudit(
   return rows;
 }
 
+// Whole-shift break totals for the given employees' days in [start, end) —
+// breaks carry no activity_id (see time_entries schema), so "break time" on
+// an Activity Report is necessarily each employee's whole-day break time,
+// not a portion attributed to this one activity. This is the only safely
+// available reading of that column, not an invented split.
+async function fetchBreakTotals(workEmployeeIds: string[], start: Date, end: Date) {
+  if (!workEmployeeIds.length) {
+    return { rows: [] as { employee_id: string; work_date: string; break_seconds: string; paid_break_seconds: string; unpaid_break_seconds: string }[] };
+  }
+  return pool.query(
+    `select te.employee_id,
+            to_char((te.started_at at time zone $4)::date, 'YYYY-MM-DD') as work_date,
+            sum(extract(epoch from (te.ended_at - te.started_at))) as break_seconds,
+            sum(extract(epoch from (te.ended_at - te.started_at))) filter (where te.is_paid) as paid_break_seconds,
+            sum(extract(epoch from (te.ended_at - te.started_at))) filter (where not coalesce(te.is_paid, false)) as unpaid_break_seconds
+     from time_entries te
+     where te.entry_type = 'break' and te.deleted_at is null and te.ended_at is not null
+       and te.employee_id = any($1::uuid[]) and te.started_at >= $2 and te.started_at < $3
+     group by te.employee_id, work_date`,
+    [workEmployeeIds, start, end, APP_TIMEZONE]
+  );
+}
+
+// Employee Paid Time inputs — the employee's WHOLE SHIFT for each day they
+// touched the activity, every activity combined, never scoped to just that
+// one. Deliberately a completely separate query from the activity-scoped
+// work query (not activity-scoped at all), fed to computeWorkdayTotals —
+// the same span-based formula Payroll/Inputs already use — rather than
+// "this activity's workSeconds + the day's paidBreakSeconds", which
+// undercounts on any day the employee also worked a different activity.
+async function fetchWholeShiftEntries(workEmployeeIds: string[], start: Date, end: Date) {
+  if (!workEmployeeIds.length) {
+    return { rows: [] as { employee_id: string; entry_type: "work" | "break"; started_at: Date; ended_at: Date; is_paid: boolean | null }[] };
+  }
+  return pool.query(
+    `select te.employee_id, te.entry_type, te.started_at, te.ended_at, te.is_paid
+     from time_entries te
+     where te.deleted_at is null and te.ended_at is not null
+       and te.employee_id = any($1::uuid[]) and te.started_at >= $2 and te.started_at < $3
+     order by te.employee_id, te.started_at`,
+    [workEmployeeIds, start, end]
+  );
+}
+
+interface WholeShiftEntry extends WorkdayBoundaryEntry {
+  employeeId: string;
+}
+
 export async function getActivityReportData(
   activityId: string,
   startDate: string,
   endDate: string,
   filter: ReportEmployeeFilter = {}
 ): Promise<ActivityReportData | null> {
-  const activityRes = await pool.query(
-    `select id, name, normal_speed, speed_unit from activities where id = $1`,
-    [activityId]
-  );
-  const activity = activityRes.rows[0];
-  if (!activity) return null;
+  const result = await getActivityReportDataWithAttribution(activityId, startDate, endDate, filter);
+  return result ? result.data : null;
+}
 
+// getActivityReportData plus the exact DensityAttribution it was built from
+// (the same getActivityDensityAttribution(activityId, start, end, filter)
+// result). Lets a caller that needs both, like Productive TV's pruning-speed,
+// reuse one computation instead of running the attribution a second time.
+export async function getActivityReportDataWithAttribution(
+  activityId: string,
+  startDate: string,
+  endDate: string,
+  filter: ReportEmployeeFilter = {}
+): Promise<{ data: ActivityReportData; attribution: DensityAttribution } | null> {
   const { start, end } = getRangeBoundsUtc(startDate, endDate);
   const employeeIds = filterToUuidArray(filter.employeeIds);
 
-  const workRes = await pool.query(
+  // Every read below is independent, except the two whole-shift queries,
+  // which need workRes's employee list. All of them start right here and
+  // run concurrently. Before, this was eight-plus sequential round trips;
+  // the only thing that changes is how long the caller waits.
+  const activityQuery = pool.query(`select id, name, normal_speed, speed_unit from activities where id = $1`, [activityId]);
+  const attributionQuery = getActivityDensityAttribution(activityId, start, end, { employeeIds: employeeIds ?? undefined });
+
+  // rowsTouched (distinct greenhouse_row_id) can't be derived by summing the
+  // per-employee-day figures in `rows` — the same row visited on two
+  // different days (or, for the date axis, by two different employees)
+  // would double count. So the range-wide, per-employee and per-date
+  // distinct counts each need their own grouping. They're computed in one
+  // query via GROUPING SETS; each set means exactly what its old standalone
+  // query meant. The () set always returns one row, 0 when nothing matched.
+  const rowsTouchedQuery = pool.query(
+    `select grouping(employee_id) as g_employee, grouping(work_date) as g_date, employee_id, work_date,
+            count(distinct greenhouse_row_id) as n
+     from (
+       select employee_id, greenhouse_row_id,
+              to_char((started_at at time zone $4)::date, 'YYYY-MM-DD') as work_date
+       from time_entries
+       where activity_id = $1 and entry_type = 'work' and deleted_at is null
+         and greenhouse_row_id is not null and started_at >= $2 and started_at < $3
+         and ($5::uuid[] is null or employee_id = any($5::uuid[]))
+     ) t
+     group by grouping sets ((), (employee_id), (work_date))`,
+    [activityId, start, end, APP_TIMEZONE, employeeIds]
+  );
+
+  const workQuery = pool.query(
     `select te.employee_id, e.first_name, e.last_name,
             -- to_char, not a bare ::date — node-postgres parses a plain SQL
             -- date result as a JS Date object (local-timezone rendered on
@@ -793,27 +905,24 @@ export async function getActivityReportData(
     [activityId, start, end, APP_TIMEZONE, employeeIds]
   );
 
-  const workEmployeeIds = [...new Set(workRes.rows.map((r) => r.employee_id as string))];
+  // The two whole-shift queries are scoped to workRes's employees, so they
+  // chain off workQuery (concurrently with each other) while the attribution
+  // and rows-touched queries above are still in flight.
+  const shiftQueries = workQuery.then((workRes) => {
+    const workEmployeeIds = [...new Set(workRes.rows.map((r) => r.employee_id as string))];
+    return Promise.all([fetchBreakTotals(workEmployeeIds, start, end), fetchWholeShiftEntries(workEmployeeIds, start, end)]);
+  });
 
-  // Whole-shift break totals for the same employee/day pairs — breaks carry
-  // no activity_id (see time_entries schema), so "break time" on an Activity
-  // Report is necessarily each employee's whole-day break time, not a
-  // portion attributed to this one activity. This is the only safely
-  // available reading of that column, not an invented split.
-  const breakRes = workEmployeeIds.length
-    ? await pool.query(
-        `select te.employee_id,
-                to_char((te.started_at at time zone $4)::date, 'YYYY-MM-DD') as work_date,
-                sum(extract(epoch from (te.ended_at - te.started_at))) as break_seconds,
-                sum(extract(epoch from (te.ended_at - te.started_at))) filter (where te.is_paid) as paid_break_seconds,
-                sum(extract(epoch from (te.ended_at - te.started_at))) filter (where not coalesce(te.is_paid, false)) as unpaid_break_seconds
-         from time_entries te
-         where te.entry_type = 'break' and te.deleted_at is null and te.ended_at is not null
-           and te.employee_id = any($1::uuid[]) and te.started_at >= $2 and te.started_at < $3
-         group by te.employee_id, work_date`,
-        [workEmployeeIds, start, end, APP_TIMEZONE]
-      )
-    : { rows: [] as { employee_id: string; work_date: string; break_seconds: string; paid_break_seconds: string; unpaid_break_seconds: string }[] };
+  const [activityRes, workRes, [breakRes, wholeShiftRes], attribution, rowsTouchedRes] = await Promise.all([
+    activityQuery,
+    workQuery,
+    shiftQueries,
+    attributionQuery,
+    rowsTouchedQuery,
+  ]);
+  const activity = activityRes.rows[0];
+  if (!activity) return null;
+
   const breakByKey = new Map<string, { breakSeconds: number; paidBreakSeconds: number; unpaidBreakSeconds: number }>();
   for (const b of breakRes.rows) {
     breakByKey.set(`${b.employee_id}:${b.work_date}`, {
@@ -823,26 +932,8 @@ export async function getActivityReportData(
     });
   }
 
-  // Employee Paid Time — the employee's WHOLE SHIFT for each day they
-  // touched this activity, every activity combined, never scoped to just
-  // this one. Deliberately a completely separate query from workRes above
-  // (not activity-scoped at all) and computed via computeWorkdayTotals —
-  // the same span-based formula Payroll/Inputs already use — rather than
-  // "this activity's workSeconds + the day's paidBreakSeconds", which
-  // undercounts on any day the employee also worked a different activity.
-  const wholeShiftRes = workEmployeeIds.length
-    ? await pool.query(
-        `select te.employee_id, te.entry_type, te.started_at, te.ended_at, te.is_paid
-         from time_entries te
-         where te.deleted_at is null and te.ended_at is not null
-           and te.employee_id = any($1::uuid[]) and te.started_at >= $2 and te.started_at < $3
-         order by te.employee_id, te.started_at`,
-        [workEmployeeIds, start, end]
-      )
-    : { rows: [] as { employee_id: string; entry_type: "work" | "break"; started_at: Date; ended_at: Date; is_paid: boolean | null }[] };
-  interface WholeShiftEntry extends WorkdayBoundaryEntry {
-    employeeId: string;
-  }
+  // Employee Paid Time, via computeWorkdayTotals — see
+  // fetchWholeShiftEntries for why it's a whole-shift figure.
   const wholeShiftEntries: WholeShiftEntry[] = wholeShiftRes.rows.map((r) => ({
     employeeId: r.employee_id,
     entryType: r.entry_type,
@@ -854,8 +945,6 @@ export async function getActivityReportData(
   for (const [key, entries] of groupByEmployeeDay(wholeShiftEntries)) {
     employeePaidByKey.set(key, toSeconds(computeWorkdayTotals(entries).workedSeconds));
   }
-
-  const attribution = await getActivityDensityAttribution(activityId, start, end, { employeeIds: employeeIds ?? undefined });
 
   const rows: ActivityReportRow[] = workRes.rows.map((r) => {
     const dateStr = String(r.work_date);
@@ -903,16 +992,8 @@ export async function getActivityReportData(
   // rowsTouched above is per employee-day (distinct rows that day) — the
   // range-wide distinct count needs its own query rather than summing the
   // per-day figures, which would double-count a row visited on more than
-  // one day.
-  const rangeRowsRes = await pool.query(
-    `select count(distinct greenhouse_row_id) as n
-     from time_entries
-     where activity_id = $1 and entry_type = 'work' and deleted_at is null
-       and greenhouse_row_id is not null and started_at >= $2 and started_at < $3
-       and ($4::uuid[] is null or employee_id = any($4::uuid[]))`,
-    [activityId, start, end, employeeIds]
-  );
-  const totalRowsTouched = Number(rangeRowsRes.rows[0]?.n ?? 0);
+  // one day. It's the () grouping set of rowsTouchedQuery above.
+  const totalRowsTouched = Number(rowsTouchedRes.rows.find((r) => r.g_employee === 1 && r.g_date === 1)?.n ?? 0);
   void distinctRowsTouched;
 
   // Range-level totals — ratio-of-sums over EVERY qualifying contribution
@@ -982,32 +1063,12 @@ export async function getActivityReportData(
     dateSeconds.set(r.date, d);
   }
 
-  // rowsTouched (distinct greenhouse_row_id) can't be derived by summing the
-  // per-employee-day figures already in `rows` — the same row visited on two
-  // different days (or, for the date axis, by two different employees)
-  // would double count. Each axis gets its own distinct-count query, same
-  // reasoning as totalRowsTouched above.
-  const employeeRowsTouchedRes = await pool.query(
-    `select employee_id, count(distinct greenhouse_row_id) as n
-     from time_entries
-     where activity_id = $1 and entry_type = 'work' and deleted_at is null
-       and greenhouse_row_id is not null and started_at >= $2 and started_at < $3
-       and ($4::uuid[] is null or employee_id = any($4::uuid[]))
-     group by employee_id`,
-    [activityId, start, end, employeeIds]
+  // Per-employee and per-date distinct rows touched — the matching
+  // GROUPING SETS of rowsTouchedQuery above.
+  const employeeRowsTouched = new Map(
+    rowsTouchedRes.rows.filter((r) => r.g_employee === 0).map((r) => [r.employee_id as string, Number(r.n)])
   );
-  const employeeRowsTouched = new Map(employeeRowsTouchedRes.rows.map((r) => [r.employee_id as string, Number(r.n)]));
-
-  const dateRowsTouchedRes = await pool.query(
-    `select to_char((started_at at time zone $4)::date, 'YYYY-MM-DD') as work_date, count(distinct greenhouse_row_id) as n
-     from time_entries
-     where activity_id = $1 and entry_type = 'work' and deleted_at is null
-       and greenhouse_row_id is not null and started_at >= $2 and started_at < $3
-       and ($5::uuid[] is null or employee_id = any($5::uuid[]))
-     group by work_date`,
-    [activityId, start, end, APP_TIMEZONE, employeeIds]
-  );
-  const dateRowsTouched = new Map(dateRowsTouchedRes.rows.map((r) => [String(r.work_date), Number(r.n)]));
+  const dateRowsTouched = new Map(rowsTouchedRes.rows.filter((r) => r.g_date === 0).map((r) => [String(r.work_date), Number(r.n)]));
 
   // Re-aggregates attribution.byEmployeeDay (keyed "employeeId:date") across
   // employees sharing the same date — the exact same day-attributable
@@ -1052,7 +1113,7 @@ export async function getActivityReportData(
     })
     .sort((a, b) => a.date.localeCompare(b.date));
 
-  return {
+  const data: ActivityReportData = {
     activity: {
       id: activity.id,
       name: activity.name,
@@ -1074,6 +1135,7 @@ export async function getActivityReportData(
       averageSpeed: overallSpeed,
     },
   };
+  return { data, attribution };
 }
 
 export interface PayrollReportRow {

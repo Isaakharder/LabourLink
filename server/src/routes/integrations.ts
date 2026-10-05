@@ -6,13 +6,13 @@
 // ranking) alongside its existing Ridder Productive data, and (as of the
 // picking-speed endpoint below) a Picking Peppers stems/hour ranking on its
 // Picking slide.
-import { Router } from "express";
+import { Request, Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireIntegrationToken } from "../middleware/integrationAuth";
-import { getActivityDensityAttribution, getActivityReportData } from "../lib/reportQueries";
+import { getActivityReportDataWithAttribution } from "../lib/reportQueries";
 import { aggregateDensitySpeed } from "../lib/densitySpeed";
-import { APP_TIMEZONE, getRangeBoundsUtc, inclusiveDayCount } from "../lib/timezone";
+import { APP_TIMEZONE, inclusiveDayCount } from "../lib/timezone";
 import { MAX_DATE_RANGE_DAYS } from "./greenhouseLive";
 
 const router = Router();
@@ -37,6 +37,39 @@ const REQUIRED_DENSITY_SOURCE = "stems";
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+// Identical concurrent requests (same endpoint, activity and range) share
+// one in-flight computation instead of each running the full report. Every
+// TV polls on its own timer, and a client that gives up and retries would
+// otherwise start a second copy while the first is still running; Express
+// never cancels a handler when its client disconnects. The entry is dropped
+// as soon as the computation settles, so this is never a cache: every
+// request gets a result computed after it arrived or while it was waiting.
+const inFlight = new Map<string, Promise<unknown>>();
+function sharedInFlight<T>(key: string, compute: () => Promise<T>): Promise<T> {
+  const existing = inFlight.get(key);
+  if (existing) return existing as Promise<T>;
+  const p = compute().finally(() => inFlight.delete(key));
+  inFlight.set(key, p);
+  return p;
+}
+
+// True once the client has closed the connection. Checked right before the
+// expensive report work starts, so a request the TV has already abandoned
+// doesn't still run a whole report against the shared DB pool.
+function clientGone(req: Request): boolean {
+  return req.socket.destroyed;
+}
+
+// Both endpoints need the Activity Report AND the attribution it is built
+// from, over the same range. getActivityReportDataWithAttribution returns
+// both from one computation — the attribution is exactly
+// getActivityDensityAttribution(activityId, getRangeBoundsUtc(from, to)),
+// unfiltered. These endpoints used to compute that attribution twice per
+// request (once directly, once inside the report).
+function loadReportWithAttribution(endpoint: string, activityId: string, from: string, to: string) {
+  return sharedInFlight(`${endpoint}:${activityId}:${from}:${to}`, () => getActivityReportDataWithAttribution(activityId, from, to));
 }
 
 // GET /api/integrations/productive-tv/pruning-speed?from=YYYY-MM-DD&to=YYYY-MM-DD
@@ -107,18 +140,16 @@ router.get(
       });
     }
 
-    const { start, end } = getRangeBoundsUtc(from, to);
-    const [attribution, reportData] = await Promise.all([
-      getActivityDensityAttribution(activity.id, start, end),
-      getActivityReportData(activity.id, from, to),
-    ]);
+    if (clientGone(req)) return;
+    const result = await loadReportWithAttribution("pruning", activity.id, from, to);
 
     // Can only be null if the activity vanished between the lookup above
     // and this call — defensive, not a realistic runtime path since it was
     // just confirmed to exist by id.
-    if (!reportData) {
+    if (!result) {
       return res.status(503).json({ error: `The "${PRUNING_ACTIVITY_NAME}" activity is not configured` });
     }
+    const { data: reportData, attribution } = result;
 
     // getActivityReportData's employeeTotals is the driving list (every
     // employee with ANY work logged against this activity in range,
@@ -228,15 +259,13 @@ router.get(
       });
     }
 
-    const { start, end } = getRangeBoundsUtc(from, to);
-    const [attribution, reportData] = await Promise.all([
-      getActivityDensityAttribution(activity.id, start, end),
-      getActivityReportData(activity.id, from, to),
-    ]);
+    if (clientGone(req)) return;
+    const result = await loadReportWithAttribution("picking", activity.id, from, to);
 
-    if (!reportData) {
+    if (!result) {
       return res.status(503).json({ error: `The "${PICKING_ACTIVITY_NAME}" activity is not configured`, reason: "activity_missing" });
     }
+    const { data: reportData, attribution } = result;
 
     let employeesWithoutSpeed = 0;
     const employees = reportData.employeeTotals
