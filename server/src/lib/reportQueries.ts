@@ -486,8 +486,13 @@ export async function getActivityDensityAttribution(
     if (quantityPerRow == null) return;
     const quantity = Number(quantityPerRow);
     const segs = segmentDetailResults[i].rows.map((r) => ({ startedAt: r.started_at as Date, endedAt: r.ended_at as Date }));
-    addTo(byEmployee, only.employeeId, quantity, only.durationSeconds, 0);
-    attributeByDay(only.employeeId, quantity, segs, 0);
+    // A sole, finished, unambiguous visit IS one completed row for its
+    // employee, exactly like a confirmed completion: its row's stems count
+    // once, and it counts once toward Rows Completed. (It used to add 0
+    // here, so Reports showed the quantity/speed but 0 rows completed for
+    // the same visit.)
+    addTo(byEmployee, only.employeeId, quantity, only.durationSeconds, 1);
+    attributeByDay(only.employeeId, quantity, segs, 1);
   });
 
   return { byEmployee, byEmployeeDay };

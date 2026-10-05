@@ -869,11 +869,38 @@ router.get(
       chainDurationByRootId.set(rootId, chainDurationByRootId.get(rootId)! + priorSeconds);
     }
 
-    const speedByRootId = new Map<string, number | null>();
+    // One speed per physical row VISIT, not per display run. Display runs
+    // split whenever the carrier changes, but a row visit doesn't (see
+    // rowCompletionCandidates.ts): every root that belongs to the same
+    // candidate is one visit, so its row's stems count once over the
+    // visit's combined duration — the same quantity/duration Reports,
+    // Dashboard, mobile Stats and Productive TV attribute for it. A root
+    // that is alone in its visit (no carrier change) computes exactly as
+    // before. Quantity comes from the visit's earliest root, matching the
+    // candidate's own segmentIds[0] that Reports reads.
+    const visitKeyByRootId = new Map<string, string>();
+    const visitDurationByKey = new Map<string, number>();
+    const visitFirstRootByKey = new Map<string, (typeof runs)[number]>();
     for (const [rootId, durationSeconds] of chainDurationByRootId) {
       const root = runById.get(rootId)!;
+      const visitKey = candidateBySegmentId.get(root.segmentIds[0])?.runId ?? rootId;
+      visitKeyByRootId.set(rootId, visitKey);
+      visitDurationByKey.set(visitKey, (visitDurationByKey.get(visitKey) ?? 0) + durationSeconds);
+      const first = visitFirstRootByKey.get(visitKey);
+      if (!first || root.startedAt < first.startedAt) visitFirstRootByKey.set(visitKey, root);
+    }
+
+    const speedByRootId = new Map<string, number | null>();
+    for (const rootId of chainDurationByRootId.keys()) {
+      const root = runById.get(rootId)!;
       if (ambiguousCycleKeys.has(cycleKeyFor(root))) continue;
-      speedByRootId.set(rootId, aggregateDensitySpeed([{ quantityPerRow: root.densityCountPerRow!, durationSeconds }]));
+      const visitKey = visitKeyByRootId.get(rootId)!;
+      speedByRootId.set(
+        rootId,
+        aggregateDensitySpeed([
+          { quantityPerRow: visitFirstRootByKey.get(visitKey)!.densityCountPerRow!, durationSeconds: visitDurationByKey.get(visitKey)! },
+        ])
+      );
     }
 
     const canEditRole = EDIT_ROLES.includes(req.employee!.securityRole);

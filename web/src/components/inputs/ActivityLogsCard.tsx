@@ -98,6 +98,7 @@ export function ActivityLogsCard({
     activityName: string;
     densityType: "plants" | "stems";
     rowLabel: string;
+    timeEntryId: string;
   } | null>(null);
 
   // Shared by both the Start Time and End Time cells — either one clicked
@@ -136,6 +137,9 @@ export function ActivityLogsCard({
       activityName: run.activityName,
       densityType: run.densityType,
       rowLabel: run.row.label,
+      // Scopes the modal to this visit's own row-work cycle — see
+      // RowCompletionReviewModal's timeEntryId prop.
+      timeEntryId: run.segmentIds[0],
     });
   }
 
@@ -370,6 +374,7 @@ export function ActivityLogsCard({
           activityName={reviewTarget.activityName}
           densityType={reviewTarget.densityType}
           rowLabel={reviewTarget.rowLabel}
+          timeEntryId={reviewTarget.timeEntryId}
           onClose={() => setReviewTarget(null)}
           onCombined={() => {
             setReviewTarget(null);

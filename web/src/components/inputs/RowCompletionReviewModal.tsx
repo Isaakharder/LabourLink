@@ -14,6 +14,12 @@ interface RowCompletionReviewModalProps {
   activityName: string;
   densityType: "plants" | "stems";
   rowLabel: string;
+  // Any segment of the visit whose "Needs review" badge opened this modal.
+  // The server returns only the candidates in that visit's own row-work
+  // cycle (visits less than 7 local calendar days apart), never every
+  // pending visit the row has ever had — other cycles can't be combined
+  // with this one anyway.
+  timeEntryId: string;
   onClose: () => void;
   onCombined: () => void;
   // Called when this row genuinely has no pending work to review — the
@@ -31,6 +37,7 @@ export function RowCompletionReviewModal({
   activityName,
   densityType,
   rowLabel,
+  timeEntryId,
   onClose,
   onCombined,
   onNoLongerPending,
@@ -42,11 +49,11 @@ export function RowCompletionReviewModal({
 
   useEffect(() => {
     api<{ candidates: RowCompletionCandidateRun[] }>(
-      `/api/row-completions/candidates?greenhouseRowId=${greenhouseRowId}&activityId=${activityId}&densityType=${densityType}`
+      `/api/row-completions/candidates?greenhouseRowId=${greenhouseRowId}&activityId=${activityId}&densityType=${densityType}&timeEntryId=${timeEntryId}`
     )
       .then((res) => setCandidates(res.candidates))
       .catch((err) => setError(err instanceof ApiError ? err.message : "Could not load pending row work"));
-  }, [greenhouseRowId, activityId, densityType]);
+  }, [greenhouseRowId, activityId, densityType, timeEntryId]);
 
   function toggle(runId: string) {
     setSelected((prev) => {
@@ -117,9 +124,10 @@ export function RowCompletionReviewModal({
     >
       {!isEmpty && (
         <p className="field-hint">
-          This physical row has work logged across more than one segment — select the segments that represent the
-          same completed row before its density-based speed can be calculated. Selecting just one segment on its own
-          confirms it as a separate, deliberately-not-combined completion.
+          This row has more than one visit for this activity less than 7 days apart — select the visits that
+          represent the same completed row before its density-based speed can be calculated. Selecting just one visit
+          on its own confirms it as a separate, deliberately-not-combined completion. Visits 7 or more days apart are
+          reviewed separately and aren't listed here.
         </p>
       )}
 

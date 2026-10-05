@@ -16,6 +16,15 @@ const DENSITY_TYPES = new Set(["plants", "stems"]);
 // complete ambiguity scope (see getUnresolvedRunsForRow's own comment /
 // 045_row_completion_activity_id.sql): a different activity sharing this
 // row and density type must never appear in this list.
+//
+// Optional timeEntryId: any segment of the visit the admin opened the
+// review from. When given, only the candidates in THAT visit's row-work
+// cycle (rowCompletionCandidates.ts's CYCLE_GAP_DAYS) are returned — a
+// cycle is the only scope that can ever be combined (see POST below), so
+// listing other cycles invites a combine the server will refuse. If the
+// segment is no longer part of any unresolved candidate (resolved
+// elsewhere since the page loaded), the list is empty, which the modal
+// already treats as "this badge is stale".
 router.get(
   "/candidates",
   requireAuth,
@@ -33,9 +42,17 @@ router.get(
     if (!densityType || !DENSITY_TYPES.has(densityType)) {
       return res.status(400).json({ error: "densityType must be 'plants' or 'stems'" });
     }
+    const timeEntryId = req.query.timeEntryId as string | undefined;
+    if (timeEntryId !== undefined && !UUID_RE.test(timeEntryId)) {
+      return res.status(400).json({ error: "timeEntryId must be a valid id" });
+    }
 
     const candidates = await getUnresolvedRunsForRow(greenhouseRowId, activityId, densityType as "plants" | "stems");
-    res.json({ candidates });
+    if (timeEntryId === undefined) {
+      return res.json({ candidates });
+    }
+    const anchor = candidates.find((c) => c.segmentIds.includes(timeEntryId));
+    res.json({ candidates: anchor ? candidates.filter((c) => c.cycleIndex === anchor.cycleIndex) : [] });
   })
 );
 
@@ -122,15 +139,27 @@ router.post(
         first.activity_id,
         first.density_type as "plants" | "stems"
       );
-      const cycleIndexBySegmentId = new Map<string, number>();
+      const candidateBySegmentId = new Map<string, (typeof candidates)[number]>();
       for (const c of candidates) {
-        for (const segId of c.segmentIds) cycleIndexBySegmentId.set(segId, c.cycleIndex);
+        for (const segId of c.segmentIds) candidateBySegmentId.set(segId, c);
       }
-      const cycleIndexesUsed = new Set(timeEntryIds.map((id) => cycleIndexBySegmentId.get(id)));
+      const cycleIndexesUsed = new Set(timeEntryIds.map((id) => candidateBySegmentId.get(id)?.cycleIndex));
       if (cycleIndexesUsed.size > 1 || cycleIndexesUsed.has(undefined)) {
         await client.query("rollback");
         return res.status(400).json({
-          error: "Selected entries span more than one row-work cycle (more than 7 calendar days apart) and cannot be combined together",
+          error: "Selected entries span more than one row-work cycle (7 or more calendar days apart) and cannot be combined together",
+        });
+      }
+      // A visit is completed whole or not at all. Its segments (break
+      // splits, carrier changes) are one physical pass over the row;
+      // completing part of it would leave the rest as a second "visit" and
+      // count the row's stems twice.
+      const selected = new Set(timeEntryIds);
+      const touchedVisits = new Set(timeEntryIds.map((id) => candidateBySegmentId.get(id)!));
+      if ([...touchedVisits].some((c) => c.segmentIds.some((segId) => !selected.has(segId)))) {
+        await client.query("rollback");
+        return res.status(400).json({
+          error: "Selected entries include only part of a visit — select every segment of each visit",
         });
       }
 

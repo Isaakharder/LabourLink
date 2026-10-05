@@ -84,6 +84,7 @@ function renderModal(props: Partial<ComponentProps<typeof RowCompletionReviewMod
       activityName="Winding & Pruning"
       densityType="stems"
       rowLabel="Phase 1 · Row 92"
+      timeEntryId="segment-of-opened-visit"
       onClose={onClose}
       onCombined={onCombined}
       onNoLongerPending={onNoLongerPending}
@@ -105,6 +106,12 @@ describe("RowCompletionReviewModal", () => {
     expect(calledPath).toContain("greenhouseRowId=row-92");
     expect(calledPath).toContain("activityId=activity-picking-peppers");
     expect(calledPath).toContain("densityType=stems");
+  });
+
+  it("asks only for the opened visit's own cycle — passes the visit's segment so other cycles aren't listed", () => {
+    renderModal({ timeEntryId: "seg-sep-28" });
+    const calledPath = vi.mocked(api).mock.calls[0][0] as string;
+    expect(calledPath).toContain("timeEntryId=seg-sep-28");
   });
 
   it("6) never shows an enabled Combine button when there are no candidates — explains the stale badge instead", async () => {

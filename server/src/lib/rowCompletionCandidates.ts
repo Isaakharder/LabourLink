@@ -283,7 +283,18 @@ export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): 
         started_at: r.started_at,
         ended_at: r.ended_at,
         greenhouse_row_id: r.greenhouse_row_id,
-        carrier_id: r.carrier_id,
+        // Deliberately blanked: a carrier change is NOT a new row visit.
+        // groupIntoActivityRuns ends a run whenever the carrier changes
+        // (correct for Inputs' display rows and for carrier completions),
+        // but a row-completion candidate is one physical visit to a row:
+        // same row, same activity, contiguous segments, breaks transparent.
+        // An employee who swaps carriers mid-row is still on that one visit.
+        // Keeping carrier_id here split such a visit into two candidates
+        // in the same cycle, which falsely flagged a lone visit as
+        // "Needs review" and excluded its stems everywhere (production:
+        // Phase 1 Row 338, Picking Peppers, Sep 14 — one visit, carrier
+        // changed at 19:27).
+        carrier_id: null,
         density_type: r.density_type,
         density_count_per_row: r.density_count_per_row,
         rollover_of_entry_id: r.rollover_of_entry_id,
