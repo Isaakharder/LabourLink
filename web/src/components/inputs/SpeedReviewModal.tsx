@@ -59,6 +59,12 @@ function timeRange(v: SpeedReviewVisit): string {
   return `${formatTimeInAppTimezone(v.startedAt)} – ${v.endedAt ? formatTimeInAppTimezone(v.endedAt) : "in progress"}`;
 }
 
+// "Oct 5" — the card's compact date list.
+function shortDate(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+}
+
 function previewText(p: SpeedPreview, unit: string): string {
   const qtyUnit = unit.replace("/hour", "");
   const speed = p.speedPerHour != null ? formatSpeedValue(p.speedPerHour, unit) : "—";
@@ -117,6 +123,10 @@ export function SpeedReviewModal({ date, employeeId, employeeName, canApply, onC
   const toApply = (groups ?? []).filter((g) => selected.has(g.id) && choices[g.id] !== "skip" && isSupported(g, choices[g.id]));
   const affectedEmployees = new Set(toApply.map((g) => g.employeeId)).size;
   const pendingAfter = (groups?.length ?? 0) - toApply.length;
+  // What Apply will do, per action — each selected card keeps its own.
+  const toMerge = toApply.filter((g) => choices[g.id] === "merge").length;
+  const toSeparate = toApply.filter((g) => choices[g.id] === "separate").length;
+  const groupsLabel = (n: number) => `${n} group${n === 1 ? "" : "s"}`;
   const eligibleIds = (groups ?? []).filter(isEligible).map((g) => g.id);
 
   function toggleSelected(id: string) {
@@ -193,7 +203,7 @@ export function SpeedReviewModal({ date, employeeId, employeeName, canApply, onC
       <span className="speed-review-footer-summary" role="status">
         {applied
           ? `${succeeded} saved · ${failed} not saved${failed > 0 ? " (still pending)" : ""}`
-          : `${selected.size} selected · ${toApply.length} to apply · ${affectedEmployees} employee${affectedEmployees === 1 ? "" : "s"} affected · ${pendingAfter} will stay pending`}
+          : `${groupsLabel(toMerge)} to merge · ${groupsLabel(toSeparate)} to keep separate · ${pendingAfter} pending · ${affectedEmployees} employee${affectedEmployees === 1 ? "" : "s"} affected`}
         {!canApply && " · Only administrators can apply changes"}
       </span>
       {applied ? (
@@ -335,10 +345,17 @@ function ReviewCard({ group: g, selected, choice, expanded, locked, result, onTo
         <div className="speed-review-card-title">
           <span>
             <strong>{g.rowLabel}</strong> · {g.activityName}
+            {g.spansDates.length > 1 && (
+              <span className="speed-review-spans" title={g.spansDates.map(formatDateLong).join(", ")}>
+                Spans {g.spansDates.length} days · {g.spansDates.map(shortDate).join(", ")}
+              </span>
+            )}
           </span>
           <span className="speed-review-card-meta">
             {g.employeeName} · {carriers.length ? carriers.join(", ") : "No carrier"} · {g.visits.length} visit
-            {g.visits.length === 1 ? "" : "s"} · {g.visits.map(timeRange).join(", ")} · {formatDurationHMS(totalSeconds)} work
+            {g.visits.length === 1 ? "" : "s"} ·{" "}
+            {g.visits.map((v) => (g.spansDates.length > 1 ? `${shortDate(v.date)} ${timeRange(v)}` : timeRange(v))).join(", ")} ·{" "}
+            {formatDurationHMS(totalSeconds)} work
           </span>
         </div>
         {result ? (

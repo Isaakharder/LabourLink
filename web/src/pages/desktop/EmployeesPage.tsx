@@ -2,10 +2,12 @@ import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import { DirectoryTab } from "./employees/DirectoryTab";
 import { EmploymentTimelineTab } from "./employees/EmploymentTimelineTab";
+import { EmployeeGroupsTab } from "./employees/EmployeeGroupsTab";
 
 const TABS = [
   { path: "directory", label: "Directory", element: <DirectoryTab /> },
   { path: "employment-timeline", label: "Employment Timeline", element: <EmploymentTimelineTab /> },
+  { path: "employee-groups", label: "Employee Groups", element: <EmployeeGroupsTab /> },
 ];
 
 export function EmployeesPage() {

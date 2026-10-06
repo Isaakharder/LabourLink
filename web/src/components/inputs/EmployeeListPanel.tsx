@@ -1,5 +1,6 @@
 import { ReactNode } from "react";
 import { InputsEmployee } from "../../lib/inputsTypes";
+import { UNGROUPED_LABEL } from "../../lib/employeeGroupTypes";
 import { secondsToHoursMinutes } from "../../lib/reportTypes";
 
 interface EmployeeListPanelProps {
@@ -59,6 +60,34 @@ function hoursDisplay(paidSeconds: number | null, loading: boolean): HoursDispla
   return { text: secondsToHoursMinutes(paidSeconds), label: paidHoursLabel(paidSeconds), isPlaceholder: false };
 }
 
+interface EmployeeSection {
+  key: string;
+  name: string;
+  employees: InputsEmployee[];
+}
+
+// The list the panel receives is already filtered (date, and search —
+// done server-side), so grouping it here makes every heading's count and
+// which groups appear follow the current filters automatically: a group
+// with no matching employee simply has no section. Groups alphabetical,
+// Ungrouped last; employees alphabetical within each group.
+export function groupEmployees(employees: InputsEmployee[]): EmployeeSection[] {
+  const byKey = new Map<string, EmployeeSection>();
+  for (const e of employees) {
+    const key = e.employeeGroup?.id ?? "";
+    const section = byKey.get(key) ?? { key, name: e.employeeGroup?.name ?? UNGROUPED_LABEL, employees: [] };
+    section.employees.push(e);
+    byKey.set(key, section);
+  }
+  const fullName = (e: InputsEmployee) => `${e.firstName} ${e.lastName}`;
+  const sections = [...byKey.values()];
+  for (const s of sections) s.employees.sort((a, b) => fullName(a).localeCompare(fullName(b)) || a.id.localeCompare(b.id));
+  return sections.sort((a, b) => {
+    if (a.key === "" || b.key === "") return a.key === "" ? 1 : -1;
+    return a.name.localeCompare(b.name) || a.key.localeCompare(b.key);
+  });
+}
+
 export function EmployeeListPanel({
   employees,
   error,
@@ -86,31 +115,45 @@ export function EmployeeListPanel({
       ) : employees.length === 0 ? (
         <p className="placeholder-page">No active employees found.</p>
       ) : (
-        <ul className="inputs-employee-list">
-          {employees.map((e) => {
-            const hours = hoursDisplay(e.paidSeconds, loading);
-            return (
-              <li key={e.id}>
-                <button
-                  type="button"
-                  className={`inputs-employee-item${e.id === selectedId ? " inputs-employee-item-selected" : ""}`}
-                  onClick={() => onSelect(e.id)}
-                >
-                  <span className="inputs-employee-name">
-                    {e.firstName} {e.lastName}
-                  </span>
-                  <span
-                    className="inputs-employee-hours"
-                    title={hours.isPlaceholder ? undefined : hours.label}
-                    aria-label={hours.label}
-                  >
-                    {hours.isPlaceholder ? <span className="inputs-employee-hours-placeholder" aria-hidden="true" /> : hours.text}
-                  </span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
+        <div className="inputs-employee-groups">
+          {groupEmployees(employees).map((section) => (
+            <section
+              key={section.key || "ungrouped"}
+              className="inputs-employee-group"
+              aria-label={`${section.name} (${section.employees.length})`}
+            >
+              <h4 className="inputs-employee-group-heading">
+                <span className="inputs-employee-group-name">{section.name}</span>
+                <span className="inputs-employee-group-count">{section.employees.length}</span>
+              </h4>
+              <ul className="inputs-employee-list">
+                {section.employees.map((e) => {
+                  const hours = hoursDisplay(e.paidSeconds, loading);
+                  return (
+                    <li key={e.id}>
+                      <button
+                        type="button"
+                        className={`inputs-employee-item${e.id === selectedId ? " inputs-employee-item-selected" : ""}`}
+                        onClick={() => onSelect(e.id)}
+                      >
+                        <span className="inputs-employee-name">
+                          {e.firstName} {e.lastName}
+                        </span>
+                        <span
+                          className="inputs-employee-hours"
+                          title={hours.isPlaceholder ? undefined : hours.label}
+                          aria-label={hours.label}
+                        >
+                          {hours.isPlaceholder ? <span className="inputs-employee-hours-placeholder" aria-hidden="true" /> : hours.text}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          ))}
+        </div>
       )}
     </div>
   );

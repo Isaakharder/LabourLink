@@ -37,11 +37,14 @@ export interface SpeedReviewGroup {
   rowLabel: string;
   densityType: "plants" | "stems";
   unit: string;
+  // Every date this card's visits touch; 2+ = the card spans days.
+  spansDates: string[];
   reasons: string[];
-  // This employee's visits on this date — what an action applies to.
+  // All of this employee's pending visits to this row in this 7-day cycle,
+  // on any day — what an action applies to.
   visits: SpeedReviewVisit[];
-  // Other visits in the same 7-day row cycle (other employees / other
-  // dates): shown for context only, never changed by this group's action.
+  // Other employees' visits in the same 7-day row cycle: shown for context
+  // only, never changed by this group's action.
   contextVisits: SpeedReviewVisit[];
   actions: {
     merge: { available: boolean; unavailableReason: string | null; preview: SpeedPreview | null };

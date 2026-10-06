@@ -7993,3 +7993,106 @@ input {
   overflow-y: auto;
   font-size: 0.9rem;
 }
+
+/* ---------- Employees > Employee Groups tab ---------- */
+
+.employee-groups-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 52rem;
+}
+
+.employee-groups-create {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.6rem;
+}
+
+.employee-groups-create label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.employee-groups-create input,
+.employee-groups-rename input {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  min-width: 16rem;
+}
+
+.employee-groups-create .employees-add-button {
+  margin-left: 0;
+}
+
+.employee-groups-rename {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.employee-groups-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+.employee-groups-ungrouped td {
+  color: var(--color-muted);
+  font-style: italic;
+}
+
+/* Inputs sidebar: employees under their Employee Group headings. Compact so
+   the list stays as dense as before. */
+.inputs-employee-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.inputs-employee-group-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0.3rem 0.5rem 0.15rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-muted);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.inputs-employee-group-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inputs-employee-group-count {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+/* Bulk speed review: card whose visits span more than one day. */
+.speed-review-spans {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: #e0e7ff;
+  color: #3730a3;
+  border: 1px solid #a5b4fc;
+  vertical-align: middle;
+}

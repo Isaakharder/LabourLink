@@ -12,6 +12,9 @@ export interface InputsEmployee {
   // successfully-computed 0; the panel shows "—"/"Paid hours unavailable"
   // for null and "0:00" only for an actual zero.
   paidSeconds: number | null;
+  // Employee Group for the sidebar's group headings; null = Ungrouped. Optional
+  // so older responses still render (they all land under Ungrouped).
+  employeeGroup?: { id: string; name: string } | null;
 }
 
 // Present on a run/break/work-start when an administrator created it

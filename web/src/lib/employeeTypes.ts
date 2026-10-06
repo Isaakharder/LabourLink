@@ -1,3 +1,5 @@
+import { EmployeeGroupRef } from "./employeeGroupTypes";
+
 export interface EmployeeDevice {
   id: string;
   name: string | null;
@@ -38,6 +40,9 @@ export interface Employee {
   activityGroups: EmployeeActivityGroup[];
   breakProfileId: string | null;
   breakProfile: EmployeeBreakProfile | null;
+  // Employee Group (Employees > Employee Groups); null = Ungrouped. Purely
+  // organizational — independent of jobGroup and activityGroups.
+  employeeGroup: EmployeeGroupRef | null;
   // Never the employee's Employment End Date, and never a reason to
   // auto-deactivate them — purely an optional expiry to track and warn
   // about (see workPermitTypes.ts / the Dashboard's Work Permit Alerts

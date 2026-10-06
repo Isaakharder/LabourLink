@@ -146,14 +146,16 @@ function isoWeekStartDateStr(dateStr: string): string {
 //     never itself a candidate here, and never suppresses this one either.
 //
 // A contribution whose segments span more than one APP_TIMEZONE calendar
-// day (a row worked across two real work sessions, or a shift closed and
-// reopened at midnight rollover) is never dropped from the per-day view and
-// never double-counted: its one frozen quantity is allocated across the
-// days it touches in proportion to each day's own share of the
-// contribution's total productive duration (splitDurationByCalendarDay
-// below) — which, by construction, gives every day the SAME resulting
-// speed as the contribution's own overall speed, matching what Inputs
-// itself shows on every day/run belonging to one completion/visit.
+// day (a row started one evening and finished the next morning, combined in
+// review; or a shift closed and reopened at midnight rollover) is never
+// dropped and never double-counted: its one frozen quantity is allocated
+// across the days it touches in proportion to each day's work time, and
+// every day inside the selected range counts its own share — even when the
+// range excludes the other day(s). Its completed row counts once, on its
+// final date. By construction every day gets the SAME speed as the
+// contribution's own overall speed, matching what Inputs shows on every
+// day/run belonging to one completion/visit, and daily figures always add
+// up to range figures. See contribute() below.
 export interface DensityTotals {
   quantity: number;
   durationSeconds: number;
@@ -211,6 +213,25 @@ function splitDurationByCalendarDay(segments: { startedAt: Date; endedAt: Date }
   return byDate;
 }
 
+// Splits an integer quantity across parts in proportion to their weights
+// (durations), rounding by largest remainder so the parts always add up to
+// exactly `quantity` — never one stem more or less than the row's frozen
+// count, however many days it's split over. Ties go to the earlier part.
+export function allocateByDuration(quantity: number, weights: number[]): number[] {
+  const total = weights.reduce((s, w) => s + w, 0);
+  if (weights.length === 1 || total <= 0) return weights.map((_, i) => (i === 0 ? quantity : 0));
+  const exact = weights.map((w) => (quantity * w) / total);
+  const parts = exact.map(Math.floor);
+  let left = quantity - parts.reduce((s, p) => s + p, 0);
+  const order = exact.map((x, i) => ({ i, frac: x - Math.floor(x) })).sort((a, b) => b.frac - a.frac || a.i - b.i);
+  for (const { i } of order) {
+    if (left <= 0) break;
+    parts[i]++;
+    left--;
+  }
+  return parts;
+}
+
 // Exactly inputs.ts's own ambiguousCycleKeys logic (see its comment there) —
 // factored out here so the Report/Dashboard/Stats attribution below and the
 // read-only production audit (getActivityDensityAudit) can never drift from
@@ -255,32 +276,56 @@ export async function getActivityDensityAttribution(
     map.set(key, cur);
   };
 
-  // Distributes one contribution's frozen quantity across the calendar
-  // day(s) it touches, proportional to each day's own share of duration —
-  // see the file-level comment above. The "completions" count (a whole-row
-  // metric, not something meaningful to split fractionally) is attributed
-  // in full to whichever day carries the largest share of the duration;
-  // ties keep the earliest date, both purely deterministic tie-breaks with
-  // no effect on quantity/speed.
-  function attributeByDay(employeeId: string, quantity: number, segments: { startedAt: Date; endedAt: Date }[], completions: number) {
+  // A calendar date (APP_TIMEZONE) counts toward this range when the whole
+  // day lies inside it — every caller passes day-aligned bounds
+  // (getRangeBoundsUtc / getDayBoundsUtc).
+  const dayInRange = (date: string) => {
+    const { start, end } = getDayBoundsUtc(date);
+    return start >= rangeStart && end <= rangeEnd;
+  };
+
+  // Credits one contribution (a confirmed completion, an employee's share of
+  // one, or a sole unresolved visit) to the range — the cross-day rule shared
+  // by Reports, Productive TV, Dashboard and mobile Stats:
+  //  - its frozen quantity is split across the calendar day(s) its own
+  //    segments touch, in proportion to each day's work time (breaks are
+  //    separate entries and never part of it), rounded by largest remainder
+  //    so the day shares always add up to exactly the quantity;
+  //  - only the days inside the range count, each with its own share and
+  //    its own work time — a contribution partly outside the range is no
+  //    longer dropped, and a single-day range gets exactly that day's share;
+  //  - its completed row (`completions`) is credited once, on the date of
+  //    its final segment, and only when that date is in range.
+  // So daily figures always sum to the range figures, and adjacent ranges
+  // never double-count. A contribution entirely inside the range adds its
+  // full quantity, full duration and completion to the range totals exactly
+  // as before (same figures as before this rule changed).
+  function contribute(
+    employeeId: string,
+    quantity: number,
+    segments: { startedAt: Date; endedAt: Date }[],
+    totalDurationSeconds: number,
+    completions: number
+  ) {
     const perDay = splitDurationByCalendarDay(segments);
-    if (perDay.size <= 1) {
-      const [date] = [...perDay.keys()];
-      const durationSeconds = perDay.get(date) ?? 0;
-      if (date) addTo(byEmployeeDay, `${employeeId}:${date}`, quantity, durationSeconds, completions);
-      return;
+    const dates = [...perDay.keys()].sort();
+    if (dates.length === 0) return;
+    const finalDate = dates[dates.length - 1];
+    const inRangeDates = dates.filter(dayInRange);
+    if (inRangeDates.length === 0) return;
+    const shares = allocateByDuration(quantity, dates.map((d) => perDay.get(d)!));
+    const shareByDate = new Map(dates.map((d, i) => [d, shares[i]]));
+
+    for (const date of inRangeDates) {
+      addTo(byEmployeeDay, `${employeeId}:${date}`, shareByDate.get(date)!, perDay.get(date)!, date === finalDate ? completions : 0);
     }
-    const totalDuration = [...perDay.values()].reduce((s, d) => s + d, 0);
-    let bestDate = "";
-    let bestDuration = -1;
-    for (const [date, duration] of perDay) {
-      addTo(byEmployeeDay, `${employeeId}:${date}`, Math.round(quantity * (duration / totalDuration)), duration, 0);
-      if (duration > bestDuration) {
-        bestDuration = duration;
-        bestDate = date;
+    if (inRangeDates.length === dates.length) {
+      addTo(byEmployee, employeeId, quantity, totalDurationSeconds, completions);
+    } else {
+      for (const date of inRangeDates) {
+        addTo(byEmployee, employeeId, shareByDate.get(date)!, perDay.get(date)!, date === finalDate ? completions : 0);
       }
     }
-    if (completions > 0 && bestDate) addTo(byEmployeeDay, `${employeeId}:${bestDate}`, 0, 0, completions);
   }
 
   // Rule 1: confirmed completions. Fetches every linked segment (not
@@ -301,10 +346,10 @@ export async function getActivityDensityAttribution(
   // queries below; until that ships, this stays exactly as production's
   // schema actually is.
   //
-  // The final `bool_or(... in range)` only narrows the scan to completions
-  // with at least one segment starting inside the range, instead of every
-  // completion in history. It can never drop one that would count: the
-  // allInRange check below requires EVERY segment to start in range.
+  // The final `bool_or(... overlaps range)` only narrows the scan to
+  // completions with at least one segment overlapping the range, instead of
+  // every completion in history — a completion with no time in range can
+  // contribute nothing (see contribute()).
   //
   // Rule 1's fetch and Rule 2's discovery (below) are independent reads, so
   // both start here and run concurrently. Contributions are still applied
@@ -320,7 +365,7 @@ export async function getActivityDensityAttribution(
          and ($2::uuid[] is null or te.employee_id = any($2::uuid[]))
        group by rc.id
        having (bool_or(te.activity_id = $1) or count(distinct te.activity_id) > 1)
-          and bool_or(te.started_at >= $3 and te.started_at < $4)`,
+          and bool_or(te.ended_at > $3 and te.started_at < $4)`,
       [activityId, employeeIds, rangeStart, rangeEnd]
     );
     const completionIds: string[] = candidateIdRows.map((r) => r.completion_id);
@@ -389,8 +434,8 @@ export async function getActivityDensityAttribution(
     if (activityIdsInGroup.size !== 1) continue;
     const [soleActivityId] = activityIdsInGroup;
     if (soleActivityId !== activityId) continue;
-    const allInRange = segs.every((s) => s.startedAt >= rangeStart && s.startedAt < rangeEnd);
-    if (!allInRange) continue;
+    // A completion partly outside the range is no longer skipped — its
+    // in-range days count their own share (see contribute()).
 
     const totalDurationSeconds = segs.reduce((sum, s) => sum + (s.endedAt.getTime() - s.startedAt.getTime()) / 1000, 0);
     if (totalDurationSeconds <= 0) continue;
@@ -400,15 +445,14 @@ export async function getActivityDensityAttribution(
       // Common case — one employee, the row's own frozen quantity counts
       // exactly once, no split needed.
       const [soleEmployeeId] = employeeIdsInGroup;
-      addTo(byEmployee, soleEmployeeId, quantityPerRow, totalDurationSeconds, 1);
-      attributeByDay(soleEmployeeId, quantityPerRow, segs, 1);
+      contribute(soleEmployeeId, quantityPerRow, segs, totalDurationSeconds, 1);
     } else {
       // Multiple employees share this one confirmed/combined completion (an
       // admin merged a re-entry's segments into the original row via the
       // Row Completion Review modal — POST /api/row-completions) — allocate
       // the one frozen quantity proportionally by each employee's own share
       // of the completion's total duration, the same principle
-      // attributeByDay already applies across days. "completions" (a
+      // contribute() applies across days. "completions" (a
       // whole-row metric, not fractional) credits whichever employee
       // contributed the largest share — never both, never neither.
       let bestEmployeeId = "";
@@ -417,14 +461,21 @@ export async function getActivityDensityAttribution(
         const empSegs = segs.filter((s) => s.employeeId === empId);
         const empDuration = empSegs.reduce((sum, s) => sum + (s.endedAt.getTime() - s.startedAt.getTime()) / 1000, 0);
         const empQuantity = Math.round(quantityPerRow * (empDuration / totalDurationSeconds));
-        addTo(byEmployee, empId, empQuantity, empDuration, 0);
-        attributeByDay(empId, empQuantity, empSegs, 0);
+        contribute(empId, empQuantity, empSegs, empDuration, 0);
         if (empDuration > bestDuration) {
           bestDuration = empDuration;
           bestEmployeeId = empId;
         }
       }
-      if (bestEmployeeId) addTo(byEmployee, bestEmployeeId, 0, 0, 1);
+      // The one completed row: credited to the largest contributor, on the
+      // completion's own final date, only when that date is in range — and
+      // on that day's row too, so daily rows add up to the range total.
+      const completionDates = [...splitDurationByCalendarDay(segs).keys()].sort();
+      const finalDate = completionDates[completionDates.length - 1];
+      if (bestEmployeeId && finalDate && dayInRange(finalDate)) {
+        addTo(byEmployee, bestEmployeeId, 0, 0, 1);
+        addTo(byEmployeeDay, `${bestEmployeeId}:${finalDate}`, 0, 0, 1);
+      }
     }
   }
 
@@ -456,13 +507,10 @@ export async function getActivityDensityAttribution(
       // elsewhere, but there is no finished visit to attribute a quantity
       // to; never invented.
       if (!endedAt) continue;
-      // Attribute only a run whose own recorded segments fall entirely
-      // inside the requested RANGE — a run that starts before or ends after
-      // the report's own date window can't be cleanly resolved against a
-      // range boundary. This is distinct from spanning multiple calendar
-      // DAYS *within* the range, which is now split proportionally below
-      // rather than excluded.
-      if (startedAt < rangeStart || endedAt > rangeEnd) continue;
+      // A run with no time in the range contributes nothing; one that only
+      // partly overlaps it contributes its in-range days' share (see
+      // contribute()), the same cross-day rule as confirmed completions.
+      if (endedAt <= rangeStart || startedAt >= rangeEnd) continue;
       accepted.push({ only: candidate, startedAt, endedAt });
     }
   }
@@ -519,8 +567,7 @@ export async function getActivityDensityAttribution(
     // once, and it counts once toward Rows Completed. (It used to add 0
     // here, so Reports showed the quantity/speed but 0 rows completed for
     // the same visit.)
-    addTo(byEmployee, only.employeeId, quantity, only.durationSeconds, 1);
-    attributeByDay(only.employeeId, quantity, segs, 1);
+    contribute(only.employeeId, quantity, segs, only.durationSeconds, 1);
   });
 
   return { byEmployee, byEmployeeDay };
@@ -697,9 +744,9 @@ export async function getActivityDensityAudit(
         reason = "This completion's segments span more than one employee — not cleanly attributable";
       } else if (activityIdsInGroup.size !== 1 || [...activityIdsInGroup][0] !== activityId) {
         reason = "This completion's segments span more than one activity — not cleanly attributable";
-      } else if (!group.segs.every((s) => s.startedAt >= start && s.startedAt < end)) {
-        reason = "One or more of this completion's segments fall outside the audited date range";
       }
+      // A completion partly outside the audited range still counts this
+      // in-range segment's own share (the report's cross-day rule).
       const included = reason === null;
       const attributedQuantity = included && groupDurationSeconds > 0 ? group.quantityPerRow * (durationSeconds / groupDurationSeconds) : null;
       rows.push({
@@ -754,12 +801,13 @@ export async function getActivityDensityAudit(
       continue;
     }
     const quantityPerRow = await frozenDensityFor(candidate);
-    const candidateStartedAt = new Date(candidate.startedAt);
     const candidateEndedAt = candidate.endedAt ? new Date(candidate.endedAt) : null;
-    const inRange = !!candidateEndedAt && candidateStartedAt >= start && candidateEndedAt < end;
+    // A run partly outside the audited range still counts this in-range
+    // segment's own share (the report's cross-day rule); only an unfinished
+    // run counts nothing.
     let reason: string | null = null;
     if (quantityPerRow == null) reason = "No resolvable density value for this run";
-    else if (!inRange) reason = "This run extends outside the audited date range";
+    else if (!candidateEndedAt) reason = "This run is still in progress";
     const included = reason === null;
     const attributedQuantity =
       included && quantityPerRow != null && candidate.durationSeconds > 0 ? quantityPerRow * (durationSeconds / candidate.durationSeconds) : null;
