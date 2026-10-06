@@ -309,8 +309,9 @@ router.get(
     }
 
     const { rows } = await pool.query(
-      `select e.id, e.first_name, e.last_name, e.profile_photo_path
+      `select e.id, e.first_name, e.last_name, e.profile_photo_path, e.employee_group_id, eg.name as employee_group_name
        from employees e
+       left join employee_groups eg on eg.id = e.employee_group_id
        where ${conditions.join(" and ")}
        order by e.first_name, e.last_name`,
       params
@@ -353,6 +354,8 @@ router.get(
         // that day (see the EXISTS filter above), so absence from the map
         // only ever means a real failure, never "nothing to compute."
         paidSeconds: paidSecondsByEmployee.has(r.id) ? paidSecondsByEmployee.get(r.id)! : null,
+        // Employee Group, for the sidebar's group headings; null = Ungrouped.
+        employeeGroup: r.employee_group_id ? { id: r.employee_group_id, name: r.employee_group_name } : null,
       })),
     });
   })

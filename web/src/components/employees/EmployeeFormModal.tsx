@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
+import { EmployeeGroupRef, EmployeeGroupsResponse, UNGROUPED_LABEL } from "../../lib/employeeGroupTypes";
 import { Modal } from "../ui/Modal";
 import { Avatar } from "./Avatar";
 import { api, ApiError } from "../../lib/api";
@@ -26,6 +27,8 @@ interface FormState {
   securityRoleId: string;
   teamRoleId: string;
   breakProfileId: string;
+  // "" = Ungrouped.
+  employeeGroupId: string;
   email: string;
   phoneNumber: string;
   notes: string;
@@ -69,6 +72,7 @@ function toFormState(employee: Employee | null): FormState {
     securityRoleId: String(employee?.securityRoleId ?? 1),
     teamRoleId: String(employee?.teamRoleId ?? 1),
     breakProfileId: employee?.breakProfileId ?? "",
+    employeeGroupId: employee?.employeeGroup?.id ?? "",
     email: employee?.email ?? "",
     phoneNumber: employee?.phoneNumber ?? "",
     notes: employee?.notes ?? "",
@@ -108,6 +112,20 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
       .then((res) => setBreakProfiles(res.breakProfiles))
       .catch(() => {});
   }, []);
+  const [employeeGroups, setEmployeeGroups] = useState<EmployeeGroupRef[]>([]);
+  useEffect(() => {
+    api<EmployeeGroupsResponse>("/api/employee-groups")
+      .then((res) => setEmployeeGroups(res.groups))
+      .catch(() => {});
+  }, []);
+  // Keep the employee's current group selectable even if the list hasn't
+  // loaded or no longer includes it, so opening the form never silently
+  // changes it.
+  const selectableEmployeeGroups =
+    employee?.employeeGroup && !employeeGroups.some((g) => g.id === employee.employeeGroup!.id)
+      ? [...employeeGroups, employee.employeeGroup]
+      : employeeGroups;
+
   // The employee's current profile stays selectable even if it's since been
   // deactivated (history stays visible), but only if it isn't already in the
   // active list above — a brand-new assignment must still pick an active one.
@@ -213,6 +231,7 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
         securityRoleId: Number(form.securityRoleId),
         teamRoleId: Number(form.teamRoleId),
         breakProfileId: form.breakProfileId || null,
+        employeeGroupId: form.employeeGroupId || null,
         email: form.email.trim() || null,
         phoneNumber: form.phoneNumber.trim() || null,
         notes: form.notes.trim() || null,
@@ -493,6 +512,18 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
                 ))}
               </select>
               {errors.breakProfileId && <span className="field-error">{errors.breakProfileId}</span>}
+            </label>
+            <label>
+              Employee Group
+              <select value={form.employeeGroupId} onChange={(e) => set("employeeGroupId", e.target.value)}>
+                <option value="">{UNGROUPED_LABEL}</option>
+                {selectableEmployeeGroups.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.name}
+                  </option>
+                ))}
+              </select>
+              {errors.employeeGroupId && <span className="field-error">{errors.employeeGroupId}</span>}
             </label>
             <label className="employee-form-checkbox">
               <input

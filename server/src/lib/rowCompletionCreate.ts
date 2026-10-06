@@ -90,6 +90,17 @@ export async function createRowCompletion(
     for (const segId of c.segmentIds) candidateBySegmentId.set(segId, c);
   }
   const cycleIndexesUsed = new Set(timeEntryIds.map((id) => candidateBySegmentId.get(id)?.cycleIndex));
+  if (cycleIndexesUsed.has(undefined)) {
+    // An entry that's no longer a pending visit: most likely an overlapping
+    // review resolved it between this transaction's first check and now.
+    const { rows: nowCompleted } = await client.query(
+      `select 1 from row_completion_segments where time_entry_id = any($1::uuid[]) limit 1`,
+      [timeEntryIds]
+    );
+    if (nowCompleted.length > 0) {
+      throw new RowCompletionError(409, "These visits were just resolved by another review — nothing was changed");
+    }
+  }
   if (cycleIndexesUsed.size > 1 || cycleIndexesUsed.has(undefined)) {
     throw new RowCompletionError(
       400,
@@ -114,11 +125,23 @@ export async function createRowCompletion(
   );
   const completion = created[0];
 
-  await client.query(
-    `insert into row_completion_segments (time_entry_id, row_completion_id)
-     select unnest($1::uuid[]), $2`,
-    [timeEntryIds, completion.id]
-  );
+  // row_completion_segments' primary key is time_entry_id: an entry can
+  // belong to one completion only. Two overlapping submissions for the same
+  // visits can both pass the already_completed check above; the second
+  // then blocks here until the first commits and fails on that key — a
+  // clean refusal (its whole transaction rolls back), never a duplicate.
+  try {
+    await client.query(
+      `insert into row_completion_segments (time_entry_id, row_completion_id)
+       select unnest($1::uuid[]), $2`,
+      [timeEntryIds, completion.id]
+    );
+  } catch (err) {
+    if ((err as { code?: string }).code === "23505") {
+      throw new RowCompletionError(409, "These visits were just resolved by another review — nothing was changed");
+    }
+    throw err;
+  }
 
   return {
     id: completion.id,

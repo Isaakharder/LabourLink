@@ -200,8 +200,8 @@ async function main() {
       g174?.contextVisits
     );
     check(
-      g174?.actions.merge.available === false && /different employees or on different dates/.test(g174.actions.merge.unavailableReason ?? ""),
-      "1) row 174: merge is not offered — the other visits are other employees/dates",
+      g174?.actions.merge.available === false && /by different employees and are never merged/.test(g174.actions.merge.unavailableReason ?? ""),
+      "1) row 174: merge is not offered — the other visits are by other employees",
       g174?.actions.merge
     );
     check(g174?.actions.separate.available === true && g174.suggestedAction === "separate", "1) row 174: keep separate is offered and suggested");

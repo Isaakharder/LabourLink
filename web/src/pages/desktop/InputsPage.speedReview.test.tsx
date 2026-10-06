@@ -8,7 +8,7 @@
 // SpeedReviewModal.test.tsx; grouping/saving by the server's
 // rowCompletions.bulkReview.test.ts.
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +18,8 @@ import { DailyInputsResponse } from "../../lib/inputsTypes";
 
 const DATE = "2026-10-05";
 let role = "Administrator";
+// Set once a bulk review has been applied: Khen's groups are then resolved.
+let applied = false;
 
 vi.mock("../../context/AuthContext", () => ({
   useAuth: () => ({ employee: { id: "emp-admin", firstName: "Ada", lastName: "Admin", securityRole: role } }),
@@ -33,7 +35,7 @@ vi.mock("../../lib/api", () => {
   }
   return {
     ApiError,
-    api: vi.fn((path: string) => {
+    api: vi.fn((path: string, options?: RequestInit) => {
       if (path.startsWith("/api/inputs/employees")) {
         return Promise.resolve({
           employees: [
@@ -53,8 +55,15 @@ vi.mock("../../lib/api", () => {
           reviewGroup("g2", "emp-khen", "Khen Lagto"),
           reviewGroup("g3", "emp-khen", "Khen Lagto"),
           reviewGroup("g4", "emp-jeff", "Jeffrey Santiago"),
-        ].filter((g) => !scoped || g.employeeId === scoped);
+        ]
+          .filter((g) => !scoped || g.employeeId === scoped)
+          .filter((g) => !(applied && g.employeeId === "emp-khen"));
         return Promise.resolve({ date: DATE, groups });
+      }
+      if (path === "/api/row-completions/bulk-review" && options?.method === "POST") {
+        applied = true;
+        const sent = JSON.parse(options.body as string).groups as { groupId: string }[];
+        return Promise.resolve({ results: sent.map((g) => ({ groupId: g.groupId, ok: true, completionIds: ["c"] })) });
       }
       return Promise.reject(new Error(`Unhandled mock api() call in test: ${path}`));
     }),
@@ -86,11 +95,15 @@ function reviewGroup(id: string, employeeId: string, employeeName: string) {
     rowLabel: `Phase 1 · Row ${id}`,
     densityType: "stems",
     unit: "stems/hour",
+    spansDates: [DATE],
     reasons: ["Also visited by someone else less than 7 days apart."],
     visits: [v],
     contextVisits: [],
     actions: {
-      merge: { available: false, unavailableReason: "Only one visit — nothing to merge.", preview: null },
+      merge:
+        id === "g2"
+          ? { available: true, unavailableReason: null, preview: { quantity: 500, durationSeconds: 2280, speedPerHour: 789.5 } }
+          : { available: false, unavailableReason: "Only one visit — nothing to merge.", preview: null },
       separate: { available: true, unavailableReason: null, previews: [{ visitId: v.visitId, quantity: 500, durationSeconds: 1140, speedPerHour: 1578.9 }] },
     },
     suggestedAction: "separate",
@@ -125,6 +138,7 @@ const reviewCalls = () => vi.mocked(api).mock.calls.map(([p]) => p as string).fi
 
 beforeEach(() => {
   role = "Administrator";
+  applied = false;
 });
 
 afterEach(() => {
@@ -158,6 +172,38 @@ describe("InputsPage bulk speed review buttons", () => {
 
     await user.click(screen.getByRole("button", { name: /Review all employees/ }));
     expect(await screen.findByRole("dialog", { name: "Review speeds — all employees" })).toBeInTheDocument();
+  });
+
+  it("one submission with mixed actions refreshes speeds and both review badges", async () => {
+    const user = userEvent.setup();
+    renderPage("emp-khen");
+    const reviewSpeeds = await screen.findByRole("button", { name: /Review speeds/ });
+    await within(reviewSpeeds).findByLabelText("3 pending speed reviews for this employee");
+    const dailyCallsBefore = vi.mocked(api).mock.calls.filter(([p]) => (p as string).startsWith("/api/inputs/daily")).length;
+
+    await user.click(reviewSpeeds);
+    const dialog = await screen.findByRole("dialog", { name: /Review speeds — Khen/ });
+    await user.click(await within(dialog).findByRole("button", { name: "Select all eligible (3)" }));
+    await user.selectOptions(within(dialog).getByRole("combobox"), "separate");
+    await user.click(within(dialog).getByRole("button", { name: "Set action" }));
+    await user.click(within(within(dialog).getByRole("article", { name: "Khen Lagto · Phase 1 · Row g2" })).getByRole("radio", { name: /Merge for speed/ }));
+    expect(within(dialog).getByText("1 group to merge · 2 groups to keep separate · 0 pending · 1 employee affected")).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "Apply changes" }));
+    const posts = vi.mocked(api).mock.calls.filter(([p]) => p === "/api/row-completions/bulk-review");
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse((posts[0][1] as RequestInit).body as string).groups.map((g: { action: string }) => g.action)).toEqual([
+      "separate",
+      "merge",
+      "separate",
+    ]);
+
+    // Speeds reload (GET /daily) and both badges refresh from the server.
+    await waitFor(() =>
+      expect(vi.mocked(api).mock.calls.filter(([p]) => (p as string).startsWith("/api/inputs/daily")).length).toBeGreaterThan(dailyCallsBefore)
+    );
+    expect(await within(reviewSpeeds).findByLabelText("0 pending speed reviews for this employee")).toBeInTheDocument();
+    expect(within(screen.getByRole("button", { name: /Review all employees/ })).getByLabelText("1 pending speed reviews for all employees")).toBeInTheDocument();
   });
 
   it("a Manager sees the review buttons (read-only review)", async () => {

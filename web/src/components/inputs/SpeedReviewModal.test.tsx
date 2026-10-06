@@ -75,6 +75,7 @@ function group(overrides: Partial<SpeedReviewGroup> & Pick<SpeedReviewGroup, "id
     greenhouseRowId: `row-${overrides.id}`,
     densityType: "stems",
     unit: "stems/hour",
+    spansDates: [DATE],
     reasons: ["Phase 1 · Row 174 also has another visit less than 7 days apart: Larry Banguigui (Sep 29)."],
     visits: [visit(`seg-${overrides.id}`, overrides.employeeId, overrides.employeeName)],
     contextVisits: [visit("seg-larry", "emp-larry", "Larry Banguigui", { date: "2026-09-29" })],
@@ -124,6 +125,34 @@ const open92 = group({
     separate: { available: false, unavailableReason: "A visit is still in progress — it can be reviewed once it ends.", previews: null },
   },
   suggestedAction: null,
+});
+
+// Row 116: Nattawat started the row at the end of Oct 5 and finished it the
+// next morning — one card spanning both days.
+const span116 = group({
+  id: "n116",
+  employeeId: "emp-natt",
+  employeeName: "Nattawat N",
+  rowLabel: "Phase 1 · Row 116",
+  spansDates: ["2026-10-05", "2026-10-06"],
+  reasons: ["Nattawat N worked Phase 1 · Row 116 2 separate times (Oct 5, Oct 6)."],
+  visits: [
+    visit("seg-116a", "emp-natt", "Nattawat N", { startedAt: "2026-10-05T20:50:26.000Z", endedAt: "2026-10-05T21:00:00.000Z", durationSeconds: 574, carriers: ["Bin 12"], quantityPerRow: 636 }),
+    visit("seg-116b", "emp-natt", "Nattawat N", { date: "2026-10-06", startedAt: "2026-10-06T11:45:00.000Z", endedAt: "2026-10-06T12:01:00.000Z", durationSeconds: 960, carriers: ["Bin 12"], quantityPerRow: 636 }),
+  ],
+  contextVisits: [],
+  actions: {
+    merge: { available: true, unavailableReason: null, preview: { quantity: 636, durationSeconds: 1534, speedPerHour: 1492.6 } },
+    separate: {
+      available: true,
+      unavailableReason: null,
+      previews: [
+        { visitId: "seg-116a", quantity: 636, durationSeconds: 574, speedPerHour: 3988.9 },
+        { visitId: "seg-116b", quantity: 636, durationSeconds: 960, speedPerHour: 2385 },
+      ],
+    },
+  },
+  suggestedAction: "merge",
 });
 
 beforeEach(() => {
@@ -177,9 +206,10 @@ describe("SpeedReviewModal", () => {
     const user = userEvent.setup();
     renderModal();
     await user.click(await screen.findByRole("button", { name: "Select all eligible (3)" }));
-    expect(screen.getByText(/3 selected · 3 to apply · 2 employees affected · 1 will stay pending/)).toBeInTheDocument();
+    // Suggested actions: row 570 merge, both row 174 cards keep separate.
+    expect(screen.getByText("1 group to merge · 2 groups to keep separate · 1 pending · 2 employees affected")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Deselect all" }));
-    expect(screen.getByText(/0 selected · 0 to apply/)).toBeInTheDocument();
+    expect(screen.getByText("0 groups to merge · 0 groups to keep separate · 4 pending · 0 employees affected")).toBeInTheDocument();
     expect(applyButton()).toBeDisabled();
   });
 
@@ -200,7 +230,7 @@ describe("SpeedReviewModal", () => {
     // Exception: put row 570 back to merge, skip the other employee's card.
     await user.click(within(k570).getByRole("radio", { name: /Merge for speed/ }));
     await user.click(within(card("Ana Other · Phase 1 · Row 174")).getByRole("radio", { name: /Skip/ }));
-    expect(screen.getByText(/3 selected · 2 to apply · 1 employee affected · 2 will stay pending/)).toBeInTheDocument();
+    expect(screen.getByText("1 group to merge · 1 group to keep separate · 2 pending · 1 employee affected")).toBeInTheDocument();
 
     expect(postCalls()).toHaveLength(0); // nothing saved before Apply
     await user.click(applyButton());
@@ -213,6 +243,34 @@ describe("SpeedReviewModal", () => {
         { groupId: "k174", action: "separate", visits: [["seg-k174"]] },
       ],
     });
+  });
+
+  it("select all → Keep separate → override one card to Merge → Apply once saves every card with its own action", async () => {
+    const user = userEvent.setup();
+    renderModal();
+    await user.click(await screen.findByRole("button", { name: "Select all eligible (3)" }));
+
+    // Choosing in the bulk dropdown alone changes nothing — only Set action does.
+    await user.selectOptions(screen.getByRole("combobox"), "separate");
+    expect(within(card("Khen Lagto · Phase 2 · Row 570")).getByRole("radio", { name: /Merge for speed/ })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Set action" }));
+    expect(screen.getByText("0 groups to merge · 3 groups to keep separate · 1 pending · 2 employees affected")).toBeInTheDocument();
+
+    // Changing one card changes only that card; nothing is deselected.
+    const k570 = card("Khen Lagto · Phase 2 · Row 570");
+    await user.click(within(k570).getByRole("radio", { name: /Merge for speed/ }));
+    expect(within(card("Khen Lagto · Phase 1 · Row 174")).getByRole("radio", { name: /Keep separate/ })).toBeChecked();
+    expect(within(card("Ana Other · Phase 1 · Row 174")).getByRole("radio", { name: /Keep separate/ })).toBeChecked();
+    expect(document.querySelectorAll(".speed-review-card-selected")).toHaveLength(3);
+    expect(screen.getByText("1 group to merge · 2 groups to keep separate · 1 pending · 2 employees affected")).toBeInTheDocument();
+
+    await user.click(applyButton());
+    expect(postCalls()).toHaveLength(1); // one submission for every choice
+    expect(JSON.parse((postCalls()[0][1] as { body: string }).body).groups).toEqual([
+      { groupId: "k570", action: "merge", visits: [["seg-570a", "seg-570b"], ["seg-570c"]] },
+      { groupId: "k174", action: "separate", visits: [["seg-k174"]] },
+      { groupId: "o174", action: "separate", visits: [["seg-o174"]] },
+    ]);
   });
 
   it("submits once even on repeated clicks, then shows which groups saved and which stay pending", async () => {
@@ -261,6 +319,28 @@ describe("SpeedReviewModal", () => {
     expect(within(k174).getByText(/shown for context, not changed/)).toBeInTheDocument();
     expect(within(k174).getByText("Larry Banguigui")).toBeInTheDocument();
     expect(within(k174).getByText(/Merge for speed: Only one visit by this employee/)).toBeInTheDocument();
+  });
+
+  it("labels a card that spans days, shows both days' visits, and merges them in the same submission as other cards", async () => {
+    groupsResponse = { date: DATE, groups: [span116, sep174] };
+    const user = userEvent.setup();
+    renderModal({ employeeId: null });
+    const c = await screen.findByRole("article", { name: "Nattawat N · Phase 1 · Row 116" });
+    expect(within(c).getByText("Spans 2 days · Oct 5, Oct 6")).toBeInTheDocument();
+    expect(within(c).getByText(/Oct 5 .*–.*, Oct 6 .*–/)).toBeInTheDocument();
+    expect(within(c).getByRole("radio", { name: /Merge for speed/ })).toBeEnabled();
+    expect(within(c).getByText("Result: 636 stems ÷ 0:25:34 work = 1492.6 stems/hour")).toBeInTheDocument();
+    await user.click(within(c).getByRole("button", { name: "Details" }));
+    expect(within(c).getByText("Monday, October 5, 2026")).toBeInTheDocument();
+    expect(within(c).getByText("Tuesday, October 6, 2026")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Select all eligible (2)" }));
+    expect(screen.getByText("1 group to merge · 1 group to keep separate · 0 pending · 2 employees affected")).toBeInTheDocument();
+    await user.click(applyButton());
+    expect(JSON.parse((postCalls()[0][1] as { body: string }).body).groups).toEqual([
+      { groupId: "n116", action: "merge", visits: [["seg-116a"], ["seg-116b"]] },
+      { groupId: "k174", action: "separate", visits: [["seg-k174"]] },
+    ]);
   });
 
   it("says so when nothing needs review", async () => {

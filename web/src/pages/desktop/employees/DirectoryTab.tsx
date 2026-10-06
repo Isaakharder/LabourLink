@@ -11,6 +11,7 @@ import { EmployeeFormModal } from "../../../components/employees/EmployeeFormMod
 import { WorkPermitStatus } from "../../../components/employees/WorkPermitStatus";
 import { api, ApiError } from "../../../lib/api";
 import { Employee } from "../../../lib/employeeTypes";
+import { UNGROUPED_LABEL } from "../../../lib/employeeGroupTypes";
 import { useAuth } from "../../../context/AuthContext";
 
 type StatusFilter = "active" | "inactive" | "all";
@@ -387,6 +388,10 @@ export function DirectoryTab() {
                         <div>
                           <dt>Security Role</dt>
                           <dd>{selectedEmployee.securityRole ?? "—"}</dd>
+                        </div>
+                        <div>
+                          <dt>Employee Group</dt>
+                          <dd>{selectedEmployee.employeeGroup?.name ?? UNGROUPED_LABEL}</dd>
                         </div>
                       </dl>
                     </section>

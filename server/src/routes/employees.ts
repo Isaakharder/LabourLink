@@ -69,6 +69,8 @@ interface EmployeeFields {
   securityRoleId: number | null;
   teamRoleId: number | null;
   breakProfileId: string | null;
+  // Employee Group (056_employee_groups.sql); null = Ungrouped.
+  employeeGroupId: string | null;
 }
 
 // Validates a full create payload — every required field must be present.
@@ -148,6 +150,13 @@ function validateCreate(body: Record<string, unknown>):
     else breakProfileId = v;
   }
 
+  let employeeGroupId: string | null = null;
+  if (body.employeeGroupId != null && String(body.employeeGroupId).trim() !== "") {
+    const v = String(body.employeeGroupId);
+    if (!UUID_RE.test(v)) errors.employeeGroupId = "Invalid employee group";
+    else employeeGroupId = v;
+  }
+
   if (Object.keys(errors).length) return { errors };
 
   return {
@@ -168,6 +177,7 @@ function validateCreate(body: Record<string, unknown>):
       securityRoleId,
       teamRoleId,
       breakProfileId,
+      employeeGroupId,
     },
   };
 }
@@ -277,6 +287,17 @@ function validateUpdate(body: Record<string, unknown>):
       errors.breakProfileId = "Invalid break profile";
     } else {
       data.breakProfileId = String(raw);
+    }
+  }
+
+  if ("employeeGroupId" in body) {
+    const raw = body.employeeGroupId;
+    if (raw == null || String(raw).trim() === "") {
+      data.employeeGroupId = null;
+    } else if (!UUID_RE.test(String(raw))) {
+      errors.employeeGroupId = "Invalid employee group";
+    } else {
+      data.employeeGroupId = String(raw);
     }
   }
 
@@ -415,6 +436,16 @@ function resolveWorkPermitUpdate(
   return { columns, historyWrite };
 }
 
+// An employee can only be assigned a group that exists in this deployment
+// (the server-side guarantee behind "never another organization's group" —
+// single-tenant schema, see 056_employee_groups.sql). The foreign key is the
+// backstop; this gives a clean field error instead of a 500.
+const EMPLOYEE_GROUP_NOT_FOUND = "Employee group not found";
+async function employeeGroupExists(id: string): Promise<boolean> {
+  const { rows } = await pool.query("select 1 from employee_groups where id = $1", [id]);
+  return rows.length > 0;
+}
+
 // -- shared query pieces -----------------------------------------------------
 
 // settings_pin_hash is deliberately never selected — not just omitted at
@@ -433,6 +464,7 @@ const SELECT_COLUMNS = `
   to_char(e.work_permit_expiry_date, 'YYYY-MM-DD') as work_permit_expiry_date,
   e.work_permit_notify_lead_months, e.work_permit_notify_lead_days,
   e.created_at, e.updated_at,
+  e.employee_group_id, eg.name as employee_group_name,
   sr.name as security_role, tr.name as team_role,
   dev.device_id, dev.device_name,
   coalesce(agg.groups, '[]'::json) as activity_groups
@@ -443,6 +475,7 @@ const FROM_JOINS = `
   join security_roles sr on sr.id = e.security_role_id
   join team_roles tr on tr.id = e.team_role_id
   left join break_profiles bp on bp.id = e.break_profile_id
+  left join employee_groups eg on eg.id = e.employee_group_id
   left join lateral (
     select da.device_id, d.device_name
     from device_assignments da
@@ -487,6 +520,8 @@ function serializeEmployee(row: any, photoUrl: string | null, includeNotes: bool
       : null,
     device: row.device_id ? { id: row.device_id, name: row.device_name } : null,
     activityGroups: row.activity_groups,
+    // null = Ungrouped.
+    employeeGroup: row.employee_group_id ? { id: row.employee_group_id, name: row.employee_group_name } : null,
     // Viewing is already Administrator/Manager-only on every route this
     // serializer feeds (see the requireRole gates on GET / and GET /:id) —
     // the same restriction the brief asks permit fields to share, so no
@@ -618,18 +653,23 @@ router.post(
       }
     }
 
+    if (d.employeeGroupId && !(await employeeGroupExists(d.employeeGroupId))) {
+      return res.status(400).json({ errors: { employeeGroupId: EMPLOYEE_GROUP_NOT_FOUND } });
+    }
+
     try {
       const { rows } = await pool.query(
         `insert into employees
            (first_name, last_name, gender, date_of_birth, email, phone_number, job_group,
             start_date, is_active, employee_number, nationality, preferred_language, notes,
             security_role_id, team_role_id, settings_pin_hash, break_profile_id,
-            work_permit_expiry_date, work_permit_notify_lead_months, work_permit_notify_lead_days)
+            work_permit_expiry_date, work_permit_notify_lead_months, work_permit_notify_lead_days,
+            employee_group_id)
          values
            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
             coalesce($14, (select id from security_roles where name = 'Employee')),
             coalesce($15, (select id from team_roles where name = 'Team Member')),
-            null, $16, $17, $18, $19)
+            null, $16, $17, $18, $19, $20)
          returning id`,
         [
           d.firstName,
@@ -651,6 +691,7 @@ router.post(
           permitExpiryDate,
           permitLeadMonths,
           permitLeadDays,
+          d.employeeGroupId,
         ]
       );
 
@@ -717,6 +758,10 @@ router.patch(
       }
     }
 
+    if (d.employeeGroupId && !(await employeeGroupExists(d.employeeGroupId))) {
+      return res.status(400).json({ errors: { employeeGroupId: EMPLOYEE_GROUP_NOT_FOUND } });
+    }
+
     // Resolved against the CURRENT row (needed for the server-side 6-month
     // default, and to know whether the expiry date is actually changing —
     // only a real change gets a history row) — see resolveWorkPermitUpdate's
@@ -759,6 +804,7 @@ router.patch(
       securityRoleId: "security_role_id",
       teamRoleId: "team_role_id",
       breakProfileId: "break_profile_id",
+      employeeGroupId: "employee_group_id",
     };
 
     const keys = Object.keys(d) as (keyof EmployeeFields)[];

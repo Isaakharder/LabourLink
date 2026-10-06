@@ -15,19 +15,24 @@
 //   - speed previews go through aggregateDensitySpeed, the only place a
 //     speed is ever divided.
 //
-// A group is ONE employee's visits on the selected date inside ONE
-// ambiguous cycle (same row, activity and frozen density type). Other
-// employees' visits, and the same employee's visits on other dates, that
-// share the cycle are returned as read-only context: they explain why the
-// group needs review but are never part of the group, so applying a group
-// can never combine different employees or dates. Different rows are never
-// grouped, even when they share a carrier/bin.
+// A group is ALL of ONE employee's unresolved visits inside ONE ambiguous
+// cycle (same row, activity and frozen density type), shown when any of
+// them touches the reviewed date. Its visits may span several days (a row
+// started one evening and finished the next morning) — the same cycle rule
+// the individual review's cross-day combine uses — and the group has the
+// same id on every day it touches, so it can never be two separate
+// actionable cards. Other employees' visits in the cycle are read-only
+// context: never part of the group, so applying it can never combine
+// different employees. Different rows are never grouped, even when they
+// share a carrier/bin. Original entries, dates and times are never changed.
 //
 // Supported actions, both creating ordinary confirmed completions through
 // createRowCompletion (rowCompletionCreate.ts):
-//   merge     2+ finished visits by this employee to this row on this date,
+//   merge     2+ finished visits by this employee to this row in this cycle,
 //             all with the same frozen stems-per-row -> ONE completion: the
-//             row's quantity counts once over the visits' combined work time.
+//             row's quantity counts once over the visits' combined work time
+//             (reports then split it across its days by work time — see
+//             reportQueries.ts's contribute()).
 //   separate  every visit finished with a single frozen density value -> one
 //             completion PER visit, the existing "select one visit on its
 //             own" individual rule.
@@ -35,7 +40,7 @@
 import { pool } from "../db";
 import { aggregateDensitySpeed } from "./densitySpeed";
 import { CandidateRun, getUnresolvedRunsForRows } from "./rowCompletionCandidates";
-import { getDayBoundsUtc } from "./timezone";
+import { calendarDateInAppTimezone, getDayBoundsUtc } from "./timezone";
 
 export type SpeedReviewAction = "merge" | "separate";
 
@@ -74,6 +79,8 @@ export interface SpeedReviewGroup {
   rowLabel: string;
   densityType: "plants" | "stems";
   unit: string;
+  // Every calendar date this card's visits touch; 2+ = a cross-day card.
+  spansDates: string[];
   reasons: string[];
   visits: SpeedReviewVisit[];
   contextVisits: SpeedReviewVisit[];
@@ -187,9 +194,18 @@ export async function getSpeedReviewGroups(opts: { date: string; employeeId?: st
 
   const groups: SpeedReviewGroup[] = [];
   for (const cycle of ambiguousCycles) {
-    const inScope = cycle.candidates.filter((c) => (employeeId === null || c.employeeId === employeeId) && touchesDate(c));
+    // Which employees get a card: anyone (in scope) with a visit in this
+    // cycle on the reviewed date. Their card then holds ALL of their own
+    // visits in the cycle — any day — so a row started one evening and
+    // finished the next morning is one card, on both days' reviews, with
+    // the same id. Other employees' visits stay context only.
+    const employeesOnDate = new Set(
+      cycle.candidates.filter((c) => (employeeId === null || c.employeeId === employeeId) && touchesDate(c)).map((c) => c.employeeId)
+    );
     const byEmployee = new Map<string, CandidateRun[]>();
-    for (const c of inScope) byEmployee.set(c.employeeId, [...(byEmployee.get(c.employeeId) ?? []), c]);
+    for (const c of cycle.candidates) {
+      if (employeesOnDate.has(c.employeeId)) byEmployee.set(c.employeeId, [...(byEmployee.get(c.employeeId) ?? []), c]);
+    }
 
     for (const [empId, empCandidates] of byEmployee) {
       const memberIds = new Set(empCandidates.map((c) => c.runId));
@@ -199,10 +215,19 @@ export async function getSpeedReviewGroups(opts: { date: string; employeeId?: st
         .map((c) => toVisit(c, cycle.densityType))
         .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
       const first = empCandidates[0];
+      // Every calendar date this card's visits touch (a visit's own
+      // segments can themselves cross midnight).
+      const spansDates = [
+        ...new Set(
+          visits.flatMap((v) => v.segmentIds.map((sid) => segById.get(sid)).filter((x): x is SegmentRow => !!x).map((x) => calendarDateInAppTimezone(x.started_at)))
+        ),
+      ].sort();
 
       const reasons: string[] = [];
       if (visits.length > 1) {
-        reasons.push(`${first.employeeName} worked ${first.rowLabel} ${visits.length} separate times on ${formatShortDate(opts.date)}.`);
+        reasons.push(
+          `${first.employeeName} worked ${first.rowLabel} ${visits.length} separate times (${spansDates.map(formatShortDate).join(", ")}).`
+        );
       }
       if (contextVisits.length > 0) {
         const who = contextVisits.map((v) => `${v.employeeName} (${formatShortDate(v.date)})`);
@@ -224,7 +249,7 @@ export async function getSpeedReviewGroups(opts: { date: string; employeeId?: st
       if (!mergeReason && visits.length < 2) {
         mergeReason =
           contextVisits.length > 0
-            ? "Only one visit by this employee on this date — the other visits are by different employees or on different dates and are never merged."
+            ? "Only one visit by this employee in this 7-day window — the other visits are by different employees and are never merged."
             : "Only one visit — nothing to merge.";
       } else if (!mergeReason && new Set(visits.map((v) => v.quantityPerRow)).size > 1) {
         mergeReason = "These visits recorded different stems-per-row values, so they can't count as one row.";
@@ -232,7 +257,9 @@ export async function getSpeedReviewGroups(opts: { date: string; employeeId?: st
 
       const totalDuration = visits.reduce((s, v) => s + v.durationSeconds, 0);
       groups.push({
-        id: `${cycle.key}:${empId}:${opts.date}`,
+        // Stable whichever date is being reviewed: the same visits are the
+        // same card on every day they touch, never two separate cards.
+        id: `${cycle.key}:${empId}:${visits[0].visitId}`,
         employeeId: empId,
         employeeName: first.employeeName,
         date: opts.date,
@@ -242,6 +269,7 @@ export async function getSpeedReviewGroups(opts: { date: string; employeeId?: st
         rowLabel: first.rowLabel,
         densityType: cycle.densityType,
         unit: unitFor(cycle.densityType),
+        spansDates,
         reasons,
         visits,
         contextVisits,

@@ -70,6 +70,7 @@ function makeEmployee(overrides: Partial<Employee> = {}): Employee {
     activityGroups: [],
     breakProfileId: null,
     breakProfile: null,
+    employeeGroup: null,
     workPermitExpiryDate: null,
     workPermitNotifyLeadMonths: null,
     workPermitNotifyLeadDays: null,
