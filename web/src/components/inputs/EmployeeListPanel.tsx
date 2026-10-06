@@ -1,3 +1,4 @@
+import { ReactNode } from "react";
 import { InputsEmployee } from "../../lib/inputsTypes";
 import { secondsToHoursMinutes } from "../../lib/reportTypes";
 
@@ -17,6 +18,9 @@ interface EmployeeListPanelProps {
   onSelect: (id: string) => void;
   search: string;
   onSearchChange: (value: string) => void;
+  // Optional control rendered above the search box (Inputs' "Review all
+  // employees" bulk speed review button).
+  headerAction?: ReactNode;
 }
 
 // "8 hours paid" / "7 hours 45 minutes paid" / "0 hours paid" — the
@@ -63,9 +67,11 @@ export function EmployeeListPanel({
   onSelect,
   search,
   onSearchChange,
+  headerAction,
 }: EmployeeListPanelProps) {
   return (
     <div className="inputs-employee-panel">
+      {headerAction}
       <input
         type="search"
         placeholder="Search employees"

@@ -12,6 +12,8 @@ import { AddWorkStartModal } from "../../components/inputs/AddWorkStartModal";
 import { AddBreakModal } from "../../components/inputs/AddBreakModal";
 import { AddActivityModal } from "../../components/inputs/AddActivityModal";
 import { BreakCorrectionPreviewModal } from "../../components/inputs/BreakCorrectionPreviewModal";
+import { SpeedReviewModal } from "../../components/inputs/SpeedReviewModal";
+import { SpeedReviewGroupsResponse } from "../../lib/speedReviewTypes";
 import { api, ApiError } from "../../lib/api";
 import { useAuth } from "../../context/AuthContext";
 import { ActivityRunDto, BreakDto, DailyInputsResponse, InputsEmployee } from "../../lib/inputsTypes";
@@ -154,6 +156,19 @@ export function InputsPage() {
   // yank the page out from under an admin mid-entry.
   const [addModal, setAddModal] = useState<"work-start" | "break" | "activity" | null>(null);
 
+  // Bulk speed review (SpeedReviewModal). Viewing the review groups needs
+  // the same roles as the individual review modal's candidate list
+  // (Administrator/Manager); saving completions is Administrator-only,
+  // same as the individual Combine. `reviewModal.employeeId === null` is
+  // "Review all employees".
+  const canReviewSpeeds = currentEmployee?.securityRole === "Administrator" || currentEmployee?.securityRole === "Manager";
+  const canApplySpeedReview = currentEmployee?.securityRole === "Administrator";
+  const [reviewModal, setReviewModal] = useState<{ employeeId: string | null } | null>(null);
+  // Pending review groups for `date`: total and per employee — the badges on
+  // "Review all employees" and "Review speeds". null until loaded (no badge
+  // shown rather than a misleading 0).
+  const [reviewCounts, setReviewCounts] = useState<{ total: number; byEmployee: Map<string, number> } | null>(null);
+
   // Background live-refresh state — distinct from `error`/`daily` above,
   // which are only ever touched by a foreground (initial/employee/date)
   // load so a failed background poll can never blank an already-loaded
@@ -232,6 +247,34 @@ export function InputsPage() {
   // resolve after being aborted) — the abort itself is the "don't even let
   // it finish" optimization on top.
   const employeesAbortControllerRef = useRef<AbortController | null>(null);
+
+  // Review-count badges for `date`, from the same server grouping the
+  // review popup shows (GET /api/row-completions/review-groups, every
+  // employee). Refreshed on exactly the sidebar's own triggers — called from
+  // loadEmployees below, so every date change, background poll and
+  // post-save refresh that updates paid hours updates these too. A failed
+  // refresh keeps the last known counts (same as a background employees
+  // refresh); a newer request always wins over an older one.
+  const reviewCountsSeqRef = useRef(0);
+  const reviewCountsDateRef = useRef<string | null>(null);
+  const loadReviewCounts = useCallback(() => {
+    if (!canReviewSpeeds) return;
+    const requestId = ++reviewCountsSeqRef.current;
+    // A different date's counts must never stay on screen while the new
+    // date's are loading.
+    if (reviewCountsDateRef.current !== date) setReviewCounts(null);
+    api<SpeedReviewGroupsResponse>(`/api/row-completions/review-groups?date=${encodeURIComponent(date)}`)
+      .then((res) => {
+        if (requestId !== reviewCountsSeqRef.current) return;
+        const byEmployee = new Map<string, number>();
+        for (const g of res.groups) byEmployee.set(g.employeeId, (byEmployee.get(g.employeeId) ?? 0) + 1);
+        reviewCountsDateRef.current = date;
+        setReviewCounts({ total: res.groups.length, byEmployee });
+      })
+      .catch(() => {
+        // Keep the last known counts; the next refresh trigger retries.
+      });
+  }, [date, canReviewSpeeds]);
   // `background: true` marks a poll/visibility/focus/online-triggered
   // refresh, same convention as loadDaily's own `opts.background`: it never
   // flips employeesLoading (so the sidebar doesn't flash its placeholder
@@ -252,6 +295,7 @@ export function InputsPage() {
 
     const requestId = ++employeesRequestSeqRef.current;
     if (!background) setEmployeesLoading(true);
+    loadReviewCounts();
     api<{ employees: InputsEmployee[] }>(`/api/inputs/employees?${params.toString()}`, { signal: controller.signal })
       .then((res) => {
         if (requestId !== employeesRequestSeqRef.current) return;
@@ -269,7 +313,7 @@ export function InputsPage() {
         if (requestId !== employeesRequestSeqRef.current) return;
         if (!background) setEmployeesLoading(false);
       });
-  }, [employeeSearch, date]);
+  }, [employeeSearch, date, loadReviewCounts]);
 
   useEffect(() => {
     const t = window.setTimeout(loadEmployees, employeeSearch ? 300 : 0);
@@ -382,7 +426,8 @@ export function InputsPage() {
       actionInFlight ||
       pendingDeletion !== null ||
       deletionSubmitting ||
-      addModal !== null;
+      addModal !== null ||
+      reviewModal !== null;
     const wasPaused = pausedRef.current;
     pausedRef.current = nowPaused;
     if (wasPaused && !nowPaused) {
@@ -400,6 +445,7 @@ export function InputsPage() {
     pendingDeletion,
     deletionSubmitting,
     addModal,
+    reviewModal,
     loadDaily,
   ]);
 
@@ -432,6 +478,7 @@ export function InputsPage() {
     setEditingWorkStart(false);
     setAddModal(null);
     setPendingDeletion(null);
+    setReviewModal(null);
     loadDaily();
   }, [loadDaily]);
 
@@ -769,6 +816,18 @@ export function InputsPage() {
           onSelect={(id) => updateParams({ employee: id })}
           search={employeeSearch}
           onSearchChange={setEmployeeSearch}
+          headerAction={
+            canReviewSpeeds ? (
+              <button
+                type="button"
+                className="inputs-section-header-button inputs-review-button inputs-employee-review-all"
+                onClick={() => setReviewModal({ employeeId: null })}
+              >
+                Review all employees
+                <ReviewCountBadge count={reviewCounts?.total ?? null} label="pending speed reviews for all employees" />
+              </button>
+            ) : null
+          }
         />
 
         <div className="inputs-workspace-main">
@@ -790,6 +849,19 @@ export function InputsPage() {
           {selectedEmployeeId && (
             <div className="inputs-section-header inputs-section-header-with-status">
               <h3>Activity details</h3>
+              {canReviewSpeeds && (
+                <button
+                  type="button"
+                  className="inputs-section-header-button inputs-review-button"
+                  onClick={() => setReviewModal({ employeeId: selectedEmployeeId })}
+                >
+                  Review speeds
+                  <ReviewCountBadge
+                    count={reviewCounts ? reviewCounts.byEmployee.get(selectedEmployeeId) ?? 0 : null}
+                    label="pending speed reviews for this employee"
+                  />
+                </button>
+              )}
               <div className="inputs-section-header-status">
                 {activityHeaderStatus && activityHeaderStatusClassName && (
                   <p
@@ -964,6 +1036,28 @@ export function InputsPage() {
           onCreated={() => handleManualEntryCreated("Break added.")}
         />
       )}
+      {reviewModal && (
+        <SpeedReviewModal
+          date={date}
+          employeeId={reviewModal.employeeId}
+          employeeName={
+            reviewModal.employeeId && daily && daily.employee.id === reviewModal.employeeId
+              ? `${daily.employee.firstName} ${daily.employee.lastName}`
+              : undefined
+          }
+          canApply={canApplySpeedReview}
+          onClose={() => setReviewModal(null)}
+          onApplied={() => {
+            // Same refresh flow as the individual review's Combine
+            // (onRowCompletionChanged): speeds and badges for the selected
+            // employee, sidebar totals and review counts. A foreground
+            // reload keeps the current employee, date and scroll position.
+            loadDaily();
+            loadEmployees();
+            setSuccessMessage("Speed review saved.");
+          }}
+        />
+      )}
       {addModal === "activity" && daily && selectedEmployeeId && (
         <AddActivityModal
           employeeId={selectedEmployeeId}
@@ -974,5 +1068,16 @@ export function InputsPage() {
         />
       )}
     </div>
+  );
+}
+
+// Pending-review count on the bulk speed review buttons. Renders nothing
+// until counts have loaded (never a misleading 0 while a new date loads).
+function ReviewCountBadge({ count, label }: { count: number | null; label: string }) {
+  if (count === null) return null;
+  return (
+    <span className={`inputs-review-count${count === 0 ? " inputs-review-count-zero" : ""}`} aria-label={`${count} ${label}`}>
+      {count}
+    </span>
   );
 }

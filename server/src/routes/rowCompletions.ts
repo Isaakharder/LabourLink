@@ -3,6 +3,8 @@ import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { getUnresolvedRunsForRow } from "../lib/rowCompletionCandidates";
+import { createRowCompletion, RowCompletionError } from "../lib/rowCompletionCreate";
+import { getSpeedReviewGroups } from "../lib/speedReviewGroups";
 
 const router = Router();
 
@@ -79,122 +81,138 @@ router.post(
     const client = await pool.connect();
     try {
       await client.query("begin");
-
-      const { rows } = await client.query(
-        `select te.id, te.entry_type, te.deleted_at, te.ended_at, te.greenhouse_row_id, te.activity_id,
-                te.density_type, te.density_count_per_row, rcs.time_entry_id as already_completed
-         from time_entries te
-         left join row_completion_segments rcs on rcs.time_entry_id = te.id
-         where te.id = any($1::uuid[])`,
-        [timeEntryIds]
-      );
-      if (rows.length !== timeEntryIds.length) {
-        await client.query("rollback");
-        return res.status(400).json({ error: "One or more time entries were not found" });
-      }
-      for (const r of rows) {
-        if (r.entry_type !== "work" || r.deleted_at !== null) {
-          await client.query("rollback");
-          return res.status(400).json({ error: "Only active work entries can be combined" });
-        }
-        if (r.ended_at === null) {
-          await client.query("rollback");
-          return res.status(400).json({ error: "An in-progress entry cannot be combined into a completed row" });
-        }
-        if (!r.density_type || !r.density_count_per_row) {
-          await client.query("rollback");
-          return res.status(400).json({ error: "One or more entries have no resolvable row density" });
-        }
-        if (r.already_completed) {
-          await client.query("rollback");
-          return res.status(409).json({ error: "One or more entries already belong to a completed row" });
-        }
-      }
-      const first = rows[0];
-      const consistent = rows.every(
-        (r) =>
-          r.greenhouse_row_id === first.greenhouse_row_id &&
-          r.activity_id === first.activity_id &&
-          r.density_type === first.density_type &&
-          Number(r.density_count_per_row) === Number(first.density_count_per_row)
-      );
-      if (!consistent) {
-        await client.query("rollback");
-        return res
-          .status(400)
-          .json({ error: "Selected entries do not all refer to the same row, activity, and density" });
-      }
-
-      // Row-work cycles (rowCompletionCandidates.ts's CYCLE_GAP_DAYS): the
-      // same row+activity+density is no longer one lifetime ambiguity group
-      // — a visit from months ago and one from this week are unrelated
-      // passes over the row, so combining across that gap must be refused
-      // the same way combining across two different activities already is
-      // above. Reads via the shared pool (not `client`) is safe here — this
-      // transaction hasn't inserted anything yet, so it sees exactly the
-      // same not-yet-completed state the admin's review modal was built
-      // from.
-      const candidates = await getUnresolvedRunsForRow(
-        first.greenhouse_row_id,
-        first.activity_id,
-        first.density_type as "plants" | "stems"
-      );
-      const candidateBySegmentId = new Map<string, (typeof candidates)[number]>();
-      for (const c of candidates) {
-        for (const segId of c.segmentIds) candidateBySegmentId.set(segId, c);
-      }
-      const cycleIndexesUsed = new Set(timeEntryIds.map((id) => candidateBySegmentId.get(id)?.cycleIndex));
-      if (cycleIndexesUsed.size > 1 || cycleIndexesUsed.has(undefined)) {
-        await client.query("rollback");
-        return res.status(400).json({
-          error: "Selected entries span more than one row-work cycle (7 or more calendar days apart) and cannot be combined together",
-        });
-      }
-      // A visit is completed whole or not at all. Its segments (break
-      // splits, carrier changes) are one physical pass over the row;
-      // completing part of it would leave the rest as a second "visit" and
-      // count the row's stems twice.
-      const selected = new Set(timeEntryIds);
-      const touchedVisits = new Set(timeEntryIds.map((id) => candidateBySegmentId.get(id)!));
-      if ([...touchedVisits].some((c) => c.segmentIds.some((segId) => !selected.has(segId)))) {
-        await client.query("rollback");
-        return res.status(400).json({
-          error: "Selected entries include only part of a visit — select every segment of each visit",
-        });
-      }
-
-      const { rows: created } = await client.query(
-        `insert into row_completions (greenhouse_row_id, activity_id, density_type, quantity_per_row, confirmed_by_employee_id)
-         values ($1, $2, $3, $4, $5)
-         returning id, greenhouse_row_id, activity_id, density_type, quantity_per_row, completed_at`,
-        [first.greenhouse_row_id, first.activity_id, first.density_type, first.density_count_per_row, req.employee!.id]
-      );
-      const completion = created[0];
-
-      await client.query(
-        `insert into row_completion_segments (time_entry_id, row_completion_id)
-         select unnest($1::uuid[]), $2`,
-        [timeEntryIds, completion.id]
-      );
-
+      const rowCompletion = await createRowCompletion(client, timeEntryIds, req.employee!.id);
       await client.query("commit");
-      res.status(201).json({
-        rowCompletion: {
-          id: completion.id,
-          greenhouseRowId: completion.greenhouse_row_id,
-          activityId: completion.activity_id,
-          densityType: completion.density_type,
-          quantityPerRow: Number(completion.quantity_per_row),
-          completedAt: completion.completed_at,
-          segmentCount: timeEntryIds.length,
-        },
-      });
+      res.status(201).json({ rowCompletion });
     } catch (err) {
       await client.query("rollback");
+      if (err instanceof RowCompletionError) {
+        return res.status(err.status).json({ error: err.message });
+      }
       throw err;
     } finally {
       client.release();
     }
+  })
+);
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const isValidDate = (v: unknown): v is string => typeof v === "string" && DATE_RE.test(v) && !isNaN(Date.parse(v));
+const REVIEW_ACTIONS = new Set(["merge", "separate"]);
+const MAX_BULK_GROUPS = 500;
+
+// Bulk speed review: every "Needs review" visit on one date, organized into
+// proposed review groups (see speedReviewGroups.ts). employeeId scopes it to
+// one employee (Inputs "Review speeds"); omitted = every employee
+// (Inputs "Review all employees"). Read-only — same roles as /candidates.
+router.get(
+  "/review-groups",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (req, res) => {
+    const date = req.query.date;
+    if (!isValidDate(date)) {
+      return res.status(400).json({ error: "A valid date (YYYY-MM-DD) is required" });
+    }
+    const employeeId = req.query.employeeId as string | undefined;
+    if (employeeId !== undefined && !UUID_RE.test(employeeId)) {
+      return res.status(400).json({ error: "employeeId must be a valid id" });
+    }
+    const groups = await getSpeedReviewGroups({ date, employeeId: employeeId ?? null });
+    res.json({ date, groups });
+  })
+);
+
+// Applies the bulk review's chosen actions in one request. Each group is
+// independent: its own transaction, its own success/failure, so one bad
+// group never blocks or partially applies another. The server never trusts
+// the client's grouping — it rebuilds every group for the date itself and
+// refuses any group that no longer exists, whose visits changed since the
+// review was loaded, or whose action isn't supported for it; then applies
+// the action from its OWN group data through createRowCompletion, the same
+// validation the individual Combine uses (cycle, whole-visit, density,
+// already-completed). The row_completion_segments primary key also makes a
+// duplicate or concurrent submission fail instead of double-counting.
+router.post(
+  "/bulk-review",
+  requireAuth,
+  requireRole("Administrator"),
+  asyncHandler(async (req, res) => {
+    const date = req.body?.date;
+    if (!isValidDate(date)) {
+      return res.status(400).json({ error: "A valid date (YYYY-MM-DD) is required" });
+    }
+    const raw = req.body?.groups;
+    if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_BULK_GROUPS) {
+      return res.status(400).json({ error: `Between 1 and ${MAX_BULK_GROUPS} groups are required` });
+    }
+    const submitted = raw as { groupId?: unknown; action?: unknown; visits?: unknown }[];
+    const wellFormed = submitted.every(
+      (g) =>
+        typeof g?.groupId === "string" &&
+        typeof g.action === "string" &&
+        REVIEW_ACTIONS.has(g.action) &&
+        Array.isArray(g.visits) &&
+        g.visits.length > 0 &&
+        g.visits.every((v) => Array.isArray(v) && v.length > 0 && v.every((id) => typeof id === "string" && UUID_RE.test(id)))
+    );
+    if (!wellFormed) {
+      return res.status(400).json({ error: "One or more groups are invalid" });
+    }
+    if (new Set(submitted.map((g) => g.groupId)).size !== submitted.length) {
+      return res.status(400).json({ error: "A group was submitted more than once" });
+    }
+
+    const serverGroups = new Map((await getSpeedReviewGroups({ date })).map((g) => [g.id, g]));
+    const visitSetKey = (visits: string[][]) =>
+      visits
+        .map((v) => [...v].sort().join(","))
+        .sort()
+        .join("|");
+
+    const results: { groupId: string; ok: boolean; error?: string; completionIds?: string[] }[] = [];
+    for (const g of submitted as { groupId: string; action: "merge" | "separate"; visits: string[][] }[]) {
+      const group = serverGroups.get(g.groupId);
+      if (!group) {
+        results.push({ groupId: g.groupId, ok: false, error: "This group no longer needs review — it was resolved or changed after the review was opened." });
+        continue;
+      }
+      if (visitSetKey(g.visits) !== visitSetKey(group.visits.map((v) => v.segmentIds))) {
+        results.push({ groupId: g.groupId, ok: false, error: "This group's visits changed after the review was opened — reopen the review to see the current entries." });
+        continue;
+      }
+      const action = group.actions[g.action];
+      if (!action.available) {
+        results.push({ groupId: g.groupId, ok: false, error: action.unavailableReason ?? "This action isn't available for this group." });
+        continue;
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query("begin");
+        const completionIds: string[] = [];
+        if (g.action === "merge") {
+          const all = group.visits.flatMap((v) => v.segmentIds);
+          completionIds.push((await createRowCompletion(client, all, req.employee!.id)).id);
+        } else {
+          for (const v of group.visits) completionIds.push((await createRowCompletion(client, v.segmentIds, req.employee!.id)).id);
+        }
+        await client.query("commit");
+        results.push({ groupId: g.groupId, ok: true, completionIds });
+      } catch (err) {
+        await client.query("rollback");
+        if (err instanceof RowCompletionError) {
+          results.push({ groupId: g.groupId, ok: false, error: err.message });
+        } else {
+          console.error(`[row-completions] bulk review group ${g.groupId} failed:`, err);
+          results.push({ groupId: g.groupId, ok: false, error: "Unexpected error saving this group — nothing was changed for it." });
+        }
+      } finally {
+        client.release();
+      }
+    }
+
+    res.json({ results });
   })
 );
 

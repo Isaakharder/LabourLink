@@ -7744,3 +7744,242 @@ input {
     overflow: visible !important;
   }
 }
+
+/* ---------- Inputs > bulk speed review (SpeedReviewModal) ---------- */
+
+.inputs-review-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Count badge on "Review speeds" / "Review all employees" — the same
+   orange family as the per-row "Needs review" pill. */
+.inputs-review-count {
+  min-width: 1.25rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1.25rem;
+  text-align: center;
+  background: #ffedd5;
+  color: #9a3412;
+  border: 1px solid #fb923c;
+}
+
+.inputs-review-count-zero {
+  background: var(--color-surface);
+  color: inherit;
+  border-color: var(--color-border);
+  opacity: 0.7;
+}
+
+.inputs-employee-review-all {
+  justify-content: center;
+}
+
+/* Sticks flush to the top of the scrolling modal body: -1.5rem cancels the
+   body's own top padding (.modal-body), which would otherwise leave a strip
+   above the toolbar where scrolled cards show through. */
+.speed-review-toolbar {
+  position: sticky;
+  top: -1.5rem;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1rem 0 0.5rem;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.speed-review-bulk {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+  font-size: 0.85rem;
+}
+
+.speed-review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-top: 0.75rem;
+}
+
+.speed-review-employee {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.speed-review-employee-name {
+  margin: 0.5rem 0 0;
+  font-size: 0.95rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.speed-review-count {
+  font-size: 0.75rem;
+  font-weight: 600;
+  opacity: 0.7;
+}
+
+.speed-review-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  background: var(--color-surface);
+}
+
+.speed-review-card-selected {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 1px var(--color-primary);
+}
+
+.speed-review-card-pending {
+  opacity: 0.85;
+}
+
+.speed-review-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.speed-review-card-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: 0.9rem;
+}
+
+.speed-review-card-meta {
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+.speed-review-expand {
+  font-size: 0.8rem;
+}
+
+.speed-review-reason,
+.speed-review-preview,
+.speed-review-unavailable {
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.speed-review-unavailable {
+  color: #9a3412;
+}
+
+.speed-review-preview {
+  font-weight: 600;
+}
+
+.speed-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.speed-review-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.speed-review-action-chosen {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.speed-review-action-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.speed-review-suggested {
+  font-size: 0.7rem;
+  font-weight: 600;
+  opacity: 0.7;
+}
+
+.speed-review-result-ok,
+.speed-review-result-failed {
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.speed-review-result-ok {
+  background: #dcfce7;
+  color: #166534;
+  border: 1px solid #4ade80;
+}
+
+.speed-review-result-failed {
+  background: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #f87171;
+}
+
+.speed-review-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-top: 0.25rem;
+}
+
+.speed-review-table caption {
+  text-align: left;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding-bottom: 0.25rem;
+}
+
+.speed-review-context {
+  opacity: 0.75;
+}
+
+.speed-review-action-notes {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.8rem;
+}
+
+.speed-review-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+}
+
+.speed-review-footer-summary {
+  margin-right: auto;
+  font-size: 0.85rem;
+}
+
+.speed-review-footer button:disabled,
+.speed-review-toolbar button:disabled,
+.speed-review-toolbar select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

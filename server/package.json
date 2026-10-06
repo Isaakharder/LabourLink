@@ -94,7 +94,8 @@
     "test:integrations-productive-tv-pruning-speed": "ts-node src/routes/integrations.productiveTvPruningSpeed.test.ts",
     "test:integrations-productive-tv-picking-speed": "ts-node src/routes/integrations.productiveTvPickingSpeed.test.ts",
     "test:row-completion-visit-cycles": "ts-node src/routes/rowCompletions.visitCycles.test.ts",
-    "test:reports-query-count": "ts-node src/lib/reportQueries.queryCount.test.ts"
+    "test:reports-query-count": "ts-node src/lib/reportQueries.queryCount.test.ts",
+    "test:row-completion-bulk-review": "ts-node src/routes/rowCompletions.bulkReview.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",
