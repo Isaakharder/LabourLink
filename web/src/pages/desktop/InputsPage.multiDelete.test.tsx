@@ -166,10 +166,10 @@ describe("Inputs multi-row select and delete", () => {
     expect(document.querySelector("input[type='time']")).toBeNull();
   });
 
-  it("deletes every selected log in one request — exact segments, earliest first — after one confirmation listing them", async () => {
+  it("deletes every selected log right away in one request — exact segments, earliest first, no confirmation popup", async () => {
     const user = userEvent.setup();
     await renderPage();
-    // Selected out of order, and including the in-progress row.
+    // Selected out of order, and including the in-progress row (left out).
     await user.click(rowOf("Picking Peppers", 1));
     await user.keyboard("{Control>}");
     await user.click(rowOf("Packing Bags", 0));
@@ -177,22 +177,17 @@ describe("Inputs multi-row select and delete", () => {
     await user.click(rowOf("Packing Bags", 2));
     await user.keyboard("{/Control}");
 
-    await user.click(screen.getAllByRole("button", { name: "Delete 3 selected" })[0]);
-    const dialog = screen.getByRole("dialog", { name: "Delete 3 activity logs?" });
-    expect(within(dialog).getAllByRole("listitem")).toHaveLength(3);
-    expect(within(dialog).getByText(/1 selected in-progress activity is not included/)).toBeInTheDocument();
-    expect(deleteCalls()).toHaveLength(0); // nothing deleted before confirming
-
     await act(async () => {
-      await user.click(within(dialog).getByRole("button", { name: "Delete 3 Logs" }));
+      await user.click(screen.getAllByRole("button", { name: "Delete 3 selected" })[0]);
     });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("3 activity logs deleted.")).toBeInTheDocument());
     expect(deleteCalls()).toEqual([
       { path: "/api/inputs/activity-runs/bulk-delete", body: { runs: [["r-pick-619"], ["r-bags-1"], ["r-pick-617"]] } },
     ]);
   });
 
-  it("if anything changed, nothing is deleted and the dialog says so", async () => {
+  it("if anything changed, nothing is deleted and the header says so", async () => {
     bulkDeleteFailure = "One or more of the selected activity logs changed since they were loaded — please refresh and try again";
     const user = userEvent.setup();
     await renderPage();
@@ -200,12 +195,11 @@ describe("Inputs multi-row select and delete", () => {
     await user.keyboard("{Control>}");
     await user.click(rowOf("Packing Bags", 0));
     await user.keyboard("{/Control}");
-    await user.click(screen.getAllByRole("button", { name: "Delete 2 selected" })[0]);
     await act(async () => {
-      await user.click(screen.getByRole("button", { name: "Delete 2 Logs" }));
+      await user.click(screen.getAllByRole("button", { name: "Delete 2 selected" })[0]);
     });
-    const dialog = screen.getByRole("dialog", { name: "Delete 2 activity logs?" });
-    expect(await within(dialog).findByText(/Nothing was deleted\. One or more of the selected activity logs changed/)).toBeInTheDocument();
+    const message = await screen.findByText(/Nothing was deleted\. One or more of the selected activity logs changed/);
+    expect(message.closest(".inputs-section-header")).not.toBeNull();
     expect(screen.queryByText(/activity logs deleted\./)).not.toBeInTheDocument();
     expect(deleteCalls()).toHaveLength(1);
   });

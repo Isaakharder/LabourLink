@@ -44,6 +44,8 @@ interface WorkdayDetailsCardProps {
   onSaveEditBreak: () => void;
   onCancelEditBreak: () => void;
   onDeleteBreak: (brk: BreakDto) => void;
+  // True while a delete is in flight — Delete disables and says "Deleting…".
+  deleting?: boolean;
   // Work start time editing is a single click-to-edit cell (no separate
   // "select, then click again to edit" step like the break rows below) —
   // there's no delete action or other row state that a select step would
@@ -80,6 +82,7 @@ export function WorkdayDetailsCard({
   onSaveEditBreak,
   onCancelEditBreak,
   onDeleteBreak,
+  deleting = false,
   editingWorkStart,
   editWorkStartTimeValue,
   onStartEditWorkStart,
@@ -309,12 +312,13 @@ export function WorkdayDetailsCard({
                     <button
                       type="button"
                       className="inputs-delete-btn"
+                      disabled={deleting}
                       onClick={(e) => {
                         e.stopPropagation();
                         onDeleteBreak(b);
                       }}
                     >
-                      Delete
+                      {deleting ? "Deleting…" : "Delete"}
                     </button>
                   )}
                 </td>

@@ -147,10 +147,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-// Loads the page, resolves the initial daily fetch, selects the run, and
-// opens the delete-confirmation modal — the common setup every test below
-// starts from.
-async function loadAndOpenDeleteModal() {
+// Loads the page, resolves the initial daily fetch and selects the run
+// (revealing its Delete button) — the common setup every test below starts
+// from. Delete has no confirmation popup: clicking it deletes.
+async function loadAndSelectRun() {
   renderInputsPage();
   await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
   await act(async () => {
@@ -160,31 +160,32 @@ async function loadAndOpenDeleteModal() {
 
   const user = userEvent.setup();
   await user.click(screen.getByText("Picking Peppers")); // selects the run — reveals its row Delete button
-  await user.click(screen.getByRole("button", { name: "Delete" }));
-  await screen.findByText("Delete activity log?");
   return user;
 }
 
 describe("InputsPage — activity-log delete performance/UX", () => {
   it("disables the Delete button and shows 'Deleting…' immediately, before the network call resolves", async () => {
-    const user = await loadAndOpenDeleteModal();
-    const confirmButton = screen.getByRole("button", { name: "Delete Log" });
-    expect(confirmButton).toBeEnabled();
+    const user = await loadAndSelectRun();
+    const deleteButton = screen.getByRole("button", { name: "Delete" });
+    expect(deleteButton).toBeEnabled();
 
-    await user.click(confirmButton);
+    await user.click(deleteButton);
 
     // Synchronous with the click — no `act`/`waitFor` needed, and
     // deliberately BEFORE resolving the mocked DELETE call below, proving
     // this doesn't wait on a round trip.
-    expect(await screen.findByRole("button", { name: "Deleting..." })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Deleting…" })).toBeDisabled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(); // no confirmation popup
     expect(deleteCalls.length).toBe(1);
   });
 
   it("makes exactly ONE DELETE call and exactly ONE subsequent daily refresh — no duplicate mutation or duplicate refresh", async () => {
-    const user = await loadAndOpenDeleteModal();
+    const user = await loadAndSelectRun();
     const dailyCallsBeforeDelete = dailyCalls.length;
 
-    await user.click(screen.getByRole("button", { name: "Delete Log" }));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    // A second click while the first is in flight is ignored.
+    await user.click(screen.getByRole("button", { name: "Deleting…" }));
     expect(deleteCalls.length).toBe(1);
 
     await act(async () => {
@@ -211,20 +212,30 @@ describe("InputsPage — activity-log delete performance/UX", () => {
   });
 
   it("never removes the row, and shows the server's real error, when the delete request fails — nothing to roll back because nothing was optimistically changed", async () => {
-    const user = await loadAndOpenDeleteModal();
+    const user = await loadAndSelectRun();
 
-    await user.click(screen.getByRole("button", { name: "Delete Log" }));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
     await act(async () => {
       deleteCalls[0].deferred.reject(new ApiError(500, "Could not delete this activity log"));
     });
 
     await screen.findByText("Could not delete this activity log");
-    // The modal stays open (still showing Delete Log, not gone) and the
-    // original row is still fully present underneath it — no premature
+    // The error shows in the Activity details header, Delete is usable
+    // again, and the original row is still fully present — no premature
     // removal ever happened, so there's nothing to undo.
-    expect(screen.getByRole("button", { name: "Delete Log" })).toBeEnabled();
+    expect(screen.getByText("Could not delete this activity log").closest(".inputs-section-header")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled();
     expect(screen.getByText("Picking Peppers")).toBeInTheDocument();
-    // No extra daily refresh was triggered by the failure either.
-    expect(dailyCalls.length).toBe(1);
+    // With no popup holding the page paused, the failure resumes polling with
+    // ONE background refresh (same as any other failed save — and what makes
+    // a "changed since it was loaded" failure show current data). It never
+    // clears the error message, and the row is still there after it.
+    await waitFor(() => expect(dailyCalls.length).toBe(2));
+    await act(async () => {
+      dailyCalls[1].deferred.resolve(buildDaily("2026-08-24"));
+    });
+    expect(screen.getByText("Could not delete this activity log")).toBeInTheDocument();
+    expect(screen.getByText("Picking Peppers")).toBeInTheDocument();
+    expect(deleteCalls.length).toBe(1);
   });
 });

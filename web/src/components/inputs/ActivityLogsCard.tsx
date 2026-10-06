@@ -67,6 +67,9 @@ interface ActivityLogsCardProps {
   // (InputsPage's actionInFlight) — disables Save/Cancel on the inline
   // editor so a double-click can't fire two overlapping requests.
   saving: boolean;
+  // True while a delete is in flight — Delete buttons disable and say
+  // "Deleting…" (deletes run immediately, with no confirmation popup).
+  deleting?: boolean;
 }
 
 function ManualBadge({ meta }: { meta: NonNullable<ActivityRunDto["manualEntry"]> }) {
@@ -100,6 +103,7 @@ export function ActivityLogsCard({
   onDeleteRun,
   onRowCompletionChanged,
   saving,
+  deleting = false,
 }: ActivityLogsCardProps) {
   const selected: ReadonlySet<string> = selectedRunIds ?? new Set(selectedRunId ? [selectedRunId] : []);
   const selectedRuns = runs.filter((r) => selected.has(r.id));
@@ -369,13 +373,14 @@ export function ActivityLogsCard({
                       <button
                         type="button"
                         className="inputs-delete-btn"
+                        disabled={deleting}
                         onClick={(e) => {
                           e.stopPropagation();
                           if (multiDeletable.length > 1 && onDeleteRuns) onDeleteRuns(selectedRuns);
                           else onDeleteRun(run);
                         }}
                       >
-                        {multiDeletable.length > 1 ? `Delete ${multiDeletable.length} selected` : "Delete"}
+                        {deleting ? "Deleting…" : multiDeletable.length > 1 ? `Delete ${multiDeletable.length} selected` : "Delete"}
                       </button>
                     )}
                   </td>

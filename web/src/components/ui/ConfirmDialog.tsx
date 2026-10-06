@@ -5,8 +5,7 @@ interface ConfirmDialogProps {
   message: string;
   confirmLabel: string;
   // Shown on the confirm button in place of confirmLabel while `submitting`
-  // is true (e.g. "Deactivating…") — distinct per caller, unlike the fixed
-  // "Deleting..." text baked into DeleteTimeEntryModal.
+  // is true (e.g. "Deactivating…") — distinct per caller.
   confirmingLabel: string;
   submitting: boolean;
   error: string | null;
@@ -21,7 +20,7 @@ interface ConfirmDialogProps {
 // app chrome as the shared Modal (components/ui/Modal.tsx) — same
 // .modal-overlay/.modal-panel/.modal-header/.modal-body classes, same
 // .employee-form-actions/.employee-form-delete button styling already used
-// by DeleteTimeEntryModal and DeactivatePhaseModal — but it manages its own
+// by DeactivatePhaseModal — but it manages its own
 // DOM instead of wrapping Modal, since the focus trap and restore-on-close
 // behavior below need a container ref Modal doesn't expose, and adding
 // that to Modal itself would change behavior for every one of its other

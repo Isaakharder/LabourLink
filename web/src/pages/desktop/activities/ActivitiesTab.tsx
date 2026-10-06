@@ -47,8 +47,7 @@ export function ActivitiesTab() {
 
   // Confirmation for deactivating an activity — kept separate from the
   // page-level `error` banner above (and from modalActivity/questionsActivity)
-  // since this dialog needs its own submitting/error state, same convention
-  // as InputsPage's pendingDeletion + DeleteTimeEntryModal.
+  // since this dialog needs its own submitting/error state.
   const [deactivateTarget, setDeactivateTarget] = useState<Activity | null>(null);
   const [deactivating, setDeactivating] = useState(false);
   const [deactivateError, setDeactivateError] = useState<string | null>(null);

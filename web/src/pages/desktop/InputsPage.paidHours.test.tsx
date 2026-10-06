@@ -320,9 +320,7 @@ describe("InputsPage — employee sidebar paid-hours totals", () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByText("Picking Peppers"));
-    await user.click(screen.getByRole("button", { name: "Delete" }));
-    await screen.findByText("Delete activity log?");
-    await user.click(screen.getByRole("button", { name: "Delete Log" }));
+    await user.click(screen.getByRole("button", { name: "Delete" })); // deletes immediately — no confirmation popup
 
     await act(async () => {
       deleteCalls[0].deferred.resolve({ ok: true });

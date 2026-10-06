@@ -7,7 +7,6 @@ import { InputsSkeleton } from "../../components/inputs/InputsSkeleton";
 import { ActivityLogsCard } from "../../components/inputs/ActivityLogsCard";
 import { WorkdayDetailsCard, EditingBreakField } from "../../components/inputs/WorkdayDetailsCard";
 import { InputsErrorBoundary } from "../../components/inputs/InputsErrorBoundary";
-import { DeleteTimeEntryModal } from "../../components/inputs/DeleteTimeEntryModal";
 import { AddWorkStartModal } from "../../components/inputs/AddWorkStartModal";
 import { AddBreakModal } from "../../components/inputs/AddBreakModal";
 import { AddActivityModal } from "../../components/inputs/AddActivityModal";
@@ -20,7 +19,6 @@ import { ActivityRunDto, BreakDto, DailyInputsResponse, InputsEmployee } from ".
 import {
   APP_TIMEZONE,
   combineDateAndTimeToUtcIso,
-  formatTimeInAppTimezone,
   todayInAppTimezone,
   toTimeInputValue,
 } from "../../lib/timezone";
@@ -49,22 +47,11 @@ type InputsHeaderStatus = {
   message: string;
 };
 
-interface PendingDeletion {
-  kind: "activity-run" | "activity-runs" | "break";
-  id: string;
-  // "activity-runs" only: every run to delete, earliest first.
-  runs?: ActivityRunDto[];
-  title: string;
-  message: string;
-  details?: string[];
-  confirmLabel: string;
-}
-
-function describeRun(run: ActivityRunDto): string {
-  const where = [run.row?.label, run.carrier?.name].filter(Boolean).join(" · ");
-  const end = run.endedAt ? formatTimeInAppTimezone(run.endedAt) : "in progress";
-  return `${run.activityName}${where ? ` (${where})` : ""} — ${formatTimeInAppTimezone(run.startedAt)} to ${end}`;
-}
+type Deletion =
+  | { kind: "activity-run"; run: ActivityRunDto }
+  // Every run to delete, earliest first.
+  | { kind: "activity-runs"; runs: ActivityRunDto[] }
+  | { kind: "break"; id: string };
 
 export function InputsPage() {
   const { employee: currentEmployee } = useAuth();
@@ -147,13 +134,13 @@ export function InputsPage() {
   // banner rather than a modal-local one.
   const [actionInFlight, setActionInFlight] = useState(false);
 
-  const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion | null>(null);
+  // True while a delete request is in flight — pauses background polling
+  // (see the pause-gate effect below) and blocks a second delete.
   const [deletionSubmitting, setDeletionSubmitting] = useState(false);
-  const [deletionError, setDeletionError] = useState<string | null>(null);
 
   // Which "Add …" modal (if any) is currently open — at most one at a time,
   // opened from either section header bar. Included in the pause-gate
-  // effect below (same as pendingDeletion) so background polling can't
+  // effect below (same as deletionSubmitting) so background polling can't
   // yank the page out from under an admin mid-entry.
   const [addModal, setAddModal] = useState<"work-start" | "break" | "activity" | null>(null);
 
@@ -430,7 +417,6 @@ export function InputsPage() {
       editingBreak !== null ||
       editingWorkStart ||
       actionInFlight ||
-      pendingDeletion !== null ||
       deletionSubmitting ||
       addModal !== null ||
       reviewModal !== null;
@@ -448,7 +434,6 @@ export function InputsPage() {
     editingBreak,
     editingWorkStart,
     actionInFlight,
-    pendingDeletion,
     deletionSubmitting,
     addModal,
     reviewModal,
@@ -484,7 +469,6 @@ export function InputsPage() {
     setEditingBreak(null);
     setEditingWorkStart(false);
     setAddModal(null);
-    setPendingDeletion(null);
     setReviewModal(null);
     loadDaily();
   }, [loadDaily]);
@@ -731,16 +715,12 @@ export function InputsPage() {
     }
   }
 
+  // Deletes happen immediately on Delete — no confirmation popup (removed
+  // at the admin's request; every deletion is still a soft delete with its
+  // own audit record). A failure shows in the Activity details header like
+  // any other failed save.
   function handleDeleteRun(run: ActivityRunDto) {
-    setDeletionError(null);
-    setPendingDeletion({
-      kind: "activity-run",
-      id: run.id,
-      title: "Delete activity log?",
-      message:
-        "This will remove this recorded activity from the employee's day. The deletion will remain in the audit history.",
-      confirmLabel: "Delete Log",
-    });
+    void performDeletion({ kind: "activity-run", run });
   }
 
   // Several Ctrl/Cmd-selected activity logs at once — the server deletes
@@ -754,92 +734,56 @@ export function InputsPage() {
       handleDeleteRun(deletable[0]);
       return;
     }
-    const skipped = runs.length - deletable.length;
-    setDeletionError(null);
-    setPendingDeletion({
-      kind: "activity-runs",
-      id: deletable.map((r) => r.id).join(","),
-      runs: deletable,
-      title: `Delete ${deletable.length} activity logs?`,
-      message:
-        `This will remove these ${deletable.length} recorded activities from the employee's day, all together or not at all. ` +
-        "Each is deleted the same way as deleting it on its own, and every deletion remains in the audit history." +
-        (skipped > 0 ? ` ${skipped} selected in-progress ${skipped === 1 ? "activity is" : "activities are"} not included.` : ""),
-      details: deletable.map(describeRun),
-      confirmLabel: `Delete ${deletable.length} Logs`,
-    });
+    void performDeletion({ kind: "activity-runs", runs: deletable });
   }
 
   function handleDeleteBreak(brk: BreakDto) {
-    setDeletionError(null);
-    setPendingDeletion({
-      kind: "break",
-      id: brk.id,
-      title: "Delete break?",
-      message:
-        "This will remove this break from the employee's day and reconnect the surrounding work time. The deletion will remain in the audit history.",
-      confirmLabel: "Delete Break",
-    });
+    void performDeletion({ kind: "break", id: brk.id });
   }
 
-  async function handleConfirmDeletion() {
-    // Belt-and-suspenders against a double-fire (e.g. a fast repeat Enter):
-    // the modal's own submit guard already disables the button while
-    // submitting, this just makes the same guarantee at the handler level.
-    if (!pendingDeletion || deletionSubmitting) return;
+  async function performDeletion(deletion: Deletion) {
+    // One deletion at a time: a fast second click while a delete is still in
+    // flight is ignored rather than sent again.
+    if (deletionSubmitting) return;
     setDeletionSubmitting(true);
-    setDeletionError(null);
-    if (pendingDeletion.kind === "activity-runs") {
-      // One all-or-nothing request (POST .../activity-runs/bulk-delete):
-      // each log is sent exactly as loaded (its own segment ids), so the
-      // server deletes precisely what was selected — never an unselected
-      // neighbour that an earlier deletion made join the same run — or, if
-      // anything changed, nothing at all.
-      const runs = pendingDeletion.runs ?? [];
-      try {
+    setActionError(null);
+    setSuccessMessage(null);
+    try {
+      if (deletion.kind === "activity-runs") {
+        // One all-or-nothing request (POST .../activity-runs/bulk-delete):
+        // each log is sent exactly as loaded (its own segment ids), so the
+        // server deletes precisely what was selected — never an unselected
+        // neighbour that an earlier deletion made join the same run — or, if
+        // anything changed, nothing at all.
         await api("/api/inputs/activity-runs/bulk-delete", {
           method: "POST",
-          body: JSON.stringify({ runs: runs.map((r) => r.segmentIds) }),
+          body: JSON.stringify({ runs: deletion.runs.map((r) => r.segmentIds) }),
         });
-        setPendingDeletion(null);
-        // Same order as the single delete below: reload while still marked
-        // as submitting, so the page's pause logic doesn't fire a second,
-        // redundant background reload right after.
-        await loadDaily();
-        loadEmployees();
-        setSuccessMessage(`${runs.length} activity logs deleted.`);
-      } catch (err) {
-        setDeletionError(
-          `Nothing was deleted. ${err instanceof ApiError ? err.message : "Could not delete the selected activity logs"}`
-        );
-      } finally {
-        setDeletionSubmitting(false);
+      } else {
+        const path =
+          deletion.kind === "activity-run"
+            ? `/api/inputs/activity-runs/${deletion.run.id}/delete`
+            : `/api/inputs/breaks/${deletion.id}/delete`;
+        await api(path, { method: "POST" });
       }
-      return;
-    }
-    try {
-      const path =
-        pendingDeletion.kind === "activity-run"
-          ? `/api/inputs/activity-runs/${pendingDeletion.id}/delete`
-          : `/api/inputs/breaks/${pendingDeletion.id}/delete`;
-      await api(path, { method: "POST" });
-      const deletedKind = pendingDeletion.kind;
-      setPendingDeletion(null);
+      // Reload while still marked as submitting, so the page's pause logic
+      // doesn't fire a second, redundant background reload right after.
       await loadDaily();
       // See applyActivityRunCorrection's own comment.
       loadEmployees();
-      setSuccessMessage(deletedKind === "activity-run" ? "Activity log deleted." : "Break deleted.");
+      setSuccessMessage(
+        deletion.kind === "activity-runs"
+          ? `${deletion.runs.length} activity logs deleted.`
+          : deletion.kind === "activity-run"
+          ? "Activity log deleted."
+          : "Break deleted."
+      );
     } catch (err) {
-      setDeletionError(err instanceof ApiError ? err.message : "Could not delete");
+      const reason = err instanceof ApiError ? err.message : "Could not delete";
+      setActionError(deletion.kind === "activity-runs" ? `Nothing was deleted. ${reason}` : reason);
     } finally {
       setDeletionSubmitting(false);
     }
-  }
-
-  function handleCancelDeletion() {
-    if (deletionSubmitting) return;
-    setPendingDeletion(null);
-    setDeletionError(null);
   }
 
   async function handleManualEntryCreated(message: string) {
@@ -1005,6 +949,7 @@ export function InputsPage() {
                   loadEmployees();
                 }}
                 saving={actionInFlight}
+                deleting={deletionSubmitting}
               />
               <WorkdayDetailsCard
                 workStartTime={daily.workStartTime}
@@ -1023,6 +968,7 @@ export function InputsPage() {
                 onSaveEditBreak={handleSaveEditBreak}
                 onCancelEditBreak={handleCancelEditBreak}
                 onDeleteBreak={handleDeleteBreak}
+                deleting={deletionSubmitting}
                 editingWorkStart={editingWorkStart}
                 editWorkStartTimeValue={editWorkStartTimeValue}
                 onStartEditWorkStart={handleStartEditWorkStart}
@@ -1036,19 +982,6 @@ export function InputsPage() {
           )}
         </div>
       </div>
-
-      {pendingDeletion && (
-        <DeleteTimeEntryModal
-          title={pendingDeletion.title}
-          message={pendingDeletion.message}
-          details={pendingDeletion.details}
-          confirmLabel={pendingDeletion.confirmLabel}
-          submitting={deletionSubmitting}
-          error={deletionError}
-          onConfirm={handleConfirmDeletion}
-          onCancel={handleCancelDeletion}
-        />
-      )}
 
       {activityRunCorrectionPreview && (
         <BreakCorrectionPreviewModal
