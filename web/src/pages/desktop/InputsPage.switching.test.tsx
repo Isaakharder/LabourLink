@@ -16,7 +16,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InputsPage } from "./InputsPage";
 import { AuthProvider } from "../../context/AuthContext";
-import { ApiError } from "../../lib/api";
+import { api, ApiError } from "../../lib/api";
 import { BreakDto, DailyInputsResponse, InputsEmployee } from "../../lib/inputsTypes";
 import { formatTimeInAppTimezone } from "../../lib/timezone";
 
@@ -461,6 +461,34 @@ describe("InputsPage employee switching", () => {
     expect(within(header as HTMLElement).getByText("Corrected break overlaps a work entry")).toBe(statusMessage);
     expect(statusMessage.closest(".inputs-section-header")).toBe(header);
     expect(statusMessage.closest(".inputs-workspace-placeholder")).toBeNull();
+  });
+
+  it("saves a break correction directly on Enter — no preview request, no confirmation popup", async () => {
+    const teaBreak = buildBreak("break-1", "Tea break", "2026-08-11T14:00:00.000Z", "2026-08-11T14:15:00.000Z");
+
+    renderInputsPage();
+    await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
+    await act(async () => {
+      findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity", [teaBreak]));
+    });
+    await screen.findByText("Alice's Activity");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByText("Tea break"));
+    await user.click(screen.getByText(formatTimeInAppTimezone(teaBreak.endedAt!)));
+    await user.keyboard("{Enter}");
+
+    // The save's own reload — resolve it so the success message lands.
+    await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(1));
+    await act(async () => {
+      dailyCalls[dailyCalls.length - 1].deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity", [teaBreak]));
+    });
+
+    expect(await screen.findByText("Break updated.")).toBeInTheDocument();
+    const paths = vi.mocked(api).mock.calls.map(([p, o]) => `${(o as RequestInit | undefined)?.method ?? "GET"} ${p}`);
+    expect(paths.filter((p) => p.includes("/breaks/") && p.includes("correction-preview"))).toHaveLength(0);
+    expect(paths.filter((p) => p === "PATCH /api/inputs/breaks/break-1")).toHaveLength(1);
+    expect(screen.queryByRole("dialog", { name: "Confirm break correction" })).not.toBeInTheDocument();
   });
 
   it("pauses on Save for a confirmation preview when the correction would remove hidden grouped segments, and only applies it after confirming", async () => {

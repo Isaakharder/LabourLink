@@ -105,22 +105,8 @@ export function InputsPage() {
   const [selectedBreakId, setSelectedBreakId] = useState<string | null>(null);
   const [editingBreak, setEditingBreak] = useState<EditingBreakField | null>(null);
   const [editBreakTimeValue, setEditBreakTimeValue] = useState("");
-  // Only populated when correcting a break would trim/split/delete another
-  // entry — computed by the server (POST .../correction-preview, the exact
-  // same plan PATCH would apply) so this can never disagree with what
-  // Save actually does. A break-only correction with no such side effect
-  // skips this and saves directly, same as every other correction on this
-  // page — this is a deliberate, narrow exception to that "no confirmation
-  // modal" convention, not a reintroduction of one generally.
-  const [breakCorrectionPreview, setBreakCorrectionPreview] = useState<{
-    breakId: string;
-    field: "start" | "end";
-    newTimeIso: string;
-    messages: string[];
-    workedMinutesRemoved: number;
-  } | null>(null);
-  // The general Activity Time Correction workflow's own preview — unlike
-  // breakCorrectionPreview above, this is shown on EVERY activity start/end
+  // The general Activity Time Correction workflow's own preview — this is
+  // shown on EVERY activity start/end
   // correction, not just ones with a side effect: computed by the server
   // (POST .../correction-preview, the exact same plan PATCH .../correction
   // would apply) so the confirmation an admin sees can never disagree with
@@ -641,27 +627,12 @@ export function InputsPage() {
     const { field } = editingBreak;
     const newTimeIso = combineDateAndTimeToUtcIso(date, editBreakTimeValue);
     setEditingBreak(null);
-    setActionInFlight(true);
-    setActionError(null);
-    try {
-      const preview = await api<{ messages: string[]; workedMinutesRemoved: number }>(
-        `/api/inputs/breaks/${brk.id}/correction-preview`,
-        { method: "POST", body: JSON.stringify(field === "start" ? { startTime: newTimeIso } : { endTime: newTimeIso }) }
-      );
-      if (preview.messages.length > 0) {
-        // Expands into at least one other entry — pause for an explicit
-        // confirmation showing exactly what will happen (the same plan
-        // Save below applies), rather than silently trimming/splitting/
-        // deleting something the admin didn't realize was in the way.
-        setBreakCorrectionPreview({ breakId: brk.id, field, newTimeIso, ...preview });
-        setActionInFlight(false);
-        return;
-      }
-      await applyBreakCorrection(brk.id, field, newTimeIso);
-    } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
-      setActionInFlight(false);
-    }
+    // Saves directly on Save/Enter, with no confirmation popup — even when the
+    // new time trims, splits or removes a neighbouring activity entry. The
+    // server's PATCH computes and applies that same adjustment itself
+    // (computeBreakCorrectionPlan, the plan the old preview popup only
+    // displayed), so skipping the popup changes nothing about what's saved.
+    await applyBreakCorrection(brk.id, field, newTimeIso);
   }
 
   async function applyBreakCorrection(breakId: string, field: "start" | "end", newTimeIso: string) {
@@ -682,7 +653,6 @@ export function InputsPage() {
       setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
     } finally {
       setActionInFlight(false);
-      setBreakCorrectionPreview(null);
     }
   }
 
@@ -980,19 +950,6 @@ export function InputsPage() {
           error={deletionError}
           onConfirm={handleConfirmDeletion}
           onCancel={handleCancelDeletion}
-        />
-      )}
-
-      {breakCorrectionPreview && (
-        <BreakCorrectionPreviewModal
-          messages={breakCorrectionPreview.messages}
-          workedMinutesRemoved={breakCorrectionPreview.workedMinutesRemoved}
-          submitting={actionInFlight}
-          error={actionError}
-          onConfirm={() =>
-            applyBreakCorrection(breakCorrectionPreview.breakId, breakCorrectionPreview.field, breakCorrectionPreview.newTimeIso)
-          }
-          onCancel={() => setBreakCorrectionPreview(null)}
         />
       )}
 
