@@ -38,7 +38,14 @@ interface ActivityLogsCardProps {
   runs: ActivityRunDto[];
   totals: { workedSeconds: number; breakSeconds: number };
   selectedRunId: string | null;
-  onSelectRun: (id: string) => void;
+  // Every selected row (Ctrl/Cmd+click adds/removes rows). Defaults to just
+  // selectedRunId.
+  selectedRunIds?: ReadonlySet<string>;
+  // additive = Ctrl/Cmd was held: toggle the row in/out of the selection.
+  onSelectRun: (id: string, additive?: boolean) => void;
+  // Deletes several selected rows at once (shown instead of the single
+  // Delete when 2+ rows are selected).
+  onDeleteRuns?: (runs: ActivityRunDto[]) => void;
   // Both Start Time and End Time are editable now (the general Activity
   // Time Correction workflow — see InputsPage.tsx's handleSaveEdit),
   // entered together as one combined edit mode on the run regardless of
@@ -79,7 +86,9 @@ export function ActivityLogsCard({
   runs,
   totals,
   selectedRunId,
+  selectedRunIds,
   onSelectRun,
+  onDeleteRuns,
   editingRunId,
   editStartTimeValue,
   editEndTimeValue,
@@ -92,6 +101,10 @@ export function ActivityLogsCard({
   onRowCompletionChanged,
   saving,
 }: ActivityLogsCardProps) {
+  const selected: ReadonlySet<string> = selectedRunIds ?? new Set(selectedRunId ? [selectedRunId] : []);
+  const selectedRuns = runs.filter((r) => selected.has(r.id));
+  const multiDeletable = onDeleteRuns ? selectedRuns.filter((r) => r.canEdit) : [];
+
   const [reviewTarget, setReviewTarget] = useState<{
     greenhouseRowId: string;
     activityId: string;
@@ -105,14 +118,20 @@ export function ActivityLogsCard({
   // while the row is already selected and editable enters ONE combined
   // edit mode covering both boundaries (see onStartEdit's own comment on
   // InputsPage.tsx), not two independent per-field editors.
-  function handleTimeCellClick(run: ActivityRunDto) {
+  function handleTimeCellClick(run: ActivityRunDto, additive: boolean) {
+    // Ctrl/Cmd+click on a time cell selects like anywhere else on the row —
+    // never opens the time editor.
+    if (additive) {
+      onSelectRun(run.id, true);
+      return;
+    }
     // Blocked while a correction is already in flight for this card — a
     // Save click closes the editor immediately (before the request
     // resolves), so without this guard a quick second click on the same
     // cell could re-open editing on the still-stale pre-correction values
     // and race a second request against the first.
     if (saving) return;
-    if (run.id === selectedRunId && run.canEdit && editingRunId !== run.id) {
+    if (run.id === selectedRunId && selected.size <= 1 && run.canEdit && editingRunId !== run.id) {
       onStartEdit(run);
     } else {
       onSelectRun(run.id);
@@ -208,8 +227,8 @@ export function ActivityLogsCard({
                   )}
                 >
                 <tr
-                  className={`inputs-log-row${run.id === selectedRunId ? " inputs-log-row-selected" : ""}`}
-                  onClick={() => onSelectRun(run.id)}
+                  className={`inputs-log-row${selected.has(run.id) ? " inputs-log-row-selected" : ""}`}
+                  onClick={(e) => onSelectRun(run.id, e.ctrlKey || e.metaKey)}
                 >
                   <td className="inputs-log-activity">
                     {run.activityName}
@@ -247,7 +266,7 @@ export function ActivityLogsCard({
                     className={`inputs-log-starttime${run.canEdit ? " inputs-log-starttime-editable" : ""}`}
                     onClick={(e) => {
                       e.stopPropagation();
-                      handleTimeCellClick(run);
+                      handleTimeCellClick(run, e.ctrlKey || e.metaKey);
                     }}
                   >
                     {editingRunId === run.id ? (
@@ -299,7 +318,7 @@ export function ActivityLogsCard({
                     className={`inputs-log-endtime${run.canEdit ? " inputs-log-endtime-editable" : ""}`}
                     onClick={(e) => {
                       e.stopPropagation();
-                      handleTimeCellClick(run);
+                      handleTimeCellClick(run, e.ctrlKey || e.metaKey);
                     }}
                   >
                     {editingRunId === run.id ? (
@@ -346,16 +365,17 @@ export function ActivityLogsCard({
                     )}
                   </td>
                   <td className="inputs-row-actions">
-                    {run.id === selectedRunId && run.canEdit && (
+                    {selected.has(run.id) && run.canEdit && (
                       <button
                         type="button"
                         className="inputs-delete-btn"
                         onClick={(e) => {
                           e.stopPropagation();
-                          onDeleteRun(run);
+                          if (multiDeletable.length > 1 && onDeleteRuns) onDeleteRuns(selectedRuns);
+                          else onDeleteRun(run);
                         }}
                       >
-                        Delete
+                        {multiDeletable.length > 1 ? `Delete ${multiDeletable.length} selected` : "Delete"}
                       </button>
                     )}
                   </td>

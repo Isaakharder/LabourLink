@@ -4,6 +4,9 @@ import { Modal } from "../ui/Modal";
 interface DeleteTimeEntryModalProps {
   title: string;
   message: string;
+  // Optional list shown under the message — e.g. every activity log a
+  // multi-row delete will remove, so nothing is deleted unseen.
+  details?: string[];
   confirmLabel: string;
   submitting: boolean;
   error: string | null;
@@ -21,6 +24,7 @@ interface DeleteTimeEntryModalProps {
 export function DeleteTimeEntryModal({
   title,
   message,
+  details,
   confirmLabel,
   submitting,
   error,
@@ -37,6 +41,13 @@ export function DeleteTimeEntryModal({
     <Modal title={title} onClose={submitting ? () => {} : onCancel}>
       <form onSubmit={handleSubmit} className="employee-form" noValidate>
         <p>{message}</p>
+        {details && details.length > 0 && (
+          <ul className="inputs-delete-list">
+            {details.map((d, i) => (
+              <li key={i}>{d}</li>
+            ))}
+          </ul>
+        )}
         {error && <p className="error-text">{error}</p>}
         <div className="employee-form-actions">
           <button type="button" onClick={onCancel} disabled={submitting}>

@@ -20,6 +20,7 @@ import { ActivityRunDto, BreakDto, DailyInputsResponse, InputsEmployee } from ".
 import {
   APP_TIMEZONE,
   combineDateAndTimeToUtcIso,
+  formatTimeInAppTimezone,
   todayInAppTimezone,
   toTimeInputValue,
 } from "../../lib/timezone";
@@ -49,11 +50,20 @@ type InputsHeaderStatus = {
 };
 
 interface PendingDeletion {
-  kind: "activity-run" | "break";
+  kind: "activity-run" | "activity-runs" | "break";
   id: string;
+  // "activity-runs" only: every run to delete, earliest first.
+  runs?: ActivityRunDto[];
   title: string;
   message: string;
+  details?: string[];
   confirmLabel: string;
+}
+
+function describeRun(run: ActivityRunDto): string {
+  const where = [run.row?.label, run.carrier?.name].filter(Boolean).join(" · ");
+  const end = run.endedAt ? formatTimeInAppTimezone(run.endedAt) : "in progress";
+  return `${run.activityName}${where ? ` (${where})` : ""} — ${formatTimeInAppTimezone(run.startedAt)} to ${end}`;
 }
 
 export function InputsPage() {
@@ -90,6 +100,11 @@ export function InputsPage() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  // Every selected activity row. A plain click selects just that row (and
+  // makes it selectedRunId, the row a second click edits); Ctrl/Cmd+click
+  // adds or removes a row, for deleting several at once. Always contains
+  // selectedRunId when that's set.
+  const [selectedRunIds, setSelectedRunIds] = useState<Set<string>>(new Set());
   const [editingRunId, setEditingRunId] = useState<string | null>(null);
   // Both editable together as one combined correction now (the general
   // Activity Time Correction workflow) — see handleStartEdit/handleSaveEdit.
@@ -353,6 +368,10 @@ export function InputsPage() {
           setLastUpdatedAt(new Date());
           if (background) {
             setSelectedRunId((prev) => (prev && res.runs.some((r) => r.id === prev) ? prev : null));
+            setSelectedRunIds((prev) => {
+              const still = [...prev].filter((id) => res.runs.some((r) => r.id === id));
+              return still.length === prev.size ? prev : new Set(still);
+            });
             setSelectedBreakId((prev) => (prev && res.breaks.some((b) => b.id === prev) ? prev : null));
           } else {
             // This explicit reload landed while the page was still paused
@@ -366,6 +385,7 @@ export function InputsPage() {
             // moved, merged, or disappeared as a result of the change that
             // triggered this reload.
             setSelectedRunId(null);
+            setSelectedRunIds(new Set());
             setEditingRunId(null);
             setSelectedBreakId(null);
             setEditingBreak(null);
@@ -458,6 +478,7 @@ export function InputsPage() {
     // gap while the request is still in flight, not just after.
     setDaily(null);
     setSelectedRunId(null);
+    setSelectedRunIds(new Set());
     setEditingRunId(null);
     setSelectedBreakId(null);
     setEditingBreak(null);
@@ -515,9 +536,27 @@ export function InputsPage() {
     };
   }, [selectedEmployeeId, loadDaily, loadEmployees]);
 
-  function handleSelectRun(id: string) {
-    setSelectedRunId(id);
-    if (editingRunId && editingRunId !== id) setEditingRunId(null);
+  // additive = Ctrl/Cmd held: toggle this row in or out of the selection
+  // instead of replacing it. Multi-selecting closes any open time editor —
+  // editing is a single-row action.
+  function handleSelectRun(id: string, additive = false) {
+    if (!additive) {
+      setSelectedRunId(id);
+      setSelectedRunIds(new Set([id]));
+      if (editingRunId && editingRunId !== id) setEditingRunId(null);
+      return;
+    }
+    setEditingRunId(null);
+    const next = new Set(selectedRunIds);
+    if (selectedRunId) next.add(selectedRunId);
+    if (next.has(id)) {
+      next.delete(id);
+      if (selectedRunId === id) setSelectedRunId(next.size > 0 ? [...next][next.size - 1] : null);
+    } else {
+      next.add(id);
+      setSelectedRunId(id);
+    }
+    setSelectedRunIds(next);
   }
 
   // Enters ONE combined edit mode covering both Start Time and End Time —
@@ -704,6 +743,33 @@ export function InputsPage() {
     });
   }
 
+  // Several Ctrl/Cmd-selected activity logs at once — the server deletes
+  // them together, each exactly like the single Delete (following work
+  // entry fills its gap, own audit record), earliest first. In-progress
+  // logs can't be deleted here and are left out.
+  function handleDeleteRuns(runs: ActivityRunDto[]) {
+    const deletable = runs.filter((r) => r.canEdit).sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    if (deletable.length === 0) return;
+    if (deletable.length === 1) {
+      handleDeleteRun(deletable[0]);
+      return;
+    }
+    const skipped = runs.length - deletable.length;
+    setDeletionError(null);
+    setPendingDeletion({
+      kind: "activity-runs",
+      id: deletable.map((r) => r.id).join(","),
+      runs: deletable,
+      title: `Delete ${deletable.length} activity logs?`,
+      message:
+        `This will remove these ${deletable.length} recorded activities from the employee's day, all together or not at all. ` +
+        "Each is deleted the same way as deleting it on its own, and every deletion remains in the audit history." +
+        (skipped > 0 ? ` ${skipped} selected in-progress ${skipped === 1 ? "activity is" : "activities are"} not included.` : ""),
+      details: deletable.map(describeRun),
+      confirmLabel: `Delete ${deletable.length} Logs`,
+    });
+  }
+
   function handleDeleteBreak(brk: BreakDto) {
     setDeletionError(null);
     setPendingDeletion({
@@ -723,6 +789,34 @@ export function InputsPage() {
     if (!pendingDeletion || deletionSubmitting) return;
     setDeletionSubmitting(true);
     setDeletionError(null);
+    if (pendingDeletion.kind === "activity-runs") {
+      // One all-or-nothing request (POST .../activity-runs/bulk-delete):
+      // each log is sent exactly as loaded (its own segment ids), so the
+      // server deletes precisely what was selected — never an unselected
+      // neighbour that an earlier deletion made join the same run — or, if
+      // anything changed, nothing at all.
+      const runs = pendingDeletion.runs ?? [];
+      try {
+        await api("/api/inputs/activity-runs/bulk-delete", {
+          method: "POST",
+          body: JSON.stringify({ runs: runs.map((r) => r.segmentIds) }),
+        });
+        setPendingDeletion(null);
+        // Same order as the single delete below: reload while still marked
+        // as submitting, so the page's pause logic doesn't fire a second,
+        // redundant background reload right after.
+        await loadDaily();
+        loadEmployees();
+        setSuccessMessage(`${runs.length} activity logs deleted.`);
+      } catch (err) {
+        setDeletionError(
+          `Nothing was deleted. ${err instanceof ApiError ? err.message : "Could not delete the selected activity logs"}`
+        );
+      } finally {
+        setDeletionSubmitting(false);
+      }
+      return;
+    }
     try {
       const path =
         pendingDeletion.kind === "activity-run"
@@ -890,7 +984,9 @@ export function InputsPage() {
                 runs={daily.runs}
                 totals={daily.totals}
                 selectedRunId={selectedRunId}
+                selectedRunIds={selectedRunIds}
                 onSelectRun={handleSelectRun}
+                onDeleteRuns={handleDeleteRuns}
                 editingRunId={editingRunId}
                 editStartTimeValue={editStartTimeValue}
                 editEndTimeValue={editEndTimeValue}
@@ -945,6 +1041,7 @@ export function InputsPage() {
         <DeleteTimeEntryModal
           title={pendingDeletion.title}
           message={pendingDeletion.message}
+          details={pendingDeletion.details}
           confirmLabel={pendingDeletion.confirmLabel}
           submitting={deletionSubmitting}
           error={deletionError}

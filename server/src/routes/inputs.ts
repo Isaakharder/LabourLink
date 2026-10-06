@@ -2110,80 +2110,13 @@ router.post(
         }
       }
 
-      // Find the entry immediately following the deleted run, within this
-      // same employee/workday — locked here (not just inferred from the
-      // unlocked dayRows/runs computed above) so a concurrent change can't
-      // be missed. Bounded by the run's own last segment's *stored*
-      // ended_at via a subquery rather than a JS Date round-trip of it (same
-      // precision reasoning as the end-time correction route above). Lock
-      // order stays ascending by time (segments first, this row after — it's
-      // chronologically >= all of them), consistent with every other
-      // multi-row lock in this file, so this can't deadlock against a
-      // concurrent correction or another deletion.
-      const nextRes = await client.query(
-        `select id, entry_type, started_at from time_entries
-         where employee_id = $1 and deleted_at is null
-           and started_at >= (select ended_at from time_entries where id = $2)
-           and started_at < $3
-         order by started_at asc
-         limit 1
-         for update`,
-        [peekRow.employee_id, segmentIds[segmentIds.length - 1], end]
-      );
-      const next = nextRes.rows[0];
-      // Only a work entry directly following the deleted run absorbs the
-      // deleted interval, by extending backward to the deleted run's
-      // original start. "Work start" is nothing but "the earliest surviving
-      // work entry for the day" (see GET /daily above), so this is also
-      // exactly what keeps it unchanged when the deleted run was itself the
-      // day's first activity. A break is a protected workday boundary and is
-      // never extended across or modified; if there's no next entry at all
-      // within the day, there's nothing to extend either way.
-      const shouldExtend = next && next.entry_type === "work";
-
-      await client.query(
-        `update time_entries
-         set deleted_at = now(), deleted_by_employee_id = $1, deletion_reason = $2
-         where id = any($3::uuid[])`,
-        [req.employee!.id, trimmedReason, segmentIds]
-      );
-
-      if (shouldExtend) {
-        // Written via a subquery on the deleted run's first segment id, not
-        // the JS Date already on `run` from the earlier unlocked query — same
-        // full-precision-write reasoning as every other correction route in
-        // this file. actual_started_at is cleared for the same reason a real
-        // correction always clears it elsewhere (PATCH /work-start above):
-        // the entry's original tap time no longer describes anything about
-        // its new, extended start. Works identically whether `next` is
-        // completed or still in progress — only started_at is touched.
-        await client.query(
-          `update time_entries
-           set started_at = (select started_at from time_entries where id = $1), actual_started_at = null
-           where id = $2`,
-          [segmentIds[0], next.id]
-        );
-        await client.query(
-          `insert into time_entry_corrections
-             (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
-           values ($1, $2, $3, 'started_at', $4, $5, $6)`,
-          [
-            next.id,
-            peekRow.employee_id,
-            req.employee!.id,
-            new Date(next.started_at).toISOString(),
-            run.startedAt.toISOString(),
-            AUTO_CORRECTION_REASON,
-          ]
-        );
-      }
-
-      await client.query(
-        `insert into time_entry_deletions
-           (employee_id, deleted_by_employee_id, deletion_type, affected_time_entry_ids, reason)
-         values ($1, $2, 'activity_run', $3, $4)`,
-        [peekRow.employee_id, req.employee!.id, segmentIds, trimmedReason]
-      );
+      await applyActivityRunDeletion(client, {
+        employeeId: peekRow.employee_id,
+        segmentIds,
+        dayEnd: end,
+        actorId: req.employee!.id,
+        reason: trimmedReason,
+      });
 
       await client.query("commit");
     } catch (err) {
@@ -2194,6 +2127,212 @@ router.post(
     }
 
     res.json({ ok: true });
+  })
+);
+
+// The deletion itself, shared by the single Delete above and the multi-row
+// bulk delete below: soft-deletes one run's (already locked) segments, lets
+// the work entry directly after it absorb the gap, and records both in the
+// audit history. Runs inside the caller's transaction.
+async function applyActivityRunDeletion(
+  client: PoolClient,
+  opts: { employeeId: string; segmentIds: string[]; dayEnd: Date; actorId: string; reason: string }
+): Promise<void> {
+  const { employeeId, segmentIds, dayEnd, actorId, reason } = opts;
+  // Find the entry immediately following the deleted run, within this
+  // same employee/workday — locked here (not just inferred from any
+  // earlier unlocked read) so a concurrent change can't be missed. Bounded
+  // by the run's own last segment's *stored* ended_at via a subquery rather
+  // than a JS Date round-trip of it (same precision reasoning as the
+  // end-time correction route above). Lock order stays ascending by time
+  // (segments first, this row after — it's chronologically >= all of them),
+  // consistent with every other multi-row lock in this file, so this can't
+  // deadlock against a concurrent correction or another deletion.
+  const nextRes = await client.query(
+    `select id, entry_type, started_at from time_entries
+     where employee_id = $1 and deleted_at is null
+       and started_at >= (select ended_at from time_entries where id = $2)
+       and started_at < $3
+     order by started_at asc
+     limit 1
+     for update`,
+    [employeeId, segmentIds[segmentIds.length - 1], dayEnd]
+  );
+  const next = nextRes.rows[0];
+  // Only a work entry directly following the deleted run absorbs the
+  // deleted interval, by extending backward to the deleted run's
+  // original start. "Work start" is nothing but "the earliest surviving
+  // work entry for the day" (see GET /daily above), so this is also
+  // exactly what keeps it unchanged when the deleted run was itself the
+  // day's first activity. A break is a protected workday boundary and is
+  // never extended across or modified; if there's no next entry at all
+  // within the day, there's nothing to extend either way.
+  const shouldExtend = next && next.entry_type === "work";
+  // The run's start as stored right now, inside this transaction — the
+  // exact value the extension below writes.
+  const runStartedAt: Date = (await client.query(`select started_at from time_entries where id = $1`, [segmentIds[0]])).rows[0]
+    .started_at;
+
+  await client.query(
+    `update time_entries
+     set deleted_at = now(), deleted_by_employee_id = $1, deletion_reason = $2
+     where id = any($3::uuid[])`,
+    [actorId, reason, segmentIds]
+  );
+
+  if (shouldExtend) {
+    // Written via a subquery on the deleted run's first segment id, not a
+    // JS Date round-trip — same full-precision-write reasoning as every
+    // other correction route in this file. actual_started_at is cleared for
+    // the same reason a real correction always clears it elsewhere (PATCH
+    // /work-start above): the entry's original tap time no longer describes
+    // anything about its new, extended start. Works identically whether
+    // `next` is completed or still in progress — only started_at is touched.
+    await client.query(
+      `update time_entries
+       set started_at = (select started_at from time_entries where id = $1), actual_started_at = null
+       where id = $2`,
+      [segmentIds[0], next.id]
+    );
+    await client.query(
+      `insert into time_entry_corrections
+         (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+       values ($1, $2, $3, 'started_at', $4, $5, $6)`,
+      [next.id, employeeId, actorId, new Date(next.started_at).toISOString(), new Date(runStartedAt).toISOString(), AUTO_CORRECTION_REASON]
+    );
+  }
+
+  await client.query(
+    `insert into time_entry_deletions
+       (employee_id, deleted_by_employee_id, deletion_type, affected_time_entry_ids, reason)
+     values ($1, $2, 'activity_run', $3, $4)`,
+    [employeeId, actorId, segmentIds, reason]
+  );
+}
+
+// Deletes several activity logs (Ctrl/Cmd-selected on Inputs) at once. The
+// client sends each log exactly as it saw it — that run's own segment ids —
+// never just a run id: a run is only ever identified by its last segment
+// (activityRuns.ts), and deleting one log can make the following entry
+// extend back and merge with an earlier, UNselected log into a single run
+// with that same id. Deleting by run id after such a merge would silently
+// take the unselected log with it. Exact segment sets make that impossible.
+//
+// All-or-nothing, in one transaction: every set must still be exactly one
+// current, finished run of the same employee and day (anything that
+// changed since it was loaded refuses the whole request), then each run is
+// deleted with the same applyActivityRunDeletion as the single Delete —
+// earliest first, so a following work entry absorbs each gap exactly as if
+// the logs had been deleted one at a time — with its own audit records.
+const MAX_BULK_DELETE_RUNS = 100;
+router.post(
+  "/activity-runs/bulk-delete",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const raw = req.body?.runs;
+    if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_BULK_DELETE_RUNS) {
+      return res.status(400).json({ error: `Between 1 and ${MAX_BULK_DELETE_RUNS} activity logs are required` });
+    }
+    const wellFormed = raw.every(
+      (r: unknown) => Array.isArray(r) && r.length > 0 && r.every((id) => typeof id === "string" && UUID_RE.test(id))
+    );
+    if (!wellFormed) return res.status(400).json({ error: "One or more activity logs are invalid" });
+    const requested = raw as string[][];
+    const allIds = requested.flat();
+    if (new Set(allIds).size !== allIds.length) {
+      return res.status(400).json({ error: "An activity log was selected more than once" });
+    }
+
+    const CHANGED = "One or more of the selected activity logs changed since they were loaded — please refresh and try again";
+    const { rows: entries } = await pool.query(
+      `select id, employee_id, entry_type, started_at, ended_at, deleted_at from time_entries where id = any($1::uuid[])`,
+      [allIds]
+    );
+    if (entries.length !== allIds.length || entries.some((e) => e.deleted_at)) {
+      return res.status(409).json({ error: CHANGED });
+    }
+    if (entries.some((e) => e.entry_type !== "work")) {
+      return res.status(409).json({ error: "Only work activity logs can be deleted" });
+    }
+    if (entries.some((e) => e.ended_at === null)) {
+      return res.status(409).json({ error: "An in-progress activity cannot be deleted from this screen" });
+    }
+    const employeeId = entries[0].employee_id;
+    const dateStr = calendarDateInAppTimezone(new Date(entries[0].started_at));
+    const { start, end } = getDayBoundsUtc(dateStr);
+    if (entries.some((e) => e.employee_id !== employeeId || new Date(e.started_at) < start || new Date(e.started_at) >= end)) {
+      return res.status(400).json({ error: "Selected activity logs must all belong to one employee on one day" });
+    }
+
+    // Each requested set must be exactly one current run — regrouped the
+    // same way GET /daily and the single Delete do.
+    const dayRows = await pool.query(
+      `select id, entry_type, activity_id, started_at, ended_at, greenhouse_row_id, carrier_id
+       from time_entries
+       where employee_id = $1 and started_at >= $2 and started_at < $3 and deleted_at is null
+       order by started_at asc`,
+      [employeeId, start, end]
+    );
+    const { runs } = groupIntoActivityRuns(
+      dayRows.rows.map((r) => ({
+        id: r.id,
+        entry_type: r.entry_type,
+        activity_id: r.activity_id,
+        started_at: r.started_at,
+        ended_at: r.ended_at,
+        greenhouse_row_id: r.greenhouse_row_id,
+        carrier_id: r.carrier_id,
+        density_type: null,
+        density_count_per_row: null,
+        rollover_of_entry_id: null,
+      }))
+    );
+    const runKey = (ids: string[]) => [...ids].sort().join(",");
+    const runByKey = new Map(runs.map((r) => [runKey(r.segmentIds), r]));
+    const toDelete = requested.map((ids) => runByKey.get(runKey(ids)));
+    if (toDelete.some((r) => !r || r.isOpen)) {
+      return res.status(409).json({ error: CHANGED });
+    }
+    // Earliest first — see this route's header.
+    const ordered = (toDelete as NonNullable<(typeof toDelete)[number]>[]).sort(
+      (a, b) => a.startedAt.getTime() - b.startedAt.getTime()
+    );
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      // Lock every selected segment up front, ascending by time like every
+      // other multi-row lock in this file, and re-check none changed.
+      const locked = await client.query(
+        `select id from time_entries
+         where id = any($1::uuid[]) and deleted_at is null and entry_type = 'work' and ended_at is not null
+         order by started_at asc
+         for update`,
+        [allIds]
+      );
+      if (locked.rows.length !== allIds.length) {
+        await client.query("rollback");
+        return res.status(409).json({ error: CHANGED });
+      }
+      for (const run of ordered) {
+        await applyActivityRunDeletion(client, {
+          employeeId,
+          segmentIds: run.segmentIds,
+          dayEnd: end,
+          actorId: req.employee!.id,
+          reason: ACTIVITY_LOG_DELETION_REASON,
+        });
+      }
+      await client.query("commit");
+    } catch (err) {
+      await client.query("rollback");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    res.json({ ok: true, deleted: ordered.length });
   })
 );
 
