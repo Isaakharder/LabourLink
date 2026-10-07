@@ -3,6 +3,10 @@
 // /api/row-completions/bulk-review.
 
 export type SpeedReviewAction = "merge" | "separate";
+
+// Fallback for a response without windowDays (the Row review window's
+// default — Setup > Row Review).
+export const DEFAULT_ROW_REVIEW_WINDOW_DAYS = 7;
 export type SpeedReviewChoice = SpeedReviewAction | "skip";
 
 export interface SpeedReviewVisit {
@@ -40,10 +44,10 @@ export interface SpeedReviewGroup {
   // Every date this card's visits touch; 2+ = the card spans days.
   spansDates: string[];
   reasons: string[];
-  // All of this employee's pending visits to this row in this 7-day cycle,
+  // All of this employee's pending visits to this row in this review cycle,
   // on any day — what an action applies to.
   visits: SpeedReviewVisit[];
-  // Other employees' visits in the same 7-day row cycle: shown for context
+  // Other employees' visits in the same review cycle: shown for context
   // only, never changed by this group's action.
   contextVisits: SpeedReviewVisit[];
   actions: {
@@ -60,6 +64,8 @@ export interface SpeedReviewGroup {
 export interface SpeedReviewGroupsResponse {
   date: string;
   groups: SpeedReviewGroup[];
+  // The Row review window (calendar days) these groups were cut at.
+  windowDays?: number;
 }
 
 export interface BulkReviewResult {

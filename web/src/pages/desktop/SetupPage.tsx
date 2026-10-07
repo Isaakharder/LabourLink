@@ -3,6 +3,7 @@ import { PageHeader } from "../../components/layout/PageHeader";
 import { DevicesTab } from "./setup/DevicesTab";
 import { MessagesTab } from "./setup/MessagesTab";
 import { GreenhouseLayoutTab } from "./setup/GreenhouseLayoutTab";
+import { RowReviewTab } from "./setup/RowReviewTab";
 
 export function SetupPage() {
   // The Greenhouse Layout editor is a full-screen, chrome-free canvas
@@ -33,11 +34,15 @@ export function SetupPage() {
         <NavLink to="messages" className={({ isActive }) => `tab${isActive ? " tab-active" : ""}`}>
           Messages
         </NavLink>
+        <NavLink to="row-review" className={({ isActive }) => `tab${isActive ? " tab-active" : ""}`}>
+          Row Review
+        </NavLink>
       </nav>
 
       <Routes>
         <Route index element={<DevicesTab />} />
         <Route path="messages" element={<MessagesTab />} />
+        <Route path="row-review" element={<RowReviewTab />} />
         <Route path="*" element={<Navigate to="." replace />} />
       </Routes>
     </>

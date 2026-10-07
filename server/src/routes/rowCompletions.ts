@@ -5,11 +5,49 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { getUnresolvedRunsForRow } from "../lib/rowCompletionCandidates";
 import { createRowCompletion, RowCompletionError } from "../lib/rowCompletionCreate";
 import { getSpeedReviewGroups } from "../lib/speedReviewGroups";
+import {
+  getRowReviewWindowDays,
+  isValidRowReviewWindowDays,
+  MAX_ROW_REVIEW_WINDOW_DAYS,
+  MIN_ROW_REVIEW_WINDOW_DAYS,
+  setRowReviewWindowDays,
+} from "../lib/rowReviewWindow";
 
 const router = Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DENSITY_TYPES = new Set(["plants", "stems"]);
+
+// Row review window (Setup > Row Review; 057_row_review_window.sql): the
+// number of calendar days that separates one row-work cycle from the next.
+// Same gate as Setup's other configuration: GET is Administrator/Manager,
+// PUT is Administrator-only. Saving takes effect on the next request of
+// every consumer (nothing caches it) and regroups only UNRESOLVED visits —
+// confirmed completions are never read or changed by it.
+router.get(
+  "/review-window",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (_req, res) => {
+    res.json({ rowReviewWindowDays: await getRowReviewWindowDays() });
+  })
+);
+
+router.put(
+  "/review-window",
+  requireAuth,
+  requireRole("Administrator"),
+  asyncHandler(async (req, res) => {
+    const { rowReviewWindowDays } = (req.body ?? {}) as { rowReviewWindowDays?: unknown };
+    if (!isValidRowReviewWindowDays(rowReviewWindowDays)) {
+      return res.status(400).json({
+        error: `Row review window must be a whole number of days from ${MIN_ROW_REVIEW_WINDOW_DAYS} to ${MAX_ROW_REVIEW_WINDOW_DAYS}`,
+      });
+    }
+    await setRowReviewWindowDays(rowReviewWindowDays, req.employee!.id);
+    res.json({ rowReviewWindowDays });
+  })
+);
 
 // Every unresolved (not yet part of a confirmed row_completions record) run
 // touching this row+activity+type, across every employee — powers the
@@ -21,7 +59,7 @@ const DENSITY_TYPES = new Set(["plants", "stems"]);
 //
 // Optional timeEntryId: any segment of the visit the admin opened the
 // review from. When given, only the candidates in THAT visit's row-work
-// cycle (rowCompletionCandidates.ts's CYCLE_GAP_DAYS) are returned — a
+// cycle (cut at the Row review window setting) are returned — a
 // cycle is the only scope that can ever be combined (see POST below), so
 // listing other cycles invites a combine the server will refuse. If the
 // segment is no longer part of any unresolved candidate (resolved
@@ -49,12 +87,15 @@ router.get(
       return res.status(400).json({ error: "timeEntryId must be a valid id" });
     }
 
-    const candidates = await getUnresolvedRunsForRow(greenhouseRowId, activityId, densityType as "plants" | "stems");
+    // windowDays is returned so the modal's explanation names the same
+    // window this grouping was cut at.
+    const windowDays = await getRowReviewWindowDays();
+    const candidates = await getUnresolvedRunsForRow(greenhouseRowId, activityId, densityType as "plants" | "stems", { windowDays });
     if (timeEntryId === undefined) {
-      return res.json({ candidates });
+      return res.json({ candidates, windowDays });
     }
     const anchor = candidates.find((c) => c.segmentIds.includes(timeEntryId));
-    res.json({ candidates: anchor ? candidates.filter((c) => c.cycleIndex === anchor.cycleIndex) : [] });
+    res.json({ candidates: anchor ? candidates.filter((c) => c.cycleIndex === anchor.cycleIndex) : [], windowDays });
   })
 );
 
@@ -118,8 +159,9 @@ router.get(
     if (employeeId !== undefined && !UUID_RE.test(employeeId)) {
       return res.status(400).json({ error: "employeeId must be a valid id" });
     }
-    const groups = await getSpeedReviewGroups({ date, employeeId: employeeId ?? null });
-    res.json({ date, groups });
+    const windowDays = await getRowReviewWindowDays();
+    const groups = await getSpeedReviewGroups({ date, employeeId: employeeId ?? null, windowDays });
+    res.json({ date, groups, windowDays });
   })
 );
 

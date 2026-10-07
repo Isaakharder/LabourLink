@@ -5,7 +5,8 @@
 //
 // Built ONLY from the existing rules — never a second ambiguity or speed
 // calculation:
-//   - visits and 7-day row-work cycles come from getUnresolvedRunsForRows
+//   - visits and row-work cycles (cut at the Row review window setting,
+//     rowReviewWindow.ts) come from getUnresolvedRunsForRows
 //     (rowCompletionCandidates.ts), the same source Inputs' badge, the
 //     individual review modal, Reports and Productive TV all use;
 //   - a cycle needs review exactly when it has 2+ unresolved visits, the
@@ -40,6 +41,7 @@
 import { pool } from "../db";
 import { aggregateDensitySpeed } from "./densitySpeed";
 import { CandidateRun, getUnresolvedRunsForRows } from "./rowCompletionCandidates";
+import { getRowReviewWindowDays } from "./rowReviewWindow";
 import { calendarDateInAppTimezone, getDayBoundsUtc } from "./timezone";
 
 export type SpeedReviewAction = "merge" | "separate";
@@ -109,7 +111,14 @@ function formatShortDate(dateStr: string): string {
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
-export async function getSpeedReviewGroups(opts: { date: string; employeeId?: string | null }): Promise<SpeedReviewGroup[]> {
+// opts.windowDays: the Row review window the caller is also showing the
+// user (GET /review-groups returns it), so the grouping and the text agree;
+// read from the setting when omitted.
+export async function getSpeedReviewGroups(opts: {
+  date: string;
+  employeeId?: string | null;
+  windowDays?: number;
+}): Promise<SpeedReviewGroup[]> {
   const { start: dayStart, end: dayEnd } = getDayBoundsUtc(opts.date);
   const employeeId = opts.employeeId ?? null;
 
@@ -131,8 +140,10 @@ export async function getSpeedReviewGroups(opts: { date: string; employeeId?: st
   );
   if (pairRows.length === 0) return [];
 
+  const windowDays = opts.windowDays ?? (await getRowReviewWindowDays());
   const candidatesByKey = await getUnresolvedRunsForRows(
-    pairRows.map((p) => ({ greenhouseRowId: p.greenhouse_row_id, activityId: p.activity_id, densityType: p.density_type }))
+    pairRows.map((p) => ({ greenhouseRowId: p.greenhouse_row_id, activityId: p.activity_id, densityType: p.density_type })),
+    { windowDays }
   );
 
   // Ambiguous cycles only — exactly inputs.ts's ambiguousCycleKeys test.
@@ -232,7 +243,7 @@ export async function getSpeedReviewGroups(opts: { date: string; employeeId?: st
       if (contextVisits.length > 0) {
         const who = contextVisits.map((v) => `${v.employeeName} (${formatShortDate(v.date)})`);
         reasons.push(
-          `${first.rowLabel} also has ${contextVisits.length === 1 ? "another visit" : `${contextVisits.length} other visits`} less than 7 days apart: ${who.join(", ")}.`
+          `${first.rowLabel} also has ${contextVisits.length === 1 ? "another visit" : `${contextVisits.length} other visits`} less than ${windowDays} days apart: ${who.join(", ")}.`
         );
       }
 
@@ -249,7 +260,7 @@ export async function getSpeedReviewGroups(opts: { date: string; employeeId?: st
       if (!mergeReason && visits.length < 2) {
         mergeReason =
           contextVisits.length > 0
-            ? "Only one visit by this employee in this 7-day window — the other visits are by different employees and are never merged."
+            ? `Only one visit by this employee in this ${windowDays}-day review window — the other visits are by different employees and are never merged.`
             : "Only one visit — nothing to merge.";
       } else if (!mergeReason && new Set(visits.map((v) => v.quantityPerRow)).size > 1) {
         mergeReason = "These visits recorded different stems-per-row values, so they can't count as one row.";

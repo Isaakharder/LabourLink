@@ -784,9 +784,9 @@ router.get(
       );
     }
 
-    // Row-work cycles (rowCompletionCandidates.ts's CYCLE_GAP_DAYS): the
-    // same row+activity+densityType is no longer one lifetime ambiguity
-    // group — a visit from months ago and one from this week are unrelated
+    // Row-work cycles (rowCompletionCandidates.ts, cut at the Row review
+    // window setting): the same row+activity+densityType is no longer one
+    // lifetime ambiguity group — a visit from months ago and one from this week are unrelated
     // passes over the row and must never be checked against each other.
     // Ambiguity ("Needs review") and speed exclusion are decided per CYCLE,
     // never per key alone. candidateBySegmentId maps every returned

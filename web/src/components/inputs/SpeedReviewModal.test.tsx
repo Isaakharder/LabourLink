@@ -27,7 +27,7 @@ function createDeferred<T>(): Deferred<T> {
   return { promise, resolve };
 }
 
-let groupsResponse: { date: string; groups: SpeedReviewGroup[] };
+let groupsResponse: { date: string; groups: SpeedReviewGroup[]; windowDays?: number };
 let applyDeferred: Deferred<{ results: any[] }>;
 
 vi.mock("../../lib/api", () => {
@@ -310,13 +310,22 @@ describe("SpeedReviewModal", () => {
     expect(screen.getByText(/Only administrators can apply changes/)).toBeInTheDocument();
   });
 
+  it("names the saved Row review window in the context caption", async () => {
+    const user = userEvent.setup();
+    groupsResponse = { ...groupsResponse, windowDays: 10 };
+    renderModal();
+    const k174 = await screen.findByRole("article", { name: "Khen Lagto · Phase 1 · Row 174" });
+    await user.click(within(k174).getByRole("button", { name: "Details" }));
+    expect(within(k174).getByText("Also in this 10-day row cycle — shown for context, not changed")).toBeInTheDocument();
+  });
+
   it("shows details on demand: the grouped visits and the other visits in the cycle as unchanged context", async () => {
     const user = userEvent.setup();
     renderModal();
     const k174 = await screen.findByRole("article", { name: "Khen Lagto · Phase 1 · Row 174" });
     expect(within(k174).queryByText(/shown for context, not changed/)).not.toBeInTheDocument();
     await user.click(within(k174).getByRole("button", { name: "Details" }));
-    expect(within(k174).getByText(/shown for context, not changed/)).toBeInTheDocument();
+    expect(within(k174).getByText("Also in this 7-day row cycle — shown for context, not changed")).toBeInTheDocument();
     expect(within(k174).getByText("Larry Banguigui")).toBeInTheDocument();
     expect(within(k174).getByText(/Merge for speed: Only one visit by this employee/)).toBeInTheDocument();
   });

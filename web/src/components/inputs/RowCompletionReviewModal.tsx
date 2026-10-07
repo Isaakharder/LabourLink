@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { api, ApiError } from "../../lib/api";
 import { RowCompletionCandidateRun } from "../../lib/rowCompletionTypes";
+import { DEFAULT_ROW_REVIEW_WINDOW_DAYS } from "../../lib/speedReviewTypes";
 import { formatDateLong, formatDurationHMS, formatTimeInAppTimezone } from "../../lib/timezone";
 
 interface RowCompletionReviewModalProps {
@@ -16,8 +17,9 @@ interface RowCompletionReviewModalProps {
   rowLabel: string;
   // Any segment of the visit whose "Needs review" badge opened this modal.
   // The server returns only the candidates in that visit's own row-work
-  // cycle (visits less than 7 local calendar days apart), never every
-  // pending visit the row has ever had — other cycles can't be combined
+  // cycle (visits fewer than the Row review window's local calendar days
+  // apart — Setup > Row Review), never every pending visit the row has ever
+  // had — other cycles can't be combined
   // with this one anyway.
   timeEntryId: string;
   onClose: () => void;
@@ -43,15 +45,20 @@ export function RowCompletionReviewModal({
   onNoLongerPending,
 }: RowCompletionReviewModalProps) {
   const [candidates, setCandidates] = useState<RowCompletionCandidateRun[] | null>(null);
+  // The Row review window the candidates were grouped by (Setup > Row Review).
+  const [windowDays, setWindowDays] = useState(DEFAULT_ROW_REVIEW_WINDOW_DAYS);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    api<{ candidates: RowCompletionCandidateRun[] }>(
+    api<{ candidates: RowCompletionCandidateRun[]; windowDays?: number }>(
       `/api/row-completions/candidates?greenhouseRowId=${greenhouseRowId}&activityId=${activityId}&densityType=${densityType}&timeEntryId=${timeEntryId}`
     )
-      .then((res) => setCandidates(res.candidates))
+      .then((res) => {
+        setCandidates(res.candidates);
+        setWindowDays(res.windowDays ?? DEFAULT_ROW_REVIEW_WINDOW_DAYS);
+      })
       .catch((err) => setError(err instanceof ApiError ? err.message : "Could not load pending row work"));
   }, [greenhouseRowId, activityId, densityType, timeEntryId]);
 
@@ -124,9 +131,9 @@ export function RowCompletionReviewModal({
     >
       {!isEmpty && (
         <p className="field-hint">
-          This row has more than one visit for this activity less than 7 days apart — select the visits that
+          This row has more than one visit for this activity less than {windowDays} days apart — select the visits that
           represent the same completed row before its density-based speed can be calculated. Selecting just one visit
-          on its own confirms it as a separate, deliberately-not-combined completion. Visits 7 or more days apart are
+          on its own confirms it as a separate, deliberately-not-combined completion. Visits {windowDays} or more days apart are
           reviewed separately and aren't listed here.
         </p>
       )}

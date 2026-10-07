@@ -10,6 +10,7 @@ import {
   SpeedReviewGroup,
   SpeedReviewGroupsResponse,
   SpeedReviewVisit,
+  DEFAULT_ROW_REVIEW_WINDOW_DAYS,
 } from "../../lib/speedReviewTypes";
 
 // Bulk speed review for Inputs: every "Needs review" visit for one date —
@@ -73,6 +74,8 @@ function previewText(p: SpeedPreview, unit: string): string {
 
 export function SpeedReviewModal({ date, employeeId, employeeName, canApply, onClose, onApplied }: SpeedReviewModalProps) {
   const [groups, setGroups] = useState<SpeedReviewGroup[] | null>(null);
+  // The Row review window these groups were cut at (Setup > Row Review).
+  const [windowDays, setWindowDays] = useState(DEFAULT_ROW_REVIEW_WINDOW_DAYS);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [choices, setChoices] = useState<Record<string, SpeedReviewChoice>>({});
@@ -95,6 +98,7 @@ export function SpeedReviewModal({ date, employeeId, employeeName, canApply, onC
       .then((res) => {
         if (cancelled) return;
         setGroups(res.groups);
+        setWindowDays(res.windowDays ?? DEFAULT_ROW_REVIEW_WINDOW_DAYS);
         setChoices(Object.fromEntries(res.groups.map((g) => [g.id, g.suggestedAction ?? "skip"])));
         setSelected(new Set());
         setResults(null);
@@ -287,6 +291,7 @@ export function SpeedReviewModal({ date, employeeId, employeeName, canApply, onC
                   <ReviewCard
                     key={g.id}
                     group={g}
+                    windowDays={windowDays}
                     selected={selected.has(g.id)}
                     choice={choices[g.id] ?? "skip"}
                     expanded={expanded.has(g.id)}
@@ -308,6 +313,7 @@ export function SpeedReviewModal({ date, employeeId, employeeName, canApply, onC
 
 interface ReviewCardProps {
   group: SpeedReviewGroup;
+  windowDays: number;
   selected: boolean;
   choice: SpeedReviewChoice;
   expanded: boolean;
@@ -318,7 +324,7 @@ interface ReviewCardProps {
   onChoose: (c: SpeedReviewChoice) => void;
 }
 
-function ReviewCard({ group: g, selected, choice, expanded, locked, result, onToggleSelected, onToggleExpanded, onChoose }: ReviewCardProps) {
+function ReviewCard({ group: g, windowDays, selected, choice, expanded, locked, result, onToggleSelected, onToggleExpanded, onChoose }: ReviewCardProps) {
   const eligible = isEligible(g);
   const carriers = [...new Set(g.visits.flatMap((v) => v.carriers))];
   const totalSeconds = g.visits.reduce((s, v) => s + v.durationSeconds, 0);
@@ -431,7 +437,7 @@ function ReviewCard({ group: g, selected, choice, expanded, locked, result, onTo
           </table>
           {g.contextVisits.length > 0 && (
             <table className="employees-table speed-review-table speed-review-context">
-              <caption>Also in this 7-day row cycle — shown for context, not changed</caption>
+              <caption>Also in this {windowDays}-day row cycle — shown for context, not changed</caption>
               <thead>
                 <tr>
                   <th>Employee</th>

@@ -13,6 +13,7 @@
 // timestamps and frozen quantities are preserved untouched.
 import { PoolClient } from "pg";
 import { getUnresolvedRunsForRow } from "./rowCompletionCandidates";
+import { getRowReviewWindowDays } from "./rowReviewWindow";
 
 export class RowCompletionError extends Error {
   constructor(public status: number, message: string) {
@@ -72,18 +73,20 @@ export async function createRowCompletion(
     throw new RowCompletionError(400, "Selected entries do not all refer to the same row, activity, and density");
   }
 
-  // Row-work cycles (rowCompletionCandidates.ts's CYCLE_GAP_DAYS): the
-  // same row+activity+density is no longer one lifetime ambiguity group
-  // — a visit from months ago and one from this week are unrelated
-  // passes over the row, so combining across that gap must be refused
-  // the same way combining across two different activities already is
-  // above. Reads via the shared pool (not `client`): it sees the
+  // Row-work cycles (rowCompletionCandidates.ts's assignCycleIndexes, cut
+  // at the Row review window setting): the same row+activity+density is no
+  // longer one lifetime ambiguity group — a visit from months ago and one
+  // from this week are unrelated passes over the row, so combining across
+  // that gap must be refused the same way combining across two different
+  // activities already is above. Reads via the shared pool (not `client`): it sees the
   // committed not-yet-completed state the review was built from, never
   // a sibling completion this same transaction inserted moments ago.
+  const windowDays = await getRowReviewWindowDays();
   const candidates = await getUnresolvedRunsForRow(
     first.greenhouse_row_id,
     first.activity_id,
-    first.density_type as "plants" | "stems"
+    first.density_type as "plants" | "stems",
+    { windowDays }
   );
   const candidateBySegmentId = new Map<string, (typeof candidates)[number]>();
   for (const c of candidates) {
@@ -104,7 +107,7 @@ export async function createRowCompletion(
   if (cycleIndexesUsed.size > 1 || cycleIndexesUsed.has(undefined)) {
     throw new RowCompletionError(
       400,
-      "Selected entries span more than one row-work cycle (7 or more calendar days apart) and cannot be combined together"
+      `Selected entries span more than one row-work cycle (${windowDays} or more calendar days apart) and cannot be combined together`
     );
   }
   // A visit is completed whole or not at all. Its segments (break

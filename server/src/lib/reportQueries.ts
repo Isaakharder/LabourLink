@@ -11,6 +11,7 @@ import { addDaysToDateStr, APP_TIMEZONE, calendarDateInAppTimezone, getDayBounds
 import { aggregateDensitySpeed } from "./densitySpeed";
 import { computeWorkdayTotals, groupByEmployeeDay, WorkdayBoundaryEntry } from "./workdayTotals";
 import { CandidateRun, getUnresolvedRunsForRows } from "./rowCompletionCandidates";
+import { getRowReviewWindowDays } from "./rowReviewWindow";
 
 export interface ActivityReportRow {
   employeeId: string;
@@ -134,7 +135,8 @@ function isoWeekStartDateStr(dateStr: string): string {
 //     attributable" caution Inputs already applies to ambiguous runs).
 //  2. A not-yet-completed row is auto-counted only when it's the *only*
 //     candidate in its own row-work CYCLE (rowCompletionCandidates.ts's
-//     CYCLE_GAP_DAYS) for that row+activity+density type — checked via the
+//     assignCycleIndexes, cut at the Row review window setting) for that
+//     row+activity+density type — checked via the
 //     same getUnresolvedRunsForRows Inputs uses, and ambiguity decided the
 //     exact same PER-CYCLE way inputs.ts's ambiguousCycleKeys does (see
 //     computeAmbiguousCycleKeys below). Checking raw candidate COUNT with no
@@ -236,7 +238,8 @@ export function allocateByDuration(quantity: number, weights: number[]): number[
 // factored out here so the Report/Dashboard/Stats attribution below and the
 // read-only production audit (getActivityDensityAudit) can never drift from
 // each other, or from what Inputs itself decides. A "row-work cycle" is
-// candidates within CYCLE_GAP_DAYS of each other (rowCompletionCandidates.ts);
+// consecutive candidates fewer than the Row review window's calendar days
+// apart (rowCompletionCandidates.ts / rowReviewWindow.ts);
 // a key ("pairKey:cycleIndex") is ambiguous when 2+ candidates share it.
 function computeAmbiguousCycleKeys(candidatesByKey: Map<string, CandidateRun[]>): Set<string> {
   const ambiguousCycleKeys = new Set<string>();
@@ -674,8 +677,10 @@ export async function getActivityDensityAudit(
   // in-progress one is reported separately below, never sent through
   // candidate resolution.
   const unresolvedSegs = segRows.filter((r) => !r.row_completion_id && r.greenhouse_row_id && r.density_type && r.ended_at);
+  const windowDays = await getRowReviewWindowDays();
   const candidatesByKey = await getUnresolvedRunsForRows(
-    unresolvedSegs.map((r) => ({ greenhouseRowId: r.greenhouse_row_id, activityId, densityType: r.density_type }))
+    unresolvedSegs.map((r) => ({ greenhouseRowId: r.greenhouse_row_id, activityId, densityType: r.density_type })),
+    { windowDays }
   );
   const ambiguousCycleKeys = computeAmbiguousCycleKeys(candidatesByKey);
   const candidateBySegmentId = new Map<string, CandidateRun>();
@@ -796,7 +801,7 @@ export async function getActivityDensityAudit(
         },
         attributedQuantity: null,
         includedInReport: false,
-        exclusionReason: `Ambiguous — ${candidatesInCycle} unresolved candidates for this row in the same ~7-day work cycle (needs admin review via Row Completion Review)`,
+        exclusionReason: `Ambiguous — ${candidatesInCycle} unresolved candidates for this row in the same ${windowDays}-day review window (needs admin review via Row Completion Review)`,
       });
       continue;
     }

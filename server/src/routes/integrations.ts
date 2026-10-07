@@ -198,7 +198,7 @@ router.get(
 // stems-per-row count per confirmed/combined row completion, split
 // proportionally when segments span more than one employee; a
 // not-yet-completed visit counts only when it's the sole unambiguous
-// candidate for its row's ~7-day cycle — see rowCompletionCandidates.ts —
+// candidate for its row's review-window cycle — see rowCompletionCandidates.ts —
 // everything else in that cycle is "Needs Review" and counts nothing),
 // denominator is that SAME attribution's own durationSeconds (the
 // attributed row time, not the employee's whole Activity Hours for the

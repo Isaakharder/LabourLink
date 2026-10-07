@@ -20,6 +20,7 @@
 import { pool } from "../db";
 import { groupIntoActivityRuns, RunSegment } from "./activityRuns";
 import { calendarDateInAppTimezone, getDayBoundsUtc, inclusiveDayCount } from "./timezone";
+import { getRowReviewWindowDays } from "./rowReviewWindow";
 
 export interface CandidateRun {
   runId: string;
@@ -34,7 +35,7 @@ export interface CandidateRun {
   startedAt: string;
   endedAt: string | null;
   durationSeconds: number;
-  // Which chronological "row-work cycle" (see CYCLE_GAP_DAYS below) this
+  // Which chronological "row-work cycle" (see assignCycleIndexes below) this
   // candidate belongs to, 0-based and only ever compared against another
   // candidate's cycleIndex for the SAME row+activity+densityType key (the
   // outer Map key in getUnresolvedRunsForRows/getUnresolvedRunsForRow) — it
@@ -60,56 +61,58 @@ function pairKey(k: RowActivityDensityKey): string {
 // group, so a visit from months ago and one from this week could get lumped
 // into the same ambiguity check (or worse, be combinable together) despite
 // being two obviously unrelated passes over the row. Splitting into
-// chronological "cycles" fixes that: candidates within CYCLE_GAP_DAYS of
-// each other stay one cycle, candidates further apart than that start a new
-// one, and ambiguity/combining is only ever checked within a single cycle
-// (see inputs.ts's per-cycle ambiguity check and rowCompletions.ts's POST
-// cross-cycle rejection, both keyed off this same cycleIndex).
+// chronological "cycles" fixes that: consecutive candidates fewer than the
+// Row review window (org_settings.row_review_window_days, rowReviewWindow.ts
+// — Setup > Row Review, default 7) calendar dates apart stay one cycle, a
+// gap of the window or more starts a new one, and ambiguity/combining is
+// only ever checked within a single cycle (see inputs.ts's per-cycle
+// ambiguity check and rowCompletions.ts's POST cross-cycle rejection, both
+// keyed off this same cycleIndex). Any employee's visit counts toward the
+// chain: the window is a property of the row + activity, not of a person.
 //
 // Deliberately calendar-DATE arithmetic, never elapsed real time: a new
 // cycle starts when the next candidate's own work date (CandidateRun.date —
 // already computed as calendarDateInAppTimezone(startedAt), i.e. the
 // organization's local calendar date in APP_TIMEZONE, not UTC) is at least
-// CYCLE_GAP_DAYS calendar dates after the preceding candidate's work date —
+// windowDays calendar dates after the preceding candidate's work date —
 // entirely independent of either segment's time-of-day, and of how many
 // real hours happen to separate them. This matters on two fronts a raw
-// "elapsed hours >= 168" check would get wrong:
-//  1. Two segments exactly 7 dates apart must both start a new cycle
-//     whether the later one falls earlier or later in the day than the
-//     first — an hours-based check would only sometimes cross 168h
+// "elapsed hours >= windowDays * 24" check would get wrong:
+//  1. Two segments exactly windowDays dates apart must both start a new
+//     cycle whether the later one falls earlier or later in the day than
+//     the first — an hours-based check would only sometimes cross the line
 //     depending on time-of-day, which is exactly the inconsistency this
 //     avoids.
-//  2. A week spanning a DST transition in APP_TIMEZONE is a real 167 or 169
-//     hours, not 168 — an hours-based ">= 168h" check would misclassify a
-//     genuine 7-calendar-date gap that happens to span a DST "spring
-//     forward" (167h). Calendar-date subtraction (inclusiveDayCount below,
-//     itself plain Y/M/D arithmetic once each side has already been
-//     resolved to a local date string) is unaffected either way — see
-//     rowCompletionCandidates.test.ts's dedicated DST regression case.
+//  2. A span crossing a DST transition in APP_TIMEZONE is an hour shorter
+//     or longer than windowDays * 24 — an hours-based check would
+//     misclassify a genuine windowDays-calendar-date gap that happens to
+//     span a DST "spring forward". Calendar-date subtraction
+//     (inclusiveDayCount below, itself plain Y/M/D arithmetic once each
+//     side has already been resolved to a local date string) is unaffected
+//     either way — see rowCompletionCandidates.test.ts's dedicated DST
+//     regression case and rowReviewWindow.test.ts.
 //
 // inclusiveDayCount (timezone.ts) counts BOTH endpoints — e.g.
-// inclusiveDayCount("2019-09-03", "2019-09-10") is 8, not 7 — so "more than
-// CYCLE_GAP_DAYS calendar days elapsed" cuts a new cycle once the plain date
-// difference reaches exactly CYCLE_GAP_DAYS (Sept 3 -> Sept 10), matching
-// the accepted regression fixture (Row 194: Sept 3 alone, both Sept 10
-// segments together, Sept 23 alone) and "at least 7 calendar days after".
-// Six calendar dates apart (inclusiveDayCount of 7, not > 7) stays one
-// cycle; two candidates on the same calendar date always compute to a
-// same-date span (inclusiveDayCount of 1, well under the threshold), so
-// contiguous/same-day segments are automatically kept in one cycle with no
-// special-casing needed here.
-const CYCLE_GAP_DAYS = 7;
-
+// inclusiveDayCount("2019-09-03", "2019-09-10") is 8, not 7 — so
+// "inclusiveDayCount > windowDays" cuts a new cycle once the plain date
+// difference reaches exactly windowDays (with the default 7: Sept 3 ->
+// Sept 10), matching the accepted regression fixture (Row 194: Sept 3
+// alone, both Sept 10 segments together, Sept 23 alone). windowDays - 1
+// calendar dates apart stays one cycle; two candidates on the same calendar
+// date always compute to a same-date span (inclusiveDayCount of 1, never
+// above a window of at least 1), so contiguous/same-day segments are
+// automatically kept in one cycle with no special-casing needed here.
+//
 // candidates must already be sorted by startedAt ascending (every caller
 // below sorts its list immediately before calling this). Anchors each gap
 // check on the PRECEDING candidate's own work date (CandidateRun.date), per
 // the rule above — never its end time, and never a raw millisecond/hour
 // difference.
-function assignCycleIndexes(candidates: CandidateRun[]): void {
+function assignCycleIndexes(candidates: CandidateRun[], windowDays: number): void {
   let cycleIndex = 0;
   let prevWorkDate: string | null = null;
   for (const candidate of candidates) {
-    if (prevWorkDate !== null && inclusiveDayCount(prevWorkDate, candidate.date) > CYCLE_GAP_DAYS) {
+    if (prevWorkDate !== null && inclusiveDayCount(prevWorkDate, candidate.date) > windowDays) {
       cycleIndex++;
     }
     candidate.cycleIndex = cycleIndex;
@@ -155,7 +158,16 @@ interface DayFetchRow {
 // and each distinct employee+day is fetched — and its runs computed — at
 // most ONCE no matter how many requested pairs touch it, then every pair's
 // candidates are filtered from that shared, already-computed run list.
-export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): Promise<Map<string, CandidateRun[]>> {
+//
+// opts.windowDays: the Row review window to cycle by. Omitted (every
+// production caller), it is read from org_settings — fresh each call, so a
+// saved Setup change regroups unresolved visits on the very next request.
+// A caller that also shows the window to the user (speedReviewGroups.ts)
+// reads it once and passes it in, so the grouping and the text agree.
+export async function getUnresolvedRunsForRows(
+  pairs: RowActivityDensityKey[],
+  opts: { windowDays?: number } = {}
+): Promise<Map<string, CandidateRun[]>> {
   const result = new Map<string, CandidateRun[]>();
   if (pairs.length === 0) return result;
 
@@ -251,7 +263,17 @@ export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): 
     [dayKeys.map((k) => k.employeeId), dayBounds.map((b) => b.start), dayBounds.map((b) => b.end)]
   );
 
-  const [rowInfoRes, empRes, activityRes, { rows: allDayRows }] = await Promise.all([rowInfoQuery, empQuery, activityQuery, dayQuery]);
+  // Read alongside the queries above (no extra round trip on the critical
+  // path) unless the caller already supplied it.
+  const windowDaysQuery = opts.windowDays !== undefined ? Promise.resolve(opts.windowDays) : getRowReviewWindowDays();
+
+  const [rowInfoRes, empRes, activityRes, { rows: allDayRows }, windowDays] = await Promise.all([
+    rowInfoQuery,
+    empQuery,
+    activityQuery,
+    dayQuery,
+    windowDaysQuery,
+  ]);
   const rowLabelById = new Map(rowInfoRes.rows.map((r) => [r.id, `${r.phase_name} · Row ${r.row_number}`]));
   const employeeNameById = new Map(empRes.rows.map((r) => [r.id, `${r.first_name} ${r.last_name}`]));
   const activityNameById = new Map(activityRes.rows.map((r) => [r.id, r.name]));
@@ -434,7 +456,7 @@ export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): 
 
   for (const list of result.values()) {
     list.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-    assignCycleIndexes(list);
+    assignCycleIndexes(list, windowDays);
   }
   return result;
 }
@@ -446,10 +468,11 @@ export async function getUnresolvedRunsForRows(pairs: RowActivityDensityKey[]): 
 export async function getUnresolvedRunsForRow(
   greenhouseRowId: string,
   activityId: string,
-  densityType: "plants" | "stems"
+  densityType: "plants" | "stems",
+  opts: { windowDays?: number } = {}
 ): Promise<CandidateRun[]> {
   const key: RowActivityDensityKey = { greenhouseRowId, activityId, densityType };
-  const map = await getUnresolvedRunsForRows([key]);
+  const map = await getUnresolvedRunsForRows([key], opts);
   return map.get(pairKey(key)) ?? [];
 }
 

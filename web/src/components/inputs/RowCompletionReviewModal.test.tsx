@@ -29,7 +29,7 @@ function createDeferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-let candidatesDeferred: Deferred<{ candidates: any[] }>;
+let candidatesDeferred: Deferred<{ candidates: any[]; windowDays?: number }>;
 
 vi.mock("../../lib/api", () => {
   class ApiError extends Error {
@@ -106,6 +106,23 @@ describe("RowCompletionReviewModal", () => {
     expect(calledPath).toContain("greenhouseRowId=row-92");
     expect(calledPath).toContain("activityId=activity-picking-peppers");
     expect(calledPath).toContain("densityType=stems");
+  });
+
+  it("explains the review window the server grouped by (Setup > Row Review)", async () => {
+    renderModal();
+    await act(async () => {
+      candidatesDeferred.resolve({ candidates: [candidate(), candidate({ runId: "run-2", segmentIds: ["run-2"] })], windowDays: 10 });
+    });
+    expect(await screen.findByText(/more than one visit for this activity less than 10 days apart/)).toBeInTheDocument();
+    expect(screen.getByText(/Visits 10 or more days apart are/)).toBeInTheDocument();
+  });
+
+  it("falls back to the 7-day default text when the response has no windowDays", async () => {
+    renderModal();
+    await act(async () => {
+      candidatesDeferred.resolve({ candidates: [candidate(), candidate({ runId: "run-2", segmentIds: ["run-2"] })] });
+    });
+    expect(await screen.findByText(/less than 7 days apart/)).toBeInTheDocument();
   });
 
   it("asks only for the opened visit's own cycle — passes the visit's segment so other cycles aren't listed", () => {
