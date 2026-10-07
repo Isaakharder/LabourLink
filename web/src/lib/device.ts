@@ -48,6 +48,15 @@ export const DEACTIVATION_MESSAGES: Record<DeactivationErrorCode, string> = {
 export const DEVICE_ID_KEY = "labourlink_device_identifier";
 const PAIRED_KEY = "labourlink_device_paired";
 const EMPLOYEE_SUMMARY_KEY = "labourlink_paired_employee";
+// Set only by reviewer (app-store demo) pairing — see lib/reviewerAccess.ts.
+// When present, every API request goes to this demo-instance origin instead
+// of the production API. Deliberately sticky: nothing in the app ever clears
+// it (not unpairing, not deactivation), because the server applies synced
+// events to whichever employee the device is CURRENTLY assigned to — a demo
+// phone's queued fictional events must never be able to reach production.
+// Getting back to production takes an uninstall or "Clear data", which also
+// wipes the local event queue.
+export const REVIEWER_API_URL_KEY = "labourlink_reviewer_api_url";
 
 // Minimal, non-authoritative snapshot of who this device is paired to —
 // used only to render a name and "last verified" time while offline at
@@ -182,10 +191,11 @@ export async function recoverDeviceIdentityFromBackup(): Promise<void> {
     console.log("[device-identity] recovery skipped — localStorage already has an identifier");
     return; // nothing to recover
   }
-  const [id, paired, employee] = await Promise.all([
+  const [id, paired, employee, reviewerApiUrl] = await Promise.all([
     idbGet(DEVICE_ID_KEY),
     idbGet(PAIRED_KEY),
     idbGet(EMPLOYEE_SUMMARY_KEY),
+    idbGet(REVIEWER_API_URL_KEY),
   ]);
   if (!id) {
     console.log("[device-identity] recovery found nothing in IndexedDB either — genuinely first launch");
@@ -195,6 +205,7 @@ export async function recoverDeviceIdentityFromBackup(): Promise<void> {
   localStorage.setItem(DEVICE_ID_KEY, id);
   if (paired) localStorage.setItem(PAIRED_KEY, paired);
   if (employee) localStorage.setItem(EMPLOYEE_SUMMARY_KEY, employee);
+  if (reviewerApiUrl) localStorage.setItem(REVIEWER_API_URL_KEY, reviewerApiUrl);
 }
 
 // Short, non-reversible, non-cryptographic fingerprint for log correlation
@@ -301,4 +312,34 @@ export function setCachedEmployeeSummary(summary: CachedEmployeeSummary): void {
 export function resetDeviceIdentity(): void {
   removeMirrored(PAIRED_KEY);
   removeMirrored(EMPLOYEE_SUMMARY_KEY);
+}
+
+// Only a bare https origin is ever accepted (what the production API's
+// /api/pairing/reviewer-target returns) — anything else is ignored, so a
+// tampered value can't point the app at an arbitrary path or plain http.
+// The one exception is the emulator QA build (.env.android-qa-emulator),
+// whose local test servers can only be plain http.
+const ALLOW_HTTP_REVIEWER_API = import.meta.env.VITE_ALLOW_HTTP_REVIEWER_API === "true";
+
+export function normalizeReviewerApiUrl(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    const protocolOk = url.protocol === "https:" || (ALLOW_HTTP_REVIEWER_API && url.protocol === "http:");
+    if (!protocolOk || url.username || url.password) return null;
+    if (url.pathname !== "/" || url.search || url.hash) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+export function getReviewerApiUrl(): string | null {
+  return normalizeReviewerApiUrl(localStorage.getItem(REVIEWER_API_URL_KEY));
+}
+
+export function setReviewerApiUrl(url: string): void {
+  const origin = normalizeReviewerApiUrl(url);
+  if (!origin) throw new Error("Reviewer API URL must be an https origin");
+  setMirrored(REVIEWER_API_URL_KEY, origin);
 }

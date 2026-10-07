@@ -9,7 +9,7 @@
 // No tokens, PINs, or employee-sensitive payloads — every field here is
 // either a boolean/timestamp or this device's own installed-app identity.
 import { isNativePlatform } from "./platform";
-import { API_URL } from "./api";
+import { activeApiUrl } from "./api";
 import { getLocalEventStore } from "./localEventStore";
 import { getOrCreateDeviceIdentifier } from "./device";
 
@@ -110,7 +110,7 @@ export async function getDiagnosticsSnapshot(apiReachable: boolean): Promise<Dia
   return {
     appVersion,
     appBuild,
-    apiUrl: API_URL || window.location.origin,
+    apiUrl: activeApiUrl() || window.location.origin,
     connectionType,
     networkConnected,
     apiReachable,

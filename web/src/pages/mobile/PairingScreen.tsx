@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { useDevicePairing } from "../../context/DevicePairingContext";
 import { api, ApiError } from "../../lib/api";
-import { getOrCreateDeviceIdentifier } from "../../lib/device";
+import { getOrCreateDeviceIdentifier, getReviewerApiUrl } from "../../lib/device";
+import { isNativePlatform } from "../../lib/platform";
 import { privacyPolicyHref } from "../../lib/privacyPolicy";
+import { pairWithReviewerCode } from "../../lib/reviewerAccess";
 import { singleFlight } from "../../lib/singleFlight";
 
 // A short, stable code appended to the (deliberately simple, non-scary)
@@ -42,8 +44,29 @@ interface StatusResponse {
 
 const POLL_INTERVAL_MS = 3000;
 
+// Server error codes from POST /api/pairing/reviewer, in plain words.
+function reviewerErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.code === "INVALID_REVIEWER_CODE") return "That access code is not valid. Check it and try again.";
+    if (err.code === "REVIEWER_CODE_THROTTLED") return "Too many attempts. Wait a minute and try again.";
+    if (err.code === "REVIEWER_CODE_DEVICE_LIMIT") return "This access code can't pair any more phones.";
+    if (err.code === "DEVICE_INACTIVE") return "This phone has been deactivated.";
+    if (err.code === "REVIEWER_ACCESS_UNAVAILABLE") return "Access codes are not available right now.";
+  }
+  return "Could not check the access code. Check your connection and try again.";
+}
+
 export function PairingScreen() {
   const { markPaired } = useDevicePairing();
+  // A phone already switched to the demo instance stays there (see
+  // REVIEWER_API_URL_KEY) — it never shows a normal pairing code, which
+  // would come from the demo instance and could never be approved.
+  const reviewerLocked = getReviewerApiUrl() !== null;
+  const reviewerAvailable = isNativePlatform() || reviewerLocked;
+  const [showCodeEntry, setShowCodeEntry] = useState(reviewerLocked);
+  const [accessCode, setAccessCode] = useState("");
+  const [codeSubmitting, setCodeSubmitting] = useState(false);
+  const [codeError, setCodeError] = useState<string | null>(null);
   const [code, setCode] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [diagnosticCode, setDiagnosticCode] = useState<string | null>(null);
@@ -85,8 +108,26 @@ export function PairingScreen() {
 
   useEffect(() => {
     console.log("[device-identity] PairingScreen mounted");
+    if (reviewerLocked) return;
     startPairing();
-  }, [startPairing]);
+  }, [startPairing, reviewerLocked]);
+
+  async function submitAccessCode(e: FormEvent) {
+    e.preventDefault();
+    if (!accessCode.trim() || codeSubmitting) return;
+    setCodeSubmitting(true);
+    setCodeError(null);
+    try {
+      await pairWithReviewerCode(accessCode);
+      if (pollRef.current) window.clearInterval(pollRef.current);
+      markPaired();
+    } catch (err) {
+      console.error("[pairing] reviewer code pairing failed:", err);
+      setCodeError(reviewerErrorMessage(err));
+    } finally {
+      setCodeSubmitting(false);
+    }
+  }
 
   useEffect(() => {
     if (!code) return;
@@ -119,7 +160,12 @@ export function PairingScreen() {
     <div className="pairing-screen">
       <h1>LabourLink</h1>
       <p>Pair this device</p>
-      {code ? (
+      {reviewerLocked ? (
+        <p className="pairing-note">
+          This phone is set up for the LabourLink demo. To use it with your employer&apos;s LabourLink,
+          uninstall and reinstall the app.
+        </p>
+      ) : code ? (
         <>
           <div className="pairing-code">{code}</div>
           <p className="pairing-status">Waiting for approval...</p>
@@ -137,10 +183,38 @@ export function PairingScreen() {
           (read aloud, photographed) to whoever is actually diagnosing a
           pairing failure. See diagnosticCodeFor's own comment. */}
       {diagnosticCode && <p className="pairing-diagnostic-code">Diagnostic: {diagnosticCode}</p>}
-      {error && (
+      {error && !reviewerLocked && (
         <button className="mobile-action-button" onClick={startPairing}>
           Try again
         </button>
+      )}
+      {reviewerAvailable && !showCodeEntry && (
+        <button type="button" className="link-button" onClick={() => setShowCodeEntry(true)}>
+          Have an access code?
+        </button>
+      )}
+      {reviewerAvailable && showCodeEntry && (
+        <form className="pairing-access-code" onSubmit={submitAccessCode}>
+          <label htmlFor="pairing-access-code-input">Access code</label>
+          <input
+            id="pairing-access-code-input"
+            value={accessCode}
+            onChange={(e) => setAccessCode(e.target.value)}
+            autoCapitalize="characters"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            placeholder="DEMO-XXXX-XXXX-XXXX"
+          />
+          {codeError && (
+            <p className="error-text" role="alert">
+              {codeError}
+            </p>
+          )}
+          <button type="submit" className="mobile-action-button" disabled={codeSubmitting || !accessCode.trim()}>
+            {codeSubmitting ? "Checking..." : "Use access code"}
+          </button>
+        </form>
       )}
       <a className="link-button" href={privacyPolicyHref()}>
         Privacy Policy

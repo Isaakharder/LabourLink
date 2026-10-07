@@ -1,4 +1,4 @@
-import { DEVICE_ID_KEY, PERMANENT_DEVICE_ERROR_CODES } from "./device";
+import { DEVICE_ID_KEY, PERMANENT_DEVICE_ERROR_CODES, getReviewerApiUrl } from "./device";
 import { isNetworkError } from "./offlineQueue";
 
 function resolveApiUrl(): string {
@@ -26,6 +26,13 @@ const API_URL = resolveApiUrl();
 // which API host a build actually talks to is otherwise invisible on a
 // physical phone. Not used for any request logic outside this file.
 export { API_URL };
+
+// The origin requests actually go to: the app-store demo instance once this
+// phone has been paired with a reviewer code (sticky — see
+// REVIEWER_API_URL_KEY in lib/device.ts), otherwise the normal API_URL.
+export function activeApiUrl(): string {
+  return getReviewerApiUrl() ?? API_URL;
+}
 
 // A weak-signal connection (still associated with the AP, but losing most
 // packets) can leave a bare fetch() hanging far longer than a clean refusal
@@ -121,6 +128,10 @@ export interface ApiOptions extends RequestInit {
   // opt into a longer bound without changing the default for everything
   // else.
   timeoutMs?: number;
+  // Sends this one request to a specific origin instead of activeApiUrl() —
+  // used only by reviewer pairing, which must reach the demo instance
+  // before this phone is switched over to it (lib/reviewerAccess.ts).
+  baseUrl?: string;
 }
 
 export async function api<T>(path: string, options: ApiOptions = {}): Promise<T> {
@@ -129,7 +140,7 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
   // one itself (including the multipart boundary), which fetch can't do if
   // we've already set the header ourselves.
   const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
-  const { timeoutMs = DEFAULT_TIMEOUT_MS, signal: callerSignal, ...fetchOptions } = options;
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, signal: callerSignal, baseUrl, ...fetchOptions } = options;
 
   const controller = new AbortController();
   // A caller-supplied signal (none exist today, but api() shouldn't silently
@@ -144,7 +155,7 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
   console.log(`[timing] fetch start: ${options.method ?? "GET"} ${path}`);
   let res: Response;
   try {
-    res = await fetch(`${API_URL}${path}`, {
+    res = await fetch(`${baseUrl ?? activeApiUrl()}${path}`, {
       ...fetchOptions,
       credentials: "include",
       signal: controller.signal,

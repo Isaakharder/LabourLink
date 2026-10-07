@@ -484,6 +484,22 @@ input {
   font-size: 0.85rem;
 }
 
+.pairing-access-code {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: min(100%, 320px);
+}
+
+.pairing-access-code input {
+  font-size: 1rem;
+  padding: 0.6rem 0.75rem;
+  text-align: center;
+  letter-spacing: 0.05em;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
 .pairing-diagnostic-code {
   color: var(--color-muted);
   font-size: 0.75rem;
