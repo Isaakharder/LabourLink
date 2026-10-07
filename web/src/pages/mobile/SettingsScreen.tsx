@@ -6,6 +6,7 @@ import { useMessages } from "../../context/MessagesContext";
 import { useWorkSession } from "../../context/WorkSessionContext";
 import { isPushMarkedEnabled, initAndroidPush, subscribeWebPush } from "../../lib/push";
 import { isNativePlatform } from "../../lib/platform";
+import { privacyPolicyHref } from "../../lib/privacyPolicy";
 import { computeSyncIndicatorState } from "../../lib/syncIndicator";
 
 // No PIN gate, no on-device "Reset this device" — pairing a phone to a
@@ -202,6 +203,12 @@ export function SettingsScreen() {
           </div>
         </section>
       )}
+      <section className="mobile-settings-device-section">
+        <h2>Privacy</h2>
+        <a className="link-button" href={privacyPolicyHref()}>
+          Privacy Policy
+        </a>
+      </section>
     </div>
   );
 }

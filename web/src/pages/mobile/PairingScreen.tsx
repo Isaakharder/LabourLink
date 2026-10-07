@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useDevicePairing } from "../../context/DevicePairingContext";
 import { api, ApiError } from "../../lib/api";
 import { getOrCreateDeviceIdentifier } from "../../lib/device";
+import { privacyPolicyHref } from "../../lib/privacyPolicy";
 import { singleFlight } from "../../lib/singleFlight";
 
 // A short, stable code appended to the (deliberately simple, non-scary)
@@ -141,6 +142,9 @@ export function PairingScreen() {
           Try again
         </button>
       )}
+      <a className="link-button" href={privacyPolicyHref()}>
+        Privacy Policy
+      </a>
     </div>
   );
 }

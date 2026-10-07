@@ -1,6 +1,7 @@
 import { FormEvent, useState } from "react";
 import { useAuth } from "../../context/AuthContext";
 import { api, ApiError } from "../../lib/api";
+import { privacyPolicyHref } from "../../lib/privacyPolicy";
 
 function ForgotPinForm({ onBack }: { onBack: () => void }) {
   const [email, setEmail] = useState("");
@@ -122,6 +123,9 @@ export function LoginPage() {
         <button type="button" className="link-button" onClick={() => setMode("forgot")}>
           Forgot PIN?
         </button>
+        <a className="link-button" href={privacyPolicyHref()}>
+          Privacy Policy
+        </a>
       </form>
     </div>
   );

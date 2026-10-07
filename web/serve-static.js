@@ -40,13 +40,24 @@ function proxyApi(request, response) {
   request.pipe(proxyReq);
 }
 
+function isPrivacyPolicyPath(url) {
+  const pathname = url.split("?")[0];
+  return pathname === "/privacy" || pathname === "/privacy.html";
+}
+
 const server = createServer((request, response) => {
   if (apiTarget && request.url.startsWith("/api/")) {
     return proxyApi(request, response);
   }
   handler(request, response, {
     public: "dist",
-    rewrites: [{ source: "**", destination: "/index.html" }],
+    // serve-handler applies rewrites before looking for a matching file (and
+    // re-applies the remaining ones to a rewritten path), so the SPA
+    // catch-all would swallow /privacy too. The public privacy policy
+    // (public/privacy.html — linked from the app stores, must load without
+    // login or JS) skips it; serve-handler's default cleanUrls then serves
+    // privacy.html at /privacy and redirects /privacy.html there.
+    rewrites: isPrivacyPolicyPath(request.url) ? [] : [{ source: "**", destination: "/index.html" }],
     // Without explicit Cache-Control, serve-handler sends none at all (no
     // ETag/Last-Modified either — etag defaults to false), leaving every
     // browser's own heuristic caching to decide how long to hold onto a
