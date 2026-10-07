@@ -69,6 +69,16 @@ describe("Setup > Row Review", () => {
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
 
+  it("shows the recalculation warning beside the setting, linked to the input", async () => {
+    render(<RowReviewTab />);
+    const input = await screen.findByLabelText("Row review window (calendar days)");
+    const note = screen.getByRole("note");
+    expect(note).toHaveTextContent(
+      "Changing this window recalculates unresolved historical visits and may change past speeds and totals. Confirmed reviews remain unchanged."
+    );
+    expect(input).toHaveAccessibleDescription(note.textContent!);
+  });
+
   it("lets an Administrator save a new whole number of days", async () => {
     const user = userEvent.setup();
     render(<RowReviewTab />);
@@ -116,6 +126,7 @@ describe("Setup > Row Review", () => {
     expect(input).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
     expect(screen.getByText("Only an Administrator can change this.")).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(/Confirmed reviews remain unchanged/);
   });
 
   it("shows nothing to an Employee and never calls the server", async () => {

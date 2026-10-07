@@ -4,6 +4,8 @@ import { api, ApiError } from "../../../lib/api";
 
 export const MIN_ROW_REVIEW_WINDOW_DAYS = 1;
 export const MAX_ROW_REVIEW_WINDOW_DAYS = 365;
+export const ROW_REVIEW_WINDOW_CHANGE_NOTE =
+  "Changing this window recalculates unresolved historical visits and may change past speeds and totals. Confirmed reviews remain unchanged.";
 
 interface RowReviewWindowResponse {
   rowReviewWindowDays: number;
@@ -102,6 +104,7 @@ export function RowReviewTab() {
               }}
               disabled={!canEdit || saving}
               required
+              aria-describedby="row-review-window-note"
             />
           </label>
           {canEdit && (
@@ -113,6 +116,11 @@ export function RowReviewTab() {
           {saveError && <span className="field-error">{saveError}</span>}
           {saved && <span className="settings-saved-note">Saved.</span>}
         </form>
+      )}
+      {windowDays !== null && (
+        <p id="row-review-window-note" className="field-hint" role="note">
+          {ROW_REVIEW_WINDOW_CHANGE_NOTE}
+        </p>
       )}
     </section>
   );
