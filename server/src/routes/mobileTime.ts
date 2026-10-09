@@ -2,6 +2,7 @@ import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireDevice } from "../middleware/device";
+import { isDemoInstanceEnabled } from "../lib/demoInstance";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { reconcileMidnightCutoff, MIDNIGHT_CUTOFF_REASON } from "../lib/midnightCutoff";
 import { findMostRecentShiftClosureBoundary } from "../lib/longShiftAdminEnd";
@@ -1675,6 +1676,36 @@ router.post(
     );
     let lastProcessedSeq = Number(stateRows[0].last_processed_seq);
     let halted = false;
+
+    // Demo instance only: a phone that already has event history (e.g. it was
+    // paired to production before) keeps its device identifier and local
+    // sequence counter when a reviewer access code moves it to the demo, but
+    // reviewer pairing creates a brand-new demo device that expects seq 1 —
+    // so every event would be a permanent sequence_gap. For a reviewer-paired
+    // device that has never recorded a single event here, the lowest pending
+    // seq it sends is by definition its first event for this server (anything
+    // lower was acknowledged elsewhere), so adopt it as the baseline once.
+    // Checked env-first: production never runs this, and doesn't even have
+    // devices.paired_via_reviewer_credential_id (migration 058).
+    if (lastProcessedSeq === 0 && valid.length > 0 && valid[0].deviceSeq > 1 && isDemoInstanceEnabled()) {
+      const { rows: firstContact } = await pool.query(
+        `select d.paired_via_reviewer_credential_id is not null as reviewer_paired,
+                exists (select 1 from mobile_time_events m where m.device_id = d.id) as has_events
+         from devices d where d.id = $1`,
+        [d.id]
+      );
+      if (firstContact[0]?.reviewer_paired && !firstContact[0].has_events) {
+        const baseline = valid[0].deviceSeq - 1;
+        const adopted = await pool.query(
+          `update device_sync_state set last_processed_seq = $2 where device_id = $1 and last_processed_seq = 0`,
+          [d.id, baseline]
+        );
+        if (adopted.rowCount === 1) {
+          lastProcessedSeq = baseline;
+          console.log(`[mobile-sync] demo reviewer device=${d.id} first sync: adopted device_seq baseline ${baseline}`);
+        }
+      }
+    }
 
     // Baseline for backward-clock-jump detection (detectClockAnomaly below)
     // — this device's own most recent successfully-applied event, if any.

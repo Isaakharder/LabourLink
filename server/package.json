@@ -109,7 +109,8 @@
     "test:row-review-window": "ts-node src/routes/rowReviewWindow.test.ts",
     "test:cors-origin": "ts-node src/lib/corsOrigin.test.ts",
     "test:apns": "ts-node src/lib/apns.test.ts",
-    "test:mobile-push": "ts-node src/routes/mobilePush.test.ts"
+    "test:mobile-push": "ts-node src/routes/mobilePush.test.ts",
+    "test:reviewer-sync-baseline": "ts-node src/routes/reviewerSyncBaseline.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",
