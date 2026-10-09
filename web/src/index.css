@@ -890,6 +890,13 @@ input {
   color: var(--color-primary);
 }
 
+/* Rows registered during the current iOS Register Existing Tag visit —
+   deliberately faint so it never competes with the selected state above. */
+.mobile-row-grid-item-registered:not(.mobile-row-grid-item-selected) {
+  background: #eef8f0;
+  border-color: #b7dfc0;
+}
+
 .mobile-row-grid-item-number {
   line-height: 1;
 }

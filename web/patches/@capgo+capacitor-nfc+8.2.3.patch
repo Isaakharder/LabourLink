@@ -137,3 +137,89 @@ index 9e87599..e21bcb3 100644
      }
  
      /**
+diff --git a/node_modules/@capgo/capacitor-nfc/ios/Sources/NfcPlugin/NfcPlugin.swift b/node_modules/@capgo/capacitor-nfc/ios/Sources/NfcPlugin/NfcPlugin.swift
+index b26819e..d0430a7 100644
+--- a/node_modules/@capgo/capacitor-nfc/ios/Sources/NfcPlugin/NfcPlugin.swift
++++ b/node_modules/@capgo/capacitor-nfc/ios/Sources/NfcPlugin/NfcPlugin.swift
+@@ -133,6 +133,7 @@ public class NfcPlugin: CAPPlugin, CAPBridgedPlugin {
+         }
+ 
+         invalidateAfterFirstRead = call.getBool("invalidateAfterFirstRead", true)
++        logNfc("startScanning: invalidateAfterFirstRead=\(invalidateAfterFirstRead) sessionType=\(sessionType)")
+         let alertMessage = call.getString("alertMessage")
+ 
+         let requestedPollingOptions = call.getArray("iosPollingOptions", Self.defaultIosPollingOptions)
+@@ -199,6 +200,7 @@ public class NfcPlugin: CAPPlugin, CAPBridgedPlugin {
+ 
+     @objc public func stopScanning(_ call: CAPPluginCall) {
+         DispatchQueue.main.async {
++            self.logNfc("stopScanning: ndefReaderSession=\(self.ndefReaderSession != nil) tagReaderSession=\(self.tagReaderSession != nil)")
+             self.ndefReaderSession?.invalidate()
+             self.ndefReaderSession = nil
+             self.tagReaderSession?.invalidate()
+@@ -452,19 +454,41 @@ public class NfcPlugin: CAPPlugin, CAPBridgedPlugin {
+         ]
+     }
+ 
++    // Patched for LabourLink: timestamped logcat-equivalent (Xcode console)
++    // logging around identifier extraction — added while diagnosing a real
++    // physical-iPhone report where a successfully NDEF-read tag (ndef
++    // present, isWritable true) still produced NO raw identifier
++    // (extractIdentifier returning nil, so JS never even sees an `id` key —
++    // see lib/nfc.ts's toScannedTag). This makes the actual cause visible
++    // live in Xcode's console on the next scan — which of the four known
++    // NFCNDEFTag subtypes (if any) this concrete tag object matched, and
++    // the exact raw identifier bytes when extraction does succeed — instead
++    // of guessing. Filter Xcode's console with "[nfc-swift]" to isolate
++    // these from the rest of the app's log output.
++    private func logNfc(_ message: String) {
++        print("[nfc-swift \(Date().timeIntervalSince1970)] \(message)")
++    }
++
+     private func extractIdentifier(from tag: NFCNDEFTag) -> Data? {
++        logNfc("extractIdentifier: concrete Swift type = \(Swift.type(of: tag))")
+         if let miFare = tag as? NFCMiFareTag {
++            logNfc("extractIdentifier: matched NFCMiFareTag, identifier=\(miFare.identifier as NSData) (\(miFare.identifier.count) bytes)")
+             return miFare.identifier
+         }
+         if let iso7816 = tag as? NFCISO7816Tag {
++            logNfc("extractIdentifier: matched NFCISO7816Tag, identifier=\(iso7816.identifier as NSData) (\(iso7816.identifier.count) bytes)")
+             return iso7816.identifier
+         }
+         if let iso15693 = tag as? NFCISO15693Tag {
++            logNfc("extractIdentifier: matched NFCISO15693Tag, identifier=\(iso15693.identifier as NSData) (\(iso15693.identifier.count) bytes)")
+             return iso15693.identifier
+         }
+         if let feliCa = tag as? NFCFeliCaTag {
+-            return Data(feliCa.currentIDm)
++            let data = Data(feliCa.currentIDm)
++            logNfc("extractIdentifier: matched NFCFeliCaTag, currentIDm=\(data as NSData) (\(data.count) bytes)")
++            return data
+         }
++        logNfc("extractIdentifier: matched NONE of MiFare/ISO7816/ISO15693/FeliCa — returning nil (this is why hardwareId came back blank)")
+         return nil
+     }
+ 
+@@ -757,8 +781,10 @@ extension NfcPlugin: NFCTagReaderSessionDelegate {
+                         self.currentTag = tag
+                         let event = self.buildEvent(tag: tag, status: status, capacity: capacity, message: message)
+                         self.notify(event: event)
++                        self.logNfc("processTag: NDEF read succeeded, notified event, invalidateAfterFirstRead=\(self.invalidateAfterFirstRead)")
+                         if self.invalidateAfterFirstRead {
+                             session.invalidate()
++                            self.logNfc("processTag: session.invalidate() called")
+                         }
+                     }
+                 }
+@@ -806,9 +832,11 @@ extension NfcPlugin: NFCTagReaderSessionDelegate {
+         ]
+ 
+         notify(event: event)
++        logNfc("emitTagEvent: notified event (hasId=\(tagInfo["id"] != nil)), invalidateAfterFirstRead=\(invalidateAfterFirstRead)")
+ 
+         if invalidateAfterFirstRead {
+             session.invalidate()
++            logNfc("emitTagEvent: session.invalidate() called")
+         }
+     }
+ }

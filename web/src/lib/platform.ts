@@ -4,6 +4,24 @@ export function isNativePlatform(): boolean {
   return Capacitor.isNativePlatform();
 }
 
+// True only for a native iOS build (not Android, not the browser/PWA,
+// including the iPhone Safari/Home-Screen PWA case — isNativePlatform() is
+// false there, same as it always was). The one place NFC's iOS-vs-Android
+// behavior split (lib/nfc.ts: iosSessionType/alertMessage/
+// invalidateAfterFirstRead on iOS, unchanged silent reader-mode on Android;
+// screens that must gate scanning behind an explicit tap on iOS but keep
+// Android's existing ambient/silent scanning exactly as it is) reads the
+// platform from. Guarded against a test mock that stubs
+// Capacitor.isNativePlatform() without also stubbing getPlatform() (several
+// existing tests do exactly this, e.g. `{ isNativePlatform: () => true }`
+// with no getPlatform at all) — such a mock safely resolves to "not iOS"
+// (preserving whatever Android-shaped behavior that test was already
+// exercising) rather than throwing.
+export function isIosNativePlatform(): boolean {
+  if (!isNativePlatform()) return false;
+  return typeof Capacitor.getPlatform === "function" && Capacitor.getPlatform() === "ios";
+}
+
 // The one place App.tsx decides DesktopApp vs. MobileApp. A native Android
 // (or future iOS) build must always get the mobile app, full stop — no
 // viewport width, split-screen, rotation, or desktop-mode state can ever

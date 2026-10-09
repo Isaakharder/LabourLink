@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Language, t } from "../../lib/i18n";
-import { isNfcSupported, ScannedTag, startScanSession } from "../../lib/nfc";
+import { ScannedTag } from "../../lib/nfc";
 import { resolveScannedTag, ResolvedTagTarget } from "../../lib/nfcMappingCache";
+import { useForegroundNfcScan } from "../../lib/useForegroundNfcScan";
 
 export interface RowPickerRow {
   id: string;
@@ -18,6 +19,20 @@ export interface RowPickerLand {
   id: string;
   name: string;
   phases: RowPickerPhase[];
+}
+
+// Everything needed to put the sheet back exactly where it was after it's
+// been unmounted and remounted — the drilled-into phase (or search), plus
+// the scroll offsets of both scroll containers (the sheet itself and the
+// row grid, which has its own max-height/overflow). Used only by the iOS
+// Register Existing Tag flow (see RegisterExistingTagScreen) so the admin
+// lands back on the same phase's row list, same scroll, after each
+// successful registration instead of back at the phase list.
+export interface RowPickerViewState {
+  expandedPhaseId: string | null;
+  search: string;
+  sheetScrollTop: number;
+  gridScrollTop: number;
 }
 
 interface RowPickerSheetProps {
@@ -63,6 +78,14 @@ interface RowPickerSheetProps {
   // own id. Omitted by the tag-registration screens, which keep the
   // phase -> row drill-down exactly as before.
   directRowList?: boolean;
+  // Optional, all three — omitted everywhere except the iOS Register
+  // Existing Tag flow, so every other caller's behavior is unchanged.
+  // initialViewState restores a snapshot on mount; onViewStateSnapshot is
+  // called with the current snapshot right before onConfirm;
+  // registeredRowIds gets a light "already done this visit" highlight.
+  initialViewState?: RowPickerViewState | null;
+  onViewStateSnapshot?: (state: RowPickerViewState) => void;
+  registeredRowIds?: ReadonlySet<string>;
 }
 
 // Same bottom-sheet visual pattern as ActivityPicker/ConfirmEndDayModal
@@ -170,11 +193,19 @@ export function RowPickerSheet({
   language,
   onNfcScan,
   directRowList = false,
+  initialViewState,
+  onViewStateSnapshot,
+  registeredRowIds,
 }: RowPickerSheetProps) {
-  const [expandedPhaseId, setExpandedPhaseId] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
+  const [expandedPhaseId, setExpandedPhaseId] = useState<string | null>(initialViewState?.expandedPhaseId ?? null);
+  const [search, setSearch] = useState(initialViewState?.search ?? "");
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  // Scroll can only be restored once the restored phase's rows are actually
+  // rendered (lands may still be loading on mount) — applied exactly once,
+  // before paint, so there's no visible jump from the top.
+  const scrollRestoredRef = useRef(!initialViewState);
   const [selectedRowId, setSelectedRowId] = useState<string | null>(initialSelectedRowId ?? null);
-  const [nfcActive, setNfcActive] = useState(false);
   const [nfcHint, setNfcHint] = useState<string | null>(null);
 
   const phases = useMemo(() => (lands ? flattenPhases(lands) : null), [lands]);
@@ -184,7 +215,6 @@ export function RowPickerSheet({
   // In the flat list a pre-selected row (Back from a later step, or editing
   // the current row) may be far down the grid — bring it into view once.
   // "nearest" scrolls only the grid's own overflow container, not the page.
-  const gridRef = useRef<HTMLDivElement | null>(null);
   const scrolledToInitialRef = useRef(false);
   useEffect(() => {
     if (!directRows || scrolledToInitialRef.current || !initialSelectedRowId) return;
@@ -192,6 +222,13 @@ export function RowPickerSheet({
     const el = gridRef.current?.querySelector<HTMLElement>(`[data-row-id="${initialSelectedRowId}"]`);
     el?.scrollIntoView?.({ block: "nearest" });
   }, [directRows, initialSelectedRowId]);
+
+  useLayoutEffect(() => {
+    if (scrollRestoredRef.current || !phases || !initialViewState) return;
+    scrollRestoredRef.current = true;
+    if (sheetRef.current) sheetRef.current.scrollTop = initialViewState.sheetScrollTop;
+    if (gridRef.current) gridRef.current.scrollTop = initialViewState.gridScrollTop;
+  }, [phases, initialViewState]);
 
   // Read inside the NFC scan callback below instead of `phases` directly —
   // the callback is registered once (see the scan effect's `[]` deps, so a
@@ -234,58 +271,52 @@ export function RowPickerSheet({
   }, [busy, onCancel]);
 
   // NFC scan session lives exactly as long as this sheet does — started on
-  // mount, stopped on unmount (Cancel, Confirm, Back, or the parent closing
-  // it for any other reason all unmount this component the same way) — so a
-  // tag tapped after the employee has moved on can never affect a selection
-  // it wasn't open for. When onNfcScan is provided (the employee flow), a
-  // resolved tag is handed entirely to the caller — auto-submit, warning
-  // dialogs, and loading state are HomeScreen's responsibility, not this
-  // generic picker's. Without it (the admin registration screens), a
-  // resolved tag only *selects* the row (same as a manual tap), never
-  // auto-confirms — see this sheet's existing select-then-confirm design
-  // (header comment above), unchanged for that case.
+  // mount (Android/web — see useForegroundNfcScan's own platform split for
+  // iOS, which never auto-starts), stopped on unmount (Cancel, Confirm,
+  // Back, or the parent closing it for any other reason all unmount this
+  // component the same way) — so a tag tapped after the employee has moved
+  // on can never affect a selection it wasn't open for. When onNfcScan is
+  // provided (the employee flow), a resolved tag is handed entirely to the
+  // caller — auto-submit, warning dialogs, and loading state are
+  // HomeScreen's responsibility, not this generic picker's. Without it (the
+  // admin registration screens), a resolved tag only *selects* the row
+  // (same as a manual tap), never auto-confirms — see this sheet's existing
+  // select-then-confirm design (header comment above), unchanged for that
+  // case.
+  const { scanning: nfcActive, awaitingTap: nfcAwaitingTap, startScan: startNfcScan } = useForegroundNfcScan({
+    active: true,
+    onTag: (tag: ScannedTag) => {
+      const resolved = resolveScannedTag(tag);
+      if (!resolved || resolved.targetType !== "greenhouse_row") {
+        setNfcHint(t(language, "nfcTagNotRecognized"));
+        return;
+      }
+      setNfcHint(null);
+
+      if (onNfcScanRef.current) {
+        onNfcScanRef.current(resolved);
+        return;
+      }
+
+      setSelectedRowId(resolved.targetId);
+      const phase = (phasesRef.current ?? []).find((p) => p.rows.some((r) => r.id === resolved.targetId));
+      if (phase) setExpandedPhaseId(phase.id);
+    },
+    onError: (message) => setNfcHint(message),
+    label: "RowPickerSheet",
+    iosAlertMessage: t(language, "tapRowTag"),
+  });
+
+  // Android/web only in practice: a nudge toward the manual list below if
+  // 15s of genuinely ambient scanning hasn't seen a tag. iOS's own system
+  // sheet already has its own "hold near..."/timeout presentation and each
+  // session is a single short-lived per-tap attempt, so this rarely has
+  // time to fire there — harmless either way, never blocks anything.
   useEffect(() => {
-    let cancelled = false;
-    let stopScan: (() => void) | null = null;
-    let waitingTimer: ReturnType<typeof setTimeout> | null = null;
-
-    (async () => {
-      const supported = await isNfcSupported();
-      if (cancelled || !supported) return;
-      setNfcActive(true);
-      waitingTimer = setTimeout(() => {
-        if (!cancelled) setNfcHint(t(language, "nfcStillWaiting"));
-      }, 15000);
-
-      stopScan = startScanSession((tag: ScannedTag) => {
-        const resolved = resolveScannedTag(tag);
-        if (!resolved || resolved.targetType !== "greenhouse_row") {
-          setNfcHint(t(language, "nfcTagNotRecognized"));
-          return;
-        }
-        setNfcHint(null);
-
-        if (onNfcScanRef.current) {
-          onNfcScanRef.current(resolved);
-          return;
-        }
-
-        setSelectedRowId(resolved.targetId);
-        const phase = (phasesRef.current ?? []).find((p) => p.rows.some((r) => r.id === resolved.targetId));
-        if (phase) setExpandedPhaseId(phase.id);
-      }, undefined, "RowPickerSheet");
-    })();
-
-    return () => {
-      cancelled = true;
-      if (waitingTimer) clearTimeout(waitingTimer);
-      stopScan?.();
-    };
-    // language is read inside the callback via closure — re-subscribing the
-    // whole scan session on a language change (which can't happen mid-sheet
-    // anyway, it's fixed per employee) isn't worth guarding against.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!nfcActive) return;
+    const timer = setTimeout(() => setNfcHint((h) => h ?? t(language, "nfcStillWaiting")), 15000);
+    return () => clearTimeout(timer);
+  }, [nfcActive, language]);
 
   const searchResults = useMemo(() => {
     if (!phases || !search.trim()) return null;
@@ -313,17 +344,28 @@ export function RowPickerSheet({
   }
 
   function handleConfirm() {
-    if (selectedRowId) onConfirm(selectedRowId);
+    if (!selectedRowId) return;
+    onViewStateSnapshot?.({
+      expandedPhaseId,
+      search,
+      sheetScrollTop: sheetRef.current?.scrollTop ?? 0,
+      gridScrollTop: gridRef.current?.scrollTop ?? 0,
+    });
+    onConfirm(selectedRowId);
   }
 
   function rowButton(row: RowPickerRow, phaseName?: string) {
     const selected = row.id === selectedRowId;
+    const registered = registeredRowIds?.has(row.id) ?? false;
     return (
       <button
         key={row.id}
         type="button"
         data-row-id={row.id}
-        className={`mobile-row-grid-item${selected ? " mobile-row-grid-item-selected" : ""}`}
+        className={`mobile-row-grid-item${selected ? " mobile-row-grid-item-selected" : ""}${
+          registered ? " mobile-row-grid-item-registered" : ""
+        }`}
+        data-registered={registered ? "true" : undefined}
         disabled={busy}
         onClick={() => setSelectedRowId(row.id)}
       >
@@ -337,6 +379,7 @@ export function RowPickerSheet({
     <div className="mobile-sheet-backdrop" onClick={busy ? undefined : onCancel}>
       <div
         className="mobile-sheet"
+        ref={sheetRef}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -358,6 +401,14 @@ export function RowPickerSheet({
         {error && <p className="error-text">{error}</p>}
         {nfcActive && (
           <p className="mobile-row-picker-subtitle">{busy ? t(language, "starting") : nfcHint ?? t(language, "tapRowTag")}</p>
+        )}
+        {nfcAwaitingTap && (
+          <div className="mobile-row-picker-subtitle">
+            {nfcHint && <p className="mobile-row-picker-subtitle">{nfcHint}</p>}
+            <button type="button" className="mobile-action-button mobile-action-primary" disabled={busy} onClick={startNfcScan}>
+              {t(language, "scanButtonLabel")}
+            </button>
+          </div>
         )}
 
         {!phases ? (
@@ -399,7 +450,7 @@ export function RowPickerSheet({
               searchResults.length === 0 ? (
                 <p className="mobile-sheet-empty">{t(language, "noMatchingRows")}</p>
               ) : (
-                <div className="mobile-row-grid">
+                <div className="mobile-row-grid" ref={gridRef}>
                   {searchResults.map(({ row, phaseName }) => rowButton(row, phaseName))}
                 </div>
               )
@@ -407,7 +458,7 @@ export function RowPickerSheet({
               expandedPhase.rows.length === 0 ? (
                 <p className="mobile-sheet-empty">{t(language, "noRowsInPhase")}</p>
               ) : (
-                <div className="mobile-row-grid">{expandedPhase.rows.map((row) => rowButton(row))}</div>
+                <div className="mobile-row-grid" ref={gridRef}>{expandedPhase.rows.map((row) => rowButton(row))}</div>
               )
             ) : (
               // The combined phase list — every active phase from every

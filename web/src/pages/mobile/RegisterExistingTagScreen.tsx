@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useWorkSession } from "../../context/WorkSessionContext";
 import { api, ApiError } from "../../lib/api";
 import { isNfcSupported, ScannedTag, startScanSession } from "../../lib/nfc";
 import { playSuccessFeedback } from "../../lib/feedback";
+import { isIosNativePlatform } from "../../lib/platform";
 import { TagMapping } from "../../lib/nfcTagTypes";
-import { RowPickerSheet, RowPickerLand } from "../../components/mobile/RowPickerSheet";
+import { RowPickerSheet, RowPickerLand, RowPickerViewState } from "../../components/mobile/RowPickerSheet";
 import { CarrierPickerSheet, PickerCarrier } from "../../components/mobile/CarrierPickerSheet";
 
 type TargetType = "greenhouse_row" | "carrier";
@@ -50,6 +51,17 @@ export function RegisterExistingTagScreen() {
   // again" here doesn't otherwise change step away from "scan").
   const [scanGeneration, setScanGeneration] = useState(0);
 
+  // iOS Capacitor only, rows only — Android and the PWA keep the existing
+  // flow exactly (return to a freshly mounted picker, no highlights).
+  // After each successful registration the admin lands back on the same
+  // phase's row list at the same scroll position (rowPickerView, captured
+  // by RowPickerSheet on Confirm), with every row registered during this
+  // visit faintly highlighted (registeredRowIds). Both are plain component
+  // state, so leaving the screen and coming back starts a clean session.
+  const iosRowFlow = useMemo(() => isIosNativePlatform(), []) && targetType === "greenhouse_row";
+  const [rowPickerView, setRowPickerView] = useState<RowPickerViewState | null>(null);
+  const [registeredRowIds, setRegisteredRowIds] = useState<ReadonlySet<string>>(() => new Set());
+
   useEffect(() => {
     api<{ lands: RowPickerLand[] }>("/api/mobile/greenhouse-rows").then((r) => setRowLands(r.lands)).catch(() => {});
     api<{ carriers: PickerCarrier[] }>("/api/mobile/carriers").then((r) => setCarriers(r.carriers)).catch(() => {});
@@ -67,6 +79,12 @@ export function RegisterExistingTagScreen() {
   // trigger one registration attempt) and immediately attempts to register
   // it, no manual confirm step for the normal path. scanGeneration lets an
   // error's "Try again" reopen a fresh session without changing `step`.
+  // Already tap-gated on iOS by construction — this effect only ever
+  // becomes active once the admin has tapped through choose-type ->
+  // choose-target -> Confirm (onTargetConfirm sets step to "scan" as a
+  // direct result of that tap), the same "Scan/Register/Write action"
+  // shape as the rest of the app's iOS NFC gating, so no separate Scan
+  // button is needed here the way the employee-facing pickers need one.
   useEffect(() => {
     if (step !== "scan") return;
     const stop = startScanSession(
@@ -74,8 +92,9 @@ export function RegisterExistingTagScreen() {
         stop();
         void handleScanAndRegister(tag);
       },
-      undefined,
-      "RegisterExistingTagScreen"
+      (message) => setError(message),
+      "RegisterExistingTagScreen",
+      "Hold your iPhone near the existing tag to register it."
     );
     return stop;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -99,6 +118,13 @@ export function RegisterExistingTagScreen() {
       });
       playSuccessFeedback();
       setSuccessBanner(targetLabel);
+      // Marked only here, after the server has confirmed the registration —
+      // a cancelled scan, a failed request, or an unconfirmed conflict never
+      // reaches this line, so those rows stay unmarked and retryable.
+      if (iosRowFlow) {
+        const registeredId = targetId;
+        setRegisteredRowIds((prev) => new Set(prev).add(registeredId));
+      }
       setConflict(null);
       // Return focus to the row/bin selector immediately, same targetType,
       // so the admin can select the next row and scan again right away.
@@ -130,6 +156,17 @@ export function RegisterExistingTagScreen() {
     setPendingHardwareId(null);
     setError(null);
     setStep("scan");
+  }
+
+  // iOS row flow's way back to the (preserved) row list without registering
+  // anything — after a cancelled/failed scan or a declined conflict.
+  function backToRowList() {
+    setTargetId(null);
+    setTargetLabel(null);
+    setPendingHardwareId(null);
+    setConflict(null);
+    setError(null);
+    setStep("choose-target");
   }
 
   function reset() {
@@ -208,8 +245,14 @@ export function RegisterExistingTagScreen() {
             onTargetConfirm(rowId, label ? `Row ${label.rowNumber}` : "Selected row");
           }}
           onSkip={() => {}}
-          onCancel={() => setStep("choose-type")}
+          onCancel={() => {
+            setRowPickerView(null);
+            setStep("choose-type");
+          }}
           language="en"
+          initialViewState={iosRowFlow ? rowPickerView : undefined}
+          onViewStateSnapshot={iosRowFlow ? setRowPickerView : undefined}
+          registeredRowIds={iosRowFlow ? registeredRowIds : undefined}
         />
       )}
       {step === "choose-target" && targetType === "carrier" && (
@@ -254,6 +297,11 @@ export function RegisterExistingTagScreen() {
           ) : (
             <p className="mobile-settings-device-note">Hold the tag near the back of the phone…</p>
           )}
+          {iosRowFlow && !submitting && (
+            <button type="button" className="mobile-action-button" onClick={backToRowList}>
+              Choose a different row
+            </button>
+          )}
         </section>
       )}
 
@@ -281,7 +329,17 @@ export function RegisterExistingTagScreen() {
               onClick={() => {
                 if (!pendingHardwareId) return;
                 void handleScanAndRegister(
-                  { hardwareId: pendingHardwareId, labourlinkTagUuid: null, hasNdefData: false, isWritable: null, maxSize: null },
+                  {
+                    hardwareId: pendingHardwareId,
+                    labourlinkTagUuid: null,
+                    hasNdefData: false,
+                    isWritable: null,
+                    maxSize: null,
+                    rawId: null,
+                    techTypes: [],
+                    tagType: null,
+                    ndefRecords: [],
+                  },
                   Boolean(conflict.tagConflict),
                   Boolean(conflict.targetConflict)
                 );
@@ -289,7 +347,12 @@ export function RegisterExistingTagScreen() {
             >
               {submitting ? "Confirming…" : "Confirm and replace"}
             </button>
-            <button type="button" className="mobile-action-button" disabled={submitting} onClick={reset}>
+            <button
+              type="button"
+              className="mobile-action-button"
+              disabled={submitting}
+              onClick={iosRowFlow ? backToRowList : reset}
+            >
               Cancel
             </button>
           </div>

@@ -1,5 +1,6 @@
-import type { NdefRecord, NfcEvent, NfcTag } from "@capgo/capacitor-nfc";
-import { isNativePlatform } from "./platform";
+import type { NdefRecord, NfcEvent, NfcSessionEndEvent, NfcTag } from "@capgo/capacitor-nfc";
+import { isIosNativePlatform, isNativePlatform } from "./platform";
+import { bytesToHex } from "./nfcTagId";
 
 // Thin wrapper around @capgo/capacitor-nfc, same role lib/push.ts plays for
 // @capacitor/push-notifications: the plugin is dynamically imported so this
@@ -21,7 +22,10 @@ import { isNativePlatform } from "./platform";
 
 export interface ScannedTag {
   // Hex-encoded raw tag identifier bytes (e.g. "04A1B2C3D4E5F6") — the
-  // stable hardware identifier a Ridder tag is registered by.
+  // stable hardware identifier a Ridder tag is registered by. Derived from
+  // rawId via lib/nfcTagId.ts's normalizeTagId (every leading-zero byte
+  // preserved) — "" when rawId is null or empty, never a guessed/fabricated
+  // value.
   hardwareId: string;
   // Present only if the tag carries an NDEF record matching the versioned
   // LabourLink URI format (see LABOURLINK_URI_PREFIX) — a tag LabourLink
@@ -31,6 +35,29 @@ export interface ScannedTag {
   hasNdefData: boolean;
   isWritable: boolean | null;
   maxSize: number | null;
+  // --- Raw fields below: never read by resolution logic (see
+  // nfcMappingCache.ts's resolveTagAgainstMappings, which only reads
+  // hardwareId/labourlinkTagUuid above) — added for diagnostics
+  // (NfcDiagnosticScreen) and cross-platform identifier investigation, so
+  // the actual native payload is always inspectable rather than only the
+  // already-interpreted fields above. ---
+  //
+  // The `id` field exactly as the native plugin reported it: `null` when
+  // the key was absent entirely (confirmed cause on iOS: NfcPlugin.swift's
+  // extractIdentifier() returned nil — see its own patched logging in
+  // web/patches/@capgo+capacitor-nfc+8.2.3.patch — meaning the native layer
+  // could not determine a raw identifier for this tag at all), distinct
+  // from a present-but-empty array. hardwareId above is always derived from
+  // this field (`rawId ?? []`), never invented independently.
+  rawId: number[] | null;
+  techTypes: string[];
+  tagType: string | null;
+  // The raw NDEF records exactly as reported, byte-for-byte — distinct
+  // from labourlinkTagUuid, which is only the PARSED v1 LabourLink URI
+  // payload (null for any tag carrying something else, including data this
+  // app doesn't recognize as its own format at all). Empty array when
+  // hasNdefData is false.
+  ndefRecords: NdefRecord[];
 }
 
 export type NfcAvailability = "ok" | "disabled" | "unsupported" | "unknown";
@@ -51,8 +78,12 @@ export const LABOURLINK_URI_PREFIX = "labourlink://tag/v1/";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Thin re-export — lib/nfcTagId.ts is now the one canonical implementation
+// (shared with any future cross-platform/display code that isn't scan-
+// session-shaped), kept under this name because it's the existing public
+// surface every current caller and test already imports.
 export function hexId(bytes: number[]): string {
-  return bytes.map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+  return bytesToHex(bytes);
 }
 
 // Pure — used both to build the record for writeTag() and mirrored by the
@@ -104,6 +135,10 @@ function toScannedTag(tag: NfcTag): ScannedTag {
     hasNdefData: Boolean(tag.ndefMessage && tag.ndefMessage.length > 0),
     isWritable: tag.isWritable ?? null,
     maxSize: tag.maxSize ?? null,
+    rawId: tag.id ?? null,
+    techTypes: tag.techTypes ?? [],
+    tagType: tag.type ?? null,
+    ndefRecords: tag.ndefMessage ?? [],
   };
 }
 
@@ -188,6 +223,44 @@ export const ANDROID_READER_MODE_FLAGS =
   0x80 | // FLAG_READER_SKIP_NDEF_CHECK
   0x100; // FLAG_READER_NO_PLATFORM_SOUNDS
 
+// Shown in Apple's own system scan sheet while an iOS session is open — has
+// no Android equivalent (Android's reader mode has no visible UI at all, by
+// design; see ANDROID_READER_MODE_FLAGS's NO_PLATFORM_SOUNDS/
+// SKIP_NDEF_CHECK above). Used only when a caller doesn't supply its own
+// `iosAlertMessage` to startScanSession — every real call site in this app
+// does supply a context-specific one (see HomeScreen/RowPickerSheet/
+// CarrierPickerSheet/NfcDiagnosticScreen/RegisterExistingTagScreen/
+// WriteNewTagScreen), so this fallback mainly exists for completeness/tests.
+export const DEFAULT_IOS_ALERT_MESSAGE = "Hold your iPhone near the LabourLink tag.";
+
+// Maps @capgo/capacitor-nfc's iOS-only `nfcSessionEnd` event (see its own
+// NfcSessionEndEvent type) to the clear, employee-facing message each
+// reason needs — Android never emits this event at all (its silent reader
+// mode has no session-lifecycle concept a JS caller needs to react to), so
+// this is purely an iOS concern. Exported and pure so it's directly
+// unit-testable without any plugin/session mocking.
+//
+// "invalidated" is CoreNFC's catch-all for every failure that isn't
+// specifically a user-tapped Cancel or a timeout — the plugin's own iOS
+// source (NfcPlugin.swift) invalidates a session with this generic reason
+// for, among other things, "more than one tag detected" and "failed to
+// connect to the tag." CoreNFC does not pass that distinguishing detail
+// through to nfcSessionEnd (only `reason` is exposed, no message text), so
+// this message is written to cover the single most common real cause
+// (multiple tags near the phone at once) while still being accurate for
+// the others.
+export function nfcSessionEndMessage(reason: NfcSessionEndEvent["reason"]): string {
+  switch (reason) {
+    case "userCancelled":
+      return "Scan cancelled.";
+    case "sessionTimeout":
+      return "Scan timed out — tap Scan again to try.";
+    case "invalidated":
+    default:
+      return "Scan didn't complete — make sure only one tag is near the phone, then try again.";
+  }
+}
+
 // Timestamped, greppable logging for reader-mode/session diagnosis (see the
 // NFC feature plan's "add timestamped logging for Reader Mode enable/
 // disable, activity pause/resume, tag detection and scan-session
@@ -213,10 +286,40 @@ function logNfc(label: string, message: string): void {
 // logcat — "HomeScreen", "RowPickerSheet", "RegisterExistingTagScreen",
 // etc.) — defaults to "session" so existing call sites that don't pass one
 // still log something identifiable.
+//
+// `iosAlertMessage` is iOS-only (shown in Apple's system scan sheet while
+// this session is open — DEFAULT_IOS_ALERT_MESSAGE's own comment) and
+// silently ignored on Android/web, same as every other iOS-only option
+// below.
+//
+// Platform split, and why it's done HERE rather than left to the plugin's
+// own per-platform defaults:
+//   - Android: startScanning() is called with EXACTLY the same options
+//     object this always sent — `invalidateAfterFirstRead: false` (an
+//     Android no-op; only iOS reads that flag) plus
+//     `androidReaderModeFlags: ANDROID_READER_MODE_FLAGS` — so Android's
+//     existing silent, continuous, no-system-UI reader-mode scanning is
+//     completely unchanged by any of the iOS work below.
+//   - iOS: `iosSessionType: "tag"` (NFCTagReaderSession, not the default
+//     NFCNDEFReaderSession) — required to read a raw hardwareId at all;
+//     the existing Ridder tags this app resolves by hardwareId carry no
+//     NDEF data (see this file's own top-of-file comment and
+//     server/migrations/034_nfc_tag_mappings.sql's tag_kind='ridder'
+//     column), and NFCNDEFReaderSession only ever detects NDEF-formatted
+//     tags — it would silently never fire for them. `tag` mode also still
+//     detects and reads NDEF tags (LabourLink's own written tags), so one
+//     session type covers both tag kinds. `invalidateAfterFirstRead: true`
+//     — every iOS session is a single Apple system-sheet presentation for
+//     exactly one tag, closed the instant a tag is read (or the sheet is
+//     cancelled/times out); iOS has no equivalent of Android's ambient,
+//     indefinitely-open reader mode (see the iOS platform bring-up
+//     report), so callers that want another scan call startScanSession
+//     again — never silently, always from a fresh explicit tap.
 export function startScanSession(
   onTag: (tag: ScannedTag) => void,
   onError?: (message: string) => void,
-  label = "session"
+  label = "session",
+  iosAlertMessage?: string
 ): () => void {
   logNfc(label, "startScanSession called");
   if (activeStop) {
@@ -226,7 +329,16 @@ export function startScanSession(
 
   let stopped = false;
   let listenerHandle: { remove: () => Promise<void> } | null = null;
+  let sessionEndListenerHandle: { remove: () => Promise<void> } | null = null;
   let lastHardwareId: string | null = null;
+  // Once a tag has actually been delivered to onTag, this session's job is
+  // done — iOS's own invalidateAfterFirstRead:true then closes the native
+  // session on its own, which (per CoreNFC's documented behavior) still
+  // fires an nfcSessionEnd event, just not for any reason a caller should
+  // ever see as an error. Without this guard, every single successful iOS
+  // scan would ALSO report a spurious "scan didn't complete" error the
+  // instant its own session cleanly closed itself.
+  let tagReceived = false;
 
   if (isNativePlatform()) {
     (async () => {
@@ -242,20 +354,76 @@ export function startScanSession(
           }
           logNfc(label, `tag detected: hardwareId=${tag.hardwareId} hasNdefData=${tag.hasNdefData}`);
           lastHardwareId = tag.hardwareId;
+          tagReceived = true;
           onTag(tag);
+          // iOS: exactly one read per session. invalidateAfterFirstRead:
+          // true (set unconditionally below for iOS) already tells the
+          // native layer to close its own session after this read, but
+          // this explicit call is the actual guarantee, not a hint —
+          // reported bug on a physical iPhone: after a successful scan,
+          // Apple's "Ready to Scan" sheet was observed staying open,
+          // i.e. the JS side must never assume the native session already
+          // tore itself down. stop() is idempotent (`stopped` guard), so
+          // this is always safe even if the native side's own
+          // self-invalidation already ran first. Never runs on Android —
+          // its ambient, continuous, many-tags-per-session reader mode
+          // (and every existing caller's own duplicate-scan handling built
+          // on top of it) is completely unaffected.
+          if (isIosNativePlatform()) {
+            stop();
+          }
+        });
+        // iOS-only in practice (Android's plugin never emits this event at
+        // all — see nfcSessionEndMessage's own comment) but harmless to
+        // register unconditionally; simplest way to guarantee it's never
+        // accidentally left un-wired for one platform.
+        sessionEndListenerHandle = await CapacitorNfc.addListener("nfcSessionEnd", (event: NfcSessionEndEvent) => {
+          if (tagReceived) {
+            logNfc(label, `nfcSessionEnd (reason=${event.reason}) after a successful read — not an error, ignoring`);
+            return;
+          }
+          if (stopped) {
+            // We tore this session down ourselves (unmount, superseded by
+            // a new session, caller-driven cleanup) — that is not a
+            // failure this caller asked to hear about.
+            logNfc(label, `nfcSessionEnd (reason=${event.reason}) after our own stop() — suppressing`);
+            return;
+          }
+          const message = nfcSessionEndMessage(event.reason);
+          logNfc(label, `nfcSessionEnd (reason=${event.reason}): ${message}`);
+          onError?.(message);
         });
         if (stopped) {
           await listenerHandle.remove();
           listenerHandle = null;
+          await sessionEndListenerHandle.remove();
+          sessionEndListenerHandle = null;
           return;
         }
-        logNfc(label, `calling native startScanning() with androidReaderModeFlags=${ANDROID_READER_MODE_FLAGS}`);
-        await CapacitorNfc.startScanning({
-          invalidateAfterFirstRead: false,
-          androidReaderModeFlags: ANDROID_READER_MODE_FLAGS,
-        });
+
+        if (isIosNativePlatform()) {
+          logNfc(label, "calling native startScanning() with iosSessionType=tag");
+          await CapacitorNfc.startScanning({
+            iosSessionType: "tag",
+            invalidateAfterFirstRead: true,
+            alertMessage: iosAlertMessage ?? DEFAULT_IOS_ALERT_MESSAGE,
+          });
+        } else {
+          logNfc(label, `calling native startScanning() with androidReaderModeFlags=${ANDROID_READER_MODE_FLAGS}`);
+          await CapacitorNfc.startScanning({
+            invalidateAfterFirstRead: false,
+            androidReaderModeFlags: ANDROID_READER_MODE_FLAGS,
+          });
+        }
         logNfc(label, "native startScanning() resolved — reader mode should now be active");
       } catch (err) {
+        // On iOS this message comes straight from the native plugin
+        // (NfcPlugin.swift) and is already specific per cause: no NFC
+        // hardware, the simulator, or — most relevant here — a missing
+        // 'TAG' reader-session-formats entitlement ("Ensure the TAG reader
+        // entitlement is enabled." / "Make sure the ... entitlement
+        // includes the 'TAG' format ..."). Forwarded verbatim rather than
+        // re-summarized so that specificity isn't lost.
         logNfc(label, `startScanning failed: ${err instanceof Error ? err.message : String(err)}`);
         onError?.(err instanceof Error ? err.message : "Could not start NFC scanning.");
       }
@@ -274,6 +442,10 @@ export function startScanSession(
         if (listenerHandle) {
           await listenerHandle.remove();
           listenerHandle = null;
+        }
+        if (sessionEndListenerHandle) {
+          await sessionEndListenerHandle.remove();
+          sessionEndListenerHandle = null;
         }
         await CapacitorNfc.stopScanning();
         logNfc(label, "native stopScanning() resolved — reader mode should now be inactive");

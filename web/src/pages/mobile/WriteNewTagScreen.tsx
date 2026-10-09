@@ -39,9 +39,22 @@ export function WriteNewTagScreen() {
   const [newUuid, setNewUuid] = useState<string | null>(null);
   const [writeError, setWriteError] = useState<string | null>(null);
   const [verifyError, setVerifyError] = useState<string | null>(null);
+  // Distinct from writeError (which is specifically writeTag()'s own
+  // failure, shown on the "confirm-overwrite" step) — this is the NFC
+  // session itself failing (cancelled/timed out/entitlement, etc.) while
+  // still waiting for the blank tag on "scan-blank", so it needs its own
+  // step-scoped display rather than leaking into confirm-overwrite's.
+  const [scanError, setScanError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [conflict, setConflict] = useState<TagMapping | null>(null);
+  // Bumped by "Try again" (scan-blank/verify) to reopen a fresh scan
+  // session without changing `step` — same convention as
+  // RegisterExistingTagScreen's identical scanGeneration. Needed because a
+  // single iOS scan session is one-shot (see lib/nfc.ts): once it ends
+  // (cancelled, timed out, or any other error), nothing on this screen
+  // otherwise starts a new one just because `step` hasn't changed.
+  const [scanGeneration, setScanGeneration] = useState(0);
 
   useEffect(() => {
     api<{ lands: RowPickerLand[] }>("/api/mobile/greenhouse-rows").then((r) => setRowLands(r.lands)).catch(() => {});
@@ -51,30 +64,40 @@ export function WriteNewTagScreen() {
 
   // Detects whatever tag is presented (step "scan-blank") — stops itself
   // once one is seen; "verify" (after a successful write) starts a fresh
-  // session the same way to capture the re-tap.
+  // session the same way to capture the re-tap. Already tap-gated on iOS
+  // by construction, same reasoning as RegisterExistingTagScreen: "scan-
+  // blank" only ever becomes active as a direct result of tapping Confirm
+  // on the target picker (onTargetConfirm), and "verify" only as a direct
+  // continuation of tapping "Write LabourLink tag" (performWrite) — both
+  // are the "Write action" itself, not an ambient/unprompted trigger.
   useEffect(() => {
     if (step !== "scan-blank" && step !== "verify") return;
-    const stop = startScanSession((tag) => {
-      if (step === "scan-blank") {
-        setDetectedTag(tag);
-        stop();
-        setStep("confirm-overwrite");
-      } else {
-        stop();
-        if (tag.labourlinkTagUuid === newUuid) {
-          submitWriteMapping();
+    const stop = startScanSession(
+      (tag) => {
+        if (step === "scan-blank") {
+          setDetectedTag(tag);
+          stop();
+          setStep("confirm-overwrite");
         } else {
-          setVerifyError(
-            tag.hardwareId === detectedTag?.hardwareId
-              ? "Verification failed — the tag doesn't show the ID that was just written. Try writing again."
-              : "A different tag was tapped. Tap the same tag that was just written to verify it."
-          );
+          stop();
+          if (tag.labourlinkTagUuid === newUuid) {
+            submitWriteMapping();
+          } else {
+            setVerifyError(
+              tag.hardwareId === detectedTag?.hardwareId
+                ? "Verification failed — the tag doesn't show the ID that was just written. Try writing again."
+                : "A different tag was tapped. Tap the same tag that was just written to verify it."
+            );
+          }
         }
-      }
-    }, undefined, "WriteNewTagScreen");
+      },
+      (message) => (step === "scan-blank" ? setScanError(message) : setVerifyError(message)),
+      "WriteNewTagScreen",
+      step === "scan-blank" ? "Hold your iPhone near the blank tag." : "Tap the same tag again to verify the write."
+    );
     return stop;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step]);
+  }, [step, scanGeneration]);
 
   function chooseType(type: TargetType) {
     setTargetType(type);
@@ -88,6 +111,7 @@ export function WriteNewTagScreen() {
     setNewUuid(null);
     setWriteError(null);
     setVerifyError(null);
+    setScanError(null);
     setStep("scan-blank");
   }
 
@@ -216,7 +240,23 @@ export function WriteNewTagScreen() {
           <h2>Tap the blank tag</h2>
           <p className="mobile-settings-device-note">Target: {targetLabel}</p>
           {nfcAvailable === false && <p className="error-text">This phone does not have NFC available.</p>}
-          <p className="mobile-settings-device-note">Hold the tag near the back of the phone…</p>
+          {scanError ? (
+            <>
+              <p className="error-text">{scanError}</p>
+              <button
+                type="button"
+                className="mobile-action-button mobile-action-primary"
+                onClick={() => {
+                  setScanError(null);
+                  setScanGeneration((g) => g + 1);
+                }}
+              >
+                Try again
+              </button>
+            </>
+          ) : (
+            <p className="mobile-settings-device-note">Hold the tag near the back of the phone…</p>
+          )}
         </section>
       )}
 
@@ -260,7 +300,21 @@ export function WriteNewTagScreen() {
         <section className="mobile-settings-device-section">
           <h2>Verify</h2>
           <p className="mobile-settings-device-note">Tap the same tag again to confirm the write.</p>
-          {verifyError && <p className="error-text">{verifyError}</p>}
+          {verifyError && (
+            <>
+              <p className="error-text">{verifyError}</p>
+              <button
+                type="button"
+                className="mobile-action-button mobile-action-primary"
+                onClick={() => {
+                  setVerifyError(null);
+                  setScanGeneration((g) => g + 1);
+                }}
+              >
+                Try again
+              </button>
+            </>
+          )}
         </section>
       )}
 

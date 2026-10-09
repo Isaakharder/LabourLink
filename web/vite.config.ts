@@ -6,6 +6,13 @@ import { defineConfig, loadEnv } from "vite";
 // lives in web/.env.android, which is committed to source control.
 const PRODUCTION_ANDROID_API_URL = "https://server-production-a4fb.up.railway.app";
 
+// Same contract as PRODUCTION_ANDROID_API_URL above, for the "ios" mode —
+// currently the same host (one shared production API serves both native
+// apps), kept as its own constant (not a reused reference) so the two
+// platforms can diverge in the future without one guard silently drifting
+// off the other's intent. Value lives in web/.env.ios, also committed.
+const PRODUCTION_IOS_API_URL = "https://server-production-a4fb.up.railway.app";
+
 // Release-build guard: `vite build --mode android` (web/package.json's
 // build:android — the only path that feeds android:aab/cap:sync, i.e. the
 // only path that produces what actually ships to Play) must never succeed
@@ -48,6 +55,42 @@ function assertProductionAndroidApiUrl(mode: string, env: Record<string, string>
   }
 }
 
+// Mirror of assertProductionAndroidApiUrl above, for `vite build --mode ios`
+// (web/package.json's build:ios — the only path that feeds cap:sync:ios,
+// i.e. the only path that produces what would ship to TestFlight/App
+// Store). Deliberately its own function rather than a shared helper
+// parameterized by mode/constant: keeping the android and ios guards
+// textually independent means an edit to one (e.g. loosening a check)
+// can never silently also loosen the other.
+function assertProductionIosApiUrl(mode: string, env: Record<string, string>): void {
+  if (mode !== "ios") return;
+  const url = env.VITE_API_URL;
+  if (!url) {
+    throw new Error(
+      "[release-guard] VITE_API_URL is missing for the 'ios' production build. Build with " +
+        "`npm run build:ios` (or `npm run cap:sync:ios`, which runs it) — never the generic " +
+        "`npm run build` — so web/.env.ios is actually loaded."
+    );
+  }
+  if (/localhost|127\.0\.0\.1/i.test(url)) {
+    throw new Error(
+      `[release-guard] VITE_API_URL ("${url}") is a local address, not the production API. ` +
+        "This is the 'ios' (App Store/TestFlight release) mode — local addresses have no equivalent " +
+        "iOS QA env file yet and must never end up in web/.env.ios."
+    );
+  }
+  if (!url.startsWith("https://")) {
+    throw new Error(`[release-guard] VITE_API_URL ("${url}") must be an https:// URL for the production iOS build.`);
+  }
+  if (url !== PRODUCTION_IOS_API_URL) {
+    throw new Error(
+      `[release-guard] VITE_API_URL ("${url}") does not match the configured LabourLink production API ` +
+        `("${PRODUCTION_IOS_API_URL}"). If the production API host genuinely changed, update ` +
+        "PRODUCTION_IOS_API_URL in vite.config.ts deliberately, in the same change as web/.env.ios."
+    );
+  }
+}
+
 // Mirror of the guard above for the *other* direction: the plain browser
 // build (`npm run build` — what web/railway.json's buildCommand actually
 // runs for the deployed web app) must NEVER have VITE_API_URL set. Vite
@@ -69,7 +112,7 @@ function assertNoBrowserApiUrlOverride(command: string, mode: string, env: Recor
         "Leave it unset here — the deployed web app must stay same-origin with the API " +
         "(see resolveApiUrl() in src/lib/api.ts) and reach it through web/serve-static.js's proxy " +
         "instead, configured via the runtime API_URL env var on the web Railway service. " +
-        "VITE_API_URL belongs only in the Android build's env files (web/.env.android*), never here."
+        "VITE_API_URL belongs only in the native build env files (web/.env.android*, web/.env.ios), never here."
     );
   }
 }
@@ -89,6 +132,7 @@ export default defineConfig(({ command, mode }) => {
   // from the same .env.<mode> file Vite itself loads for this mode.
   const env = loadEnv(mode, process.cwd(), "VITE_");
   assertProductionAndroidApiUrl(mode, env);
+  assertProductionIosApiUrl(mode, env);
   assertNoBrowserApiUrlOverride(command, mode, env);
 
   return {

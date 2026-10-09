@@ -4,6 +4,7 @@ import {
   buildLabourlinkUriRecord,
   hexId,
   LABOURLINK_URI_PREFIX,
+  nfcSessionEndMessage,
   parseLabourlinkTagUuid,
   shouldSuppressDuplicateScan,
   startScanSession,
@@ -131,6 +132,28 @@ describe("shouldSuppressDuplicateScan", () => {
 
   it("does not suppress a different hardware ID", () => {
     expect(shouldSuppressDuplicateScan("048E7BE2202290", "AABBCCDDEE")).toBe(false);
+  });
+});
+
+describe("nfcSessionEndMessage", () => {
+  it("gives a calm, specific message for a user-initiated cancel", () => {
+    expect(nfcSessionEndMessage("userCancelled")).toBe("Scan cancelled.");
+  });
+
+  it("gives a distinct, actionable message for a timeout", () => {
+    expect(nfcSessionEndMessage("sessionTimeout")).toBe("Scan timed out — tap Scan again to try.");
+  });
+
+  it("gives actionable guidance (covering the multiple-tags case) for the generic 'invalidated' reason", () => {
+    expect(nfcSessionEndMessage("invalidated")).toBe(
+      "Scan didn't complete — make sure only one tag is near the phone, then try again."
+    );
+  });
+
+  it("every reason maps to a distinct message — no two collapse to the same text", () => {
+    const reasons = ["userCancelled", "sessionTimeout", "invalidated"] as const;
+    const messages = new Set(reasons.map(nfcSessionEndMessage));
+    expect(messages.size).toBe(reasons.length);
   });
 });
 

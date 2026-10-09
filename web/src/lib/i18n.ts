@@ -88,6 +88,9 @@ const TRANSLATIONS_EN = {
   tapBinTag: "Tap the bin's tag to start working there, or choose manually below.",
   nfcTagNotRecognized: "That tag isn't registered. Choose manually below.",
   nfcStillWaiting: "Still not seeing a tag — choose manually below.",
+  // iPhone only — Android never shows this (it starts scanning silently by
+  // itself). Tapping it opens Apple's own NFC scan sheet for one tag.
+  scanButtonLabel: "Scan",
 
   // --- Active-screen row/bin scanning (Home, while working) — accepts
   // both tag types continuously on a dual-question activity like Picking
@@ -223,6 +226,7 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   tapBinTag: "Toque la etiqueta del transportador para comenzar a trabajar allí, o elija manualmente abajo.",
   nfcTagNotRecognized: "Esa etiqueta no está registrada. Elija manualmente abajo.",
   nfcStillWaiting: "Todavía no se detecta ninguna etiqueta — elija manualmente abajo.",
+  scanButtonLabel: "Escanear",
 
   readyToScanNextRow: "Listo para escanear la siguiente hilera",
   readyToScanNextBin: "Listo para escanear el siguiente bin",

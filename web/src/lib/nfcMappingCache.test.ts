@@ -19,6 +19,10 @@ function scan(overrides: Partial<ScannedTag> = {}): ScannedTag {
     hasNdefData: false,
     isWritable: null,
     maxSize: null,
+    rawId: null,
+    techTypes: [],
+    tagType: null,
+    ndefRecords: [],
     ...overrides,
   };
 }

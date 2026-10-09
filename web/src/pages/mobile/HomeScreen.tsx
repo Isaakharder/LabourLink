@@ -9,10 +9,11 @@ import { ActivityPicker, PickerActivity } from "../../components/mobile/Activity
 import { RowPickerSheet, RowPickerLand } from "../../components/mobile/RowPickerSheet";
 import { CarrierPickerSheet, PickerCarrier } from "../../components/mobile/CarrierPickerSheet";
 import { SwitchWarningDialog } from "../../components/mobile/SwitchWarningDialog";
-import { isNfcSupported, startScanSession, ScannedTag } from "../../lib/nfc";
+import { ScannedTag } from "../../lib/nfc";
 import { refreshTagMappingCache, resolveScannedTag } from "../../lib/nfcMappingCache";
 import { checkSwitchWarning, SwitchWarning } from "../../lib/nfcSwitchWarning";
 import { buildScanSwitchAnswers, classifyHomeScan, HomeScanOutcome, isHomeNfcScanActive } from "../../lib/nfcActiveScreenScan";
+import { useForegroundNfcScan } from "../../lib/useForegroundNfcScan";
 import { playErrorFeedback, playSuccessFeedback } from "../../lib/feedback";
 import { ActivityTimer, formatElapsed } from "../../components/mobile/ActivityTimer";
 import { RecentJobsCard } from "../../components/mobile/RecentJobsCard";
@@ -194,11 +195,6 @@ export function HomeScreen() {
     return () => document.removeEventListener("visibilitychange", onVisibilityChange);
   }, []);
 
-  const [homeNfcSupported, setHomeNfcSupported] = useState(false);
-  useEffect(() => {
-    isNfcSupported().then(setHomeNfcSupported);
-  }, []);
-
   // Transient inline message for a scan this screen can't act on (unknown
   // tag, a bin tag, or offline) — auto-clears rather than sitting
   // indefinitely, same convention as the picker sheets' own nfcHint.
@@ -217,18 +213,20 @@ export function HomeScreen() {
   // or a pending switchWarning dialog — any of those already own (or are
   // about to own) the native reader; lib/nfc.ts's own single-ownership
   // guard is the hard backstop, this is what keeps HomeScreen from even
-  // trying to start a second one in the first place. Active for either
+  // trying to start a second one in the first place. Eligible for either
   // question type — a dual row+carrier activity (e.g. Picking Peppers)
-  // accepts both tag types from this one continuous session.
-  const homeNfcActive =
-    homeNfcSupported &&
-    isHomeNfcScanActive({
-      foregrounded,
-      status: me?.status ?? "idle",
-      hasCompetingNfcOwner: Boolean(questionFlow || singleQuestionEdit || switchWarning),
-      hasRowQuestion: Boolean(rowQuestion),
-      hasCarrierQuestion: Boolean(carrierQuestion),
-    });
+  // accepts both tag types from this one continuous (Android) or per-tap
+  // (iOS) session. Named "eligible" rather than "active" now: whether a
+  // native session is ACTUALLY open is useForegroundNfcScan's own
+  // `scanning` (see homeNfcActive below) — on iOS this being true no longer
+  // means a session is open, only that tapping Scan would start one.
+  const homeNfcEligible = isHomeNfcScanActive({
+    foregrounded,
+    status: me?.status ?? "idle",
+    hasCompetingNfcOwner: Boolean(questionFlow || singleQuestionEdit || switchWarning),
+    hasRowQuestion: Boolean(rowQuestion),
+    hasCarrierQuestion: Boolean(carrierQuestion),
+  });
 
   // Everything the scan callback below needs, kept current on every render
   // and read only via .current — never via closure — so the callback (which
@@ -343,36 +341,30 @@ export function HomeScreen() {
     });
   }, []);
 
-  // Edge-triggered, imperative sync instead of a cleanup-returning effect:
-  // this only ever calls startScanSession/stop() when homeNfcActive's
-  // boolean value has genuinely flipped (tracked in scanSessionActiveRef),
-  // never as a side effect of an unrelated rerender, loadMe() refresh, timer
-  // tick, or the open entry temporarily reloading — none of those change
-  // scanSessionActiveRef's tracked value, so none of them touch reader mode.
-  const scanSessionActiveRef = useRef(false);
-  const stopScanRef = useRef<(() => void) | null>(null);
-  useEffect(() => {
-    if (homeNfcActive === scanSessionActiveRef.current) return;
-    scanSessionActiveRef.current = homeNfcActive;
-    if (homeNfcActive) {
-      stopScanRef.current = startScanSession(handleHomeScannedTag, undefined, "HomeScreen");
-    } else {
-      stopScanRef.current?.();
-      stopScanRef.current = null;
-    }
-  }, [homeNfcActive, handleHomeScannedTag]);
-
-  // Unmount-only backstop — the edge-triggered effect above already stops
-  // the session the moment homeNfcActive goes false, but this guarantees
-  // the native reader is released if HomeScreen itself ever unmounts while
-  // still active.
-  useEffect(() => {
-    return () => {
-      stopScanRef.current?.();
-      stopScanRef.current = null;
-      scanSessionActiveRef.current = false;
-    };
-  }, []);
+  // useForegroundNfcScan owns exactly the edge-triggered start/stop
+  // bookkeeping this used to hand-roll (only touches the native reader when
+  // `active` genuinely flips, and always releases it on unmount) — see its
+  // own header comment. On Android/web this is a silent, continuous session
+  // exactly as it always was; on iOS it never auto-starts (homeNfcAwaitingTap
+  // below drives the Scan button instead), and each scan is a single tap ->
+  // one Apple system-sheet presentation -> one tag, matching the plugin's
+  // own invalidateAfterFirstRead:true.
+  const {
+    scanning: homeNfcActive,
+    awaitingTap: homeNfcAwaitingTap,
+    startScan: startHomeNfcScan,
+  } = useForegroundNfcScan({
+    active: homeNfcEligible,
+    onTag: handleHomeScannedTag,
+    onError: (message) => setHomeNfcMessage(message),
+    label: "HomeScreen",
+    iosAlertMessage:
+      rowQuestion && carrierQuestion
+        ? "Hold your iPhone near the row or bin tag."
+        : carrierQuestion
+          ? "Hold your iPhone near the bin tag."
+          : "Hold your iPhone near the row tag.",
+  });
 
   function openPicker() {
     loadActivities();
@@ -847,24 +839,44 @@ export function HomeScreen() {
           })}
         </p>
       )}
-      {/* Small, unobtrusive status — deliberately not a button, matching
-          the NFC feature plan's "should not look like a button." Shown
-          only while the foreground scan session is actually running (NFC
-          supported, working a row- and/or carrier-based activity, this
-          screen foregrounded, nothing else owns the reader). Wording
-          reflects which tag types this activity actually accepts — both on
-          a dual row+carrier activity like Picking Peppers, just one on a
-          single-question activity. homeNfcMessage (unknown/wrong-type/
-          offline/already-current/success) briefly replaces it, same
-          auto-clearing convention as the picker sheets' own nfcHint. */}
-      {homeNfcActive && (
-        <p className="mobile-timer-static">
-          {homeNfcMessage ??
-            t(
-              language,
-              rowQuestion && carrierQuestion ? "readyToScanRowOrBin" : carrierQuestion ? "readyToScanNextBin" : "readyToScanNextRow"
-            )}
-        </p>
+      {/* Android/web: small, unobtrusive status — deliberately not a
+          button, matching the NFC feature plan's "should not look like a
+          button." Shown only while the foreground scan session is actually
+          running (NFC supported, working a row- and/or carrier-based
+          activity, this screen foregrounded, nothing else owns the
+          reader). Wording reflects which tag types this activity actually
+          accepts — both on a dual row+carrier activity like Picking
+          Peppers, just one on a single-question activity. homeNfcMessage
+          (unknown/wrong-type/offline/already-current/success) briefly
+          replaces it, same auto-clearing convention as the picker sheets'
+          own nfcHint.
+
+          iOS: never scans ambiently (see useForegroundNfcScan) — this same
+          area instead shows an explicit Scan button (homeNfcAwaitingTap)
+          whenever a scan would otherwise be eligible, and briefly shows
+          homeNfcMessage after a tap-triggered attempt settles, exactly the
+          same as Android's message handling. */}
+      {(homeNfcActive || homeNfcAwaitingTap) && (
+        <div className="mobile-timer-static">
+          {homeNfcMessage && <p>{homeNfcMessage}</p>}
+          {!homeNfcMessage && homeNfcActive && (
+            <p>
+              {t(
+                language,
+                rowQuestion && carrierQuestion
+                  ? "readyToScanRowOrBin"
+                  : carrierQuestion
+                    ? "readyToScanNextBin"
+                    : "readyToScanNextRow"
+              )}
+            </p>
+          )}
+          {!homeNfcMessage && homeNfcAwaitingTap && (
+            <button type="button" className="mobile-action-button mobile-action-primary" onClick={startHomeNfcScan}>
+              {t(language, "scanButtonLabel")}
+            </button>
+          )}
+        </div>
       )}
 
       {/* 5. Recent jobs */}

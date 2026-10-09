@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Required for lib/nfc.ts's startScanSession to use
+	     iosSessionType: "tag" (NFCTagReaderSession) at all — without this
+	     entitlement (or with a format missing from the list below) that
+	     session type fails to start with a NO_NFC error, even on a device
+	     that otherwise has working NFC hardware. TAG is required for raw
+	     UID reads (the existing Ridder tags — see nfc.ts's own top-of-file
+	     comment and server/migrations/034_nfc_tag_mappings.sql's
+	     tag_kind='ridder' column: they carry no NDEF data, so only a TAG
+	     session can read them at all). NDEF is included alongside it so the
+	     same session also still reads LabourLink's own NDEF-written tags
+	     (tag_kind='labourlink') without needing a second, separate session
+	     type/entitlement combination.
+
+	     THIS ENTITLEMENT MUST ALSO BE ENABLED FOR THE APP ID ITSELF in the
+	     Apple Developer portal ("Near Field Communication Tag Reading"
+	     capability) before it will take effect on a real device — Xcode's
+	     own entitlements file alone is not sufficient; see the iOS NFC
+	     readiness report for the exact steps and why provisioning profiles
+	     must be regenerated after enabling it. -->
+	<key>com.apple.developer.nfc.readersession.formats</key>
+	<array>
+		<string>NDEF</string>
+		<string>TAG</string>
+	</array>
+</dict>
+</plist>

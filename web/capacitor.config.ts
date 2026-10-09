@@ -30,6 +30,21 @@ const config: CapacitorConfig = {
   webDir: "dist",
   server: {
     androidScheme: "https",
+    // NOT overridden to "https" the way androidScheme is above — confirmed
+    // by reading @capacitor/ios's own CAPInstanceDescriptor.swift
+    // (node_modules/@capacitor/ios/Capacitor/Capacitor/CAPInstanceDescriptor
+    // .swift): it only accepts a custom server.iosScheme when
+    // `WKWebView.handlesURLScheme(scheme) == false`. "https" is a scheme
+    // WKWebView natively handles, so that check always fails for it and the
+    // native layer silently falls back to Capacitor's built-in default,
+    // "capacitor" (i.e. the real WKWebView origin is always
+    // capacitor://localhost, never https://localhost). An earlier version
+    // of this config set iosScheme: "https" on the (reasonable-looking, but
+    // wrong) assumption that it worked the same way androidScheme does —
+    // confirmed dead on a real physical iPhone: Xcode showed the live
+    // WebView origin as capacitor://localhost regardless. The fix is on the
+    // server side instead — capacitor://localhost is allow-listed directly
+    // in CORS_ORIGIN (see server/.env.example) — not here.
   },
   ...(isQaBuild ? { android: { allowMixedContent: true } } : {}),
 };

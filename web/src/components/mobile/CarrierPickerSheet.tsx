@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Language, t } from "../../lib/i18n";
-import { isNfcSupported, ScannedTag, startScanSession } from "../../lib/nfc";
+import { ScannedTag } from "../../lib/nfc";
 import { resolveScannedTag, ResolvedTagTarget } from "../../lib/nfcMappingCache";
+import { useForegroundNfcScan } from "../../lib/useForegroundNfcScan";
 
 export interface PickerCarrier {
   id: string;
@@ -58,7 +59,6 @@ export function CarrierPickerSheet({
 }: CarrierPickerSheetProps) {
   const [search, setSearch] = useState("");
   const [selectedCarrierId, setSelectedCarrierId] = useState<string | null>(initialSelectedCarrierId ?? null);
-  const [nfcActive, setNfcActive] = useState(false);
   const [nfcHint, setNfcHint] = useState<string | null>(null);
 
   // Same reasoning as RowPickerSheet's onNfcScanRef.
@@ -75,47 +75,40 @@ export function CarrierPickerSheet({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [busy, onCancel]);
 
-  // Same NFC scan lifecycle as RowPickerSheet: started on mount, stopped on
+  // Same NFC scan lifecycle as RowPickerSheet: auto-started on mount on
+  // Android/web, tap-gated on iOS (see useForegroundNfcScan), stopped on
   // unmount, and a resolved tag only *selects* a carrier (same as a manual
   // tap) — never auto-confirms. See RowPickerSheet.tsx's matching effect for
   // the full rationale.
+  const { scanning: nfcActive, awaitingTap: nfcAwaitingTap, startScan: startNfcScan } = useForegroundNfcScan({
+    active: true,
+    onTag: (tag: ScannedTag) => {
+      const resolved = resolveScannedTag(tag);
+      if (!resolved || resolved.targetType !== "carrier") {
+        setNfcHint(t(language, "nfcTagNotRecognized"));
+        return;
+      }
+      setNfcHint(null);
+
+      if (onNfcScanRef.current) {
+        onNfcScanRef.current(resolved);
+        return;
+      }
+
+      setSelectedCarrierId(resolved.targetId);
+    },
+    onError: (message) => setNfcHint(message),
+    label: "CarrierPickerSheet",
+    iosAlertMessage: t(language, "tapBinTag"),
+  });
+
+  // Android/web only in practice — see RowPickerSheet.tsx's identical timer
+  // for the full rationale.
   useEffect(() => {
-    let cancelled = false;
-    let stopScan: (() => void) | null = null;
-    let waitingTimer: ReturnType<typeof setTimeout> | null = null;
-
-    (async () => {
-      const supported = await isNfcSupported();
-      if (cancelled || !supported) return;
-      setNfcActive(true);
-      waitingTimer = setTimeout(() => {
-        if (!cancelled) setNfcHint(t(language, "nfcStillWaiting"));
-      }, 15000);
-
-      stopScan = startScanSession((tag: ScannedTag) => {
-        const resolved = resolveScannedTag(tag);
-        if (!resolved || resolved.targetType !== "carrier") {
-          setNfcHint(t(language, "nfcTagNotRecognized"));
-          return;
-        }
-        setNfcHint(null);
-
-        if (onNfcScanRef.current) {
-          onNfcScanRef.current(resolved);
-          return;
-        }
-
-        setSelectedCarrierId(resolved.targetId);
-      }, undefined, "CarrierPickerSheet");
-    })();
-
-    return () => {
-      cancelled = true;
-      if (waitingTimer) clearTimeout(waitingTimer);
-      stopScan?.();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!nfcActive) return;
+    const timer = setTimeout(() => setNfcHint((h) => h ?? t(language, "nfcStillWaiting")), 15000);
+    return () => clearTimeout(timer);
+  }, [nfcActive, language]);
 
   const filtered = useMemo(() => {
     if (!carriers) return null;
@@ -153,6 +146,14 @@ export function CarrierPickerSheet({
         {error && <p className="error-text">{error}</p>}
         {nfcActive && (
           <p className="mobile-row-picker-subtitle">{busy ? t(language, "starting") : nfcHint ?? t(language, "tapBinTag")}</p>
+        )}
+        {nfcAwaitingTap && (
+          <div className="mobile-row-picker-subtitle">
+            {nfcHint && <p className="mobile-row-picker-subtitle">{nfcHint}</p>}
+            <button type="button" className="mobile-action-button mobile-action-primary" disabled={busy} onClick={startNfcScan}>
+              {t(language, "scanButtonLabel")}
+            </button>
+          </div>
         )}
 
         {!carriers ? (

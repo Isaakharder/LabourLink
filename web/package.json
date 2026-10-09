@@ -25,13 +25,17 @@
     "android:apk:qa-emulator": "npm run cap:sync:qa-emulator && cd android && ./gradlew assembleDebug",
     "build:android-qa-phone": "tsc -b && vite build --mode android-qa-phone",
     "cap:sync:qa-phone": "npm run build:android-qa-phone && cross-env LABOURLINK_QA_BUILD=true npx cap sync android",
-    "android:apk:qa-phone": "npm run cap:sync:qa-phone && cd android && ./gradlew assembleDebug"
+    "android:apk:qa-phone": "npm run cap:sync:qa-phone && cd android && ./gradlew assembleDebug",
+    "build:ios": "tsc -b && vite build --mode ios",
+    "cap:sync:ios": "npm run build:ios && npx cap sync ios",
+    "ios:open": "npx cap open ios"
   },
   "dependencies": {
     "@capacitor-community/sqlite": "^8.1.1",
     "@capacitor/android": "^8.5.0",
     "@capacitor/app": "^8.1.1",
     "@capacitor/core": "^8.5.0",
+    "@capacitor/ios": "^8.5.2",
     "@capacitor/network": "^8.0.1",
     "@capacitor/push-notifications": "^8.1.2",
     "@capgo/capacitor-nfc": "^8.2.3",
