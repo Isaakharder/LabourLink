@@ -57,7 +57,7 @@
 <main>
   <header>
     <h1>LabourLink Privacy Policy</h1>
-    <p class="meta">Effective date: October 7, 2026 · Last updated: October 7, 2026</p>
+    <p class="meta">Effective date: October 7, 2026 · Last updated: October 9, 2026</p>
   </header>
 
   <p>
@@ -151,7 +151,7 @@
 
   <h3>Notification information</h3>
   <ul>
-    <li>If notifications are enabled, a push notification token (Android) or web push subscription (web browsers). This lets us tell the device that a new message is waiting.</li>
+    <li>If notifications are enabled, a push notification token (Android or iPhone) or web push subscription (web browsers). This lets us tell the device that a new message is waiting.</li>
   </ul>
 
   <h3>Sign-in and password reset</h3>
@@ -162,8 +162,8 @@
 
   <h2 id="device">3. Device permissions and features</h2>
   <ul>
-    <li><strong>NFC.</strong> The app uses NFC only while a work or administration screen that needs it is open. It reads or writes tags attached to greenhouse rows and carriers so the right row or carrier can be selected. Only the tag's identifier is used. NFC is not used to collect information about you, and the app works without NFC through manual selection.</li>
-    <li><strong>Notifications.</strong> On Android 13 and later, the app asks for permission to show notifications. Notifications only say that a new message is waiting; the message itself is shown inside the app. You can turn notifications off at any time in your device settings.</li>
+    <li><strong>NFC.</strong> The app uses NFC only while a work or administration screen that needs it is open. It reads or writes tags attached to greenhouse rows and carriers so the right row or carrier can be selected. On iPhone, a scan only starts when you tap Scan. Only the tag's identifier is used. NFC is not used to collect information about you, and the app works without NFC through manual selection.</li>
+    <li><strong>Notifications.</strong> On Android 13 and later, and on iPhone, the app asks for permission to show notifications. Notifications only say that a new message is waiting; the message itself is shown inside the app. You can turn notifications off at any time in your device settings.</li>
     <li><strong>Vibration.</strong> Used for short confirmation feedback, for example after a tag is scanned.</li>
     <li><strong>Internet and network status.</strong> Used to send records to the LabourLink server and to know when the device is offline.</li>
   </ul>
@@ -179,7 +179,8 @@
   <p>This information is sent only to the LabourLink server. Where it is kept depends on how you use LabourLink:</p>
   <ul>
     <li><strong>Android app.</strong> The information is kept in the app's private storage on the phone. The app is set so that this storage is excluded from Android device backups and device-to-device transfers. Uninstalling the app removes it from the phone.</li>
-    <li><strong>Web browser (including a LabourLink shortcut or icon added to a home screen).</strong> The information is kept in that browser's storage for the LabourLink website. Uninstalling the Android app does not affect it, and removing a home-screen shortcut or icon may not remove it either. You can remove it by clearing the browser's site data for LabourLink. Signing in to the web app also stores a session cookie in the browser.</li>
+    <li><strong>iPhone app.</strong> The information is kept in the app's private storage on the iPhone. The app excludes this storage from iCloud and computer backups. Deleting the app removes it from the iPhone.</li>
+    <li><strong>Web browser (including a LabourLink shortcut or icon added to a home screen).</strong> The information is kept in that browser's storage for the LabourLink website. Uninstalling the Android or iPhone app does not affect it, and removing a home-screen shortcut or icon may not remove it either. You can remove it by clearing the browser's site data for LabourLink. Signing in to the web app also stores a session cookie in the browser.</li>
   </ul>
   <p>Records that have already been sent to the server are not affected by uninstalling the app or clearing browser data.</p>
 
@@ -215,6 +216,7 @@
         <tr><td>Supabase</td><td>Database and file storage</td><td>All LabourLink records described in this policy, and profile photos</td></tr>
         <tr><td>Railway</td><td>Application hosting</td><td>Information passing through the LabourLink web and server applications, and server logs</td></tr>
         <tr><td>Google Firebase Cloud Messaging</td><td>Android push notifications</td><td>Push notification token and the generic notification text</td></tr>
+        <tr><td>Apple Push Notification service</td><td>iPhone push notifications</td><td>Push notification token and the generic notification text</td></tr>
         <tr><td>Web push services provided by your browser vendor</td><td>Browser notifications</td><td>Web push subscription and the generic notification text</td></tr>
         <tr><td>Resend</td><td>Sending PIN-reset emails</td><td>Email address, first name and the reset link</td></tr>
       </tbody>
@@ -241,7 +243,7 @@
     <li><strong>Phones.</strong> Unpairing or deactivating a phone does not delete the phone's record or the time events it already sent.</li>
     <li><strong>Profile photos.</strong> An administrator can remove a profile photo, which deletes the photo file from storage. Uploading a new photo deletes the previous one.</li>
     <li><strong>Short-lived codes and links.</strong> Pairing codes stop working after 10 minutes, PIN-reset links after 30 minutes, and web sign-in sessions after 12 hours.</li>
-    <li><strong>Information on your device</strong> is removed from an Android phone when the LabourLink app is uninstalled. Information stored by a web browser stays until that browser's site data is cleared (see <a href="#on-device">section 4</a>). Records already sent to the server are not affected either way.</li>
+    <li><strong>Information on your device</strong> is removed from an Android phone or iPhone when the LabourLink app is uninstalled. Information stored by a web browser stays until that browser's site data is cleared (see <a href="#on-device">section 4</a>). Records already sent to the server are not affected either way.</li>
     <li><strong>Service providers</strong> may keep backup copies and system logs for periods set by their own practices.</li>
   </ul>
 
