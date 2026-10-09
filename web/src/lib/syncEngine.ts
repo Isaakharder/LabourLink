@@ -56,6 +56,19 @@ function nextBackoffMs(): number {
   return Math.round(exp * spread);
 }
 
+// Statuses that mean the server reached a final answer for an event (it
+// leaves the pending queue). sequence_gap / retryable_failure leave it
+// pending for a later attempt.
+const PROGRESS_STATUSES = new Set(["accepted", "duplicate", "permanent_conflict"]);
+
+// Pure: did this round move the queue forward at all? When it didn't, an
+// immediate retry would send the identical batch and get the identical
+// answer — the cause of a physical iPhone hammering the demo API ~5 times a
+// second with a sequence_gap it could never clear on its own.
+export function syncRoundMadeProgress(results: { status: string }[]): boolean {
+  return results.some((r) => PROGRESS_STATUSES.has(r.status));
+}
+
 interface SyncEventWire {
   clientEventId: string;
   deviceSeq: number;
@@ -173,7 +186,10 @@ async function runSync(): Promise<void> {
     if (typeof response.deviceLastProcessedSeq === "number") {
       await bounded("setServerLastProcessedSeq", store.setServerLastProcessedSeq(deviceId, response.deviceLastProcessedSeq));
     }
-    consecutiveFailures = 0;
+    const progressed = syncRoundMadeProgress(response.results);
+    // A round that only came back sequence_gap/retryable_failure counts as a
+    // failure for backoff (and for hasSyncProblem's "Sync problem" state).
+    consecutiveFailures = progressed ? 0 : Math.min(consecutiveFailures + 1, 10);
     await bounded("setSyncMeta", store.setSyncMeta(deviceId, { lastSuccessfulSyncAt: attemptedAt, lastAttemptedSyncAt: attemptedAt, lastError: null }));
     notifySettled();
 
@@ -183,7 +199,7 @@ async function runSync(): Promise<void> {
     // same batch) — keep draining without waiting for the next external
     // trigger.
     const remaining = await bounded("getPendingCount", store.getPendingCount(deviceId));
-    if (remaining > 0) scheduleRetry(0);
+    if (remaining > 0) scheduleRetry(progressed ? 0 : nextBackoffMs());
   } catch (err) {
     consecutiveFailures = Math.min(consecutiveFailures + 1, 10);
     if (!isServerUnreachableError(err)) {
