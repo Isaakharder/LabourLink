@@ -407,6 +407,18 @@ input {
   gap: 0.75rem;
 }
 
+/* The pairing screen renders before (outside) MobileLayout, so it doesn't get
+   .mobile-content's safe-area padding — without this its "LabourLink" title
+   sits under the iPhone status bar / Dynamic Island. "safe center" falls back
+   to top alignment when the access-code form makes it taller than the screen,
+   so the top is never pushed off-screen. env() is 0 where there's no inset. */
+.pairing-screen {
+  box-sizing: border-box;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  justify-content: safe center;
+}
+
 /* Settings (and its NFC sub-screens — RegisterExistingTagScreen,
    WriteNewTagScreen, NfcDiagnosticScreen — which reuse this same class)
    used to share .pairing-screen/.mobile-home's centered, height:100% rule
