@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { generateDisplayKey } from "../lib/displayToken";
 import { calendarDateInAppTimezone, inclusiveDayCount } from "../lib/timezone";
 import { isMapDatePreset, isReportWeek, MapDatePreset, resolveMapPreset, resolveReportingPeriod } from "../lib/displayPeriods";
+import { DEFAULT_AT_TARGET_COLOR, DEFAULT_BELOW_TARGET_COLOR, normalizeHexColor } from "../lib/displaySlideColors";
 import { MAX_DATE_RANGE_DAYS } from "./greenhouseLive";
 
 const router = Router();
@@ -251,12 +252,14 @@ async function loadSlidesConfig(displayId: string) {
     `select a.id, a.name, a.speed_unit, a.density_source, a.normal_speed,
             coalesce(s.send_to_tv, false) as send_to_tv, s.target_override,
             coalesce(s.minimum_activity_hours, 0) as minimum_activity_hours,
-            s.top_n, coalesce(s.slide_seconds, 15) as slide_seconds
+            s.top_n, coalesce(s.slide_seconds, 15) as slide_seconds,
+            coalesce(s.at_target_color, $2) as at_target_color,
+            coalesce(s.below_target_color, $3) as below_target_color
      from activities a
      left join greenhouse_display_activity_slides s on s.activity_id = a.id and s.display_id = $1
      where a.is_active = true
      order by a.sort_order, lower(a.name)`,
-    [displayId]
+    [displayId, DEFAULT_AT_TARGET_COLOR, DEFAULT_BELOW_TARGET_COLOR]
   );
   const today = calendarDateInAppTimezone(new Date());
   return {
@@ -275,6 +278,8 @@ async function loadSlidesConfig(displayId: string) {
       minimumActivityHours: Number(r.minimum_activity_hours),
       topN: r.top_n,
       slideSeconds: r.slide_seconds,
+      atTargetColor: r.at_target_color,
+      belowTargetColor: r.below_target_color,
     })),
   };
 }
@@ -299,6 +304,8 @@ interface SlideSettingInput {
   minimumActivityHours?: unknown;
   topN?: unknown;
   slideSeconds?: unknown;
+  atTargetColor?: unknown;
+  belowTargetColor?: unknown;
 }
 
 function isFiniteNumber(v: unknown): v is number {
@@ -336,6 +343,8 @@ router.put(
       minimumActivityHours: number;
       topN: number | null;
       slideSeconds: number;
+      atTargetColor: string;
+      belowTargetColor: string;
     }[] = [];
     for (const a of activities) {
       if (typeof a.activityId !== "string" || !UUID_RE.test(a.activityId)) return res.status(400).json({ error: "Invalid activityId" });
@@ -352,8 +361,17 @@ router.put(
       if (!isWholeInRange(a.slideSeconds, 5, MAX_SLIDE_SECONDS)) {
         return res.status(400).json({ error: `Slide duration must be 5–${MAX_SLIDE_SECONDS} seconds` });
       }
+      // Colours are optional in the request (older clients): absent means
+      // the defaults. Present but not a hex colour is rejected.
+      const atTargetColor = a.atTargetColor == null ? DEFAULT_AT_TARGET_COLOR : normalizeHexColor(a.atTargetColor);
+      const belowTargetColor = a.belowTargetColor == null ? DEFAULT_BELOW_TARGET_COLOR : normalizeHexColor(a.belowTargetColor);
+      if (!atTargetColor || !belowTargetColor) {
+        return res.status(400).json({ error: "Bar colours must be hex colours like #15803d" });
+      }
       settings.push({
         activityId: a.activityId,
+        atTargetColor,
+        belowTargetColor,
         sendToTv: a.sendToTv,
         targetOverride: (a.targetOverride as number | null | undefined) ?? null,
         minimumActivityHours: a.minimumActivityHours,
@@ -388,14 +406,16 @@ router.put(
         await client.query(
           `insert into greenhouse_display_activity_slides
              (display_id, activity_id, send_to_tv, target_override, minimum_activity_hours, top_n, slide_seconds,
-              updated_by_employee_id, updated_at)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, now())
+              updated_by_employee_id, updated_at, at_target_color, below_target_color)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9, $10)
            on conflict (display_id, activity_id) do update set
              send_to_tv = excluded.send_to_tv, target_override = excluded.target_override,
              minimum_activity_hours = excluded.minimum_activity_hours, top_n = excluded.top_n,
              slide_seconds = excluded.slide_seconds, updated_by_employee_id = excluded.updated_by_employee_id,
-             updated_at = now()`,
-          [id, x.activityId, x.sendToTv, x.targetOverride, x.minimumActivityHours, x.topN, x.slideSeconds, req.employee!.id]
+             updated_at = now(), at_target_color = excluded.at_target_color,
+             below_target_color = excluded.below_target_color`,
+          [id, x.activityId, x.sendToTv, x.targetOverride, x.minimumActivityHours, x.topN, x.slideSeconds, req.employee!.id,
+           x.atTargetColor, x.belowTargetColor]
         );
       }
       await client.query("commit");

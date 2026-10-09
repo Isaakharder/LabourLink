@@ -5,7 +5,7 @@ import { TvRankingSlide } from "../../components/greenhouseLive/TvRankingSlide";
 import { api } from "../../lib/api";
 import { CanvasTransform, computeFitTransformToPhases } from "../../lib/canvasTransform";
 import { buildSlideSequence, formatAge, indexAfterUpdate, isStale, SlideItem } from "../../lib/displaySlideshow";
-import { DisplaySlidesResponse, GreenhouseDisplayStateResponse } from "../../lib/greenhouseLiveTypes";
+import { ActivitySlide, DisplaySlidesResponse, GreenhouseDisplayStateResponse } from "../../lib/greenhouseLiveTypes";
 import { formatDateLong, formatTimeInAppTimezone } from "../../lib/timezone";
 
 interface GreenhouseDisplayPageProps {
@@ -156,11 +156,30 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
           {onActivity ? (
             <>
               <p className="greenhouse-tv-activity">{current.slide.activityName}</p>
-              <p className="greenhouse-tv-daterange">
-                {/* No unit when nothing is measured for this activity. */}
-                {current.slide.reason === "no_density" || !current.slide.speedUnit ? "" : `${current.slide.speedUnit} · `}
-                {periodLabel(slidesData)}
+              {/* Productive TV-style meta line: Date · Top · Target · Min hours. */}
+              <p className="greenhouse-tv-daterange tv-header-meta">
+                <span>
+                  <b>Date:</b> {periodLabel(slidesData)}
+                </span>
+                {current.slide.status === "ok" && (
+                  <>
+                    <span>
+                      <b>Top:</b> {current.slide.topN ?? "All"}
+                    </span>
+                    {current.slide.target != null && (
+                      <span>
+                        <b>Target:</b> {Math.round(current.slide.target)} {current.slide.speedUnit ?? ""}
+                      </span>
+                    )}
+                    <span>
+                      <b>Min hours:</b> {current.slide.minimumActivityHours} h
+                    </span>
+                  </>
+                )}
               </p>
+              {current.slide.status === "ok" && slideFootnotes(current.slide) && (
+                <p className="tv-header-footnotes">{slideFootnotes(current.slide)}</p>
+              )}
             </>
           ) : (
             data && (
@@ -250,4 +269,13 @@ function periodLabel(slides: DisplaySlidesResponse | null): string {
   const range = dateStart === dateEnd ? formatDateLong(dateStart) : `${formatDateLong(dateStart)} – ${formatDateLong(dateEnd)}`;
   if (week === "last_week") return `Last week, ${range}`;
   return `This week, ${range}${includeToday ? " (including today)" : ""}`;
+}
+
+// Who isn't on the chart, and why — kept to one compact header line so the
+// chart gets the screen.
+function slideFootnotes(slide: ActivitySlide): string {
+  const notes: string[] = [];
+  if (slide.belowMinimumHours > 0) notes.push(`${slide.belowMinimumHours} under the ${slide.minimumActivityHours} h minimum not shown`);
+  if (slide.employeesWithoutSpeed > 0) notes.push(`${slide.employeesWithoutSpeed} without a calculable speed yet`);
+  return notes.join(" · ");
 }

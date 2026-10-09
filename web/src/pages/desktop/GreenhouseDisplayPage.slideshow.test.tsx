@@ -38,6 +38,8 @@ function activitySlide(over: Partial<ActivitySlide> = {}): ActivitySlide {
     minimumActivityHours: 0.5,
     topN: null,
     slideSeconds: 15,
+    atTargetColor: "#15803d",
+    belowTargetColor: "#dc2626",
     status: "ok",
     notice: null,
     employees: [
@@ -69,6 +71,9 @@ let slidesReply: () => Response | Promise<Response>;
 let mapReply: () => Response | Promise<Response>;
 
 beforeEach(() => {
+  // jsdom has no layout: give the bar chart a 1920×1080-like area.
+  vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(1872);
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(950);
   vi.useFakeTimers({ shouldAdvanceTime: false });
   vi.setSystemTime(new Date("2026-10-12T14:00:00Z"));
   slidesReply = () => json(200, slidesResponse([]));
@@ -83,6 +88,7 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 async function flush() {
@@ -116,11 +122,14 @@ describe("TV slideshow", () => {
     expect(screen.getByText("Currently working")).toBeInTheDocument();
     await advance(20_000);
     expect(screen.getByText("Winding & Pruning")).toBeInTheDocument();
-    expect(screen.getByText(/stems\/hour · This week, .*\(including today\)/)).toBeInTheDocument();
+    expect(screen.getByText("Stems per hour")).toBeInTheDocument();
+    expect(screen.getByText("Date:").parentElement).toHaveTextContent(/This week, .*\(including today\)/);
     expect(screen.getByText("Ana A.")).toBeInTheDocument();
-    expect(screen.getByText("812")).toBeInTheDocument();
+    expect(screen.getByText("812 stems/hour")).toBeInTheDocument();
     expect(screen.getByText(/1 under the 0.5 h minimum not shown/)).toBeInTheDocument();
-    expect(screen.getByText(/Target 500 stems\/hour/)).toBeInTheDocument();
+    expect(screen.getByText("Target:").parentElement).toHaveTextContent("Target: 500 stems/hour");
+    expect(screen.getByText("Top:").parentElement).toHaveTextContent("Top: All");
+    expect(screen.getByText("Min hours:").parentElement).toHaveTextContent("Min hours: 0.5 h");
     await advance(15_000);
     expect(screen.queryByText("Ana A.")).not.toBeInTheDocument();
     expect(screen.getByText("Currently working")).toBeInTheDocument();

@@ -87,6 +87,10 @@ export type SlideStatus = "ok" | "no_speed" | "unavailable";
 export type NoSpeedReason = "no_density" | "not_calculable" | "below_minimum" | null;
 
 export interface RankedEmployee {
+  // Full name as shown on the ranking slide's bar ("First Last"), per the
+  // Productive TV-style chart. firstName/lastInitial are kept for clients
+  // built before displayName existed.
+  displayName: string;
   firstName: string;
   lastInitial: string;
   speed: number;
@@ -102,6 +106,9 @@ export interface ActivitySlide {
   minimumActivityHours: number;
   topN: number | null;
   slideSeconds: number;
+  // Bar colours (060_display_slide_colours.sql): at/above vs below target.
+  atTargetColor: string;
+  belowTargetColor: string;
   status: SlideStatus;
   reason: NoSpeedReason;
   notice: string | null;
@@ -154,7 +161,8 @@ export async function buildDisplaySlides(display: DisplayReportSettings, today: 
 
   const { rows: enabled } = await pool.query(
     `select a.id, a.name, a.speed_unit, a.density_source, a.normal_speed,
-            s.target_override, s.minimum_activity_hours, s.top_n, s.slide_seconds
+            s.target_override, s.minimum_activity_hours, s.top_n, s.slide_seconds,
+            s.at_target_color, s.below_target_color
      from greenhouse_display_activity_slides s
      join activities a on a.id = s.activity_id and a.is_active = true
      where s.display_id = $1 and s.send_to_tv = true
@@ -180,6 +188,8 @@ export async function buildDisplaySlides(display: DisplayReportSettings, today: 
       minimumActivityHours,
       topN: a.top_n,
       slideSeconds: a.slide_seconds,
+      atTargetColor: a.at_target_color,
+      belowTargetColor: a.below_target_color,
       status: "ok",
       reason: null,
       notice: null,
@@ -209,6 +219,7 @@ export async function buildDisplaySlides(display: DisplayReportSettings, today: 
       const shown = slide.topN ? eligible.slice(0, slide.topN) : eligible;
       const names = await employeeNames(shown.map((r) => r.employeeId));
       slide.employees = shown.map((r) => ({
+        displayName: names.get(r.employeeId)?.displayName ?? "",
         firstName: names.get(r.employeeId)?.firstName ?? "",
         lastInitial: names.get(r.employeeId)?.lastInitial ?? "",
         speed: r.speed,
@@ -233,11 +244,19 @@ export async function buildDisplaySlides(display: DisplayReportSettings, today: 
   return base;
 }
 
-// TV privacy: first name and last initial, the same redaction the map uses.
-async function employeeNames(ids: string[]): Promise<Map<string, { firstName: string; lastInitial: string }>> {
+// Names for the ranking bars. The map keeps its first-name-and-initial
+// redaction; ranking slides show the full display name, like Productive TV.
+async function employeeNames(ids: string[]): Promise<Map<string, { displayName: string; firstName: string; lastInitial: string }>> {
   if (ids.length === 0) return new Map();
   const { rows } = await pool.query(`select id, first_name, last_name from employees where id = any($1::uuid[])`, [ids]);
   return new Map(
-    rows.map((r) => [r.id, { firstName: r.first_name, lastInitial: r.last_name ? `${String(r.last_name).charAt(0)}.` : "" }])
+    rows.map((r) => [
+      r.id,
+      {
+        displayName: [r.first_name, r.last_name].filter(Boolean).join(" "),
+        firstName: r.first_name,
+        lastInitial: r.last_name ? `${String(r.last_name).charAt(0)}.` : "",
+      },
+    ])
   );
 }

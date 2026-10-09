@@ -167,6 +167,9 @@ export type SlideStatus = "ok" | "no_speed" | "unavailable";
 export type NoSpeedReason = "no_density" | "not_calculable" | "below_minimum" | null;
 
 export interface RankedEmployee {
+  // Full name for the ranking bar (server >= 060); older servers send only
+  // firstName/lastInitial.
+  displayName?: string;
   firstName: string;
   lastInitial: string;
   speed: number;
@@ -182,6 +185,9 @@ export interface ActivitySlide {
   minimumActivityHours: number;
   topN: number | null;
   slideSeconds: number;
+  // Bar colours (server/migrations/060_display_slide_colours.sql).
+  atTargetColor: string;
+  belowTargetColor: string;
   status: SlideStatus;
   reason?: NoSpeedReason;
   notice: string | null;
@@ -212,6 +218,8 @@ export interface ActivitySlideSetting {
   minimumActivityHours: number;
   topN: number | null;
   slideSeconds: number;
+  atTargetColor: string;
+  belowTargetColor: string;
 }
 
 export interface DisplaySlidesConfig {
