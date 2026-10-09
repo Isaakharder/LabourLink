@@ -40,9 +40,12 @@ function proxyApi(request, response) {
   request.pipe(proxyReq);
 }
 
-function isPrivacyPolicyPath(url) {
-  const pathname = url.split("?")[0];
-  return pathname === "/privacy" || pathname === "/privacy.html";
+// Static public pages (public/privacy.html, public/support.html) — linked
+// from the app stores, so they must load without login or JavaScript.
+const PUBLIC_STATIC_PAGES = new Set(["/privacy", "/privacy.html", "/support", "/support.html"]);
+
+function isPublicStaticPagePath(url) {
+  return PUBLIC_STATIC_PAGES.has(url.split("?")[0]);
 }
 
 const server = createServer((request, response) => {
@@ -53,11 +56,10 @@ const server = createServer((request, response) => {
     public: "dist",
     // serve-handler applies rewrites before looking for a matching file (and
     // re-applies the remaining ones to a rewritten path), so the SPA
-    // catch-all would swallow /privacy too. The public privacy policy
-    // (public/privacy.html — linked from the app stores, must load without
-    // login or JS) skips it; serve-handler's default cleanUrls then serves
-    // privacy.html at /privacy and redirects /privacy.html there.
-    rewrites: isPrivacyPolicyPath(request.url) ? [] : [{ source: "**", destination: "/index.html" }],
+    // catch-all would swallow /privacy and /support too. Those public pages
+    // skip it; serve-handler's default cleanUrls then serves privacy.html at
+    // /privacy (support.html at /support) and redirects the .html form there.
+    rewrites: isPublicStaticPagePath(request.url) ? [] : [{ source: "**", destination: "/index.html" }],
     // Without explicit Cache-Control, serve-handler sends none at all (no
     // ETag/Last-Modified either — etag defaults to false), leaving every
     // browser's own heuristic caching to decide how long to hold onto a

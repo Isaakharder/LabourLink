@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LabourLink Support</title>
+  <meta name="description" content="Help with the LabourLink app: pairing a phone, syncing, notifications, NFC tags and contacting support." />
+  <link rel="icon" href="/icon-192.png" />
+  <!-- email_off markers stop Cloudflare email obfuscation, so the contact address stays readable without JavaScript. -->
+  <style>
+    :root {
+      --bg: #ffffff;
+      --fg: #1c2321;
+      --muted: #55605c;
+      --rule: #dfe5e2;
+      --accent: #1f6b45;
+      --panel: #f4f7f5;
+      color-scheme: light dark;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #121614;
+        --fg: #e6ece9;
+        --muted: #a7b2ad;
+        --rule: #2c3531;
+        --accent: #7fd1a3;
+        --panel: #1a201d;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+    h1 { font-size: 1.9rem; line-height: 1.2; margin: 0 0 4px; }
+    h2 { font-size: 1.25rem; margin: 2.2em 0 0.5em; padding-top: 0.6em; border-top: 1px solid var(--rule); }
+    p, li { overflow-wrap: anywhere; }
+    ol, ul { padding-left: 1.3em; }
+    li { margin: 0.25em 0; }
+    a { color: var(--accent); }
+    a:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+    .meta { color: var(--muted); margin: 0 0 1.5em; }
+    .contact { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 4px 20px; }
+    footer { margin-top: 3em; color: var(--muted); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>LabourLink Support</h1>
+    <p class="meta">Help for employees and administrators using the LabourLink app on iPhone, Android and the web.</p>
+  </header>
+
+  <section class="contact" aria-labelledby="contact">
+    <h2 id="contact" style="border-top: 0; margin-top: 0.8em;">Contact support</h2>
+    <p>
+      Email <!--email_off--><a href="mailto:support@lltech.io">support@lltech.io</a><!--/email_off-->.
+      Include your workplace name, the phone model, and what you were doing when the problem happened.
+      If your question is about your hours, jobs or employee details, your employer's LabourLink
+      administrator can usually help fastest.
+    </p>
+  </section>
+
+  <h2 id="pairing">Pairing a phone</h2>
+  <p>Each phone that uses the LabourLink app is paired to one employee by an administrator.</p>
+  <ol>
+    <li>Install LabourLink and open it. The app shows a 6-digit pairing code.</li>
+    <li>Give the code to your administrator. They approve it on the Setup page of the LabourLink
+      desktop site and choose which employee the phone belongs to.</li>
+    <li>The phone switches to the home screen by itself within a few seconds of approval.</li>
+  </ol>
+  <ul>
+    <li><strong>The code expired.</strong> Codes last 10 minutes. Close and reopen the app to get a new one.</li>
+    <li><strong>New or replacement phone.</strong> Pair the new phone the same way. Your administrator
+      can deactivate the old phone from the desktop site.</li>
+    <li><strong>"Have an access code?"</strong> Access codes are only for app reviewers and demonstrations.
+      They connect the app to a separate demo with fictional data, not to a real workplace. Employees
+      should always pair with the 6-digit code instead.</li>
+  </ul>
+
+  <h2 id="offline">Working offline and syncing</h2>
+  <ul>
+    <li>LabourLink keeps recording work start, breaks, job changes and end of day without a connection.
+      These show as "pending sync" until the phone is back online.</li>
+    <li>Pending records are sent automatically when the connection returns or the app is opened again.
+      Settings shows the sync status and has a <em>Sync now</em> button.</li>
+    <li>Don't uninstall the app while records are pending: records that haven't been sent yet are only on the phone.</li>
+  </ul>
+
+  <h2 id="notifications">Notifications</h2>
+  <ul>
+    <li>Open <strong>Settings</strong> in the app and tap <strong>Enable notifications</strong>, then allow
+      notifications when your phone asks.</li>
+    <li>Notifications only tell you a new message is waiting; open LabourLink to read it.</li>
+    <li>If nothing arrives, check that notifications for LabourLink are allowed in your phone's own settings.</li>
+  </ul>
+
+  <h2 id="nfc">NFC row and bin tags</h2>
+  <ul>
+    <li><strong>iPhone:</strong> tap <strong>Scan</strong>, then hold the top of the iPhone near the tag until it confirms.</li>
+    <li><strong>Android:</strong> hold the tag near the back of the phone while the job screen is open.</li>
+    <li>NFC is optional. You can always choose the row or bin from the list instead.</li>
+  </ul>
+
+  <h2 id="web">Signing in on the web</h2>
+  <ul>
+    <li>Administrators and managers sign in to the LabourLink website with their email address and PIN.</li>
+    <li>"Forgot PIN?" emails a reset link to the address on your employee profile. The link works once
+      and expires after 30 minutes.</li>
+  </ul>
+
+  <h2 id="privacy">Privacy and your data</h2>
+  <p>
+    Read the <a href="/privacy">LabourLink Privacy Policy</a> for what information LabourLink collects,
+    how it is used, and how to ask for access, correction or deletion.
+  </p>
+
+  <footer>
+    <p>LabourLink is developed by LinkLogic Technologies, Ontario, Canada.</p>
+    <p>© 2026 LinkLogic Technologies. LabourLink.</p>
+  </footer>
+</main>
+</body>
+</html>
