@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSlideSequence, formatAge, indexAfterUpdate, isStale, reportingPeriodFor, ROWS_PER_PAGE } from "./displaySlideshow";
+import { buildSlideSequence, formatAge, indexAfterUpdate, isStale, reportingPeriodFor } from "./displaySlideshow";
 import { ActivitySlide } from "./greenhouseLiveTypes";
 
 function slide(id: string, employees: number, seconds = 15): ActivitySlide {
@@ -11,6 +11,8 @@ function slide(id: string, employees: number, seconds = 15): ActivitySlide {
     minimumActivityHours: 0,
     topN: null,
     slideSeconds: seconds,
+    atTargetColor: "#15803d",
+    belowTargetColor: "#dc2626",
     status: "ok",
     notice: null,
     employees: Array.from({ length: employees }, (_, i) => ({
@@ -34,25 +36,20 @@ describe("buildSlideSequence", () => {
 
   it("puts the map first, then each activity with its own duration", () => {
     const seq = buildSlideSequence([slide("pruning", 3, 25), slide("picking", 2)], 20);
-    expect(seq.map((s) => s.key)).toEqual(["map", "pruning:1", "picking:1"]);
+    expect(seq.map((s) => s.key)).toEqual(["map", "pruning", "picking"]);
     expect(seq.map((s) => s.seconds)).toEqual([20, 25, 15]);
   });
 
-  it("paginates long rankings so every page stays readable", () => {
-    const seq = buildSlideSequence([slide("picking", 23)], 20);
-    expect(seq).toHaveLength(1 + 3);
-    const pages = seq.filter((s) => s.kind === "activity");
-    expect(pages.map((p) => (p.kind === "activity" ? [p.page, p.pageCount, p.employees.length, p.firstRank] : null))).toEqual([
-      [1, 3, ROWS_PER_PAGE, 1],
-      [2, 3, ROWS_PER_PAGE, 11],
-      [3, 3, 3, 21],
-    ]);
+  it("keeps every employee on ONE slide per activity — no pagination", () => {
+    const seq = buildSlideSequence([slide("picking", 60)], 20);
+    expect(seq).toHaveLength(2);
+    const only = seq[1];
+    expect(only.kind === "activity" && only.slide.employees.length).toBe(60);
   });
 
-  it("keeps a notice-only slide as one page", () => {
+  it("keeps a notice-only slide as one slide", () => {
     const empty = { ...slide("cleaning", 0), status: "no_speed" as const, notice: "No speed" };
-    const seq = buildSlideSequence([empty], 20);
-    expect(seq).toHaveLength(2);
+    expect(buildSlideSequence([empty], 20)).toHaveLength(2);
   });
 });
 
@@ -60,7 +57,7 @@ describe("indexAfterUpdate", () => {
   it("stays on the same slide after a data refresh, or falls back to the map", () => {
     const before = buildSlideSequence([slide("a", 3), slide("b", 3)], 20);
     const after = buildSlideSequence([slide("b", 3)], 20);
-    expect(indexAfterUpdate(before[2], after)).toBe(1);
+    expect(indexAfterUpdate(before[2], after)).toBe(1); // still on "b"
     expect(indexAfterUpdate(before[1], after)).toBe(0);
     expect(indexAfterUpdate(undefined, after)).toBe(0);
   });

@@ -162,6 +162,8 @@ async function main() {
     check(cfg0.status === 200 && byId(cfg0.body, pruning)?.sendToTv === false && byId(cfg0.body, pruning)?.targetOverride === null &&
       byId(cfg0.body, pruning)?.normalSpeed === 500, "every active activity listed, not sent to TV by default, target from normal speed", cfg0.body);
     check(!byId(cfg0.body, retired), "inactive activities are not listed", cfg0.body.activities.map((a: any) => a.name));
+    check(byId(cfg0.body, pruning)?.atTargetColor === "#15803d" && byId(cfg0.body, pruning)?.belowTargetColor === "#dc2626",
+      "bar colours default to green (at/above) and red (below)", byId(cfg0.body, pruning));
     check((await call("GET", `/api/greenhouse/displays/${displayId}/slides-config`, { cookie: BASIC })).status === 403, "Employee role cannot read slide settings");
     check((await call("PUT", `/api/greenhouse/displays/${displayId}/slides-config`, { cookie: BASIC, body: {} })).status === 403, "Employee role cannot save slide settings");
 
@@ -190,6 +192,26 @@ async function main() {
     const badTopN = await call("PUT", `/api/greenhouse/displays/${displayId}/slides-config`, { cookie: ADMIN, body: saveBody("last_week", true, [setting(pruning, { topN: 0 })]) });
     check(badTopN.status === 400, "invalid Top N rejected", badTopN);
 
+    // ---- Bar colours (060) ------------------------------------------------------
+    for (const bad of ["red", "#12345", "#gggggg", "15803d", 42]) {
+      const r = await call("PUT", `/api/greenhouse/displays/${displayId}/slides-config`, {
+        cookie: ADMIN, body: saveBody("last_week", true, [setting(pruning, { atTargetColor: bad })]),
+      });
+      check(r.status === 400 && /hex colour/.test(r.body?.error ?? ""), `invalid colour rejected: ${JSON.stringify(bad)}`, r);
+    }
+    const coloured = await call("PUT", `/api/greenhouse/displays/${displayId}/slides-config`, {
+      cookie: MANAGER,
+      body: saveBody("last_week", true, [
+        setting(pruning, { targetOverride: 650, minimumActivityHours: 0.5, slideSeconds: 20, atTargetColor: "#1D4ED8", belowTargetColor: "#F80" }),
+        setting(picking), setting(cleaning), setting(idle), setting(retired),
+      ]),
+    });
+    check(coloured.status === 200 && byId(coloured.body, pruning).atTargetColor === "#1d4ed8" && byId(coloured.body, pruning).belowTargetColor === "#ff8800",
+      "colours saved per activity per display, normalised to lowercase #rrggbb", byId(coloured.body, pruning));
+    check(byId(coloured.body, picking).atTargetColor === "#15803d", "an activity saved without colours (older client) keeps the defaults", byId(coloured.body, picking));
+    const colourReread = await call("GET", `/api/greenhouse/displays/${displayId}/slides-config`, { cookie: ADMIN });
+    check(byId(colourReread.body, pruning).belowTargetColor === "#ff8800", "colours persist on re-read", byId(colourReread.body, pruning));
+
     // ---- Slides for last week -------------------------------------------------
     _clearSpeedCacheForTests();
     const slides = await call("GET", `/api/greenhouse/display/${key}/slides`);
@@ -203,8 +225,10 @@ async function main() {
     const pk = slides.body.slides.find((s: any) => s.activityId === picking);
     const cl = slides.body.slides.find((s: any) => s.activityId === cleaning);
     check(pr?.status === "ok" && pr.speedUnit === "stems/hour" && pr.target === 650 && pr.slideSeconds === 20, "pruning slide: stems/hour, override target, own duration", pr);
+    check(pr?.atTargetColor === "#1d4ed8" && pr?.belowTargetColor === "#ff8800", "the TV payload carries this display's bar colours", pr);
     check(pr?.employees.map((e: any) => `${e.firstName} ${e.lastInitial}`).join(",") === `${ANA} A.,${BRUNO} B.` && pr.belowMinimumHours === 1,
-      "ranked fastest first, names shortened, 0.1 h worker left out by the 0.5 h minimum", pr);
+      "ranked fastest first, 0.1 h worker left out by the 0.5 h minimum", pr);
+    check(pr?.employees[0]?.displayName === `${ANA} Alvarez${RUN}`, "ranking slides carry the full display name", pr?.employees[0]);
     // An open-only visit has no finished Activity Hours yet, so the report
     // doesn't count Carla at all (employeesWithoutSpeed 0, same as the
     // endpoint below) — the slide still exists because work is recorded.

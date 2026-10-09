@@ -1,48 +1,20 @@
 // Pure slideshow logic for the TV display (GreenhouseDisplayPage): which
 // slides to show, in what order, for how long, and how old retained data is.
-import { ActivitySlide, RankedEmployee, ReportWeek } from "./greenhouseLiveTypes";
+import { ActivitySlide, ReportWeek } from "./greenhouseLiveTypes";
 import { addCalendarDays, startOfWeekMonday } from "./timezone";
-
-// Ten ranking rows fit a 1920×1080 TV at a size readable across a break room
-// (see .tv-ranking-row); longer lists continue on further pages.
-export const ROWS_PER_PAGE = 10;
 
 export type SlideItem =
   | { kind: "map"; key: string; seconds: number }
-  | {
-      kind: "activity";
-      key: string;
-      seconds: number;
-      slide: ActivitySlide;
-      page: number; // 1-based
-      pageCount: number;
-      employees: RankedEmployee[];
-      firstRank: number; // rank of employees[0]
-    };
+  | { kind: "activity"; key: string; seconds: number; slide: ActivitySlide };
 
-// Map first, then each activity slide (paginated). With no activity slides
-// the map is the only item and the TV simply stays on it.
-export function buildSlideSequence(
-  slides: ActivitySlide[] | null | undefined,
-  mapSeconds: number,
-  rowsPerPage = ROWS_PER_PAGE
-): SlideItem[] {
+// Map first, then one slide per activity with EVERY eligible employee on it
+// (the bar chart sizes itself to fit — no pagination). Top N, when chosen,
+// is already applied by the server. With no activity slides the map is the
+// only item and the TV simply stays on it.
+export function buildSlideSequence(slides: ActivitySlide[] | null | undefined, mapSeconds: number): SlideItem[] {
   const items: SlideItem[] = [{ kind: "map", key: "map", seconds: mapSeconds }];
   for (const slide of slides ?? []) {
-    const pageCount = Math.max(1, Math.ceil(slide.employees.length / rowsPerPage));
-    for (let page = 1; page <= pageCount; page++) {
-      const start = (page - 1) * rowsPerPage;
-      items.push({
-        kind: "activity",
-        key: `${slide.activityId}:${page}`,
-        seconds: slide.slideSeconds,
-        slide,
-        page,
-        pageCount,
-        employees: slide.employees.slice(start, start + rowsPerPage),
-        firstRank: start + 1,
-      });
-    }
+    items.push({ kind: "activity", key: slide.activityId, seconds: slide.slideSeconds, slide });
   }
   return items;
 }

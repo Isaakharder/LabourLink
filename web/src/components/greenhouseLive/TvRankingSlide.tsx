@@ -1,16 +1,80 @@
-import { formatSpeed, SlideItem } from "../../lib/displaySlideshow";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { BarInput, layoutBarChart, lighten, MeasureText } from "../../lib/barChartLayout";
+import { SlideItem } from "../../lib/displaySlideshow";
 
 interface TvRankingSlideProps {
   item: Extract<SlideItem, { kind: "activity" }>;
 }
 
-// One employee speed-ranking slide on the break-room TV. Sized for reading
-// across a room at 1920×1080: at most ROWS_PER_PAGE rows, large names and
-// values. Speeds come straight from the server's canonical calculation —
-// this only lays them out; it never fills in a missing speed.
+// Text measured with the page's real font through a canvas; a character-
+// width estimate stands in where canvas isn't available (tests).
+function createMeasure(fontFamily: string): MeasureText {
+  let ctx: CanvasRenderingContext2D | null = null;
+  try {
+    ctx = document.createElement("canvas").getContext("2d");
+  } catch {
+    ctx = null;
+  }
+  return (text, fontPx, bold) => {
+    if (ctx) {
+      ctx.font = `${bold ? 700 : 400} ${fontPx}px ${fontFamily}`;
+      return ctx.measureText(text).width;
+    }
+    return text.length * fontPx * (bold ? 0.62 : 0.56);
+  };
+}
+
+// One activity's employee speed ranking on the break-room TV, as a bar
+// chart: every eligible employee on one screen, fastest first, bars on one
+// shared scale from the same left edge, sized to fit however many qualify.
+// Speeds come straight from the server's canonical calculation — this only
+// lays them out; it never fills in a missing speed or stretches a bar.
 export function TvRankingSlide({ item }: TvRankingSlideProps) {
-  const { slide, employees, firstRank, page, pageCount } = item;
+  const { slide } = item;
+  const chartRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  const [fontFamily, setFontFamily] = useState("sans-serif");
+
+  useLayoutEffect(() => {
+    const el = chartRef.current;
+    if (!el) return;
+    setFontFamily(getComputedStyle(el).fontFamily || "sans-serif");
+    const update = () => setSize({ width: el.clientWidth, height: el.clientHeight });
+    update();
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(update);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [slide.status]);
+
+  const measure = useMemo(() => createMeasure(fontFamily), [fontFamily]);
   const unit = slide.speedUnit ?? "";
+
+  const bars: BarInput[] = useMemo(
+    () =>
+      slide.employees.map((e) => ({
+        name: e.displayName || `${e.firstName} ${e.lastInitial}`.trim(),
+        speed: e.speed,
+        speedLabel: unit ? `${Math.round(e.speed)} ${unit}` : String(Math.round(e.speed)),
+      })),
+    [slide.employees, unit]
+  );
+
+  const layout = useMemo(
+    () =>
+      layoutBarChart(bars, {
+        width: size.width,
+        height: size.height,
+        target: slide.target,
+        atTargetColor: slide.atTargetColor,
+        belowTargetColor: slide.belowTargetColor,
+        measure,
+      }),
+    [bars, size, slide.target, slide.atTargetColor, slide.belowTargetColor, measure]
+  );
 
   if (slide.status !== "ok") {
     return (
@@ -29,54 +93,51 @@ export function TvRankingSlide({ item }: TvRankingSlideProps) {
     );
   }
 
-  const maxSpeed = Math.max(...slide.employees.map((e) => e.speed), slide.target ?? 0, 1);
-  const scale = maxSpeed * 1.08;
-  const targetPct = slide.target ? (slide.target / scale) * 100 : null;
-
-  const footnotes: string[] = [];
-  if (slide.belowMinimumHours > 0) {
-    footnotes.push(`${slide.belowMinimumHours} under the ${slide.minimumActivityHours} h minimum not shown`);
-  }
-  if (slide.employeesWithoutSpeed > 0) {
-    footnotes.push(`${slide.employeesWithoutSpeed} without a calculable speed yet`);
-  }
-  if (slide.topN) footnotes.push(`Top ${slide.topN}`);
-
   return (
     <div className="tv-ranking">
-      <ol className="tv-ranking-list" start={firstRank}>
-        {employees.map((e, i) => {
-          const pct = (e.speed / scale) * 100;
-          const meetsTarget = slide.target != null && e.speed >= slide.target;
-          return (
-            <li key={`${firstRank + i}:${e.firstName}${e.lastInitial}`} className="tv-ranking-row">
-              <span className="tv-ranking-rank">{firstRank + i}</span>
-              <span className="tv-ranking-name">
-                {e.firstName} {e.lastInitial}
+      {unit && <p className="tv-chart-caption">{chartCaption(unit)}</p>}
+      <div className="tv-chart" ref={chartRef} role="list" aria-label={`${slide.activityName} speeds, fastest first`}>
+        {size.width > 0 &&
+          layout.rows.map((row, i) => (
+            <div
+              key={`${i}:${bars[i].name}`}
+              className={`tv-chart-row tv-chart-label-${row.labelMode}`}
+              role="listitem"
+              data-meets-target={row.meetsTarget}
+              style={{ top: row.top, height: layout.barHeight, fontSize: layout.fontSize }}
+            >
+              <div
+                className="tv-chart-bar"
+                data-color={row.color}
+                style={{ width: row.barWidth, background: `linear-gradient(90deg, ${row.color}, ${lighten(row.color)})` }}
+              />
+              <span
+                className="tv-chart-name"
+                style={{
+                  left: row.nameLeft,
+                  color: row.labelMode === "inside" ? row.insideTextColor : undefined,
+                }}
+              >
+                {row.name}
               </span>
-              <span className="tv-ranking-bar-track">
-                <span className={`tv-ranking-bar${meetsTarget ? " tv-ranking-bar-target-met" : ""}`} style={{ width: `${pct}%` }} />
-                {targetPct != null && <span className="tv-ranking-target-line" style={{ left: `${targetPct}%` }} />}
+              <span
+                className="tv-chart-speed"
+                style={{
+                  right: size.width - row.speedRight,
+                  color: row.labelMode === "inside" ? row.insideTextColor : undefined,
+                }}
+              >
+                {bars[i].speedLabel}
               </span>
-              <span className="tv-ranking-value">
-                {formatSpeed(e.speed)}
-                <span className="tv-ranking-hours">{e.activityHours.toFixed(1)} h</span>
-              </span>
-            </li>
-          );
-        })}
-      </ol>
-      <div className="tv-ranking-footer">
-        <span>
-          {slide.target != null && (
-            <>
-              <span className="tv-ranking-target-key" /> Target {formatSpeed(slide.target)} {unit}
-            </>
-          )}
-        </span>
-        <span className="tv-ranking-footnotes">{footnotes.join(" · ")}</span>
-        <span>{pageCount > 1 ? `Page ${page} of ${pageCount}` : ""}</span>
+            </div>
+          ))}
       </div>
     </div>
   );
+}
+
+// "stems/hour" -> "Stems per hour" for the small caption above the bars.
+function chartCaption(unit: string): string {
+  const text = unit.replace("/", " per ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }

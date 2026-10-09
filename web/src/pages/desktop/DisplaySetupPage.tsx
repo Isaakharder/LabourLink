@@ -46,9 +46,20 @@ function draftKey(d: Draft | null): string {
     d.reportWeek,
     d.reportIncludeToday,
     d.mapSlideSeconds,
-    d.activities.map((a) => [a.activityId, a.sendToTv, a.targetText, a.minHoursText, a.topNText, a.secondsText]),
+    d.activities.map((a) => [
+      a.activityId,
+      a.sendToTv,
+      a.targetText,
+      a.minHoursText,
+      a.topNText,
+      a.secondsText,
+      a.atTargetColor,
+      a.belowTargetColor,
+    ]),
   ]);
 }
+
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
 function parseWhole(text: string): number | null {
   return /^\d+$/.test(text.trim()) ? Number(text.trim()) : null;
@@ -127,7 +138,17 @@ export function DisplaySetupPage() {
       if (a.topNText.trim() !== "" && (topN == null || topN < 1 || topN > 200)) return `${a.name}: Top N must be 1–200, or All.`;
       const seconds = parseWhole(a.secondsText);
       if (seconds == null || seconds < 5 || seconds > 600) return `${a.name}: slide duration must be 5–600 seconds.`;
-      activities.push({ activityId: a.activityId, sendToTv: a.sendToTv, targetOverride: target, minimumActivityHours: minHours, topN, slideSeconds: seconds });
+      if (!HEX_COLOR.test(a.atTargetColor) || !HEX_COLOR.test(a.belowTargetColor)) return `${a.name}: bar colours must be hex colours.`;
+      activities.push({
+        activityId: a.activityId,
+        sendToTv: a.sendToTv,
+        targetOverride: target,
+        minimumActivityHours: minHours,
+        topN,
+        slideSeconds: seconds,
+        atTargetColor: a.atTargetColor,
+        belowTargetColor: a.belowTargetColor,
+      });
     }
     return { reportWeek: d.reportWeek, reportIncludeToday: d.reportIncludeToday, mapSlideSeconds: mapSeconds, activities };
   }
@@ -314,6 +335,24 @@ export function DisplaySetupPage() {
                           />
                         )}
                       </span>
+                    </label>
+                    <label>
+                      At/above target colour
+                      <input
+                        type="color"
+                        className="display-setup-color"
+                        value={a.atTargetColor}
+                        onChange={(e) => updateActivity(a.activityId, { atTargetColor: e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      Below target colour
+                      <input
+                        type="color"
+                        className="display-setup-color"
+                        value={a.belowTargetColor}
+                        onChange={(e) => updateActivity(a.activityId, { belowTargetColor: e.target.value })}
+                      />
                     </label>
                     <label>
                       Slide duration (s)

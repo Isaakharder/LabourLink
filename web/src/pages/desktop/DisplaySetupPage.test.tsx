@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,9 +14,9 @@ const config: DisplaySlidesConfig = {
   mapSlideSeconds: 20,
   period: { dateStart: "2026-10-12", dateEnd: "2026-10-12", empty: false },
   activities: [
-    { activityId: "a-pick", name: "Picking Peppers", speedUnit: "stems/hour", densitySource: "stems", normalSpeed: 180, sendToTv: false, targetOverride: null, minimumActivityHours: 0, topN: null, slideSeconds: 15 },
-    { activityId: "a-prune", name: "Winding & Pruning", speedUnit: "stems/hour", densitySource: "stems", normalSpeed: 500, sendToTv: true, targetOverride: null, minimumActivityHours: 0.5, topN: null, slideSeconds: 15 },
-    { activityId: "a-clean", name: "Cleaning", speedUnit: "tasks/hour", densitySource: null, normalSpeed: null, sendToTv: false, targetOverride: null, minimumActivityHours: 0, topN: null, slideSeconds: 15 },
+    { activityId: "a-pick", name: "Picking Peppers", speedUnit: "stems/hour", densitySource: "stems", normalSpeed: 180, sendToTv: false, targetOverride: null, minimumActivityHours: 0, topN: null, slideSeconds: 15, atTargetColor: "#15803d", belowTargetColor: "#dc2626" },
+    { activityId: "a-prune", name: "Winding & Pruning", speedUnit: "stems/hour", densitySource: "stems", normalSpeed: 500, sendToTv: true, targetOverride: null, minimumActivityHours: 0.5, topN: null, slideSeconds: 15, atTargetColor: "#15803d", belowTargetColor: "#dc2626" },
+    { activityId: "a-clean", name: "Cleaning", speedUnit: "tasks/hour", densitySource: null, normalSpeed: null, sendToTv: false, targetOverride: null, minimumActivityHours: 0, topN: null, slideSeconds: 15, atTargetColor: "#15803d", belowTargetColor: "#dc2626" },
   ],
 };
 
@@ -97,6 +97,25 @@ describe("Display > Setup", () => {
     expect(prune).toMatchObject({ sendToTv: true, targetOverride: null });
     expect(await screen.findByText(/Saved\. The TV picks this up/)).toBeInTheDocument();
     expect(screen.getByText("2 sent to TV")).toBeInTheDocument();
+  });
+
+  it("saves at/above and below target colours per activity", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const card = (await screen.findByText("Winding & Pruning")).closest(".display-setup-card") as HTMLElement;
+    expect(within(card).getByLabelText("At/above target colour")).toHaveValue("#15803d");
+    expect(within(card).getByLabelText("Below target colour")).toHaveValue("#dc2626");
+    fireEvent.input(within(card).getByLabelText("At/above target colour"), { target: { value: "#1d4ed8" } });
+    fireEvent.change(within(card).getByLabelText("At/above target colour"), { target: { value: "#1d4ed8" } });
+    fireEvent.input(within(card).getByLabelText("Below target colour"), { target: { value: "#f59e0b" } });
+    fireEvent.change(within(card).getByLabelText("Below target colour"), { target: { value: "#f59e0b" } });
+    await user.click(screen.getByRole("button", { name: "Save TV settings" }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    const body = puts[0] as { activities: { activityId: string; atTargetColor: string; belowTargetColor: string }[] };
+    expect(body.activities.find((a) => a.activityId === "a-prune")).toMatchObject({ atTargetColor: "#1d4ed8", belowTargetColor: "#f59e0b" });
+    expect(body.activities.find((a) => a.activityId === "a-pick")).toMatchObject({ atTargetColor: "#15803d", belowTargetColor: "#dc2626" });
+    // Re-read from the (mock) server response: still the saved colours.
+    expect(await within(card).findByLabelText("At/above target colour")).toHaveValue("#1d4ed8");
   });
 
   it("rejects an invalid slide duration before sending anything", async () => {
