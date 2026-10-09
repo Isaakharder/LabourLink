@@ -59,6 +59,9 @@ iPhone, check the web app in Safari instead:
 - [ ] Admin: Register Existing Tag (row) → scan → saved → returns to the same
       phase and scroll position with the row highlighted.
 - [ ] Admin: Write New Tag → scan a blank tag → write → verify scan succeeds.
+      KNOWN ISSUE (1.8.5 build 14): expected to fail on iPhone with "No active NFC
+      session or tag" — the iOS scan session closes after the first read, so the
+      plugin has no tag left to write to. Fix planned for the next build.
 - [ ] NFC Diagnostic shows the tag ID, type and NDEF records.
 - [ ] Xcode console (filter `[nfc-swift]`) shows a non-empty identifier for Ridder tags.
 

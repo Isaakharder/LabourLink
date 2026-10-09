@@ -19,10 +19,13 @@
 	     UID reads (the existing Ridder tags — see nfc.ts's own top-of-file
 	     comment and server/migrations/034_nfc_tag_mappings.sql's
 	     tag_kind='ridder' column: they carry no NDEF data, so only a TAG
-	     session can read them at all). NDEF is included alongside it so the
-	     same session also still reads LabourLink's own NDEF-written tags
-	     (tag_kind='labourlink') without needing a second, separate session
-	     type/entitlement combination.
+	     session can read them at all). A TAG session also reads and writes
+	     LabourLink's own NDEF-written tags (tag_kind='labourlink').
+
+	     TAG only: App Store Connect rejects "NDEF" in this list for apps
+	     built with the iOS 27 SDK ("NDEF is disallowed"). The app never
+	     opens an NFCNDEFReaderSession on iOS (lib/nfc.ts always passes
+	     iosSessionType: "tag"), so nothing needs the NDEF value.
 
 	     THIS ENTITLEMENT MUST ALSO BE ENABLED FOR THE APP ID ITSELF in the
 	     Apple Developer portal ("Near Field Communication Tag Reading"
@@ -32,7 +35,6 @@
 	     must be regenerated after enabling it. -->
 	<key>com.apple.developer.nfc.readersession.formats</key>
 	<array>
-		<string>NDEF</string>
 		<string>TAG</string>
 	</array>
 </dict>
