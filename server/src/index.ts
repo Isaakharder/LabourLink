@@ -2,6 +2,7 @@ import "dotenv/config";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import express, { NextFunction, Request, Response } from "express";
+import { parseCorsOrigins } from "./lib/corsOrigin";
 import activitiesRoutes from "./routes/activities";
 import activityGroupsRoutes from "./routes/activityGroups";
 import authRoutes from "./routes/auth";
@@ -39,9 +40,7 @@ import rowCompletionsRoutes from "./routes/rowCompletions";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
-const CORS_ORIGIN = (process.env.CORS_ORIGIN || "http://localhost:5173").split(
-  ","
-);
+const CORS_ORIGIN = parseCorsOrigins(process.env.CORS_ORIGIN);
 
 app.use(cors({ origin: CORS_ORIGIN, credentials: true }));
 app.use(express.json());

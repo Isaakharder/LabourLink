@@ -541,8 +541,13 @@ environment variables.
 2. **api** service environment variables:
    - `DATABASE_URL` — the Supabase Session pooler string from step 1 above
    - `JWT_SECRET` — a long random value (`openssl rand -hex 32`)
-   - `CORS_ORIGIN` — `https://${{web.RAILWAY_PUBLIC_DOMAIN}}` (Railway's cross-service
-     variable reference — resolves to the web service's live URL automatically)
+   - `CORS_ORIGIN` — `https://${{web.RAILWAY_PUBLIC_DOMAIN}},https://localhost,capacitor://localhost`
+     (Railway's `${{web.RAILWAY_PUBLIC_DOMAIN}}` cross-service variable reference resolves
+     to the web service's live URL automatically; `https://localhost` and
+     `capacitor://localhost` are the Android and iOS native app WebView origins
+     respectively — both are fixed values, not derived from anything, and both native
+     apps are unusable in production without them. See `web/.env.example` for why they
+     differ per platform.)
    - `NODE_ENV` — `production`
    - `PORT` — set automatically by Railway, no action needed
 3. **web** service environment variables:
