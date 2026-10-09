@@ -12,7 +12,8 @@ import { SwitchWarningDialog } from "../../components/mobile/SwitchWarningDialog
 import { ScannedTag } from "../../lib/nfc";
 import { refreshTagMappingCache, resolveScannedTag } from "../../lib/nfcMappingCache";
 import { checkSwitchWarning, SwitchWarning } from "../../lib/nfcSwitchWarning";
-import { buildScanSwitchAnswers, classifyHomeScan, HomeScanOutcome, isHomeNfcScanActive } from "../../lib/nfcActiveScreenScan";
+import { buildScanSwitchAnswers, classifyHomeScan, HomeScanOutcome, isHomeNfcScanActive, unknownTagMessageKey } from "../../lib/nfcActiveScreenScan";
+import { isIosNativePlatform } from "../../lib/platform";
 import { useForegroundNfcScan } from "../../lib/useForegroundNfcScan";
 import { playErrorFeedback, playSuccessFeedback } from "../../lib/feedback";
 import { ActivityTimer, formatElapsed } from "../../components/mobile/ActivityTimer";
@@ -269,12 +270,16 @@ export function HomeScreen() {
       hasCarrierQuestion: Boolean(carrierQ),
       currentRowId: ctx.me.currentActivity.row?.id ?? null,
       currentCarrierId: ctx.me.currentActivity.carrier?.id ?? null,
-      online: ctx.online,
+      // iPhone switches offline too: the switch is a local-first event
+      // (WorkSessionContext's commitLocalEvent — saved with its own
+      // timestamp, synced in device_seq order after reconnecting), exactly
+      // like a manual switch. Android keeps its online-only rule.
+      online: ctx.online || isIosNativePlatform(),
     });
 
     if (outcome.kind === "unknown") {
       playErrorFeedback();
-      setHomeNfcMessage(t(ctx.language, "nfcTagNotRecognized"));
+      setHomeNfcMessage(t(ctx.language, unknownTagMessageKey(ctx.online, isIosNativePlatform())));
       return;
     }
     if (outcome.kind === "wrong-type") {

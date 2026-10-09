@@ -138,7 +138,7 @@ index 9e87599..e21bcb3 100644
  
      /**
 diff --git a/node_modules/@capgo/capacitor-nfc/ios/Sources/NfcPlugin/NfcPlugin.swift b/node_modules/@capgo/capacitor-nfc/ios/Sources/NfcPlugin/NfcPlugin.swift
-index b26819e..d0430a7 100644
+index b26819e..caa776d 100644
 --- a/node_modules/@capgo/capacitor-nfc/ios/Sources/NfcPlugin/NfcPlugin.swift
 +++ b/node_modules/@capgo/capacitor-nfc/ios/Sources/NfcPlugin/NfcPlugin.swift
 @@ -133,6 +133,7 @@ public class NfcPlugin: CAPPlugin, CAPBridgedPlugin {
@@ -157,7 +157,60 @@ index b26819e..d0430a7 100644
              self.ndefReaderSession?.invalidate()
              self.ndefReaderSession = nil
              self.tagReaderSession?.invalidate()
-@@ -452,19 +454,41 @@ public class NfcPlugin: CAPPlugin, CAPBridgedPlugin {
+@@ -324,6 +326,18 @@ public class NfcPlugin: CAPPlugin, CAPBridgedPlugin {
+         }
+     }
+ 
++    // Patched for LabourLink: record-by-record comparison used to verify a
++    // write by reading the tag back (see performWriteToTag).
++    private static func ndefMessagesEqual(_ a: NFCNDEFMessage, _ b: NFCNDEFMessage) -> Bool {
++        guard a.records.count == b.records.count else { return false }
++        for (x, y) in zip(a.records, b.records) {
++            if x.typeNameFormat != y.typeNameFormat || x.type != y.type || x.payload != y.payload {
++                return false
++            }
++        }
++        return true
++    }
++
+     private func performWriteToTag(message: NFCNDEFMessage, on tag: NFCNDEFTag, call: CAPPluginCall) {
+         tag.queryNDEFStatus { status, capacity, statusError in
+             if let statusError {
+@@ -342,11 +356,29 @@ public class NfcPlugin: CAPPlugin, CAPBridgedPlugin {
+                     return
+                 }
+                 tag.writeNDEF(message) { writeError in
+-                    DispatchQueue.main.async {
+-                        if let writeError {
++                    if let writeError {
++                        self.logNfc("performWriteToTag: writeNDEF failed: \(writeError.localizedDescription)")
++                        DispatchQueue.main.async {
+                             call.reject("Failed to write NDEF message.", nil, writeError)
+-                        } else {
+-                            call.resolve()
++                        }
++                        return
++                    }
++                    // Patched for LabourLink: verify in the SAME session by
++                    // reading the tag straight back while it is still
++                    // connected, and only resolve if every record matches
++                    // byte-for-byte. Resolves { verified: true }.
++                    tag.readNDEF { readBack, readError in
++                        let matches = readBack.map { Self.ndefMessagesEqual($0, message) } ?? false
++                        self.logNfc("performWriteToTag: wrote \(message.records.count) record(s); read-back matches=\(matches) error=\(readError?.localizedDescription ?? "none")")
++                        DispatchQueue.main.async {
++                            if matches {
++                                if let successMessage = call.getString("successMessage") {
++                                    self.tagReaderSession?.alertMessage = successMessage
++                                }
++                                call.resolve(["verified": true])
++                            } else {
++                                call.reject("The tag was written but reading it back did not match. Keep the tag still and try again.", "WRITE_NOT_VERIFIED", readError)
++                            }
+                         }
+                     }
+                 }
+@@ -452,19 +484,41 @@ public class NfcPlugin: CAPPlugin, CAPBridgedPlugin {
          ]
      }
  
@@ -200,7 +253,7 @@ index b26819e..d0430a7 100644
          return nil
      }
  
-@@ -757,8 +781,10 @@ extension NfcPlugin: NFCTagReaderSessionDelegate {
+@@ -757,8 +811,10 @@ extension NfcPlugin: NFCTagReaderSessionDelegate {
                          self.currentTag = tag
                          let event = self.buildEvent(tag: tag, status: status, capacity: capacity, message: message)
                          self.notify(event: event)
@@ -211,7 +264,7 @@ index b26819e..d0430a7 100644
                          }
                      }
                  }
-@@ -806,9 +832,11 @@ extension NfcPlugin: NFCTagReaderSessionDelegate {
+@@ -806,9 +862,11 @@ extension NfcPlugin: NFCTagReaderSessionDelegate {
          ]
  
          notify(event: event)

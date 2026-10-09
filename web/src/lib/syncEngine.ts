@@ -18,6 +18,7 @@ import { getOrCreateDeviceIdentifier } from "./device";
 import { api, isServerUnreachableError } from "./api";
 import { isNativePlatform } from "./platform";
 import { singleFlight } from "./singleFlight";
+import { flushPendingTagRegistrations } from "./pendingTagSync";
 
 // Oldest-first, capped — matches the plan's "ordered batches, not one
 // request per item" requirement. A queue holding thousands of events (a
@@ -157,6 +158,10 @@ function bounded<T>(step: string, promise: Promise<T>): Promise<T> {
 
 async function runSync(): Promise<void> {
   if (!navigator.onLine) return;
+  // Tags written offline on iPhone (lib/pendingTagSync.ts) ride the same
+  // triggers. Independent of the event queue — its own single-flight, and a
+  // no-op when nothing is queued.
+  void flushPendingTagRegistrations().catch((err) => console.error("[sync-engine] tag registration flush failed:", err));
   const deviceId = getOrCreateDeviceIdentifier();
   const store = getLocalEventStore();
   const attemptedAt = new Date().toISOString();

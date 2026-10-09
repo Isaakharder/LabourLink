@@ -1,5 +1,6 @@
 import { api } from "./api";
 import { ScannedTag } from "./nfc";
+import { localTagMappings } from "./pendingTagStore";
 
 // Offline-first cache of every active NFC tag <-> row/bin mapping ("bin" =
 // the existing Carrier concept). Fetched from GET /api/mobile/tags/mappings
@@ -60,6 +61,20 @@ export function resolveTagAgainstMappings(tag: ScannedTag, mappings: CachedTagMa
   return null;
 }
 
+// This phone's own not-yet-registered tag writes (lib/pendingTagStore.ts)
+// come first, so a tag written offline resolves immediately on this phone.
 export function resolveScannedTag(tag: ScannedTag): ResolvedTagTarget | null {
-  return resolveTagAgainstMappings(tag, getCachedTagMappings());
+  return resolveTagAgainstMappings(tag, [...localTagMappings(), ...getCachedTagMappings()]);
+}
+
+// Adds one server-confirmed mapping to the downloaded cache without a full
+// refresh (used right after a queued registration succeeds, so there's no
+// window where the tag resolves neither locally nor from the cache).
+export function addToTagMappingCache(mapping: CachedTagMapping): void {
+  const others = getCachedTagMappings().filter(
+    (m) =>
+      !(m.targetType === mapping.targetType && m.targetId === mapping.targetId) &&
+      !(mapping.labourlinkTagUuid && m.labourlinkTagUuid === mapping.labourlinkTagUuid)
+  );
+  localStorage.setItem(CACHE_KEY, JSON.stringify([...others, mapping]));
 }

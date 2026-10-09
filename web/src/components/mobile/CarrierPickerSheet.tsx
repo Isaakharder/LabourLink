@@ -3,6 +3,8 @@ import { Language, t } from "../../lib/i18n";
 import { ScannedTag } from "../../lib/nfc";
 import { resolveScannedTag, ResolvedTagTarget } from "../../lib/nfcMappingCache";
 import { useForegroundNfcScan } from "../../lib/useForegroundNfcScan";
+import { unknownTagMessageKey } from "../../lib/nfcActiveScreenScan";
+import { isIosNativePlatform } from "../../lib/platform";
 
 export interface PickerCarrier {
   id: string;
@@ -85,7 +87,7 @@ export function CarrierPickerSheet({
     onTag: (tag: ScannedTag) => {
       const resolved = resolveScannedTag(tag);
       if (!resolved || resolved.targetType !== "carrier") {
-        setNfcHint(t(language, "nfcTagNotRecognized"));
+        setNfcHint(t(language, unknownTagMessageKey(navigator.onLine, isIosNativePlatform())));
         return;
       }
       setNfcHint(null);

@@ -52,6 +52,13 @@ export function isHomeNfcScanActive(ctx: HomeNfcGateContext): boolean {
 
 export type TagTargetType = "greenhouse_row" | "carrier";
 
+// Which message an unrecognized tag gets. On iPhone while offline the tag may
+// well be registered — it just isn't in this phone's saved list yet — so say
+// that instead of "isn't registered". Android keeps its existing message.
+export function unknownTagMessageKey(online: boolean, ios: boolean): "nfcTagNotRecognized" | "nfcTagNotSavedOffline" {
+  return ios && !online ? "nfcTagNotSavedOffline" : "nfcTagNotRecognized";
+}
+
 export type HomeScanOutcome =
   | { kind: "unknown" } // did not resolve to any registered row or bin
   | { kind: "wrong-type"; targetType: TagTargetType } // resolved, but the activity has no question for this tag's type

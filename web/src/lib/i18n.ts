@@ -87,6 +87,9 @@ const TRANSLATIONS_EN = {
   tapRowTag: "Tap the row's tag to start working there, or choose manually below.",
   tapBinTag: "Tap the bin's tag to start working there, or choose manually below.",
   nfcTagNotRecognized: "That tag isn't registered. Choose manually below.",
+  // iPhone, offline: the tag may be registered, just not in this phone's
+  // saved list yet.
+  nfcTagNotSavedOffline: "This tag isn't saved on this phone yet. Choose manually below, or reconnect to update tags.",
   nfcStillWaiting: "Still not seeing a tag — choose manually below.",
   // iPhone only — Android never shows this (it starts scanning silently by
   // itself). Tapping it opens Apple's own NFC scan sheet for one tag.
@@ -225,6 +228,7 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   tapRowTag: "Toque la etiqueta de la fila para comenzar a trabajar allí, o elija manualmente abajo.",
   tapBinTag: "Toque la etiqueta del transportador para comenzar a trabajar allí, o elija manualmente abajo.",
   nfcTagNotRecognized: "Esa etiqueta no está registrada. Elija manualmente abajo.",
+  nfcTagNotSavedOffline: "Esta etiqueta aún no está guardada en este teléfono. Elija manualmente abajo, o conéctese para actualizar las etiquetas.",
   nfcStillWaiting: "Todavía no se detecta ninguna etiqueta — elija manualmente abajo.",
   scanButtonLabel: "Escanear",
 

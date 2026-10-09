@@ -315,12 +315,22 @@ function logNfc(label: string, message: string): void {
 //     indefinitely-open reader mode (see the iOS platform bring-up
 //     report), so callers that want another scan call startScanSession
 //     again — never silently, always from a fresh explicit tap.
+// iOS-only options. keepOpen: deliver the first tag to onTag WITHOUT closing
+// the native session (invalidateAfterFirstRead:false, no automatic stop()),
+// so the caller can write to that still-connected tag and then call stop()
+// itself — the Write New Tag flow. Ignored on Android/web.
+export interface ScanSessionOptions {
+  keepOpen?: boolean;
+}
+
 export function startScanSession(
   onTag: (tag: ScannedTag) => void,
   onError?: (message: string) => void,
   label = "session",
-  iosAlertMessage?: string
+  iosAlertMessage?: string,
+  options: ScanSessionOptions = {}
 ): () => void {
+  const keepOpenOnIos = options.keepOpen === true && isIosNativePlatform();
   logNfc(label, "startScanSession called");
   if (activeStop) {
     logNfc(label, "preempting a previously active session (single reader-ownership guard)");
@@ -369,7 +379,7 @@ export function startScanSession(
           // its ambient, continuous, many-tags-per-session reader mode
           // (and every existing caller's own duplicate-scan handling built
           // on top of it) is completely unaffected.
-          if (isIosNativePlatform()) {
+          if (isIosNativePlatform() && !keepOpenOnIos) {
             stop();
           }
         });
@@ -402,10 +412,10 @@ export function startScanSession(
         }
 
         if (isIosNativePlatform()) {
-          logNfc(label, "calling native startScanning() with iosSessionType=tag");
+          logNfc(label, `calling native startScanning() with iosSessionType=tag keepOpen=${keepOpenOnIos}`);
           await CapacitorNfc.startScanning({
             iosSessionType: "tag",
-            invalidateAfterFirstRead: true,
+            invalidateAfterFirstRead: !keepOpenOnIos,
             alertMessage: iosAlertMessage ?? DEFAULT_IOS_ALERT_MESSAGE,
           });
         } else {
@@ -459,8 +469,12 @@ export function startScanSession(
   return stop;
 }
 
-export type NfcWriteFailureReason = "not_writable" | "insufficient_capacity" | "unsupported" | "write_failed";
-export type NfcWriteResult = { ok: true } | { ok: false; reason: NfcWriteFailureReason; message: string };
+export type NfcWriteFailureReason = "not_writable" | "insufficient_capacity" | "unsupported" | "write_failed" | "not_verified";
+// verified: true only when the native layer read the tag back in the same
+// session and it matched what was written (the patched iOS plugin). Android's
+// write resolves without that check, so verified is false there and its
+// existing separate "tap again to verify" step still applies.
+export type NfcWriteResult = { ok: true; verified: boolean } | { ok: false; reason: NfcWriteFailureReason; message: string };
 
 // Writes a v1 LabourLink URI record to whatever tag the plugin currently has
 // in the field (the caller must have just captured a ScannedTag via
@@ -474,7 +488,8 @@ export type NfcWriteResult = { ok: true } | { ok: false; reason: NfcWriteFailure
 // whether the write call itself succeeded.
 export async function writeTag(
   uuid: string,
-  context: { isWritable: boolean | null; maxSize: number | null }
+  context: { isWritable: boolean | null; maxSize: number | null },
+  options: { iosSuccessMessage?: string } = {}
 ): Promise<NfcWriteResult> {
   if (!isNativePlatform()) {
     return { ok: false, reason: "unsupported", message: "Writing is only available in the LabourLink Android app." };
@@ -492,12 +507,19 @@ export async function writeTag(
   }
   try {
     const { CapacitorNfc } = await import("@capgo/capacitor-nfc");
-    await CapacitorNfc.write({ records: [record], allowFormat: true });
-    return { ok: true };
+    const result = (await CapacitorNfc.write({
+      records: [record],
+      allowFormat: true,
+      // Read by the patched iOS plugin only: shown in Apple's sheet once the
+      // write has been verified, just before the caller closes the session.
+      ...(options.iosSuccessMessage ? { successMessage: options.iosSuccessMessage } : {}),
+    } as Parameters<typeof CapacitorNfc.write>[0])) as unknown as { verified?: boolean } | undefined;
+    return { ok: true, verified: result?.verified === true };
   } catch (err) {
+    const code = (err as { code?: string }).code;
     return {
       ok: false,
-      reason: "write_failed",
+      reason: code === "WRITE_NOT_VERIFIED" ? "not_verified" : "write_failed",
       message: err instanceof Error ? err.message : "Could not write to this tag.",
     };
   }

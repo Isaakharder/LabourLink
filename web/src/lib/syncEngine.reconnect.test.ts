@@ -28,6 +28,8 @@ vi.mock("./localEventStore", () => ({
   }),
 }));
 
+// The tag-registration flush rides the same triggers; isolated here.
+vi.mock("./pendingTagSync", () => ({ flushPendingTagRegistrations: () => Promise.resolve() }));
 vi.mock("./device", () => ({
   getOrCreateDeviceIdentifier: () => "device-1",
 }));
