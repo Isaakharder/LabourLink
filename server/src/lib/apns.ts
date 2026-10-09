@@ -64,6 +64,7 @@ const REQUEST_TIMEOUT_MS = 10_000;
 
 export class ApnsClient {
   private sessions = new Map<ApnsEnvironment, http2.ClientHttp2Session>();
+  private inFlight = new Map<http2.ClientHttp2Session, number>();
   private token: { value: string; createdAt: number } | null = null;
 
   constructor(
@@ -90,7 +91,9 @@ export class ApnsClient {
     session.on("error", drop);
     session.on("goaway", drop);
     session.on("close", drop);
-    // Don't keep the process alive just for an idle APNs connection.
+    // Idle connections must not keep the process alive; send() re-refs the
+    // session while a request is in flight (an unref'd session would let a
+    // short-lived process exit mid-request).
     session.unref();
     this.sessions.set(environment, session);
     return session;
@@ -98,9 +101,11 @@ export class ApnsClient {
 
   send(environment: ApnsEnvironment, deviceToken: string, payload: object): Promise<ApnsSendResult> {
     return new Promise((resolve, reject) => {
+      let session: http2.ClientHttp2Session;
       let req: http2.ClientHttp2Stream;
       try {
-        req = this.session(environment).request({
+        session = this.session(environment);
+        req = session.request({
           ":method": "POST",
           ":path": `/3/device/${deviceToken}`,
           authorization: `bearer ${this.providerToken()}`,
@@ -113,6 +118,20 @@ export class ApnsClient {
         reject(err);
         return;
       }
+      this.inFlight.set(session, (this.inFlight.get(session) ?? 0) + 1);
+      session.ref();
+      let settled = false;
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        const left = (this.inFlight.get(session) ?? 1) - 1;
+        if (left > 0) this.inFlight.set(session, left);
+        else {
+          this.inFlight.delete(session);
+          if (!session.destroyed) session.unref();
+        }
+        fn();
+      };
       let status = 0;
       let body = "";
       req.setEncoding("utf8");
@@ -125,7 +144,7 @@ export class ApnsClient {
       });
       req.on("end", () => {
         if (status === 200) {
-          resolve({ ok: true });
+          settle(() => resolve({ ok: true }));
           return;
         }
         let reason: string | null = null;
@@ -136,9 +155,12 @@ export class ApnsClient {
         }
         // A rejected provider token must be re-minted, not reused.
         if (reason === "ExpiredProviderToken" || reason === "InvalidProviderToken") this.token = null;
-        resolve({ ok: false, status, reason });
+        settle(() => resolve({ ok: false, status, reason }));
       });
-      req.on("error", reject);
+      req.on("error", (err) => settle(() => reject(err)));
+      // A timeout (req.close above) or a dropped connection ends the stream
+      // without "end" — never leave the caller waiting.
+      req.on("close", () => settle(() => reject(new Error(`APNs request closed before a response (status ${status || "none"})`))));
       req.end(JSON.stringify(payload));
     });
   }

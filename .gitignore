@@ -8,3 +8,8 @@ dist/
 .DS_Store
 *.tsbuildinfo
 .claude/
+
+# Apple signing / APNs keys — never commit (kept in ~/.labourlink-secrets)
+*.p8
+*.p12
+*.mobileprovision
