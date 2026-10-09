@@ -22,6 +22,7 @@ router.post(
     let webPushEndpoint: string | null = null;
     let webPushP256dh: string | null = null;
     let webPushAuth: string | null = null;
+    let apnsToken: string | null = null;
 
     if (platform === "android_fcm") {
       const { fcmToken: token } = req.body as { fcmToken?: string };
@@ -44,8 +45,16 @@ router.post(
       webPushEndpoint = subscription.endpoint;
       webPushP256dh = subscription.keys.p256dh;
       webPushAuth = subscription.keys.auth;
+    } else if (platform === "ios_apns") {
+      // The raw APNs device token as hex (currently 64 chars; Apple says not
+      // to rely on the length). Delivered by lib/apns.ts.
+      const { apnsToken: token } = req.body as { apnsToken?: string };
+      if (!token || typeof token !== "string" || !/^[0-9a-f]{32,200}$/i.test(token)) {
+        return res.status(400).json({ error: "A hex apnsToken is required for platform ios_apns" });
+      }
+      apnsToken = token.toLowerCase();
     } else {
-      return res.status(400).json({ error: "platform must be 'android_fcm' or 'web_push'" });
+      return res.status(400).json({ error: "platform must be 'android_fcm', 'web_push' or 'ios_apns'" });
     }
 
     const client = await pool.connect();
@@ -58,9 +67,9 @@ router.post(
       );
       await client.query(
         `insert into device_push_registrations
-           (device_id, platform, fcm_token, web_push_endpoint, web_push_p256dh, web_push_auth)
-         values ($1, $2, $3, $4, $5, $6)`,
-        [d.id, platform, fcmToken, webPushEndpoint, webPushP256dh, webPushAuth]
+           (device_id, platform, fcm_token, web_push_endpoint, web_push_p256dh, web_push_auth, apns_token)
+         values ($1, $2, $3, $4, $5, $6, $7)`,
+        [d.id, platform, fcmToken, webPushEndpoint, webPushP256dh, webPushAuth, apnsToken]
       );
       await client.query("commit");
     } catch (err) {

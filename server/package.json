@@ -107,7 +107,9 @@
     "test:employee-groups": "ts-node src/routes/employeeGroups.test.ts",
     "test:reports-cross-day-completion": "ts-node src/routes/reports.crossDayCompletion.test.ts",
     "test:row-review-window": "ts-node src/routes/rowReviewWindow.test.ts",
-    "test:cors-origin": "ts-node src/lib/corsOrigin.test.ts"
+    "test:cors-origin": "ts-node src/lib/corsOrigin.test.ts",
+    "test:apns": "ts-node src/lib/apns.test.ts",
+    "test:mobile-push": "ts-node src/routes/mobilePush.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",

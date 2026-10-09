@@ -2,6 +2,13 @@ import webpush from "web-push";
 import { cert, initializeApp, App } from "firebase-admin/app";
 import { getMessaging, Messaging } from "firebase-admin/messaging";
 import { pool } from "../db";
+import {
+  ApnsClient,
+  ApnsEnvironment,
+  isPermanentApnsTokenFailure,
+  loadApnsConfig,
+  sendWithEnvironmentFallback,
+} from "./apns";
 
 // Self-generated ECDSA keypair (not a third-party credential) — see
 // server/.env.example for the generation command. Configured once at
@@ -36,14 +43,35 @@ function getFirebaseMessaging(): Messaging | null {
   return getMessaging(firebaseApp);
 }
 
+// Same lazy, never-crash pattern as Firebase above, for the iOS app's direct
+// APNs delivery (lib/apns.ts). Needs APNS_KEY_ID, APNS_TEAM_ID and
+// APNS_PRIVATE_KEY — see server/.env.example.
+let apnsClient: ApnsClient | null = null;
+let apnsWarned = false;
+function getApnsClient(): ApnsClient | null {
+  if (apnsClient) return apnsClient;
+  const config = loadApnsConfig();
+  if (!config) {
+    if (!apnsWarned) {
+      console.warn("[push] APNS_KEY_ID/APNS_TEAM_ID/APNS_PRIVATE_KEY not configured — iOS push delivery is disabled");
+      apnsWarned = true;
+    }
+    return null;
+  }
+  apnsClient = new ApnsClient(config);
+  return apnsClient;
+}
+
 export interface PushRegistration {
   employeeId: string;
   registrationId: string;
-  platform: "android_fcm" | "web_push";
+  platform: "android_fcm" | "web_push" | "ios_apns";
   fcmToken: string | null;
   webPushEndpoint: string | null;
   webPushP256dh: string | null;
   webPushAuth: string | null;
+  apnsToken: string | null;
+  apnsEnvironment: ApnsEnvironment | null;
 }
 
 // Exported for callers that need to know reachability BEFORE (or instead
@@ -58,7 +86,8 @@ export interface PushRegistration {
 export async function loadActiveRegistrations(employeeIds: string[]): Promise<PushRegistration[]> {
   const { rows } = await pool.query(
     `select da.employee_id, dpr.id as registration_id, dpr.platform,
-            dpr.fcm_token, dpr.web_push_endpoint, dpr.web_push_p256dh, dpr.web_push_auth
+            dpr.fcm_token, dpr.web_push_endpoint, dpr.web_push_p256dh, dpr.web_push_auth,
+            dpr.apns_token, dpr.apns_environment
      from device_assignments da
      join devices d on d.id = da.device_id and d.is_active = true
      join device_push_registrations dpr on dpr.device_id = d.id and dpr.disabled_at is null
@@ -73,6 +102,8 @@ export async function loadActiveRegistrations(employeeIds: string[]): Promise<Pu
     webPushEndpoint: r.web_push_endpoint,
     webPushP256dh: r.web_push_p256dh,
     webPushAuth: r.web_push_auth,
+    apnsToken: r.apns_token,
+    apnsEnvironment: r.apns_environment,
   }));
 }
 
@@ -88,6 +119,14 @@ async function markPushSent(messageId: string, employeeId: string): Promise<void
     `update employee_message_recipients set push_sent_at = coalesce(push_sent_at, now())
      where message_id = $1 and employee_id = $2`,
     [messageId, employeeId]
+  );
+}
+
+async function rememberApnsEnvironment(registrationId: string, environment: ApnsEnvironment): Promise<void> {
+  await pool.query(
+    `update device_push_registrations set apns_environment = $2, updated_at = now()
+     where id = $1 and apns_environment is distinct from $2`,
+    [registrationId, environment]
   );
 }
 
@@ -144,6 +183,28 @@ export async function sendPushForRecipients(messageId: string, employeeIds: stri
             notification: { title: PUSH_TITLE, body: PUSH_BODY },
             data: { type: "message" },
           });
+        } else if (reg.platform === "ios_apns") {
+          const apns = getApnsClient();
+          if (!apns || !reg.apnsToken) {
+            failed++; // push not configured on this server — no notification will arrive
+            return;
+          }
+          const { result, environment } = await sendWithEnvironmentFallback(apns, reg.apnsToken, reg.apnsEnvironment, {
+            aps: { alert: { title: PUSH_TITLE, body: PUSH_BODY }, sound: "default" },
+            type: "message",
+          });
+          if (!result.ok) {
+            failed++;
+            if (isPermanentApnsTokenFailure(result)) {
+              await disableRegistration(reg.registrationId).catch(() => {});
+            } else {
+              console.error(
+                `[push] APNs delivery failed for registration=${reg.registrationId}: ${result.status} ${result.reason ?? ""}`
+              );
+            }
+            return;
+          }
+          await rememberApnsEnvironment(reg.registrationId, environment).catch(() => {});
         } else {
           if (!vapidConfigured || !reg.webPushEndpoint || !reg.webPushP256dh || !reg.webPushAuth) {
             failed++; // push not configured on this server — no notification will arrive
