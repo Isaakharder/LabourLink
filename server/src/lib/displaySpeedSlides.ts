@@ -106,7 +106,7 @@ export interface ActivitySlide {
   minimumActivityHours: number;
   topN: number | null;
   slideSeconds: number;
-  // Bar colours (060_display_slide_colours.sql): at/above vs below target.
+  // Bar colours (061_display_slide_colours.sql): at/above vs below target.
   atTargetColor: string;
   belowTargetColor: string;
   status: SlideStatus;

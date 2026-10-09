@@ -185,7 +185,7 @@ export interface ActivitySlide {
   minimumActivityHours: number;
   topN: number | null;
   slideSeconds: number;
-  // Bar colours (server/migrations/060_display_slide_colours.sql).
+  // Bar colours (server/migrations/061_display_slide_colours.sql).
   atTargetColor: string;
   belowTargetColor: string;
   status: SlideStatus;

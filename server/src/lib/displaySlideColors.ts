@@ -1,4 +1,4 @@
-// Bar colours for TV ranking slides (060_display_slide_colours.sql).
+// Bar colours for TV ranking slides (061_display_slide_colours.sql).
 export const DEFAULT_AT_TARGET_COLOR = "#15803d";
 export const DEFAULT_BELOW_TARGET_COLOR = "#dc2626";
 
