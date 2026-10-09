@@ -242,6 +242,40 @@ async function main() {
     check(confirmedCarrierReplace.status === 200, "J) confirming the carrier replacement succeeds", confirmedCarrierReplace);
     if (confirmedCarrierReplace.body?.mappingId) mappingIds.push(confirmedCarrierReplace.body.mappingId);
 
+    check(targetConflictAttempt.body?.code === "TARGET_HAS_DIFFERENT_TAG", "I2) target conflict carries code TARGET_HAS_DIFFERENT_TAG", targetConflictAttempt.body);
+
+    // J2) A retried write-mapping (same tag ID, same target — e.g. an
+    // offline-queued registration re-sent after a lost response) is
+    // idempotent: same mapping back, no second row, no false conflict.
+    const replay = await call("POST", "/api/mobile/tags/write-mapping", adminDevice, {
+      targetType: "carrier",
+      targetId: carrierAId,
+      labourlinkTagUuid: newLabourlinkUuid.toUpperCase(),
+    });
+    check(
+      replay.status === 200 && replay.body?.alreadyRegistered === true && replay.body?.mappingId === confirmedCarrierReplace.body?.mappingId,
+      "J2) replaying the same write-mapping returns the existing mapping",
+      replay
+    );
+    const activeForUuid = await pool.query(
+      `select count(*)::int as n from nfc_tag_mappings where labourlink_tag_uuid = $1 and deactivated_at is null`,
+      [newLabourlinkUuid.toLowerCase()]
+    );
+    check(activeForUuid.rows[0].n === 1, "J3) still exactly one active mapping for that tag ID", activeForUuid.rows[0]);
+
+    // J4) The same tag ID can't be claimed by a different target.
+    const otherTarget = await call("POST", "/api/mobile/tags/write-mapping", adminDevice, {
+      targetType: "greenhouse_row",
+      targetId: rowAId,
+      labourlinkTagUuid: newLabourlinkUuid,
+      confirmReplaceTarget: true,
+    });
+    check(
+      otherTarget.status === 409 && otherTarget.body?.code === "TAG_ID_IN_USE",
+      "J4) a tag ID active on another target is refused with TAG_ID_IN_USE",
+      otherTarget
+    );
+
     // -----------------------------------------------------------------
     // K) direct DB check: the partial unique indexes reject a second
     //    active mapping for the same target even bypassing the app's own

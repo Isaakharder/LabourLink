@@ -144,13 +144,22 @@ router.post(
       await client.query("begin");
 
       const targetConflict = await findActiveMappingByTarget(client, { targetType, targetId });
-      const targetConflictsWithDifferentTag =
-        targetConflict !== null && targetConflict.labourlinkTagUuid !== normalizedUuid;
+
+      // Same tag ID already active on this same target: a retry of a write
+      // that already succeeded (e.g. an iPhone's offline-queued registration
+      // re-sent after its first response was lost). Idempotent success.
+      if (targetConflict !== null && targetConflict.labourlinkTagUuid === normalizedUuid) {
+        await client.query("rollback");
+        return res.json({ mappingId: targetConflict.id, alreadyRegistered: true });
+      }
+
+      const targetConflictsWithDifferentTag = targetConflict !== null;
 
       if (targetConflictsWithDifferentTag && !confirmReplaceTarget) {
         await client.query("rollback");
         return res.status(409).json({
           error: "This target already has a different active tag — confirm to proceed.",
+          code: "TARGET_HAS_DIFFERENT_TAG",
           targetConflict,
         });
       }
@@ -177,7 +186,10 @@ router.post(
         // effectively impossible — surfaced as a clear retry rather than a
         // raw 500 anyway, since the client already committed to writing
         // this UUID onto the physical tag before calling this endpoint.
-        return res.status(409).json({ error: "This tag ID was just used by someone else. Generate a new tag and try again." });
+        return res.status(409).json({
+          error: "This tag ID was just used by someone else. Generate a new tag and try again.",
+          code: "TAG_ID_IN_USE",
+        });
       }
       throw err;
     } finally {
