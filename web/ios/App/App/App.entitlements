@@ -2,6 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Push Notifications capability. "development" is correct here:
+	     Xcode signs Debug/Run builds against the APNs sandbox, and an
+	     App Store Connect / TestFlight export with automatic signing
+	     rewrites this to "production" from the distribution profile.
+	     The App ID must have Push Notifications enabled in the Apple
+	     Developer portal for either profile to carry it. Delivery is
+	     server/src/lib/apns.ts (direct APNs, token auth). -->
+	<key>aps-environment</key>
+	<string>development</string>
 	<!-- Required for lib/nfc.ts's startScanSession to use
 	     iosSessionType: "tag" (NFCTagReaderSession) at all — without this
 	     entitlement (or with a format missing from the list below) that

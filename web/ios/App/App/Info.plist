@@ -22,6 +22,17 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- Export compliance: the only encryption this build performs is the
+	     operating system's own (HTTPS/TLS via WKWebView, APNs). SQLCipher is
+	     linked (required by @capacitor-community/sqlite) but database
+	     encryption is never enabled (iosIsEncryption: false in
+	     capacitor.config.ts; connections open with "no-encryption"), and the
+	     shipped SQLCipher binary uses Apple's CommonCrypto, not a bundled
+	     crypto library. Guarded by web/src/lib/exportCompliance.test.ts.
+	     Re-evaluate before ever turning on SQLite encryption or adding any
+	     crypto library. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NFCReaderUsageDescription</key>
@@ -56,13 +67,6 @@
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
-	</array>
-	<key>UISupportedInterfaceOrientations~ipad</key>
-	<array>
-		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>

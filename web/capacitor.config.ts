@@ -46,6 +46,21 @@ const config: CapacitorConfig = {
     // server side instead — capacitor://localhost is allow-listed directly
     // in CORS_ORIGIN (see server/.env.example) — not here.
   },
+  plugins: {
+    CapacitorSQLite: {
+      // iOS only (Android reads its own android* keys and is unaffected).
+      // The plugin's default location is Documents, which iCloud backs up;
+      // a custom Library location is created with isExcludedFromBackup set,
+      // so the offline event queue can't be restored onto another phone —
+      // same rule as Android's allowBackup="false". See AppDelegate.swift
+      // for the matching WebView-storage exclusion.
+      iosDatabaseLocation: "Library/CapacitorDatabase",
+      // Database encryption stays off. The iOS export-compliance declaration
+      // (ITSAppUsesNonExemptEncryption = false in ios/App/App/Info.plist)
+      // depends on it — guarded by src/lib/exportCompliance.test.ts.
+      iosIsEncryption: false,
+    },
+  },
   ...(isQaBuild ? { android: { allowMixedContent: true } } : {}),
 };
 

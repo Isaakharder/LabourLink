@@ -5,10 +5,11 @@ import { beforeAll, describe, expect, it } from "vitest";
 // test mode also sets import.meta.env.DEV to) — same stub as api.test.ts,
 // needed before the very first import.
 let shouldSkipPushRegistration: typeof import("./push").shouldSkipPushRegistration;
+let nativePushRegistrationBody: typeof import("./push").nativePushRegistrationBody;
 
 beforeAll(async () => {
   (globalThis as { window?: unknown }).window ??= { location: { protocol: "http:", hostname: "localhost" } };
-  ({ shouldSkipPushRegistration } = await import("./push"));
+  ({ shouldSkipPushRegistration, nativePushRegistrationBody } = await import("./push"));
 });
 
 describe("shouldSkipPushRegistration", () => {
@@ -22,5 +23,15 @@ describe("shouldSkipPushRegistration", () => {
 
   it("does not skip a device's first-ever registration (nothing registered yet)", () => {
     expect(shouldSkipPushRegistration(null, "token-a")).toBe(false);
+  });
+});
+
+describe("nativePushRegistrationBody", () => {
+  it("labels an iOS token as an APNs registration, never android_fcm", () => {
+    expect(nativePushRegistrationBody("ios", "a1b2c3")).toEqual({ platform: "ios_apns", apnsToken: "a1b2c3" });
+  });
+
+  it("keeps Android's FCM registration body exactly as before", () => {
+    expect(nativePushRegistrationBody("android", "fcm-token")).toEqual({ platform: "android_fcm", fcmToken: "fcm-token" });
   });
 });

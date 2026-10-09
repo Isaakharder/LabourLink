@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useMessages } from "../../context/MessagesContext";
-import { initAndroidPush } from "../../lib/push";
+import { initNativePush } from "../../lib/push";
 
 // No UI of its own — silently re-establishes native push registration and
 // the notification-tap listener on every app start AND every time the app
@@ -14,7 +14,7 @@ import { initAndroidPush } from "../../lib/push";
 // rotated while the app process was killed or backgrounded — Android's
 // process management can and does kill a backgrounded app, and nothing
 // listens for Firebase's onNewToken while no JS is running, so a resume is
-// the earliest point anything here can notice. initAndroidPush itself
+// the earliest point anything here can notice. initNativePush itself
 // (push.ts) is wrapped in singleFlight and skips the server round-trip
 // entirely when the token hasn't actually changed, so a resume that finds
 // nothing new is cheap and never creates a redundant registration row.
@@ -22,11 +22,11 @@ export function NativePushBridge() {
   const { refresh } = useMessages();
 
   useEffect(() => {
-    initAndroidPush(false, refresh).catch(() => {});
+    initNativePush(false, refresh).catch(() => {});
 
     function onVisibilityChange() {
       if (document.visibilityState === "visible") {
-        initAndroidPush(false, refresh).catch(() => {});
+        initNativePush(false, refresh).catch(() => {});
       }
     }
     document.addEventListener("visibilitychange", onVisibilityChange);

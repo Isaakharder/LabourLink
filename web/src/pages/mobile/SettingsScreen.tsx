@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { useDevicePairing } from "../../context/DevicePairingContext";
 import { useMessages } from "../../context/MessagesContext";
 import { useWorkSession } from "../../context/WorkSessionContext";
-import { isPushMarkedEnabled, initAndroidPush, subscribeWebPush } from "../../lib/push";
+import { isPushMarkedEnabled, initNativePush, subscribeWebPush } from "../../lib/push";
 import { isNativePlatform } from "../../lib/platform";
 import { privacyPolicyHref } from "../../lib/privacyPolicy";
 import { computeSyncIndicatorState } from "../../lib/syncIndicator";
@@ -61,7 +61,7 @@ export function SettingsScreen() {
   async function handleEnableNotifications() {
     setNotifBusy(true);
     setNotifError(null);
-    const result = isNativePlatform() ? await initAndroidPush(true, refresh) : await subscribeWebPush();
+    const result = isNativePlatform() ? await initNativePush(true, refresh) : await subscribeWebPush();
     setNotifBusy(false);
     if (result?.ok) {
       setNotifEnabled(true);

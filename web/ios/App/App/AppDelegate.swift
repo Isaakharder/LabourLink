@@ -7,8 +7,40 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Override point for customization after application launch.
+        excludeWebViewStorageFromBackup()
         return true
+    }
+
+    // Same rule as Android's allowBackup="false" (AndroidManifest.xml): the
+    // WebView's localStorage holds this phone's pairing identity
+    // (web/src/lib/device.ts) and pending offline events, so an iCloud
+    // backup restore must never clone it onto a second phone. WKWebView keeps
+    // that data under Library/WebKit; the flag on the directory covers
+    // everything beneath it. The SQLite database is kept out of backups
+    // separately (iosDatabaseLocation in capacitor.config.ts).
+    private func excludeWebViewStorageFromBackup() {
+        guard var url = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("WebKit", isDirectory: true) else { return }
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try url.setResourceValues(values)
+        } catch {
+            print("[backup] could not exclude WebKit storage from backup: \(error)")
+        }
+    }
+
+    // Hands the APNs device token (or the failure) to
+    // @capacitor/push-notifications, which emits it to web/src/lib/push.ts as
+    // its "registration" / "registrationError" event. Without these two the
+    // plugin's register() never completes on iOS.
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        NotificationCenter.default.post(name: .capacitorDidRegisterForRemoteNotifications, object: deviceToken)
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        NotificationCenter.default.post(name: .capacitorDidFailToRegisterForRemoteNotifications, object: error)
     }
 
     func applicationWillResignActive(_ application: UIApplication) {
