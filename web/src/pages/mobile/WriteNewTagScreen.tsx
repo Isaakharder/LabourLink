@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useWorkSession } from "../../context/WorkSessionContext";
 import { api, ApiError } from "../../lib/api";
 import { isNfcSupported, ScannedTag, startScanSession, writeTag } from "../../lib/nfc";
+import { isIosNativePlatform } from "../../lib/platform";
 import { TagMapping } from "../../lib/nfcTagTypes";
 import { uuid } from "../../lib/uuid";
 import { RowPickerSheet, RowPickerLand } from "../../components/mobile/RowPickerSheet";
@@ -202,6 +203,9 @@ export function WriteNewTagScreen() {
 
       {step === "choose-target" && targetType === "greenhouse_row" && (
         <RowPickerSheet
+          // iPhone: every row from every phase in one numeric list, no phase
+          // step. Android keeps the phase drill-down unchanged.
+          directRowList={isIosNativePlatform()}
           activityName=""
           questionLabel="Select the row"
           allowSkip={false}

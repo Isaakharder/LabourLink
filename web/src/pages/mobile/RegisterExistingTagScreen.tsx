@@ -234,6 +234,9 @@ export function RegisterExistingTagScreen() {
 
       {step === "choose-target" && targetType === "greenhouse_row" && (
         <RowPickerSheet
+          // iPhone: every row from every phase in one numeric list, no phase
+          // step. Android keeps the phase drill-down unchanged.
+          directRowList={iosRowFlow}
           activityName=""
           questionLabel="Select the row"
           allowSkip={false}
