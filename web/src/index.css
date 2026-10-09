@@ -204,6 +204,26 @@ input {
   flex-shrink: 0;
 }
 
+.nav-group-toggle .nav-group-chevron {
+  margin-left: auto;
+  color: var(--color-muted);
+}
+
+.nav-group-toggle.active-group {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.nav-group-children {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-item.nav-item-child {
+  padding-left: 2.6rem;
+}
+
 .nav-item-button {
   cursor: pointer;
 }
@@ -5880,6 +5900,9 @@ input {
   flex: 1;
   min-height: 0;
   display: flex;
+  /* Anchors .tv-slide-overlay: ranking slides cover the map, which stays
+     mounted underneath so it never re-measures. */
+  position: relative;
 }
 
 /* TV-only contrast boost — GreenhouseLiveCanvas's shared base palette
@@ -8111,4 +8134,406 @@ input {
   color: #3730a3;
   border: 1px solid #a5b4fc;
   vertical-align: middle;
+}
+
+/* ---------- TV slideshow: employee speed-ranking slides ----------
+   Sized for a 1920×1080 TV read across a break room: ten rows per page
+   (ROWS_PER_PAGE in lib/displaySlideshow.ts), names and values at ~2.4rem. */
+
+.tv-slide-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: #eef1f4;
+  display: flex;
+}
+
+.tv-ranking {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 1.25rem 3rem 0.75rem;
+  min-width: 0;
+}
+
+.tv-ranking-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  display: grid;
+  grid-template-rows: repeat(10, minmax(0, 1fr));
+  row-gap: 0.55rem;
+}
+
+.tv-ranking-row {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(14rem, 22rem) 1fr 13rem;
+  align-items: center;
+  column-gap: 1.5rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 0 1.5rem;
+  min-height: 0;
+}
+
+.tv-ranking-rank {
+  font-size: 2.2rem;
+  font-weight: 700;
+  color: var(--color-muted);
+  text-align: right;
+}
+
+.tv-ranking-name {
+  font-size: 2.4rem;
+  font-weight: 700;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tv-ranking-bar-track {
+  position: relative;
+  height: 2.2rem;
+  background: #e5e7eb;
+  border-radius: 999px;
+  overflow: visible;
+}
+
+.tv-ranking-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: #94a3b8;
+  border-radius: 999px;
+}
+
+.tv-ranking-bar-target-met {
+  background: #15803d;
+}
+
+.tv-ranking-target-line {
+  position: absolute;
+  top: -0.45rem;
+  bottom: -0.45rem;
+  width: 0;
+  border-left: 4px dashed #b45309;
+}
+
+.tv-ranking-value {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  font-size: 2.6rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+
+.tv-ranking-hours {
+  font-size: 1.3rem;
+  font-weight: 600;
+  color: var(--color-muted);
+}
+
+.tv-ranking-footer {
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  padding-top: 0.6rem;
+  font-size: 1.3rem;
+  color: var(--color-muted);
+}
+
+.tv-ranking-footer > :last-child {
+  justify-self: end;
+}
+
+.tv-ranking-target-key {
+  display: inline-block;
+  width: 0;
+  height: 1.2rem;
+  border-left: 4px dashed #b45309;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+
+.tv-ranking-notice-only {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 1rem;
+}
+
+.tv-ranking-notice-title {
+  margin: 0;
+  font-size: 3rem;
+  font-weight: 800;
+  color: var(--color-text);
+}
+
+.tv-ranking-notice-text {
+  margin: 0;
+  max-width: 60rem;
+  font-size: 2rem;
+  color: var(--color-muted);
+}
+
+.tv-ranking-unavailable .tv-ranking-notice-title {
+  color: #92400e;
+}
+
+/* Slide position, under "Updated …" in the header — never over slide
+   content. */
+.tv-slide-dots {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* On a ranking slide the activity is the slide's title: read across the
+   room, not the map's small caption. */
+.tv-header-activity .greenhouse-tv-activity {
+  font-size: 2.4rem;
+  font-weight: 800;
+}
+
+.tv-header-activity .greenhouse-tv-daterange {
+  font-size: 1.25rem;
+}
+
+.display-setup-actions .employees-add-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.tv-slide-dot {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 999px;
+  background: #cbd5e1;
+}
+
+.tv-slide-dot.active {
+  background: var(--color-primary);
+}
+
+.greenhouse-office-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+}
+
+/* ---------- Display > Setup ---------- */
+
+.display-setup-page {
+  padding: 1.5rem 2rem 3rem;
+  max-width: 1200px;
+}
+
+.display-setup-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 2rem;
+  margin-bottom: 1.25rem;
+}
+
+.display-setup-header h1 {
+  margin: 0 0 0.35rem;
+  font-size: 1.5rem;
+}
+
+.display-setup-subtitle {
+  margin: 0;
+  max-width: 46rem;
+  color: var(--color-muted);
+  font-size: 0.9rem;
+}
+
+.display-setup-display-select {
+  min-width: 16rem;
+}
+
+.display-setup-empty {
+  color: var(--color-muted);
+}
+
+.display-setup-section {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.display-setup-section h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+}
+
+.display-setup-count {
+  margin-left: 0.5rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--color-muted);
+}
+
+.display-setup-period-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1.25rem;
+}
+
+.display-setup-segmented {
+  display: inline-flex;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.display-setup-segmented label {
+  display: flex;
+  align-items: center;
+  padding: 0.4rem 0.9rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.display-setup-segmented label.selected {
+  background: #e8edfc;
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.display-setup-segmented input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.display-setup-segmented label:has(input:focus-visible) {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+
+.display-setup-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.display-setup-inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.display-setup-inline-field input {
+  width: 4.5rem;
+}
+
+.display-setup-period {
+  margin: 0.75rem 0 0;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.display-setup-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 0.75rem;
+}
+
+.display-setup-card {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  background: var(--color-bg);
+}
+
+.display-setup-card.sent {
+  border-color: #a5b4fc;
+  background: #f5f7ff;
+}
+
+.display-setup-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.display-setup-card-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.display-setup-send {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.display-setup-unit {
+  margin: 0.3rem 0 0.6rem;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+}
+
+.display-setup-card-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem 0.75rem;
+}
+
+.display-setup-card-fields.muted {
+  opacity: 0.55;
+}
+
+.display-setup-card-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+  color: var(--color-muted);
+}
+
+.display-setup-card-fields input,
+.display-setup-card-fields select,
+.display-setup-inline-field input {
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--color-text);
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  min-width: 0;
+}
+
+.display-setup-topn {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.display-setup-topn input {
+  width: 4.5rem;
+}
+
+.display-setup-hint {
+  margin: 0.5rem 0 0;
+  font-size: 0.75rem;
+  color: var(--color-muted);
+}
+
+.display-setup-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
 }

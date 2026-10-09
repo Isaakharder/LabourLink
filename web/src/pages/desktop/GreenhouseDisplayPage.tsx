@@ -1,106 +1,132 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GreenhouseLiveCanvas } from "../../components/greenhouseLive/GreenhouseLiveCanvas";
 import { EmployeeBlockLegend } from "../../components/greenhouseLive/EmployeeBlockLegend";
+import { TvRankingSlide } from "../../components/greenhouseLive/TvRankingSlide";
 import { api } from "../../lib/api";
 import { CanvasTransform, computeFitTransformToPhases } from "../../lib/canvasTransform";
-import { GreenhouseDisplayStateResponse } from "../../lib/greenhouseLiveTypes";
+import { buildSlideSequence, formatAge, indexAfterUpdate, isStale, SlideItem } from "../../lib/displaySlideshow";
+import { DisplaySlidesResponse, GreenhouseDisplayStateResponse } from "../../lib/greenhouseLiveTypes";
 import { formatDateLong, formatTimeInAppTimezone } from "../../lib/timezone";
 
 interface GreenhouseDisplayPageProps {
   displayKey: string;
 }
 
-const POLL_INTERVAL_MS = 10000;
+const MAP_POLL_MS = 10000;
+const SLIDES_POLL_MS = 60000;
+const DEFAULT_MAP_SECONDS = 20;
+
+function isNotFound(err: unknown): boolean {
+  return Boolean(err && typeof err === "object" && "status" in err && (err as { status: number }).status === 404);
+}
 
 // The break-room TV: full viewport, zero controls, no session. Reads only
-// what the office page has published (see greenhouseDisplays.ts / the
-// requireDisplayKey-authed /display/:displayKey/state route) and never
-// blanks on a failed poll — the last successfully rendered map stays on
-// screen with a small stale indicator instead.
+// what the office has published (display-key auth, see
+// server/src/middleware/displayAuth.ts). A slideshow: the map, plus one
+// employee speed-ranking slide per activity sent to this TV that has work
+// in the reporting period (GET .../slides). Never blanks on a failed poll —
+// the last good data stays on screen, labelled with its age.
 export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps) {
   const [data, setData] = useState<GreenhouseDisplayStateResponse | null>(null);
-  const [stale, setStale] = useState(false);
+  const [mapLastOk, setMapLastOk] = useState<number | null>(null);
+  const [mapFailing, setMapFailing] = useState(false);
   const [notFound, setNotFound] = useState(false);
+
+  const [slidesData, setSlidesData] = useState<DisplaySlidesResponse | null>(null);
+  const [slidesLastOk, setSlidesLastOk] = useState<number | null>(null);
+  const [slidesFailing, setSlidesFailing] = useState(false);
+
+  const [now, setNow] = useState(() => Date.now());
 
   const [transform, setTransform] = useState<CanvasTransform>({ pan: { x: 0, y: 0 }, scale: 1 });
   const [fitScale, setFitScale] = useState(1);
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
 
-  const load = useCallback(() => {
+  const loadMap = useCallback(() => {
     api<GreenhouseDisplayStateResponse>(`/api/greenhouse/display/${displayKey}/state`)
       .then((res) => {
         setData(res);
-        setStale(false);
+        setMapLastOk(Date.now());
+        setMapFailing(false);
         setNotFound(false);
       })
       .catch((err) => {
-        // A 404 (bad/deactivated/regenerated token) is not a transient
-        // failure — no retry will ever fix it, so it gets its own terminal
-        // message rather than the "stale, still retrying" indicator.
-        if (err && typeof err === "object" && "status" in err && (err as { status: number }).status === 404) {
-          setNotFound(true);
-          return;
-        }
-        setStale(true);
+        // A 404 (bad/deactivated/regenerated link) won't fix itself by
+        // retrying soon, but polling continues, so a re-activated display
+        // comes back on its own.
+        if (isNotFound(err)) setNotFound(true);
+        else setMapFailing(true);
+      });
+  }, [displayKey]);
+
+  const loadSlides = useCallback(() => {
+    api<DisplaySlidesResponse>(`/api/greenhouse/display/${displayKey}/slides`, { timeoutMs: 45000 })
+      .then((res) => {
+        setSlidesData(res);
+        setSlidesLastOk(Date.now());
+        setSlidesFailing(false);
+      })
+      .catch((err) => {
+        if (isNotFound(err)) setNotFound(true);
+        else setSlidesFailing(true);
       });
   }, [displayKey]);
 
   useEffect(() => {
-    load();
-    const interval = window.setInterval(load, POLL_INTERVAL_MS);
-    function onFocus() {
-      load();
+    loadMap();
+    loadSlides();
+    const mapTimer = window.setInterval(loadMap, MAP_POLL_MS);
+    const slidesTimer = window.setInterval(loadSlides, SLIDES_POLL_MS);
+    const clock = window.setInterval(() => setNow(Date.now()), 15000);
+    function refreshNow() {
+      loadMap();
+      loadSlides();
     }
     function onVisibilityChange() {
-      if (document.visibilityState === "visible") load();
+      if (document.visibilityState === "visible") refreshNow();
     }
-    window.addEventListener("focus", onFocus);
+    window.addEventListener("focus", refreshNow);
+    window.addEventListener("online", refreshNow);
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", onFocus);
+      window.clearInterval(mapTimer);
+      window.clearInterval(slidesTimer);
+      window.clearInterval(clock);
+      window.removeEventListener("focus", refreshNow);
+      window.removeEventListener("online", refreshNow);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [load]);
+  }, [loadMap, loadSlides]);
 
-  // Refit whenever the viewport itself resizes (the TV's own window/canvas
-  // dimensions changed) — always, since there's no user pan/zoom state on a
-  // control-free display worth preserving across a resize.
+  // --- Slide rotation -------------------------------------------------------
+  const sequence = useMemo(
+    () => buildSlideSequence(slidesData?.slides, slidesData?.mapSlideSeconds ?? DEFAULT_MAP_SECONDS),
+    [slidesData]
+  );
+  const [index, setIndex] = useState(0);
+  const currentRef = useRef<SlideItem | undefined>(undefined);
+  useEffect(() => {
+    setIndex(indexAfterUpdate(currentRef.current, sequence));
+  }, [sequence]);
+  const current = sequence[Math.min(index, sequence.length - 1)];
+  currentRef.current = current;
+  useEffect(() => {
+    if (sequence.length <= 1) return; // map only: no rotation
+    const timer = window.setTimeout(() => setIndex((i) => (i + 1) % sequence.length), current.seconds * 1000);
+    return () => window.clearTimeout(timer);
+  }, [current, sequence.length]);
+
+  // --- Map fitting (unchanged behaviour) ------------------------------------
+  // Refit whenever the viewport resizes, and whenever a publish changes the
+  // config (configVersion) — but not on routine polls, which would reset the
+  // view every 10 seconds.
   useEffect(() => {
     if (!data || viewportSize.width <= 0 || viewportSize.height <= 0) return;
-    const fit = computeFitTransformToPhases(
-      data.land,
-      data.land.phases,
-      viewportSize.width,
-      viewportSize.height,
-      data.rotationDegrees
-    );
+    const fit = computeFitTransformToPhases(data.land, data.land.phases, viewportSize.width, viewportSize.height, data.rotationDegrees);
     setFitScale(fit.scale);
     setTransform(fit);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewportSize.width, viewportSize.height]);
-
-  // Also refit whenever a fresh publish changes the config (land/date/
-  // activity/rotation scope may have changed) — but not on every routine
-  // poll where nothing actually changed, which would otherwise flash/reset
-  // the view roughly every 10 seconds for no reason.
-  useEffect(() => {
-    if (!data || viewportSize.width <= 0 || viewportSize.height <= 0) return;
-    const fit = computeFitTransformToPhases(
-      data.land,
-      data.land.phases,
-      viewportSize.width,
-      viewportSize.height,
-      data.rotationDegrees
-    );
-    setFitScale(fit.scale);
-    setTransform(fit);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data?.configVersion]);
-
-  function handleViewportSize(size: { width: number; height: number }) {
-    setViewportSize(size);
-  }
+  }, [viewportSize.width, viewportSize.height, data?.configVersion]);
 
   const rangeLabel = data
     ? data.dateStart === data.dateEnd
@@ -116,29 +142,67 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
     );
   }
 
+  const mapStale = mapFailing || isStale(mapLastOk, now, MAP_POLL_MS);
+  const slidesStale = slidesFailing && slidesLastOk !== null;
+  const onActivity = current?.kind === "activity";
+
   return (
     <div className="greenhouse-tv-page">
-      <div className="greenhouse-tv-header">
+      <div className={`greenhouse-tv-header${onActivity ? " tv-header-activity" : ""}`}>
         <div className="greenhouse-tv-title">
-          <h1>{data?.name ?? "Greenhouse"}</h1>
+          <h1>{data?.name ?? "LabourLink"}</h1>
         </div>
         <div className="greenhouse-tv-header-center">
-          {data && (
+          {onActivity ? (
             <>
-              <p className="greenhouse-tv-activity">{data.activityName ?? "All activities"}</p>
-              <p className="greenhouse-tv-daterange">{rangeLabel}</p>
+              <p className="greenhouse-tv-activity">{current.slide.activityName}</p>
+              <p className="greenhouse-tv-daterange">
+                {/* No unit when nothing is measured for this activity. */}
+                {current.slide.reason === "no_density" || !current.slide.speedUnit ? "" : `${current.slide.speedUnit} · `}
+                {periodLabel(slidesData)}
+              </p>
             </>
+          ) : (
+            data && (
+              <>
+                <p className="greenhouse-tv-activity">{data.activityName ?? "All activities"}</p>
+                <p className="greenhouse-tv-daterange">{rangeLabel}</p>
+              </>
+            )
           )}
         </div>
         <div className="greenhouse-tv-status">
-          {stale && <span className="status-pill greenhouse-tv-stale-badge">Reconnecting…</span>}
-          {data && !stale && (
-            <span className="greenhouse-tv-updated">Updated {formatTimeInAppTimezone(data.generatedAt)}</span>
+          {onActivity ? (
+            slidesStale ? (
+              <span className="status-pill greenhouse-tv-stale-badge">
+                Reconnecting… Rankings from {formatTimeInAppTimezone(new Date(slidesLastOk!).toISOString())} (
+                {formatAge(now - slidesLastOk!)} old)
+              </span>
+            ) : (
+              slidesData && <span className="greenhouse-tv-updated">Updated {formatTimeInAppTimezone(slidesData.generatedAt)}</span>
+            )
+          ) : mapStale && mapLastOk !== null ? (
+            <span className="status-pill greenhouse-tv-stale-badge">
+              Reconnecting… Map from {formatTimeInAppTimezone(new Date(mapLastOk).toISOString())} ({formatAge(now - mapLastOk)} old)
+            </span>
+          ) : mapStale ? (
+            <span className="status-pill greenhouse-tv-stale-badge">Reconnecting…</span>
+          ) : (
+            data && <span className="greenhouse-tv-updated">Updated {formatTimeInAppTimezone(data.generatedAt)}</span>
+          )}
+          {sequence.length > 1 && (
+            <div className="tv-slide-dots" aria-hidden="true">
+              {sequence.map((item, i) => (
+                <span key={item.key} className={`tv-slide-dot${i === index ? " active" : ""}`} />
+              ))}
+            </div>
           )}
         </div>
       </div>
 
       <div className="greenhouse-tv-canvas-wrapper">
+        {/* The map stays mounted under the ranking slides so it never has
+            to re-measure or refit when the slideshow returns to it. */}
         {data ? (
           <GreenhouseLiveCanvas
             land={data.land}
@@ -146,7 +210,7 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
             phaseFilterId={null}
             transform={transform}
             onTransformChange={setTransform}
-            onViewportSize={handleViewportSize}
+            onViewportSize={setViewportSize}
             minScale={fitScale * 0.15}
             maxScale={fitScale * 6}
             rotationDegrees={data.rotationDegrees}
@@ -154,19 +218,36 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
             blocks={data.blocks}
           />
         ) : (
-          <p className="placeholder-page greenhouse-tv-loading">Loading…</p>
+          <p className="placeholder-page greenhouse-tv-loading">{mapFailing ? "Map unavailable — retrying…" : "Loading…"}</p>
+        )}
+        {onActivity && (
+          <div className="tv-slide-overlay">
+            <TvRankingSlide item={current} />
+          </div>
         )}
       </div>
 
-      <div className="greenhouse-tv-legend">
-        <span>
-          <span className="greenhouse-live-legend-swatch greenhouse-live-row-blue" /> Currently working
-        </span>
-        <span>
-          <span className="greenhouse-live-legend-swatch greenhouse-live-row-green" /> Completed Row
-        </span>
-      </div>
-      {data && <EmployeeBlockLegend blocks={data.blocks} />}
+      {!onActivity && (
+        <>
+          <div className="greenhouse-tv-legend">
+            <span>
+              <span className="greenhouse-live-legend-swatch greenhouse-live-row-blue" /> Currently working
+            </span>
+            <span>
+              <span className="greenhouse-live-legend-swatch greenhouse-live-row-green" /> Completed Row
+            </span>
+          </div>
+          {data && <EmployeeBlockLegend blocks={data.blocks} />}
+        </>
+      )}
     </div>
   );
+}
+
+function periodLabel(slides: DisplaySlidesResponse | null): string {
+  if (!slides) return "";
+  const { dateStart, dateEnd, week, includeToday } = slides.period;
+  const range = dateStart === dateEnd ? formatDateLong(dateStart) : `${formatDateLong(dateStart)} – ${formatDateLong(dateEnd)}`;
+  if (week === "last_week") return `Last week, ${range}`;
+  return `This week, ${range}${includeToday ? " (including today)" : ""}`;
 }

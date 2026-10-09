@@ -10,6 +10,7 @@ import { DevicesPage } from "./pages/desktop/DevicesPage";
 import { EmployeesPage } from "./pages/desktop/EmployeesPage";
 import { GreenhouseDisplayPage } from "./pages/desktop/GreenhouseDisplayPage";
 import { GreenhousePage } from "./pages/desktop/GreenhousePage";
+import { DisplaySetupPage } from "./pages/desktop/DisplaySetupPage";
 import { InputsPage } from "./pages/desktop/InputsPage";
 import { LoginPage } from "./pages/desktop/LoginPage";
 import { ReportDensityAuditPage } from "./pages/desktop/ReportDensityAuditPage";
@@ -66,8 +67,19 @@ function DesktopApp() {
       <Route element={<AppLayout />}>
         <Route index element={<Navigate to="/inputs" replace />} />
         <Route path="dashboard" element={<DashboardPage />} />
+        {/* "Greenhouse" became Display > Map; the old address still works. */}
+        <Route path="greenhouse" element={<Navigate to="/display/map" replace />} />
+        <Route path="display" element={<Navigate to="/display/setup" replace />} />
         <Route
-          path="greenhouse"
+          path="display/setup"
+          element={
+            <RequireRole roles={["Administrator", "Manager"]}>
+              <DisplaySetupPage />
+            </RequireRole>
+          }
+        />
+        <Route
+          path="display/map"
           element={
             <RequireRole roles={["Administrator", "Manager"]}>
               <GreenhousePage />
@@ -174,7 +186,23 @@ function MobileApp() {
   );
 }
 
+// The break-room TV link (/greenhouse/display/<key>) is matched before
+// anything else — before the phone/desktop split below — so a TV browser
+// with a narrow window (≤768 CSS px) still gets the TV screen, never the
+// employee mobile app's pairing flow, and never mounts the login/session
+// providers at all.
+export function matchTvDisplayKey(pathname: string): string | null {
+  const m = pathname.match(/^\/greenhouse\/display\/([^/]+)\/?$/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
 export default function App() {
+  const tvKey = matchTvDisplayKey(window.location.pathname);
+  if (tvKey) return <GreenhouseDisplayPage displayKey={tvKey} />;
+  return <MainApp />;
+}
+
+function MainApp() {
   const isMobileViewport = useIsMobile();
   const isMobile = shouldRenderMobileApp(isNativePlatform(), isMobileViewport);
 

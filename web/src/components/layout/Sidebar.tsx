@@ -1,4 +1,7 @@
+import { useState } from "react";
+import { useLocation } from "react-router-dom";
 import {
+  ChevronDown,
   ChevronRight,
   ClipboardList,
   Database,
@@ -6,9 +9,9 @@ import {
   LayoutDashboard,
   ListChecks,
   LogOut,
+  MonitorPlay,
   Settings,
   Smartphone,
-  Sprout,
   TriangleAlert,
   Users,
   Wrench,
@@ -22,9 +25,29 @@ import { NavItem } from "./NavItem";
 // `roles`, when set, hides the nav item for anyone else — App.tsx's
 // RequireRole wrapper enforces the same list on the route itself, so direct
 // navigation is blocked too, not just the link.
-const PRIMARY_NAV: { to: string; icon: typeof LayoutDashboard; label: string; roles?: string[] }[] = [
+// An entry with `children` is an expandable group (Display > Setup / Map);
+// clicking it only opens/closes the group, and it starts open while one of
+// its pages is the current route.
+interface NavEntry {
+  to: string;
+  icon: typeof LayoutDashboard;
+  label: string;
+  roles?: string[];
+  children?: { to: string; label: string }[];
+}
+
+const PRIMARY_NAV: NavEntry[] = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
-  { to: "/greenhouse", icon: Sprout, label: "Greenhouse", roles: ["Administrator", "Manager"] },
+  {
+    to: "/display",
+    icon: MonitorPlay,
+    label: "Display",
+    roles: ["Administrator", "Manager"],
+    children: [
+      { to: "/display/setup", label: "Setup" },
+      { to: "/display/map", label: "Map" },
+    ],
+  },
   { to: "/inputs", icon: ClipboardList, label: "Inputs" },
   { to: "/reports", icon: FileBarChart, label: "Reports", roles: ["Administrator", "Manager"] },
   { to: "/employees", icon: Users, label: "Employees" },
@@ -62,9 +85,13 @@ export function Sidebar({ hidden, onRestore }: SidebarProps) {
       </div>
 
       <nav className="sidebar-nav">
-        {visibleNav.map((item) => (
-          <NavItem key={item.to} to={item.to} icon={item.icon} label={item.label} />
-        ))}
+        {visibleNav.map((item) =>
+          item.children ? (
+            <NavGroup key={item.to} item={item} />
+          ) : (
+            <NavItem key={item.to} to={item.to} icon={item.icon} label={item.label} />
+          )
+        )}
       </nav>
 
       <div className="sidebar-spacer" />
@@ -83,5 +110,35 @@ export function Sidebar({ hidden, onRestore }: SidebarProps) {
         </button>
       </div>
     </aside>
+  );
+}
+
+function NavGroup({ item }: { item: NavEntry }) {
+  const location = useLocation();
+  const inGroup = location.pathname === item.to || location.pathname.startsWith(`${item.to}/`);
+  const [open, setOpen] = useState(inGroup);
+  const expanded = open || inGroup;
+  const Icon = item.icon;
+  const Chevron = expanded ? ChevronDown : ChevronRight;
+  return (
+    <div className="nav-group">
+      <button
+        type="button"
+        className={`nav-item nav-item-button nav-group-toggle${inGroup ? " active-group" : ""}`}
+        aria-expanded={expanded}
+        onClick={() => setOpen(!expanded)}
+      >
+        <Icon size={18} className="nav-item-icon" />
+        <span className="nav-item-label">{item.label}</span>
+        <Chevron size={16} className="nav-group-chevron" />
+      </button>
+      {expanded && (
+        <div className="nav-group-children">
+          {item.children!.map((child) => (
+            <NavItem key={child.to} to={child.to} label={child.label} />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

@@ -39,6 +39,8 @@
     "reviewer:credentials": "ts-node src/cli/reviewerCredentials.ts",
     "test:reviewer-pairing": "ts-node src/routes/reviewerPairing.test.ts",
     "test:reviewer-isolation": "ts-node src/routes/reviewerPairing.isolation.test.ts",
+    "test:display-slideshow": "ts-node src/routes/displaySlideshow.test.ts",
+    "test:display-periods": "ts-node src/lib/displayPeriods.test.ts",
     "qa:cleanup": "ts-node src/scripts/cleanupOrphanedQaFixtures.ts",
     "test:qa-fixture-cleanup": "ts-node src/scripts/cleanupOrphanedQaFixtures.test.ts",
     "test:qa-cleanup-after-failure": "ts-node src/scripts/qaCleanupAfterFailure.test.ts",

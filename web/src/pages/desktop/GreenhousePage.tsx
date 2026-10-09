@@ -15,6 +15,7 @@ import {
   GreenhouseDisplayRegenerateResponse,
   GreenhouseDisplaySummary,
   LiveGreenhouseResponse,
+  isMapDatePreset,
 } from "../../lib/greenhouseLiveTypes";
 import { GreenhouseLandListItem } from "../../lib/greenhouseLayoutTypes";
 import {
@@ -100,8 +101,9 @@ export function GreenhousePage() {
     selectedDisplay &&
       (selectedDisplay.landId !== landId ||
         (selectedDisplay.activityId ?? null) !== activityFilterId ||
-        selectedDisplay.dateStart !== dateRange.start ||
-        selectedDisplay.dateEnd !== dateRange.end ||
+        (selectedDisplay.datePreset ?? "custom") !== preset ||
+        selectedDisplay.effectiveDateStart !== dateRange.start ||
+        selectedDisplay.effectiveDateEnd !== dateRange.end ||
         selectedDisplay.rotationDegrees !== rotationDegrees)
   );
 
@@ -154,10 +156,13 @@ export function GreenhousePage() {
     if (!selectedDisplay || initializedFromDisplayRef.current === selectedDisplay.id) return;
     initializedFromDisplayRef.current = selectedDisplay.id;
     setLandId(selectedDisplay.landId);
-    setDateRange({ start: selectedDisplay.dateStart, end: selectedDisplay.dateEnd });
+    // A relative preset reopens as that preset, showing what the TV shows
+    // today; fixed dates (every display published before presets existed)
+    // reopen as the exact custom range.
+    setDateRange({ start: selectedDisplay.effectiveDateStart, end: selectedDisplay.effectiveDateEnd });
     setActivityFilterId(selectedDisplay.activityId);
     setRotationDegrees(selectedDisplay.rotationDegrees);
-    setPreset("custom");
+    setPreset(selectedDisplay.datePreset ?? "custom");
   }, [selectedDisplay]);
 
   useEffect(() => {
@@ -305,6 +310,8 @@ export function GreenhousePage() {
           dateStart: dateRange.start,
           dateEnd: dateRange.end,
           rotationDegrees,
+          // A preset keeps advancing on the TV; "custom" publishes fixed dates.
+          datePreset: isMapDatePreset(preset) ? preset : null,
         }),
       });
       setDisplays((prev) => prev?.map((d) => (d.id === res.display.id ? res.display : d)) ?? [res.display]);
@@ -576,7 +583,7 @@ export function GreenhousePage() {
                       <option value="last7">Last 7 days</option>
                       <option value="thisMonth">This month</option>
                       <option value="lastMonth">Last month</option>
-                      <option value="custom">Custom range</option>
+                      <option value="custom">Custom range (fixed dates)</option>
                     </select>
                   </span>
                 </label>
@@ -584,6 +591,11 @@ export function GreenhousePage() {
                 <DateRangeCalendar value={dateRange} onChange={handleCalendarChange} />
 
                 <p className="greenhouse-office-range-label">{formatRangeLabel(dateRange)}</p>
+                <p className="greenhouse-office-hint">
+                  {isMapDatePreset(preset)
+                    ? "The TV moves this range forward by itself each day — no need to republish."
+                    : "Fixed dates: the TV keeps showing exactly these days until you publish again."}
+                </p>
               </div>
 
               <div className="greenhouse-office-section">
@@ -633,9 +645,9 @@ export function GreenhousePage() {
             <span className="greenhouse-office-published-status">
               {selectedDisplay
                 ? `Published: ${selectedDisplay.activityName ?? "All activities"} · ${formatRangeLabel({
-                    start: selectedDisplay.dateStart,
-                    end: selectedDisplay.dateEnd,
-                  })}`
+                    start: selectedDisplay.effectiveDateStart,
+                    end: selectedDisplay.effectiveDateEnd,
+                  })}${selectedDisplay.datePreset ? " (advances daily)" : ""}`
                 : "No display selected"}
             </span>
           </div>

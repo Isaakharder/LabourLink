@@ -1,6 +1,8 @@
 import { NextFunction, Request, Response } from "express";
 import { pool } from "../db";
 import { hashDisplayKey } from "../lib/displayToken";
+import { MapDatePreset, ReportWeek, resolveMapPreset } from "../lib/displayPeriods";
+import { calendarDateInAppTimezone } from "../lib/timezone";
 
 export interface AuthedDisplay {
   id: string;
@@ -11,6 +13,11 @@ export interface AuthedDisplay {
   name: string;
   updatedAt: string;
   rotationDegrees: number;
+  // 059_display_slideshow.sql. null = fixed dates (dateStart/dateEnd above).
+  mapDatePreset: MapDatePreset | null;
+  reportWeek: ReportWeek;
+  reportIncludeToday: boolean;
+  mapSlideSeconds: number;
 }
 
 declare global {
@@ -41,7 +48,8 @@ export async function requireDisplayKey(req: Request, res: Response, next: NextF
     // date-range helper in this app expects (see scheduled_break_date's
     // identical to_char cast in mobileTime.ts/breakReconciliation.ts).
     `select id, land_id, activity_id, to_char(date_start, 'YYYY-MM-DD') as date_start,
-            to_char(date_end, 'YYYY-MM-DD') as date_end, name, updated_at, rotation_degrees
+            to_char(date_end, 'YYYY-MM-DD') as date_end, name, updated_at, rotation_degrees,
+            map_date_preset, report_week, report_include_today, map_slide_seconds
      from greenhouse_displays
      where display_key_hash = $1 and is_active = true`,
     [tokenHash]
@@ -52,15 +60,24 @@ export async function requireDisplayKey(req: Request, res: Response, next: NextF
     return res.status(404).json({ error: "Not found" });
   }
 
+  // A relative preset advances every day without republishing; fixed dates
+  // (every pre-059 display) are served exactly as published.
+  const effective = row.map_date_preset
+    ? resolveMapPreset(row.map_date_preset, calendarDateInAppTimezone(new Date()))
+    : { dateStart: row.date_start, dateEnd: row.date_end };
   req.display = {
     id: row.id,
     landId: row.land_id,
     activityId: row.activity_id,
-    dateStart: row.date_start,
-    dateEnd: row.date_end,
+    dateStart: effective.dateStart,
+    dateEnd: effective.dateEnd,
     name: row.name,
     updatedAt: row.updated_at,
     rotationDegrees: row.rotation_degrees,
+    mapDatePreset: row.map_date_preset,
+    reportWeek: row.report_week,
+    reportIncludeToday: row.report_include_today,
+    mapSlideSeconds: row.map_slide_seconds,
   };
   next();
 }

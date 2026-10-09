@@ -4,7 +4,8 @@ import { useUnsavedChangesGuard } from "../../context/UnsavedChangesContext";
 
 interface NavItemProps {
   to: string;
-  icon: LucideIcon;
+  // Omitted for a child entry inside an expandable group (Sidebar NavGroup).
+  icon?: LucideIcon;
   label: string;
 }
 
@@ -14,12 +15,12 @@ export function NavItem({ to, icon: Icon, label }: NavItemProps) {
   return (
     <NavLink
       to={to}
-      className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
+      className={({ isActive }) => `nav-item${Icon ? "" : " nav-item-child"}${isActive ? " active" : ""}`}
       onClick={(e) => {
         if (!confirmNavigation()) e.preventDefault();
       }}
     >
-      <Icon size={18} className="nav-item-icon" />
+      {Icon && <Icon size={18} className="nav-item-icon" />}
       <span className="nav-item-label">{label}</span>
     </NavLink>
   );

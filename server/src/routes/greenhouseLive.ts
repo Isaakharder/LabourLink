@@ -3,6 +3,7 @@ import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { requireDisplayKey } from "../middleware/displayAuth";
+import { buildDisplaySlides } from "../lib/displaySpeedSlides";
 import { calendarDateInAppTimezone, getRangeBoundsUtc, inclusiveDayCount } from "../lib/timezone";
 import {
   attachEmployeePhotoUrls,
@@ -173,12 +174,29 @@ router.get(
       activityName,
       dateStart: d.dateStart,
       dateEnd: d.dateEnd,
+      datePreset: d.mapDatePreset,
       rotationDegrees: d.rotationDegrees,
       configVersion: d.updatedAt,
       generatedAt: new Date().toISOString(),
       land: redactEmployeeNamesForDisplay(land),
       blocks: redactBlockEmployeeNames(blocks),
     });
+  })
+);
+
+// TV slideshow (059_display_slideshow.sql) — the ranking slides for this
+// display, same display-key auth as /state above. Polled on its own,
+// slower timer; an empty `slides` list means the TV shows only the map.
+router.get(
+  "/display/:displayKey/slides",
+  asyncHandler(requireDisplayKey),
+  asyncHandler(async (req, res) => {
+    const d = req.display!;
+    const payload = await buildDisplaySlides(
+      { id: d.id, reportWeek: d.reportWeek, reportIncludeToday: d.reportIncludeToday, mapSlideSeconds: d.mapSlideSeconds },
+      calendarDateInAppTimezone(new Date())
+    );
+    res.json(payload);
   })
 );
 

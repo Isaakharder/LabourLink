@@ -113,6 +113,14 @@ export interface GreenhouseDisplaySummary {
   isActive: boolean;
   updatedAt: string;
   rotationDegrees: RotationDegrees;
+  // Relative map date preset (server/migrations/059_display_slideshow.sql);
+  // null = fixed dates. effectiveDate* is what the TV shows today.
+  datePreset: MapDatePreset | null;
+  effectiveDateStart: string;
+  effectiveDateEnd: string;
+  reportWeek: ReportWeek;
+  reportIncludeToday: boolean;
+  mapSlideSeconds: number;
   // The display's current raw TV token, or null when either (a) this
   // display predates the token being stored retrievably and hasn't been
   // regenerated since, or (b) the current user isn't an Administrator (the
@@ -131,8 +139,17 @@ export interface GreenhouseDisplayRegenerateResponse {
   token: string;
 }
 
+export const MAP_DATE_PRESETS = ["today", "yesterday", "thisWeek", "lastWeek", "last7", "thisMonth", "lastMonth"] as const;
+export type MapDatePreset = (typeof MAP_DATE_PRESETS)[number];
+export type ReportWeek = "this_week" | "last_week";
+
+export function isMapDatePreset(v: unknown): v is MapDatePreset {
+  return typeof v === "string" && (MAP_DATE_PRESETS as readonly string[]).includes(v);
+}
+
 export interface GreenhouseDisplayStateResponse {
   name: string;
+  datePreset?: MapDatePreset | null;
   activityId: string | null;
   activityName: string | null;
   dateStart: string;
@@ -142,4 +159,65 @@ export interface GreenhouseDisplayStateResponse {
   generatedAt: string;
   land: LiveLand;
   blocks: LiveBlockSummary[];
+}
+
+// --- TV slideshow (GET /api/greenhouse/display/:key/slides) -----------------
+
+export type SlideStatus = "ok" | "no_speed" | "unavailable";
+export type NoSpeedReason = "no_density" | "not_calculable" | "below_minimum" | null;
+
+export interface RankedEmployee {
+  firstName: string;
+  lastInitial: string;
+  speed: number;
+  activityHours: number;
+  quantityCounted: number;
+}
+
+export interface ActivitySlide {
+  activityId: string;
+  activityName: string;
+  speedUnit: string | null;
+  target: number | null;
+  minimumActivityHours: number;
+  topN: number | null;
+  slideSeconds: number;
+  status: SlideStatus;
+  reason?: NoSpeedReason;
+  notice: string | null;
+  employees: RankedEmployee[];
+  belowMinimumHours: number;
+  employeesWithoutSpeed: number;
+  computedAt: string;
+}
+
+export interface DisplaySlidesResponse {
+  generatedAt: string;
+  timezone: string;
+  period: { week: ReportWeek; includeToday: boolean; dateStart: string; dateEnd: string; empty: boolean };
+  mapSlideSeconds: number;
+  slides: ActivitySlide[];
+}
+
+// --- Display > Setup (GET/PUT /api/greenhouse/displays/:id/slides-config) ----
+
+export interface ActivitySlideSetting {
+  activityId: string;
+  name: string;
+  speedUnit: string | null;
+  densitySource: string | null;
+  normalSpeed: number | null;
+  sendToTv: boolean;
+  targetOverride: number | null;
+  minimumActivityHours: number;
+  topN: number | null;
+  slideSeconds: number;
+}
+
+export interface DisplaySlidesConfig {
+  reportWeek: ReportWeek;
+  reportIncludeToday: boolean;
+  mapSlideSeconds: number;
+  period: { dateStart: string; dateEnd: string; empty: boolean };
+  activities: ActivitySlideSetting[];
 }
