@@ -96,9 +96,10 @@ describe("Display → Map block display", () => {
 
   it("outlines follow the phase selection and rotation", () => {
     const onlyPhase1 = phases.filter((p) => p.id === "p1");
+    const phase1Land = { ...land, phases: onlyPhase1 };
     const { container } = render(
       <GreenhouseLiveCanvas
-        land={{ ...land, phases: onlyPhase1 }}
+        land={phase1Land}
         phases={onlyPhase1}
         phaseFilterId={null}
         transform={{ pan: { x: 0, y: 0 }, scale: 4 }}
