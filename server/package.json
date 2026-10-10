@@ -52,6 +52,7 @@
     "test:work-start-rounding": "ts-node src/lib/workStartRounding.test.ts",
     "test:manual-entries": "ts-node src/routes/inputs.manualEntries.test.ts",
     "test:inputs-employees-list": "ts-node src/routes/inputs.employeesList.test.ts",
+    "test:inputs-working-totals": "ts-node src/routes/inputs.workingTotals.test.ts",
     "test:add-activity-boundary-trim": "ts-node src/routes/inputs.addActivityBoundaryTrim.test.ts",
     "test:inputs-add-employee-to-day": "ts-node src/routes/inputs.addEmployeeToDay.test.ts",
     "test:mobile-time-sync-events-manual-entry-protection": "ts-node src/routes/mobileTime.syncEvents.manualEntryProtection.test.ts",

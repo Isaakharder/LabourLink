@@ -231,3 +231,11 @@ export interface InputsEmployeeOption {
   lastName: string;
   employeeGroup: { id: string; name: string } | null;
 }
+
+// GET /api/inputs/employees' workingTotals — distinct employees with work
+// recorded on the date, by Employee Group (every configured group, then
+// Ungrouped (id null) when non-zero). Never narrowed by the sidebar search.
+export interface InputsWorkingTotals {
+  total: number;
+  groups: { id: string | null; name: string; count: number }[];
+}

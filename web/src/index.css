@@ -283,6 +283,57 @@ input {
   font-size: 0.9rem;
 }
 
+/* Title plus an aside (Inputs' daily totals) on one line, wrapping below
+   the title when there isn't room. */
+.page-header-title-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  column-gap: 1rem;
+  row-gap: 0.35rem;
+}
+
+.inputs-day-totals {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  column-gap: 0.75rem;
+  row-gap: 0.2rem;
+  min-width: 0;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.inputs-day-totals-total {
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.inputs-day-totals-groups {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  row-gap: 0.15rem;
+}
+
+/* "Locals: 6 · Greenhouse Guys: 8" — each group stays on one line; the list
+   wraps between groups. */
+.inputs-day-totals-group {
+  white-space: nowrap;
+}
+
+.inputs-day-totals-group + .inputs-day-totals-group::before {
+  content: "·";
+  margin: 0 0.45rem;
+}
+
+.inputs-day-totals strong {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
 .page-header-user {
   flex-shrink: 0;
   font-size: 0.9rem;
@@ -8149,19 +8200,29 @@ input {
   gap: 0.35rem;
 }
 
+/* Group divider: light-blue band with darker text and a solid separator,
+   identical for every group (Ungrouped included). Name left, count right. */
 .inputs-employee-group-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.4rem;
   margin: 0;
-  padding: 0.3rem 0.5rem 0.15rem;
+  padding: 0.35rem 0.55rem;
   font-size: 0.7rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  color: var(--color-muted);
-  border-bottom: 1px solid var(--color-border);
+  color: #1e3a8a;
+  background: #e0ecff;
+  border-top: 1px solid #bfd4fb;
+  border-bottom: 2px solid #93b4f5;
+  border-radius: 4px 4px 0 0;
+}
+
+/* Breathing room between one group's last row and the next divider. */
+.inputs-employee-group + .inputs-employee-group {
+  margin-top: 0.35rem;
 }
 
 .inputs-employee-group-name {
