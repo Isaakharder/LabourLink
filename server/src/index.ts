@@ -37,6 +37,7 @@ import passwordResetRoutes from "./routes/passwordReset";
 import plantDensitiesRoutes from "./routes/plantDensities";
 import reportsRoutes from "./routes/reports";
 import rowCompletionsRoutes from "./routes/rowCompletions";
+import { installProcessSafetyNet } from "./lib/processSafety";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -88,6 +89,10 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   console.error("Unhandled request error:", err);
   res.status(500).json({ error: "Internal server error" });
 });
+
+// One request's unhandled rejection must never take the whole API down
+// (see lib/processSafety.ts).
+installProcessSafetyNet();
 
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`LabourLink API listening on port ${PORT}`);
