@@ -1,8 +1,7 @@
 // @vitest-environment jsdom
 //
-// Write New Tag, row target: on iOS the row picker opens straight onto every
-// row from every phase in numeric order (no phase step) and the mapping is
-// saved against the chosen row's own ID. Android/PWA keep the phase step.
+// Write New Tag, row target on Android/PWA: the phase step is unchanged.
+// (iPhone has its own screen — see IosWriteNewTagScreen.test.tsx.)
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -105,27 +104,6 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("WriteNewTagScreen — row picker", () => {
-  it("iOS: no phase step, rows sorted numerically, and the mapping is saved to the chosen row's ID", async () => {
-    const user = userEvent.setup();
-    renderScreen();
-
-    await user.click(screen.getByRole("button", { name: "Row" }));
-    await screen.findByRole("button", { name: "1" });
-    expect(screen.queryByRole("button", { name: /Phase/ })).not.toBeInTheDocument();
-    expect(gridRowNumbers()).toEqual(["1", "2", "9", "10", "11"]);
-
-    await user.click(screen.getByRole("button", { name: "10" }));
-    await user.click(screen.getByRole("button", { name: "Confirm" }));
-
-    await act(async () => lastSession().onTag(tag()));
-    await user.click(await screen.findByRole("button", { name: "Write LabourLink tag" }));
-    await act(async () => lastSession().onTag(tag({ labourlinkTagUuid: NEW_UUID, hasNdefData: true })));
-
-    expect(apiMock.writeMapping).toHaveBeenCalledWith(
-      expect.objectContaining({ targetType: "greenhouse_row", targetId: "row-10", labourlinkTagUuid: NEW_UUID })
-    );
-  });
-
   it("Android/PWA: still asks for the phase first", async () => {
     platform.ios = false;
     const user = userEvent.setup();

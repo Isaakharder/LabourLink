@@ -8,6 +8,7 @@ import { TagMapping } from "../../lib/nfcTagTypes";
 import { uuid } from "../../lib/uuid";
 import { RowPickerSheet, RowPickerLand } from "../../components/mobile/RowPickerSheet";
 import { CarrierPickerSheet, PickerCarrier } from "../../components/mobile/CarrierPickerSheet";
+import { IosWriteNewTagScreen } from "./IosWriteNewTagScreen";
 
 type TargetType = "greenhouse_row" | "carrier";
 type Step =
@@ -25,7 +26,13 @@ type Step =
 // it by reading it back, then saves the mapping. Never locks the tag
 // (makeReadOnly is never called anywhere in lib/nfc.ts). Plain English, no
 // i18n — same convention as the rest of Settings.
+// iPhone gets the offline-capable single-session flow; Android/web keep this
+// original screen unchanged.
 export function WriteNewTagScreen() {
+  return isIosNativePlatform() ? <IosWriteNewTagScreen /> : <StandardWriteNewTagScreen />;
+}
+
+function StandardWriteNewTagScreen() {
   const { me } = useWorkSession();
   const isAdmin = me?.employee.securityRole === "Administrator" || me?.employee.securityRole === "Manager";
 
