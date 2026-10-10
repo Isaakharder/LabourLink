@@ -81,6 +81,18 @@ export function fetchCarriersWithCache(): Promise<CacheResult<CarriersResponse>>
   return fetchWithCache<CarriersResponse>(CACHE_KEYS.carriers, "/api/mobile/carriers");
 }
 
+// Every active activity, for iPhone Set Up NFC Tag → Activities (admin-only
+// server route). Falls back to the admin's own activity list when the server
+// predates that route.
+export async function fetchTagActivityTargetsWithCache(): Promise<CacheResult<{ activities: { id: string; name: string }[] }>> {
+  try {
+    return await fetchWithCache<{ activities: { id: string; name: string }[] }>("tag-activity-targets", "/api/mobile/tags/activity-targets");
+  } catch {
+    const own = await fetchActivitiesWithCache();
+    return { ...own, data: { activities: own.data.activities.map((a) => ({ id: a.id, name: a.name })) } };
+  }
+}
+
 export interface ResolvedDisplayLabels {
   activityName: string | null;
   minimumDurationMinutes: number | null;

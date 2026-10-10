@@ -486,6 +486,78 @@ export type NfcWriteResult = { ok: true; verified: boolean } | { ok: false; reas
 // responsible for reading the tag back afterward (a fresh startScanSession
 // tap) to verify the write actually took — this function only reports
 // whether the write call itself succeeded.
+// Custom content for "Custom Text / URL" tags (iPhone Set Up NFC Tag). Plain
+// NDEF Text/URI records: LabourLink never acts on them when scanned (they
+// carry no LabourLink tag ID), and the app never opens a scanned URL.
+export function buildTextRecord(text: string): NdefRecord {
+  const lang = Array.from(new TextEncoder().encode("en"));
+  return { tnf: NDEF_TNF_WELL_KNOWN, type: [0x54], id: [], payload: [lang.length, ...lang, ...Array.from(new TextEncoder().encode(text))] };
+}
+export function buildUriRecord(url: string): NdefRecord {
+  return { tnf: NDEF_TNF_WELL_KNOWN, type: [NDEF_TYPE_URI], id: [], payload: [URI_IDENTIFIER_CODE_NONE, ...Array.from(new TextEncoder().encode(url))] };
+}
+
+// Writes arbitrary NDEF records to the tag in the field; on iPhone the patched
+// plugin reads them back in the same session (verified: true only on a match).
+export async function writeNdefRecords(
+  records: NdefRecord[],
+  context: { isWritable: boolean | null; maxSize: number | null },
+  options: { iosSuccessMessage?: string } = {}
+): Promise<NfcWriteResult> {
+  if (!isNativePlatform()) {
+    return { ok: false, reason: "unsupported", message: "Writing tags is only available in the LabourLink app." };
+  }
+  if (context.isWritable === false) {
+    return { ok: false, reason: "not_writable", message: "This tag is read-only and cannot be written to." };
+  }
+  const bytes = records.reduce((n, r) => n + r.payload.length + r.type.length + 6, 0);
+  if (context.maxSize !== null && context.maxSize > 0 && context.maxSize < bytes) {
+    return { ok: false, reason: "insufficient_capacity", message: `This tag only holds ${context.maxSize} bytes — this content needs about ${bytes}.` };
+  }
+  try {
+    const { CapacitorNfc } = await import("@capgo/capacitor-nfc");
+    const result = (await CapacitorNfc.write({
+      records,
+      allowFormat: true,
+      ...(options.iosSuccessMessage ? { successMessage: options.iosSuccessMessage } : {}),
+    } as Parameters<typeof CapacitorNfc.write>[0])) as unknown as { verified?: boolean } | undefined;
+    return { ok: true, verified: result?.verified === true };
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    return {
+      ok: false,
+      reason: code === "WRITE_NOT_VERIFIED" ? "not_verified" : "write_failed",
+      message: err instanceof Error ? err.message : "Could not write to this tag.",
+    };
+  }
+}
+
+// Erases the tag in the field (one empty NDEF record — what the plugin's
+// erase() writes); on iPhone verified by reading it back in the same session.
+// The tag's hardware ID never changes — erasing is not the same as removing a
+// LabourLink assignment.
+export async function eraseTag(
+  context: { isWritable: boolean | null },
+  options: { iosSuccessMessage?: string } = {}
+): Promise<NfcWriteResult> {
+  if (!isNativePlatform()) return { ok: false, reason: "unsupported", message: "Erasing tags is only available in the LabourLink app." };
+  if (context.isWritable === false) return { ok: false, reason: "not_writable", message: "This tag is read-only, so its contents can't be erased." };
+  try {
+    const { CapacitorNfc } = await import("@capgo/capacitor-nfc");
+    const result = (await (CapacitorNfc.erase as (o?: unknown) => Promise<unknown>)(
+      options.iosSuccessMessage ? { successMessage: options.iosSuccessMessage } : undefined
+    )) as { verified?: boolean } | undefined;
+    return { ok: true, verified: result?.verified === true };
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    return {
+      ok: false,
+      reason: code === "WRITE_NOT_VERIFIED" ? "not_verified" : "write_failed",
+      message: err instanceof Error ? err.message : "Could not erase this tag.",
+    };
+  }
+}
+
 export async function writeTag(
   uuid: string,
   context: { isWritable: boolean | null; maxSize: number | null },

@@ -138,3 +138,65 @@ export function buildScanSwitchAnswers(
 
   return answers;
 }
+
+// ---------------------------------------------------------------------------
+// iPhone: what a scanned tag means on Home, for every tag kind (rows, bins,
+// activities and the Start Break / End Break / End Work actions). Pure.
+// Rules: an action only happens when it makes sense in the current state —
+// repeating a scan when already in that state does nothing; a tag never ends
+// a break or starts work as a side effect; End Work always asks first; row and
+// bin tags keep the existing switching rules (classifyHomeScan).
+export type IosHomeScanPlan =
+  | { kind: "unknown" }
+  | { kind: "row-or-bin"; resolved: HomeScanResolved }
+  | { kind: "choose-activity"; activityId: string; label: string }
+  | { kind: "start-break" }
+  | { kind: "end-break" }
+  | { kind: "confirm-end-work" }
+  | {
+      kind: "nothing";
+      reason:
+        | "on-break" // a work tag while on a break
+        | "not-working" // break/end-work/row/bin tag while not working
+        | "already-on-break"
+        | "not-on-break"
+        | "already-this-activity"
+        | "activity-not-available";
+      label?: string;
+    };
+
+export function planIosHomeScan(
+  resolved: { targetType: string; targetId: string; label: string } | null,
+  ctx: { status: "idle" | "work" | "break"; currentActivityId: string | null; availableActivityIds: ReadonlySet<string> }
+): IosHomeScanPlan {
+  if (!resolved) return { kind: "unknown" };
+  switch (resolved.targetType) {
+    case "greenhouse_row":
+    case "carrier":
+      if (ctx.status === "break") return { kind: "nothing", reason: "on-break" };
+      if (ctx.status !== "work") return { kind: "nothing", reason: "not-working" };
+      return { kind: "row-or-bin", resolved: { targetType: resolved.targetType, targetId: resolved.targetId, label: resolved.label } };
+    case "activity":
+      if (ctx.status === "break") return { kind: "nothing", reason: "on-break", label: resolved.label };
+      if (!ctx.availableActivityIds.has(resolved.targetId)) return { kind: "nothing", reason: "activity-not-available", label: resolved.label };
+      if (ctx.status === "work" && ctx.currentActivityId === resolved.targetId) {
+        return { kind: "nothing", reason: "already-this-activity", label: resolved.label };
+      }
+      return { kind: "choose-activity", activityId: resolved.targetId, label: resolved.label };
+    case "action":
+      if (resolved.targetId === "start_break") {
+        if (ctx.status === "break") return { kind: "nothing", reason: "already-on-break" };
+        if (ctx.status !== "work") return { kind: "nothing", reason: "not-working" };
+        return { kind: "start-break" };
+      }
+      if (resolved.targetId === "end_break") {
+        return ctx.status === "break" ? { kind: "end-break" } : { kind: "nothing", reason: "not-on-break" };
+      }
+      if (resolved.targetId === "end_work") {
+        return ctx.status === "idle" ? { kind: "nothing", reason: "not-working" } : { kind: "confirm-end-work" };
+      }
+      return { kind: "unknown" };
+    default:
+      return { kind: "unknown" };
+  }
+}

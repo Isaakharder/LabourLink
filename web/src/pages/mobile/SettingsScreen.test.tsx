@@ -21,9 +21,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsScreen } from "./SettingsScreen";
 
 let mockIsNative = false;
+let mockPlatform = "android";
 vi.mock("@capacitor/core", () => ({
   Capacitor: {
     isNativePlatform: () => mockIsNative,
+    getPlatform: () => mockPlatform,
   },
 }));
 
@@ -51,6 +53,7 @@ function renderSettings() {
       <Routes>
         <Route path="/mobile/settings" element={<SettingsScreen />} />
         <Route path="/mobile/home" element={<div>Home Screen</div>} />
+        <Route path="/mobile/settings/nfc-setup/:kind" element={<div>NFC setup page</div>} />
       </Routes>
     </MemoryRouter>
   );
@@ -58,6 +61,7 @@ function renderSettings() {
 
 beforeEach(() => {
   mockIsNative = false;
+  mockPlatform = "android";
   mockSecurityRole = "Employee";
 });
 
@@ -181,6 +185,61 @@ describe("SettingsScreen — Administrator Tools (Employees / Messages)", () => 
     renderSettings();
     expect(screen.getByRole("link", { name: "Employees" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Messages" })).toBeInTheDocument();
+  });
+});
+
+describe("SettingsScreen — iPhone admin grid and Set Up NFC Tag", () => {
+  beforeEach(() => {
+    mockIsNative = true;
+    mockPlatform = "ios";
+  });
+
+  it("one equal-size grid: Employees, Messages, Set Up NFC Tag, NFC Diagnostic — no separate register/write buttons", () => {
+    mockSecurityRole = "Administrator";
+    renderSettings();
+    const buttons = Array.from(document.querySelectorAll(".mobile-admin-grid > .mobile-admin-grid-button")).map((e) => e.textContent);
+    expect(buttons).toEqual(["Employees", "Messages", "Set Up NFC Tag", "NFC Diagnostic"]);
+    expect(screen.queryByText("Register Existing Tag")).not.toBeInTheDocument();
+    expect(screen.queryByText("Write New Tag")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Admin Mode" })).not.toBeInTheDocument();
+  });
+
+  it("Set Up NFC Tag opens a sheet with the eight equal choices (no Start Work) and each opens its setup", async () => {
+    mockSecurityRole = "Manager";
+    renderSettings();
+    await userEvent.click(screen.getByRole("button", { name: "Set Up NFC Tag" }));
+    const sheet = screen.getByRole("dialog", { name: "Set Up NFC Tag" });
+    const choices = Array.from(sheet.querySelectorAll(".mobile-admin-grid-button")).map((e) => e.textContent);
+    expect(choices).toEqual(["Activities", "Rows", "Bins", "Start Break", "End Break", "End Work", "Clear Tag", "Custom Text / URL"]);
+    expect(choices).not.toContain("Start Work");
+    await userEvent.click(screen.getByRole("button", { name: "End Break" }));
+    expect(screen.getByText("NFC setup page")).toBeInTheDocument();
+  });
+
+  it("the sheet closes without navigating", async () => {
+    mockSecurityRole = "Administrator";
+    renderSettings();
+    await userEvent.click(screen.getByRole("button", { name: "Set Up NFC Tag" }));
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("a general Employee sees no admin grid", () => {
+    mockSecurityRole = "Employee";
+    renderSettings();
+    expect(screen.queryByRole("heading", { name: "Administrator Tools" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Set Up NFC Tag" })).not.toBeInTheDocument();
+  });
+
+  it("Android keeps its original sections and labels", () => {
+    mockPlatform = "android";
+    mockSecurityRole = "Administrator";
+    renderSettings();
+    expect(screen.getByRole("heading", { name: "Admin Mode" })).toBeInTheDocument();
+    expect(screen.getByText("Register Existing Tag")).toBeInTheDocument();
+    expect(screen.getByText("Write New Tag")).toBeInTheDocument();
+    expect(screen.queryByText("Set Up NFC Tag")).not.toBeInTheDocument();
+    expect(document.querySelector(".mobile-admin-grid")).toBeNull();
   });
 });
 

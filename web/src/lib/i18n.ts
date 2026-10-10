@@ -90,6 +90,15 @@ const TRANSLATIONS_EN = {
   // iPhone, offline: the tag may be registered, just not in this phone's
   // saved list yet.
   nfcTagNotSavedOffline: "This tag isn't saved on this phone yet. Choose manually below, or reconnect to update tags.",
+  // iPhone action/activity tags on Home (see planIosHomeScan).
+  nfcScanOnBreak: "You're on a break. End your break first.",
+  nfcScanNotWorking: "You're not working right now. Choose a job first.",
+  nfcAlreadyOnBreak: "You're already on a break.",
+  nfcNotOnBreak: "You're not on a break.",
+  nfcAlreadyOnActivity: (p: Params) => `You're already working on ${p.label}.`,
+  nfcActivityNotAvailable: (p: Params) => `${p.label} isn't one of your jobs.`,
+  nfcBreakStarted: "Break started.",
+  nfcBreakEnded: "Break ended.",
   nfcStillWaiting: "Still not seeing a tag — choose manually below.",
   // iPhone only — Android never shows this (it starts scanning silently by
   // itself). Tapping it opens Apple's own NFC scan sheet for one tag.
@@ -229,6 +238,14 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   tapBinTag: "Toque la etiqueta del transportador para comenzar a trabajar allí, o elija manualmente abajo.",
   nfcTagNotRecognized: "Esa etiqueta no está registrada. Elija manualmente abajo.",
   nfcTagNotSavedOffline: "Esta etiqueta aún no está guardada en este teléfono. Elija manualmente abajo, o conéctese para actualizar las etiquetas.",
+  nfcScanOnBreak: "Está en un descanso. Termine su descanso primero.",
+  nfcScanNotWorking: "No está trabajando ahora. Elija un trabajo primero.",
+  nfcAlreadyOnBreak: "Ya está en un descanso.",
+  nfcNotOnBreak: "No está en un descanso.",
+  nfcAlreadyOnActivity: (p) => `Ya está trabajando en ${p.label}.`,
+  nfcActivityNotAvailable: (p) => `${p.label} no es uno de sus trabajos.`,
+  nfcBreakStarted: "Descanso iniciado.",
+  nfcBreakEnded: "Descanso terminado.",
   nfcStillWaiting: "Todavía no se detecta ninguna etiqueta — elija manualmente abajo.",
   scanButtonLabel: "Escanear",
 

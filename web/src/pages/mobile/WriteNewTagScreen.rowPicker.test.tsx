@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // Write New Tag, row target on Android/PWA: the phase step is unchanged.
-// (iPhone has its own screen — see IosWriteNewTagScreen.test.tsx.)
+// (iPhone uses Set Up NFC Tag — see IosNfcSetupScreen.test.tsx.)
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

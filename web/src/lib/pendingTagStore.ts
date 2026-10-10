@@ -1,23 +1,26 @@
-// Tag assignments this phone has written (Write New Tag on iPhone) but the
-// server hasn't confirmed yet — so a tag written offline in a greenhouse can
-// be scanned and used on this phone straight away, then registered once the
-// phone reconnects (lib/pendingTagSync.ts). No imports on purpose:
-// nfcMappingCache.ts reads it to resolve scans, and pendingTagSync.ts
-// (which imports nfcMappingCache) writes it.
+// Tag operations this phone has made (Set Up NFC Tag on iPhone) that the
+// server hasn't confirmed yet — so a tag set up or cleared offline in a
+// greenhouse takes effect on this phone immediately and survives a restart,
+// then syncs once the phone reconnects (lib/pendingTagSync.ts), oldest first.
+// No imports on purpose: nfcMappingCache.ts reads it to resolve scans, and
+// pendingTagSync.ts (which imports nfcMappingCache) writes it.
 //
 // localStorage, same as the downloaded mapping cache and the device identity
 // it belongs with (Library/WebKit is excluded from backups — AppDelegate).
 
 const KEY = "labourlink_pending_tag_registrations";
 
+export type TagTargetKind = "greenhouse_row" | "carrier" | "activity" | "action";
+
 export type PendingTagStatus =
-  // Written and verified on the tag; waiting to be registered.
+  // Waiting to be sent.
   | "pending"
-  // The server says this row/bin already has a different tag. Nothing is
-  // replaced until an admin chooses (resolvePendingTagConflict).
+  // Assign only: the server says this row/bin already has a different tag
+  // (or the tag belongs to something else). Nothing is replaced until an
+  // admin chooses (resolvePendingTagConflict).
   | "conflict"
-  // Registration can't succeed as-is (e.g. the tag ID is already assigned
-  // elsewhere, or the row/bin no longer exists). Kept so it's visible.
+  // Can't succeed as-is (tag ID used elsewhere, target gone, assignment
+  // changed by someone else before a removal arrived…). Kept so it's visible.
   | "failed";
 
 export interface PendingTagConflict {
@@ -28,10 +31,17 @@ export interface PendingTagConflict {
 
 export interface PendingTagRegistration {
   id: string;
-  targetType: "greenhouse_row" | "carrier";
+  // "assign" (default for entries saved by build 15) or "unassign" (Clear Tag).
+  op?: "assign" | "unassign";
+  // For "unassign": the target the phone believed the tag was assigned to —
+  // the server only removes it if that's still true.
+  targetType: TagTargetKind;
   targetId: string;
   label: string;
-  labourlinkTagUuid: string; // lowercase
+  // Exactly one identifier: a LabourLink tag ID written by the app, or the
+  // tag's hardware ID (a tag registered as it is — incl. read-only tags).
+  labourlinkTagUuid: string | null; // lowercase
+  ridderHardwareId?: string | null; // uppercase hex
   writtenAt: string;
   status: PendingTagStatus;
   attempts: number;
@@ -52,7 +62,7 @@ export function subscribePendingTags(listener: Listener): () => void {
 export function listPendingTags(): PendingTagRegistration[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(KEY) ?? "[]");
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed) ? parsed.map((e) => ({ op: "assign", ridderHardwareId: null, ...e })) : [];
   } catch {
     return [];
   }
@@ -64,7 +74,22 @@ function save(entries: PendingTagRegistration[]): void {
 }
 
 export function addPendingTag(entry: PendingTagRegistration): void {
-  save([...listPendingTags().filter((e) => e.id !== entry.id), { ...entry, labourlinkTagUuid: entry.labourlinkTagUuid.toLowerCase() }]);
+  const key = identifierKey(entry);
+  save([
+    // Clearing a tag drops this phone's own assign for it that the server
+    // never accepted (a conflict) — otherwise it would keep resolving. A
+    // "pending" assign may already have reached the server, so it stays and
+    // syncs first; the removal follows it.
+    ...listPendingTags().filter(
+      (e) => e.id !== entry.id && !(entry.op === "unassign" && e.op !== "unassign" && e.status === "conflict" && identifierKey(e) === key)
+    ),
+    {
+      ...entry,
+      op: entry.op ?? "assign",
+      labourlinkTagUuid: entry.labourlinkTagUuid ? entry.labourlinkTagUuid.toLowerCase() : null,
+      ridderHardwareId: entry.ridderHardwareId ? entry.ridderHardwareId.toUpperCase() : null,
+    },
+  ]);
 }
 
 export function updatePendingTag(id: string, patch: Partial<PendingTagRegistration>): void {
@@ -75,18 +100,50 @@ export function removePendingTag(id: string): void {
   save(listPendingTags().filter((e) => e.id !== id));
 }
 
-// Assignments this phone should resolve scans against right now. A
-// "conflict" entry still resolves locally — the tag physically carries this
-// row/bin's ID; only the server-side registration is undecided. A "failed"
-// entry does not (e.g. its tag ID belongs to something else on the server).
-export function localTagMappings(): {
-  targetType: "greenhouse_row" | "carrier";
+export function identifierKey(e: { labourlinkTagUuid?: string | null; ridderHardwareId?: string | null }): string {
+  return e.labourlinkTagUuid ? `uuid:${e.labourlinkTagUuid.toLowerCase()}` : `hw:${(e.ridderHardwareId ?? "").toUpperCase()}`;
+}
+
+export interface LocalTagMapping {
+  targetType: TagTargetKind;
   targetId: string;
   label: string;
-  labourlinkTagUuid: string;
-  ridderHardwareId: null;
-}[] {
-  return listPendingTags()
-    .filter((e) => e.status === "pending" || e.status === "conflict")
-    .map((e) => ({ targetType: e.targetType, targetId: e.targetId, label: e.label, labourlinkTagUuid: e.labourlinkTagUuid, ridderHardwareId: null }));
+  labourlinkTagUuid: string | null;
+  ridderHardwareId: string | null;
+}
+
+// What this phone's own queued operations say right now, per tag: the
+// LATEST operation for a tag wins. An assign makes the tag resolve locally
+// (a "conflict" assign still does — the tag physically carries this target;
+// only the server side is undecided). A pending unassign hides that tag's
+// cached assignment until the server confirms the removal, so a cache refresh
+// can't bring it back. "failed" operations have no local effect.
+export function localTagState(): { mappings: LocalTagMapping[]; suppressed: Set<string> } {
+  const latest = new Map<string, PendingTagRegistration>();
+  for (const e of [...listPendingTags()].sort((a, b) => a.writtenAt.localeCompare(b.writtenAt))) {
+    if (e.status === "failed") continue;
+    latest.set(identifierKey(e), e);
+  }
+  const mappings: LocalTagMapping[] = [];
+  const suppressed = new Set<string>();
+  for (const [key, e] of latest) {
+    if (e.op === "unassign") {
+      if (e.status === "pending") suppressed.add(key);
+    } else {
+      suppressed.add(key); // the local assignment supersedes any cached one for this tag
+      mappings.push({
+        targetType: e.targetType,
+        targetId: e.targetId,
+        label: e.label,
+        labourlinkTagUuid: e.labourlinkTagUuid,
+        ridderHardwareId: e.ridderHardwareId ?? null,
+      });
+    }
+  }
+  return { mappings, suppressed };
+}
+
+// Back-compat helper (build 15 callers/tests).
+export function localTagMappings(): LocalTagMapping[] {
+  return localTagState().mappings;
 }

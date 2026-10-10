@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { ChevronLeft } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useDevicePairing } from "../../context/DevicePairingContext";
 import { useMessages } from "../../context/MessagesContext";
 import { useWorkSession } from "../../context/WorkSessionContext";
 import { isPushMarkedEnabled, initNativePush, subscribeWebPush } from "../../lib/push";
-import { isNativePlatform } from "../../lib/platform";
+import { isIosNativePlatform, isNativePlatform } from "../../lib/platform";
+import { NFC_SETUP_KINDS, NFC_SETUP_LABELS } from "./IosNfcSetupScreen";
 import { privacyPolicyHref } from "../../lib/privacyPolicy";
 import { computeSyncIndicatorState } from "../../lib/syncIndicator";
 
@@ -51,6 +52,11 @@ export function SettingsScreen() {
   const [notifBusy, setNotifBusy] = useState(false);
   const [notifError, setNotifError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [nfcSetupOpen, setNfcSetupOpen] = useState(false);
+  const navigate = useNavigate();
+  // iPhone: one grid of equal admin buttons, and a single "Set Up NFC Tag"
+  // entry point (IosNfcSetupScreen). Android keeps its sections unchanged.
+  const iosAdminGrid = isIosNativePlatform();
 
   async function handleSyncNow() {
     setSyncing(true);
@@ -169,39 +175,90 @@ export function SettingsScreen() {
           to an NFC screen that can't do anything on this device. Never
           translated (same convention as the rest of this screen — see
           i18n.ts's scope note). */}
-      {(canViewEmployees || canSendMessages) && (
-        <section className="mobile-settings-device-section">
-          <h2>Administrator Tools</h2>
-          <div className="mobile-confirm-actions">
-            {canViewEmployees && (
-              <Link to="/mobile/settings/employees" className="mobile-action-button mobile-action-secondary">
-                Employees
-              </Link>
-            )}
-            {canSendMessages && (
-              <Link to="/mobile/settings/messages" className="mobile-action-button mobile-action-secondary">
-                Messages
-              </Link>
-            )}
-          </div>
-        </section>
-      )}
+      {iosAdminGrid ? (
+        (canViewEmployees || canSendMessages || showAdminNfcTools) && (
+          <section className="mobile-settings-device-section">
+            <h2>Administrator Tools</h2>
+            <div className="mobile-admin-grid">
+              {canViewEmployees && (
+                <Link to="/mobile/settings/employees" className="mobile-admin-grid-button">
+                  Employees
+                </Link>
+              )}
+              {canSendMessages && (
+                <Link to="/mobile/settings/messages" className="mobile-admin-grid-button">
+                  Messages
+                </Link>
+              )}
+              {showAdminNfcTools && (
+                <button type="button" className="mobile-admin-grid-button" onClick={() => setNfcSetupOpen(true)}>
+                  Set Up NFC Tag
+                </button>
+              )}
+              {showAdminNfcTools && (
+                <Link to="/mobile/settings/nfc-diagnostic" className="mobile-admin-grid-button">
+                  NFC Diagnostic
+                </Link>
+              )}
+            </div>
+          </section>
+        )
+      ) : (
+        <>
+        {(canViewEmployees || canSendMessages) && (
+          <section className="mobile-settings-device-section">
+            <h2>Administrator Tools</h2>
+            <div className="mobile-confirm-actions">
+              {canViewEmployees && (
+                <Link to="/mobile/settings/employees" className="mobile-action-button mobile-action-secondary">
+                  Employees
+                </Link>
+              )}
+              {canSendMessages && (
+                <Link to="/mobile/settings/messages" className="mobile-action-button mobile-action-secondary">
+                  Messages
+                </Link>
+              )}
+            </div>
+          </section>
+        )}
 
-      {showAdminNfcTools && (
-        <section className="mobile-settings-device-section">
-          <h2>Admin Mode</h2>
-          <div className="mobile-confirm-actions">
-            <Link to="/mobile/settings/register-tag" className="mobile-action-button mobile-action-secondary">
-              Register Existing Tag
-            </Link>
-            <Link to="/mobile/settings/write-tag" className="mobile-action-button mobile-action-secondary">
-              Write New Tag
-            </Link>
-            <Link to="/mobile/settings/nfc-diagnostic" className="mobile-action-button mobile-action-secondary">
-              NFC Diagnostic
-            </Link>
+        {showAdminNfcTools && (
+          <section className="mobile-settings-device-section">
+            <h2>Admin Mode</h2>
+            <div className="mobile-confirm-actions">
+              <Link to="/mobile/settings/register-tag" className="mobile-action-button mobile-action-secondary">
+                Register Existing Tag
+              </Link>
+              <Link to="/mobile/settings/write-tag" className="mobile-action-button mobile-action-secondary">
+                Write New Tag
+              </Link>
+              <Link to="/mobile/settings/nfc-diagnostic" className="mobile-action-button mobile-action-secondary">
+                NFC Diagnostic
+              </Link>
+            </div>
+          </section>
+        )}
+        </>
+      )}
+      {nfcSetupOpen && (
+        <div className="mobile-sheet-backdrop" onClick={() => setNfcSetupOpen(false)}>
+          <div className="mobile-sheet" role="dialog" aria-modal="true" aria-label="Set Up NFC Tag" onClick={(e) => e.stopPropagation()}>
+            <div className="mobile-sheet-header">
+              <h2>Set Up NFC Tag</h2>
+              <button type="button" className="mobile-sheet-close" aria-label="Close" onClick={() => setNfcSetupOpen(false)}>
+                ×
+              </button>
+            </div>
+            <div className="mobile-admin-grid">
+              {NFC_SETUP_KINDS.map((k) => (
+                <button key={k} type="button" className="mobile-admin-grid-button" onClick={() => navigate(`/mobile/settings/nfc-setup/${k}`)}>
+                  {NFC_SETUP_LABELS[k]}
+                </button>
+              ))}
+            </div>
           </div>
-        </section>
+        </div>
       )}
       <section className="mobile-settings-device-section">
         <h2>Privacy</h2>

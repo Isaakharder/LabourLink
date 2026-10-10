@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildScanSwitchAnswers, classifyHomeScan, HomeNfcGateContext, isHomeNfcScanActive } from "./nfcActiveScreenScan";
+import { buildScanSwitchAnswers, classifyHomeScan, HomeNfcGateContext, isHomeNfcScanActive, planIosHomeScan } from "./nfcActiveScreenScan";
 
 function gate(overrides: Partial<HomeNfcGateContext> = {}): HomeNfcGateContext {
   return {
@@ -180,5 +180,47 @@ describe("buildScanSwitchAnswers", () => {
     expect(answers).toEqual({
       "q-row": { questionId: "q-row", questionType: "greenhouse_row", greenhouseRowId: "row-1" },
     });
+  });
+});
+
+describe("planIosHomeScan (iPhone)", () => {
+  const acts = new Set(["act-1", "act-2"]);
+  const ctx = (status: "idle" | "work" | "break", currentActivityId: string | null = null) => ({ status, currentActivityId, availableActivityIds: acts });
+  const tagFor = (targetType: string, targetId: string, label = "X") => ({ targetType, targetId, label });
+
+  it("unknown tag", () => expect(planIosHomeScan(null, ctx("work", "act-1"))).toEqual({ kind: "unknown" }));
+
+  it("row/bin only while working; never ends a break or starts work", () => {
+    expect(planIosHomeScan(tagFor("greenhouse_row", "r"), ctx("work", "act-1")).kind).toBe("row-or-bin");
+    expect(planIosHomeScan(tagFor("carrier", "c"), ctx("break", "act-1"))).toEqual({ kind: "nothing", reason: "on-break" });
+    expect(planIosHomeScan(tagFor("carrier", "c"), ctx("idle"))).toEqual({ kind: "nothing", reason: "not-working" });
+  });
+
+  it("activity: start/switch through the job flow; blocked on a break, for another group's job, or the same job", () => {
+    expect(planIosHomeScan(tagFor("activity", "act-2", "Picking"), ctx("idle"))).toEqual({ kind: "choose-activity", activityId: "act-2", label: "Picking" });
+    expect(planIosHomeScan(tagFor("activity", "act-2"), ctx("work", "act-1")).kind).toBe("choose-activity");
+    expect(planIosHomeScan(tagFor("activity", "act-2"), ctx("break", "act-1"))).toMatchObject({ kind: "nothing", reason: "on-break" });
+    expect(planIosHomeScan(tagFor("activity", "act-9"), ctx("idle"))).toMatchObject({ kind: "nothing", reason: "activity-not-available" });
+    expect(planIosHomeScan(tagFor("activity", "act-1"), ctx("work", "act-1"))).toMatchObject({ kind: "nothing", reason: "already-this-activity" });
+  });
+
+  it("break actions are no-ops when already in that state", () => {
+    expect(planIosHomeScan(tagFor("action", "start_break"), ctx("work", "act-1"))).toEqual({ kind: "start-break" });
+    expect(planIosHomeScan(tagFor("action", "start_break"), ctx("break", "act-1"))).toEqual({ kind: "nothing", reason: "already-on-break" });
+    expect(planIosHomeScan(tagFor("action", "start_break"), ctx("idle"))).toEqual({ kind: "nothing", reason: "not-working" });
+    expect(planIosHomeScan(tagFor("action", "end_break"), ctx("break", "act-1"))).toEqual({ kind: "end-break" });
+    expect(planIosHomeScan(tagFor("action", "end_break"), ctx("work", "act-1"))).toEqual({ kind: "nothing", reason: "not-on-break" });
+    expect(planIosHomeScan(tagFor("action", "end_break"), ctx("idle"))).toEqual({ kind: "nothing", reason: "not-on-break" });
+  });
+
+  it("End Work always asks for confirmation first, and does nothing when idle", () => {
+    expect(planIosHomeScan(tagFor("action", "end_work"), ctx("work", "act-1"))).toEqual({ kind: "confirm-end-work" });
+    expect(planIosHomeScan(tagFor("action", "end_work"), ctx("break", "act-1"))).toEqual({ kind: "confirm-end-work" });
+    expect(planIosHomeScan(tagFor("action", "end_work"), ctx("idle"))).toEqual({ kind: "nothing", reason: "not-working" });
+  });
+
+  it("an unrecognised action or target type is treated as unknown", () => {
+    expect(planIosHomeScan(tagFor("action", "start_work"), ctx("idle"))).toEqual({ kind: "unknown" });
+    expect(planIosHomeScan(tagFor("custom", "x"), ctx("work", "act-1"))).toEqual({ kind: "unknown" });
   });
 });

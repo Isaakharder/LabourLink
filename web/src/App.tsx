@@ -25,6 +25,7 @@ import { EmployeesScreen } from "./pages/mobile/EmployeesScreen";
 import { HomeScreen } from "./pages/mobile/HomeScreen";
 import { MessagesScreen } from "./pages/mobile/MessagesScreen";
 import { NfcDiagnosticScreen } from "./pages/mobile/NfcDiagnosticScreen";
+import { IosNfcSetupScreen } from "./pages/mobile/IosNfcSetupScreen";
 import { PairingScreen } from "./pages/mobile/PairingScreen";
 import { RegisterExistingTagScreen } from "./pages/mobile/RegisterExistingTagScreen";
 import { SettingsScreen } from "./pages/mobile/SettingsScreen";
@@ -32,7 +33,7 @@ import { SyncStatusScreen } from "./pages/mobile/SyncStatusScreen";
 import { WriteNewTagScreen } from "./pages/mobile/WriteNewTagScreen";
 import { StatsScreen } from "./pages/mobile/StatsScreen";
 import { useIsMobile } from "./lib/useIsMobile";
-import { isNativePlatform, shouldRenderMobileApp } from "./lib/platform";
+import { isIosNativePlatform, isNativePlatform, shouldRenderMobileApp } from "./lib/platform";
 
 function DesktopApp() {
   const { employee, loading } = useAuth();
@@ -165,8 +166,11 @@ function MobileApp() {
         <Route path="settings/messages" element={<MessagesScreen />} />
         <Route path="settings/sync-status" element={<SyncStatusScreen />} />
         <Route path="settings/nfc-diagnostic" element={<NfcDiagnosticScreen />} />
-        <Route path="settings/register-tag" element={<RegisterExistingTagScreen />} />
-        <Route path="settings/write-tag" element={<WriteNewTagScreen />} />
+        {/* iPhone sets up every kind of tag from Settings → Set Up NFC Tag;
+            the older register/write screens remain Android's. */}
+        <Route path="settings/register-tag" element={isIosNativePlatform() ? <Navigate to="/mobile/settings" replace /> : <RegisterExistingTagScreen />} />
+        <Route path="settings/write-tag" element={isIosNativePlatform() ? <Navigate to="/mobile/settings" replace /> : <WriteNewTagScreen />} />
+        <Route path="settings/nfc-setup/:kind" element={isIosNativePlatform() ? <IosNfcSetupScreen /> : <Navigate to="/mobile/settings" replace />} />
         <Route path="*" element={<Navigate to="/mobile/home" replace />} />
       </Route>
       <Route path="*" element={<Navigate to="/mobile" replace />} />

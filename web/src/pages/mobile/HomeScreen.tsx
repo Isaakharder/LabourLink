@@ -12,7 +12,15 @@ import { SwitchWarningDialog } from "../../components/mobile/SwitchWarningDialog
 import { ScannedTag } from "../../lib/nfc";
 import { refreshTagMappingCache, resolveScannedTag } from "../../lib/nfcMappingCache";
 import { checkSwitchWarning, SwitchWarning } from "../../lib/nfcSwitchWarning";
-import { buildScanSwitchAnswers, classifyHomeScan, HomeScanOutcome, isHomeNfcScanActive, unknownTagMessageKey } from "../../lib/nfcActiveScreenScan";
+import {
+  buildScanSwitchAnswers,
+  classifyHomeScan,
+  HomeScanOutcome,
+  HomeScanResolved,
+  isHomeNfcScanActive,
+  planIosHomeScan,
+  unknownTagMessageKey,
+} from "../../lib/nfcActiveScreenScan";
 import { isIosNativePlatform } from "../../lib/platform";
 import { useForegroundNfcScan } from "../../lib/useForegroundNfcScan";
 import { playErrorFeedback, playSuccessFeedback } from "../../lib/feedback";
@@ -70,6 +78,9 @@ export function HomeScreen() {
     pendingActivityName,
     handleApiError,
     perform,
+    startBreak,
+    endBreak,
+    openEndDayConfirm,
   } = useWorkSession();
   const [activities, setActivities] = useState<Activity[]>([]);
   const [activitiesLoaded, setActivitiesLoaded] = useState(false);
@@ -221,13 +232,19 @@ export function HomeScreen() {
   // native session is ACTUALLY open is useForegroundNfcScan's own
   // `scanning` (see homeNfcActive below) — on iOS this being true no longer
   // means a session is open, only that tapping Scan would start one.
-  const homeNfcEligible = isHomeNfcScanActive({
-    foregrounded,
-    status: me?.status ?? "idle",
-    hasCompetingNfcOwner: Boolean(questionFlow || singleQuestionEdit || switchWarning),
-    hasRowQuestion: Boolean(rowQuestion),
-    hasCarrierQuestion: Boolean(carrierQuestion),
-  });
+  // iPhone: Scan is available whenever Home is showing and nothing else owns
+  // the reader — activity and Start Break / End Break / End Work tags work
+  // while idle, working or on a break (planIosHomeScan decides what each tag
+  // may do). Android keeps its rule: only while working a row/bin job.
+  const homeNfcEligible = isIosNativePlatform()
+    ? foregrounded && Boolean(me) && !questionFlow && !singleQuestionEdit && !switchWarning
+    : isHomeNfcScanActive({
+        foregrounded,
+        status: me?.status ?? "idle",
+        hasCompetingNfcOwner: Boolean(questionFlow || singleQuestionEdit || switchWarning),
+        hasRowQuestion: Boolean(rowQuestion),
+        hasCarrierQuestion: Boolean(carrierQuestion),
+      });
 
   // Everything the scan callback below needs, kept current on every render
   // and read only via .current — never via closure — so the callback (which
@@ -237,9 +254,9 @@ export function HomeScreen() {
   // snapshot, and critically never calls a stale copy of submitQuestionFlow
   // itself (a plain function recreated every render, closing over that
   // render's own me/switchWarning/perform).
-  const homeScanContextRef = useRef({ me, activities, online, language, submitQuestionFlow });
+  const homeScanContextRef = useRef({ me, activities, online, language, submitQuestionFlow, chooseActivity, startBreak, endBreak, openEndDayConfirm });
   useEffect(() => {
-    homeScanContextRef.current = { me, activities, online, language, submitQuestionFlow };
+    homeScanContextRef.current = { me, activities, online, language, submitQuestionFlow, chooseActivity, startBreak, endBreak, openEndDayConfirm };
   });
 
   // Set the instant a resolved scan is classified as an actionable switch,
@@ -259,7 +276,67 @@ export function HomeScreen() {
   const handleHomeScannedTag = useCallback((tag: ScannedTag) => {
     if (inFlightScanRef.current) return;
     const ctx = homeScanContextRef.current;
-    const resolved = resolveScannedTag(tag);
+    const anyResolved = resolveScannedTag(tag);
+    let resolved: HomeScanResolved | null =
+      anyResolved && (anyResolved.targetType === "greenhouse_row" || anyResolved.targetType === "carrier")
+        ? { targetType: anyResolved.targetType, targetId: anyResolved.targetId, label: anyResolved.label }
+        : null;
+
+    if (isIosNativePlatform()) {
+      const plan = planIosHomeScan(anyResolved, {
+        status: ctx.me?.status ?? "idle",
+        currentActivityId: ctx.me?.currentActivity?.id ?? null,
+        availableActivityIds: new Set(ctx.activities.map((a) => a.id)),
+      });
+      switch (plan.kind) {
+        case "unknown":
+          playErrorFeedback();
+          setHomeNfcMessage(t(ctx.language, unknownTagMessageKey(ctx.online, true)));
+          return;
+        case "nothing": {
+          const key =
+            plan.reason === "on-break"
+              ? t(ctx.language, "nfcScanOnBreak")
+              : plan.reason === "not-working"
+                ? t(ctx.language, "nfcScanNotWorking")
+                : plan.reason === "already-on-break"
+                  ? t(ctx.language, "nfcAlreadyOnBreak")
+                  : plan.reason === "not-on-break"
+                    ? t(ctx.language, "nfcNotOnBreak")
+                    : plan.reason === "already-this-activity"
+                      ? t(ctx.language, "nfcAlreadyOnActivity", { label: plan.label ?? "" })
+                      : t(ctx.language, "nfcActivityNotAvailable", { label: plan.label ?? "" });
+          setHomeNfcMessage(key);
+          return;
+        }
+        case "choose-activity":
+          // Same as picking the job from the list: starts at once if it asks
+          // nothing, otherwise opens its row/bin questions — nothing is
+          // committed until those are complete, and Cancel changes nothing.
+          setHomeNfcMessage(null);
+          ctx.chooseActivity(plan.activityId);
+          return;
+        case "start-break":
+          playSuccessFeedback();
+          setHomeNfcMessage(t(ctx.language, "nfcBreakStarted"));
+          ctx.startBreak();
+          return;
+        case "end-break":
+          playSuccessFeedback();
+          setHomeNfcMessage(t(ctx.language, "nfcBreakEnded"));
+          ctx.endBreak();
+          return;
+        case "confirm-end-work":
+          // The same confirmation the End Work button shows.
+          setHomeNfcMessage(null);
+          ctx.openEndDayConfirm();
+          return;
+        case "row-or-bin":
+          resolved = plan.resolved;
+          break;
+      }
+    }
+
     if (!ctx.me?.currentActivity) return;
     const activityDef = ctx.activities.find((a) => a.id === ctx.me!.currentActivity!.id);
     const rowQ = activityDef?.questions.find((q) => q.questionType === "greenhouse_row") ?? null;
