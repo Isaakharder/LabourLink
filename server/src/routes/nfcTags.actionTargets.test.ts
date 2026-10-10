@@ -89,6 +89,10 @@ async function main() {
     }
     check((await call("GET", "/api/mobile/tags/mappings?include=all", employee)).status === 200, "employee device can read mappings (needed to scan)");
 
+    const targets = await call("GET", "/api/mobile/tags/activity-targets", admin);
+    check(targets.status === 200 && targets.body.activities.some((x: any) => x.id === activityId), "admin can list every active activity for tag setup", targets.status);
+    check((await call("GET", "/api/mobile/tags/activity-targets", employee)).status === 403, "employee device can't list activity targets");
+
     // Validation.
     const badAction = await call("POST", "/api/mobile/tags/register", admin, { targetType: "action", targetId: "start_work", ridderHardwareId: `AA${HEX}` });
     check(badAction.status === 400, "unknown action (start_work) is rejected", badAction);

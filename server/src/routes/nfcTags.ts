@@ -88,6 +88,18 @@ router.get(
   })
 );
 
+// Every active activity, for "Set Up NFC Tag → Activities" (admin only). The
+// regular /api/mobile/activities list is limited to the paired employee's own
+// activity groups, which needn't include every job an admin tags.
+router.get(
+  "/activity-targets",
+  requireDeviceAdmin,
+  asyncHandler(async (_req, res) => {
+    const { rows } = await pool.query(`select id, name from activities where is_active = true order by name`);
+    res.json({ activities: rows });
+  })
+);
+
 // Registers a tag by its hardware ID (Ridder tags, read-only tags, or any tag
 // registered as-is without writing to it). Retrying the same tag + target is
 // a no-op success.
