@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GreenhouseLiveCanvas } from "../../components/greenhouseLive/GreenhouseLiveCanvas";
 import { TvRankingSlide } from "../../components/greenhouseLive/TvRankingSlide";
+import { graphSpeedUnit } from "../../lib/speedUnitDisplay";
 import { api } from "../../lib/api";
 import { CanvasTransform, computeFitTransformToPhases } from "../../lib/canvasTransform";
 import { buildSlideSequence, formatAge, indexAfterUpdate, isStale, SlideItem } from "../../lib/displaySlideshow";
@@ -167,7 +168,7 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
                     </span>
                     {current.slide.target != null && (
                       <span>
-                        <b>Target:</b> {Math.round(current.slide.target)} {current.slide.speedUnit ?? ""}
+                        <b>Target:</b> {Math.round(current.slide.target)} {graphSpeedUnit(current.slide.speedUnit)}
                       </span>
                     )}
                     <span>

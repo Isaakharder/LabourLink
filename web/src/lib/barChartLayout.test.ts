@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BarInput, layoutBarChart, MAX_BAR_HEIGHT, MIN_FONT, MeasureText, sizeRows, textColorOn } from "./barChartLayout";
+import { BarInput, labelText, layoutBarChart, MAX_BAR_HEIGHT, MIN_FONT, MeasureText, sizeRows, textColorOn } from "./barChartLayout";
 
 // Deterministic text width: 0.6 em per character (bold), like a sans font.
 const measure: MeasureText = (text, fontPx) => text.length * fontPx * 0.6;
@@ -13,7 +13,7 @@ const GREEN = "#15803d";
 const RED = "#dc2626";
 
 function bars(speeds: number[], name = (i: number) => `Person ${i + 1} L.`): BarInput[] {
-  return speeds.map((s, i) => ({ name: name(i), speed: s, speedLabel: `${s} stems/hour` }));
+  return speeds.map((s, i) => ({ name: name(i), speed: s, speedLabel: `${s} stm/hr` }));
 }
 
 function layout(input: BarInput[], target: number | null = 500, width = W, height = H) {
@@ -54,43 +54,79 @@ describe("bars", () => {
   });
 });
 
-describe("labels", () => {
-  it("go inside a long bar: name at the left, speed at the right", () => {
-    const r = layout(bars([800])).rows[0];
-    expect(r.labelMode).toBe("inside");
-    expect(r.nameLeft).toBeLessThan(r.speedRight);
-    expect(r.speedRight).toBeLessThanOrEqual(r.barWidth);
+describe("labels: name and speed as one label", () => {
+  it("reads 'Name · speed' with the speed right after the name", () => {
+    expect(labelText("Jhang Jhang", "1389 stm/hr")).toBe("Jhang Jhang · 1389 stm/hr");
   });
 
-  it("move outside a very short bar: name after the bar, speed right-aligned at the edge, no overlap", () => {
+  it("go inside a long bar, starting at its left, the whole label within the bar", () => {
+    const l = layout(bars([800]));
+    const r = l.rows[0];
+    expect(r.labelMode).toBe("inside");
+    expect(r.labelLeft).toBe(l.padding);
+    expect(r.labelLeft + r.labelWidth).toBeLessThanOrEqual(r.barWidth - l.padding);
+    expect(r.speedLabel).toBe("800 stm/hr");
+  });
+
+  it("go just after a short bar — not at the screen's right edge", () => {
     const l = layout(bars([800, 20]));
     const short = l.rows[1];
     expect(short.labelMode).toBe("outside");
-    expect(short.nameLeft).toBeGreaterThanOrEqual(short.barWidth);
-    expect(short.speedRight).toBeCloseTo(W - l.padding);
-    const nameEnd = short.nameLeft + measure(short.name, l.fontSize, true);
-    const speedStart = short.speedRight - measure("20 stems/hour", l.fontSize, true);
-    expect(nameEnd).toBeLessThan(speedStart);
+    expect(short.labelLeft).toBeCloseTo(short.barWidth + l.padding);
+    const end = short.labelLeft + short.labelWidth;
+    expect(end).toBeLessThanOrEqual(W - l.padding);
+    // The speed follows the name directly: the label is only as wide as its text.
+    expect(short.labelWidth).toBeCloseTo(measure(labelText(short.name, "20 stm/hr"), l.fontSize, true));
+    expect(end).toBeLessThan(W / 2);
   });
 
-  it("move a long name outside rather than overlap the speed, and never shorten the bar", () => {
+  it("a label that doesn't fit inside a medium bar moves entirely outside, never split", () => {
+    const name = "Maximiliano Alejandro de la Cruz H.";
+    const l = layout([...bars([800]), { name, speed: 260, speedLabel: "260 stm/hr" }]);
+    const r = l.rows[1];
+    expect(r.labelMode).toBe("outside");
+    expect(r.name).toBe(name);
+    expect(r.labelLeft).toBeCloseTo(r.barWidth + l.padding);
+  });
+
+  it("long names never clip or overlap the bar, and never shorten the bar", () => {
     const longName = "Maximiliano Alejandro de la Cruz Hernández-Villanueva Z.";
-    const l = layout([{ name: longName, speed: 360, speedLabel: "360 stems/hour" }, ...bars([800])]);
-    const r = l.rows[0];
-    expect(r.barWidth).toBeCloseTo((360 / 800) * W);
-    // whichever mode was chosen, the two labels never overlap
-    const nameEnd = r.nameLeft + measure(r.name, l.fontSize, true);
-    const speedStart = r.speedRight - measure("360 stems/hour", l.fontSize, true);
-    expect(nameEnd).toBeLessThanOrEqual(speedStart);
+    for (const speed of [15, 120, 360, 640, 790]) {
+      const l = layout([{ name: longName, speed, speedLabel: `${speed} stm/hr` }, ...bars([800])]);
+      const r = l.rows[0];
+      expect(r.barWidth).toBeCloseTo((speed / 800) * W);
+      expect(r.labelLeft).toBeGreaterThanOrEqual(0);
+      expect(r.labelLeft + r.labelWidth).toBeLessThanOrEqual(W - l.padding + 0.001);
+      if (r.labelMode === "inside") expect(r.labelLeft + r.labelWidth).toBeLessThanOrEqual(r.barWidth - l.padding + 0.001);
+      else expect(r.labelLeft).toBeGreaterThanOrEqual(r.barWidth);
+      expect(r.speedLabel).toBe(`${speed} stm/hr`);
+    }
   });
 
-  it("only shortens a name with … when even the open space can't hold it", () => {
+  it("only shortens the name (never the speed) when neither placement can hold the label", () => {
     const huge = "N".repeat(200);
-    const l = layout([{ name: huge, speed: 790, speedLabel: "790 stems/hour" }, ...bars([800])], 500, 1000, 400);
+    const l = layout([{ name: huge, speed: 790, speedLabel: "790 stm/hr" }, ...bars([800])], 500, 1000, 400);
     const r = l.rows[0];
     expect(r.name.endsWith("…")).toBe(true);
-    const nameEnd = r.nameLeft + measure(r.name, l.fontSize, true);
-    expect(nameEnd).toBeLessThanOrEqual(r.speedRight - measure("790 stems/hour", l.fontSize, true));
+    expect(r.speedLabel).toBe("790 stm/hr");
+    const room = r.labelMode === "inside" ? r.barWidth - l.padding * 2 : 1000 - l.padding - (r.barWidth + l.padding);
+    expect(r.labelWidth).toBeLessThanOrEqual(room);
+  });
+
+  it.each([
+    [1920 - 48, 950],
+    [1280 - 48, 590],
+  ])("60 employees with long names at %ix%i: every label inside the chart, rows never overlap", (width, height) => {
+    const speeds = Array.from({ length: 60 }, (_, i) => 1400 - i * 23);
+    const input = bars(speeds, (i) => (i % 3 === 0 ? `Employee With A Very Long Name ${i} Hernández-Villanueva` : `P${i}`));
+    const l = layout(input, 500, width, height);
+    for (const r of l.rows) {
+      expect(r.labelLeft + r.labelWidth).toBeLessThanOrEqual(width - l.padding + 0.001);
+      expect(r.labelLeft).toBeGreaterThanOrEqual(0);
+    }
+    const last = l.rows[l.rows.length - 1];
+    expect(last.top + l.barHeight).toBeLessThanOrEqual(height + 0.5);
+    expect(l.fontSize).toBeLessThanOrEqual(l.barHeight + l.gap);
   });
 });
 

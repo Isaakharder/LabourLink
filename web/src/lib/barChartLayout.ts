@@ -7,23 +7,28 @@
 export interface BarInput {
   name: string;
   speed: number;
-  speedLabel: string; // e.g. "812 stems/hour"
+  speedLabel: string; // e.g. "1389 stm/hr"
 }
 
 export type MeasureText = (text: string, fontPx: number, bold: boolean) => number;
+
+// Name and speed form ONE label, "Name · 1389 stm/hr": the speed sits right
+// after the name with a small gap, never pushed to the bar's or the
+// screen's right edge.
+export const LABEL_SEPARATOR = " · ";
 
 export interface BarRow {
   top: number;
   barWidth: number;
   color: string;
   meetsTarget: boolean;
-  // "inside": name at the bar's left, speed at its right, both inside.
-  // "outside": the bar is too short for both; name just right of the bar,
-  // speed right-aligned at the chart's right edge.
+  // "inside": the whole label fits in the bar, starting at its left.
+  // "outside": it doesn't; the whole label starts just after the bar's end.
   labelMode: "inside" | "outside";
-  name: string; // possibly shortened with "…" if even the open space is too narrow
-  nameLeft: number;
-  speedRight: number; // distance of the speed label's right edge from the chart's left
+  name: string; // shortened with "…" only if neither placement can hold the full label
+  speedLabel: string; // always shown in full
+  labelLeft: number; // the label's left edge, from the chart's left
+  labelWidth: number; // measured width of the label as placed (for overlap/clip checks)
   insideTextColor: string;
 }
 
@@ -96,17 +101,21 @@ export function textColorOn(hex: string): string {
   return contrastWhite >= contrastDark ? "#ffffff" : "#111827";
 }
 
-// Longest prefix of `text` (plus "…") that fits in maxWidth.
-function shorten(text: string, maxWidth: number, fontPx: number, measure: MeasureText): string {
-  if (measure(text, fontPx, true) <= maxWidth) return text;
+export function labelText(name: string, speedLabel: string): string {
+  return `${name}${LABEL_SEPARATOR}${speedLabel}`;
+}
+
+// Longest prefix of `name` (plus "…") whose full label, with the speed kept
+// intact, fits in maxWidth.
+function shortenName(name: string, speedLabel: string, maxWidth: number, fontPx: number, measure: MeasureText): string {
   let lo = 0;
-  let hi = text.length;
+  let hi = name.length;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
-    if (measure(`${text.slice(0, mid)}…`, fontPx, true) <= maxWidth) lo = mid;
+    if (measure(labelText(`${name.slice(0, mid)}…`, speedLabel), fontPx, true) <= maxWidth) lo = mid;
     else hi = mid - 1;
   }
-  return lo > 0 ? `${text.slice(0, lo)}…` : "…";
+  return lo > 0 ? `${name.slice(0, lo)}…` : "…";
 }
 
 export function layoutBarChart(bars: BarInput[], opts: LayoutOptions): BarChartLayout {
@@ -122,27 +131,28 @@ export function layoutBarChart(bars: BarInput[], opts: LayoutOptions): BarChartL
     const barWidth = Math.max(0, (bar.speed / scale) * width);
     const meetsTarget = target == null || bar.speed >= target;
     const color = meetsTarget ? opts.atTargetColor : opts.belowTargetColor;
-    const nameWidth = measure(bar.name, fontSize, true);
-    const speedWidth = measure(bar.speedLabel, fontSize, true);
-
-    // Room for the name in each placement, keeping clear space before the
-    // speed label. Inside: name at the bar's left, speed at its right.
-    // Outside: name just after the bar, speed right-aligned at the chart edge.
-    const insideRoom = barWidth - padding - padding * 2 - speedWidth - padding;
-    const outsideRoom = width - padding - speedWidth - padding * 2 - (barWidth + padding);
+    // The whole label goes inside the bar when it fits (padding both ends),
+    // otherwise just after the bar's end (padding before it and before the
+    // chart's right edge). If neither can hold it, only the name is shortened
+    // — in whichever space is larger — so the label never clips or overlaps.
+    const fullWidth = measure(labelText(bar.name, bar.speedLabel), fontSize, true);
+    const insideRoom = barWidth - padding * 2;
+    const outsideLeft = barWidth + padding;
+    const outsideRoom = width - padding - outsideLeft;
     const mode: "inside" | "outside" =
-      nameWidth <= insideRoom ? "inside" : nameWidth <= outsideRoom ? "outside" : insideRoom >= outsideRoom ? "inside" : "outside";
-    const room = mode === "inside" ? insideRoom : outsideRoom;
+      fullWidth <= insideRoom ? "inside" : fullWidth <= outsideRoom ? "outside" : insideRoom >= outsideRoom ? "inside" : "outside";
+    const room = Math.max(0, mode === "inside" ? insideRoom : outsideRoom);
+    const name = fullWidth <= room ? bar.name : shortenName(bar.name, bar.speedLabel, room, fontSize, measure);
     return {
       top: i * (barHeight + gap),
       barWidth,
       color,
       meetsTarget,
       labelMode: mode,
-      // Shortened with "…" only when neither placement can hold the full name.
-      name: nameWidth <= room ? bar.name : shorten(bar.name, Math.max(0, room), fontSize, measure),
-      nameLeft: mode === "inside" ? padding : barWidth + padding,
-      speedRight: mode === "inside" ? barWidth - padding : width - padding,
+      name,
+      speedLabel: bar.speedLabel,
+      labelLeft: mode === "inside" ? padding : outsideLeft,
+      labelWidth: measure(labelText(name, bar.speedLabel), fontSize, true),
       insideTextColor: textColorOn(color),
     };
   });

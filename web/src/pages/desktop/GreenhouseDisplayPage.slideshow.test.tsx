@@ -138,12 +138,13 @@ describe("TV slideshow", () => {
     expect(screen.getByText("Currently working")).toBeInTheDocument();
     await advance(20_000);
     expect(screen.getByText("Winding & Pruning")).toBeInTheDocument();
-    expect(screen.getByText("Stems per hour")).toBeInTheDocument();
+    // Graphs show stems/hour as stm/hr (the stored unit stays stems/hour).
+    expect(screen.getByText("stm/hr", { selector: ".tv-chart-caption" })).toBeInTheDocument();
     expect(screen.getByText("Date:").parentElement).toHaveTextContent(/This week, .*\(including today\)/);
     expect(screen.getByText("Ana A.")).toBeInTheDocument();
-    expect(screen.getByText("812 stems/hour")).toBeInTheDocument();
+    expect(screen.getByText("812 stm/hr")).toBeInTheDocument();
     expect(screen.getByText(/1 under the 0.5 h minimum not shown/)).toBeInTheDocument();
-    expect(screen.getByText("Target:").parentElement).toHaveTextContent("Target: 500 stems/hour");
+    expect(screen.getByText("Target:").parentElement).toHaveTextContent("Target: 500 stm/hr");
     expect(screen.getByText("Top:").parentElement).toHaveTextContent("Top: All");
     expect(screen.getByText("Min hours:").parentElement).toHaveTextContent("Min hours: 0.5 h");
     await advance(15_000);

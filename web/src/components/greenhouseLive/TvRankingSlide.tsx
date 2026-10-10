@@ -1,5 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { BarInput, layoutBarChart, lighten, MeasureText } from "../../lib/barChartLayout";
+import { BarInput, LABEL_SEPARATOR, layoutBarChart, lighten, MeasureText } from "../../lib/barChartLayout";
+import { graphSpeedUnit } from "../../lib/speedUnitDisplay";
 import { SlideItem } from "../../lib/displaySlideshow";
 
 interface TvRankingSlideProps {
@@ -51,7 +52,9 @@ export function TvRankingSlide({ item }: TvRankingSlideProps) {
   }, [slide.status]);
 
   const measure = useMemo(() => createMeasure(fontFamily), [fontFamily]);
-  const unit = slide.speedUnit ?? "";
+  // Stored unit, and how graphs show it ("stems/hour" -> "stm/hr").
+  const storedUnit = slide.speedUnit ?? "";
+  const unit = graphSpeedUnit(storedUnit);
 
   const bars: BarInput[] = useMemo(
     () =>
@@ -95,7 +98,7 @@ export function TvRankingSlide({ item }: TvRankingSlideProps) {
 
   return (
     <div className="tv-ranking">
-      {unit && <p className="tv-chart-caption">{chartCaption(unit)}</p>}
+      {unit && <p className="tv-chart-caption">{chartCaption(storedUnit, unit)}</p>}
       <div className="tv-chart" ref={chartRef} role="list" aria-label={`${slide.activityName} speeds, fastest first`}>
         {size.width > 0 &&
           layout.rows.map((row, i) => (
@@ -111,23 +114,19 @@ export function TvRankingSlide({ item }: TvRankingSlideProps) {
                 data-color={row.color}
                 style={{ width: row.barWidth, background: `linear-gradient(90deg, ${row.color}, ${lighten(row.color)})` }}
               />
+              {/* One label: name, a small gap, then the speed. */}
               <span
-                className="tv-chart-name"
+                className="tv-chart-label"
                 style={{
-                  left: row.nameLeft,
+                  left: row.labelLeft,
                   color: row.labelMode === "inside" ? row.insideTextColor : undefined,
                 }}
               >
-                {row.name}
-              </span>
-              <span
-                className="tv-chart-speed"
-                style={{
-                  right: size.width - row.speedRight,
-                  color: row.labelMode === "inside" ? row.insideTextColor : undefined,
-                }}
-              >
-                {bars[i].speedLabel}
+                <span className="tv-chart-name">{row.name}</span>
+                <span className="tv-chart-sep" aria-hidden="true">
+                  {LABEL_SEPARATOR}
+                </span>
+                <span className="tv-chart-speed">{row.speedLabel}</span>
               </span>
             </div>
           ))}
@@ -136,8 +135,10 @@ export function TvRankingSlide({ item }: TvRankingSlideProps) {
   );
 }
 
-// "stems/hour" -> "Stems per hour" for the small caption above the bars.
-function chartCaption(unit: string): string {
-  const text = unit.replace("/", " per ");
+// Small caption above the bars: a unit with a short graph form is shown as
+// that ("stm/hr"); any other keeps the spelled-out form ("Plants per hour").
+function chartCaption(storedUnit: string, shownUnit: string): string {
+  if (shownUnit !== storedUnit) return shownUnit;
+  const text = storedUnit.replace("/", " per ");
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
