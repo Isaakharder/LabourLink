@@ -158,7 +158,13 @@ router.get(
 // without a second poll loop).
 router.get(
   "/display/:displayKey/state",
-  requireDisplayKey,
+  // Must be wrapped like /slides below: requireDisplayKey is async, and in
+  // Express 4 a rejected middleware promise is an unhandled rejection that
+  // crashes the whole API process. 2026-10-10: this route ran before
+  // migration 063 was applied, its display lookup failed on the missing
+  // column, and every TV poll (~10s) took the API down until Railway gave up
+  // restarting it. Wrapped, a failure is a 500 for that one request.
+  asyncHandler(requireDisplayKey),
   asyncHandler(async (req, res) => {
     const d = req.display!;
     const { start, end } = getRangeBoundsUtc(d.dateStart, d.dateEnd);
