@@ -228,6 +228,54 @@ router.get(
 // here until that employee's own Daily view is opened (which reconciles
 // and persists it) or the next reconciling event touches their day —  a
 // narrow, self-correcting staleness window, not a wrong formula.
+// "Has work recorded on this day": a non-deleted work entry (phone, manual,
+// finished or still in progress — breaks don't count) for e.id starting
+// within [$1, $2), the date's getDayBoundsUtc bounds. Shared by GET
+// /employees' workingTotals, the "Add employee to this day" picker and POST
+// /activities' addEmployeeToDay save-time recheck, so they can never
+// disagree about who worked that day.
+const WORK_ON_DATE_EXISTS_SQL = `exists (
+  select 1 from time_entries te
+  where te.employee_id = e.id and te.entry_type = 'work' and te.deleted_at is null
+    and te.started_at >= $1 and te.started_at < $2
+)`;
+
+export interface WorkingTotals {
+  total: number;
+  // Every configured Employee Group (alphabetical, zeros included), then
+  // Ungrouped (id null) only when someone ungrouped worked.
+  groups: { id: string | null; name: string; count: number }[];
+}
+
+// The Inputs header's "Employees working" totals for one date: distinct
+// employees with work recorded that day (WORK_ON_DATE_EXISTS_SQL), by their
+// current Employee Group — the same group assignment the sidebar headings
+// use. Like the sidebar, is_active plays no part (a since-deactivated
+// employee who worked that day still counts). Independent of the sidebar's
+// search filter.
+async function loadWorkingTotals(start: Date, end: Date): Promise<WorkingTotals> {
+  const [groupsRes, countsRes] = await Promise.all([
+    pool.query(`select id, name from employee_groups`),
+    pool.query(
+      `select e.employee_group_id, count(*)::int as count
+       from employees e
+       where ${WORK_ON_DATE_EXISTS_SQL}
+       group by e.employee_group_id`,
+      [start, end]
+    ),
+  ]);
+  const counts = new Map<string | null, number>();
+  for (const r of countsRes.rows) counts.set(r.employee_group_id, r.count);
+  const groups: WorkingTotals["groups"] = groupsRes.rows
+    .map((g) => ({ id: g.id as string | null, name: g.name as string, count: counts.get(g.id) ?? 0 }))
+    .sort((a, b) => a.name.localeCompare(b.name) || String(a.id).localeCompare(String(b.id)));
+  const ungrouped = counts.get(null) ?? 0;
+  if (ungrouped > 0) groups.push({ id: null, name: "Ungrouped", count: ungrouped });
+  let total = 0;
+  for (const c of counts.values()) total += c;
+  return { total, groups };
+}
+
 async function loadPaidSecondsByEmployee(
   employeeIds: string[],
   date: string,
@@ -339,9 +387,16 @@ router.get(
       console.error("[inputs] GET /employees: loadPaidSecondsByEmployee failed, every row will show as unavailable", err);
       return new Map<string, number>();
     });
-    const [urlMap, paidSecondsByEmployee] = await Promise.all([photoUrlPromise, paidSecondsPromise]);
+    // Header totals: the whole date, never narrowed by `search`.
+    const workingTotalsPromise = loadWorkingTotals(start, end);
+    const [urlMap, paidSecondsByEmployee, workingTotals] = await Promise.all([
+      photoUrlPromise,
+      paidSecondsPromise,
+      workingTotalsPromise,
+    ]);
 
     res.json({
+      workingTotals,
       employees: rows.map((r) => ({
         id: r.id,
         firstName: r.first_name,
@@ -369,16 +424,6 @@ router.get(
 // own day instead. Active only, because POST /activities rejects an inactive
 // employee anyway. Same minimal shape as GET /employees (no PII beyond a
 // name), for the same Supervisor-can't-call-GET-/api/employees reason.
-// "Has work recorded on this day": a non-deleted work entry for e.id starting
-// within [$1, $2) — the date's getDayBoundsUtc bounds. Shared by the picker
-// above and POST /activities' addEmployeeToDay save-time recheck, so the two
-// can never disagree about who qualifies.
-const WORK_ON_DATE_EXISTS_SQL = `exists (
-  select 1 from time_entries te
-  where te.employee_id = e.id and te.entry_type = 'work' and te.deleted_at is null
-    and te.started_at >= $1 and te.started_at < $2
-)`;
-
 // creation_reason for entries saved by "Add employee to this day", which has
 // no Reason field. created_by_employee_id and created_at still record who
 // added the entry and when, and drive the Manual label.

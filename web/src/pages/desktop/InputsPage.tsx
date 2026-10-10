@@ -7,6 +7,7 @@ import { InputsSkeleton } from "../../components/inputs/InputsSkeleton";
 import { ActivityLogsCard } from "../../components/inputs/ActivityLogsCard";
 import { WorkdayDetailsCard, EditingBreakField } from "../../components/inputs/WorkdayDetailsCard";
 import { InputsErrorBoundary } from "../../components/inputs/InputsErrorBoundary";
+import { InputsDayTotals } from "../../components/inputs/InputsDayTotals";
 import { DeleteTimeEntryModal } from "../../components/inputs/DeleteTimeEntryModal";
 import { AddWorkStartModal } from "../../components/inputs/AddWorkStartModal";
 import { AddBreakModal } from "../../components/inputs/AddBreakModal";
@@ -17,7 +18,7 @@ import { SpeedReviewModal } from "../../components/inputs/SpeedReviewModal";
 import { SpeedReviewGroupsResponse } from "../../lib/speedReviewTypes";
 import { api, ApiError } from "../../lib/api";
 import { useAuth } from "../../context/AuthContext";
-import { ActivityRunDto, BreakDto, DailyInputsResponse, InputsEmployee } from "../../lib/inputsTypes";
+import { ActivityRunDto, BreakDto, DailyInputsResponse, InputsEmployee, InputsWorkingTotals } from "../../lib/inputsTypes";
 import {
   APP_TIMEZONE,
   combineDateAndTimeToUtcIso,
@@ -84,6 +85,12 @@ export function InputsPage() {
   // numbers while a fresh total is on the way (the roster itself stays put
   // — no full-panel flash, no lost scroll position).
   const [employeesLoading, setEmployeesLoading] = useState(false);
+  // Header "Employees working" totals, tagged with the date they're for so a
+  // previous date's numbers are never shown after switching dates. They come
+  // with every employees response (date-only, ignoring the search), so they
+  // refresh on exactly the sidebar's triggers: date change, background poll
+  // and every add/edit/delete handler's loadEmployees().
+  const [workingTotals, setWorkingTotals] = useState<{ date: string; totals: InputsWorkingTotals } | null>(null);
   const [employeeSearch, setEmployeeSearch] = useState("");
   const [daily, setDaily] = useState<DailyInputsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -315,11 +322,14 @@ export function InputsPage() {
     const requestId = ++employeesRequestSeqRef.current;
     if (!background) setEmployeesLoading(true);
     loadReviewCounts();
-    api<{ employees: InputsEmployee[] }>(`/api/inputs/employees?${params.toString()}`, { signal: controller.signal })
+    api<{ employees: InputsEmployee[]; workingTotals?: InputsWorkingTotals }>(`/api/inputs/employees?${params.toString()}`, {
+      signal: controller.signal,
+    })
       .then((res) => {
         if (requestId !== employeesRequestSeqRef.current) return;
         setEmployees(res.employees);
         setEmployeesError(null);
+        if (res.workingTotals) setWorkingTotals({ date, totals: res.workingTotals });
       })
       .catch((err) => {
         if (requestId !== employeesRequestSeqRef.current) return;
@@ -910,7 +920,11 @@ export function InputsPage() {
 
   return (
     <div className="inputs-page">
-      <PageHeader title="Inputs" description="Review and correct daily employee activity logs." />
+      <PageHeader
+        title="Inputs"
+        description="Review and correct daily employee activity logs."
+        titleAside={<InputsDayTotals totals={workingTotals?.date === date ? workingTotals.totals : null} />}
+      />
 
       <div className="inputs-workspace">
         <EmployeeListPanel
