@@ -1,11 +1,9 @@
 import { Maximize, Minus, Plus, RotateCw } from "lucide-react";
-import { LivePhase } from "../../lib/greenhouseLiveTypes";
 import { formatTimeInAppTimezone } from "../../lib/timezone";
 
+// Phase selection moved out of this toolbar into Display → Map's sidebar as
+// published per-display checkboxes (GreenhousePage.tsx).
 interface GreenhouseLiveToolbarProps {
-  phases: LivePhase[];
-  phaseFilterId: string | null;
-  onPhaseFilterChange: (id: string | null) => void;
   zoomPercent: number;
   onZoomIn: () => void;
   onZoomOut: () => void;
@@ -19,9 +17,6 @@ interface GreenhouseLiveToolbarProps {
 // View-only toolbar — no snap/edit-mode/save controls the layout editor's
 // LayoutToolbar.tsx has, matching the same button styling conventions.
 export function GreenhouseLiveToolbar({
-  phases,
-  phaseFilterId,
-  onPhaseFilterChange,
   zoomPercent,
   onZoomIn,
   onZoomOut,
@@ -54,29 +49,6 @@ export function GreenhouseLiveToolbar({
         >
           <RotateCw size={16} aria-hidden="true" />
         </button>
-      </div>
-
-      <div className="greenhouse-toolbar-divider greenhouse-live-toolbar-divider" />
-
-      <div className="greenhouse-toolbar-group greenhouse-live-toolbar-group greenhouse-live-toolbar-filter-group">
-        <label className="greenhouse-live-toolbar-field">
-          <span>Phase</span>
-          <span className="greenhouse-office-select-wrap greenhouse-live-toolbar-select-wrap">
-            <select
-              className="greenhouse-office-select greenhouse-live-toolbar-select"
-              value={phaseFilterId ?? ""}
-              onChange={(e) => onPhaseFilterChange(e.target.value || null)}
-              aria-label="Filter by phase"
-            >
-              <option value="">All phases</option>
-              {phases.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </span>
-        </label>
       </div>
 
       <div className="greenhouse-toolbar-spacer" />

@@ -8,13 +8,14 @@ import { RegenerateTvLinkModal } from "../../components/greenhouseLive/Regenerat
 import { useAuth } from "../../context/AuthContext";
 import { useUnsavedChangesGuard } from "../../context/UnsavedChangesContext";
 import { api, ApiError } from "../../lib/api";
-import { CanvasTransform, RotationDegrees, computeFitTransform, nextRotation, zoomAtPoint } from "../../lib/canvasTransform";
+import { CanvasTransform, RotationDegrees, computeFitTransformToPhases, nextRotation, zoomAtPoint } from "../../lib/canvasTransform";
 import {
   AvailableActivity,
   GreenhouseDisplayCreateResponse,
   GreenhouseDisplayRegenerateResponse,
   GreenhouseDisplaySummary,
   LiveGreenhouseResponse,
+  LivePhase,
   isMapDatePreset,
 } from "../../lib/greenhouseLiveTypes";
 import { GreenhouseLandListItem } from "../../lib/greenhouseLayoutTypes";
@@ -37,6 +38,18 @@ function formatRangeLabel(range: DateRange): string {
   return range.start === range.end
     ? formatDateLong(range.start)
     : `${formatDateLong(range.start)} – ${formatDateLong(range.end)}`;
+}
+
+// Comparable form of a phase selection: null (all phases) vs a sorted list.
+function phaseSelectionKey(ids: string[] | null): string {
+  return ids === null ? "all" : [...ids].sort().join(",");
+}
+
+// "All phases" / "Phase 1, Phase 3" for the published-status line.
+function publishedPhasesLabel(ids: string[] | null, phases: LivePhase[]): string {
+  if (ids === null) return "All phases";
+  const names = phases.filter((p) => ids.includes(p.id)).map((p) => p.name);
+  return names.length > 0 ? names.join(", ") : `${ids.length} phase${ids.length === 1 ? "" : "s"}`;
 }
 
 function todayRange(): DateRange {
@@ -77,7 +90,10 @@ export function GreenhousePage() {
   const [activityFilterId, setActivityFilterId] = useState<string | null>(null);
   const [availableActivities, setAvailableActivities] = useState<AvailableActivity[] | null>(null);
   const [activityResetMessage, setActivityResetMessage] = useState<string | null>(null);
-  const [phaseFilterId, setPhaseFilterId] = useState<string | null>(null); // view-only canvas convenience, never published
+  // Phases the TV map shows — published per display. null = every phase of
+  // the land (including phases added later); a list = exactly those. An
+  // empty list is a draft-only state that can't be published.
+  const [phaseIds, setPhaseIds] = useState<string[] | null>(null);
   const [rotationDegrees, setRotationDegrees] = useState<RotationDegrees>(0);
   const initializedFromDisplayRef = useRef<string | null>(null);
 
@@ -104,7 +120,8 @@ export function GreenhousePage() {
         (selectedDisplay.datePreset ?? "custom") !== preset ||
         selectedDisplay.effectiveDateStart !== dateRange.start ||
         selectedDisplay.effectiveDateEnd !== dateRange.end ||
-        selectedDisplay.rotationDegrees !== rotationDegrees)
+        selectedDisplay.rotationDegrees !== rotationDegrees ||
+        phaseSelectionKey(selectedDisplay.phaseIds ?? null) !== phaseSelectionKey(phaseIds))
   );
 
   // Lands reuse the existing editor-facing endpoint — read-only here.
@@ -163,6 +180,7 @@ export function GreenhousePage() {
     setActivityFilterId(selectedDisplay.activityId);
     setRotationDegrees(selectedDisplay.rotationDegrees);
     setPreset(selectedDisplay.datePreset ?? "custom");
+    setPhaseIds(selectedDisplay.phaseIds ?? null);
   }, [selectedDisplay]);
 
   useEffect(() => {
@@ -201,6 +219,8 @@ export function GreenhousePage() {
         dateEnd: dateRange.end,
       });
       if (activityFilterId) params.set("activityId", activityFilterId);
+      // Narrows only the employee-block legend; every phase still comes back.
+      if (phaseIds && phaseIds.length > 0) params.set("phaseIds", phaseIds.join(","));
       api<LiveGreenhouseResponse>(`/api/greenhouse/live?${params.toString()}`)
         .then((res) => {
           setData(res);
@@ -216,7 +236,7 @@ export function GreenhousePage() {
           setRefreshing(false);
         });
     },
-    [landId, dateRange.start, dateRange.end, activityFilterId]
+    [landId, dateRange.start, dateRange.end, activityFilterId, phaseIds]
   );
 
   useEffect(() => {
@@ -298,6 +318,10 @@ export function GreenhousePage() {
 
   async function handleSave() {
     if (!selectedDisplay || !landId) return;
+    if (noPhaseSelected) {
+      setSaveError("Select at least one phase to publish.");
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     setSaveSuccess(false);
@@ -312,6 +336,7 @@ export function GreenhousePage() {
           rotationDegrees,
           // A preset keeps advancing on the TV; "custom" publishes fixed dates.
           datePreset: isMapDatePreset(preset) ? preset : null,
+          phaseIds: phaseIds === null ? null : selectedPhaseIds,
         }),
       });
       setDisplays((prev) => prev?.map((d) => (d.id === res.display.id ? res.display : d)) ?? [res.display]);
@@ -394,27 +419,58 @@ export function GreenhousePage() {
     }
   }
 
+  // The current land's phases (the preview only ever returns active ones),
+  // and which of them are checked. Ids no longer on this land are ignored.
+  const landPhases: LivePhase[] = data?.land.phases ?? [];
+  const selectedPhaseIds = phaseIds === null ? landPhases.map((p) => p.id) : landPhases.filter((p) => phaseIds.includes(p.id)).map((p) => p.id);
+  const visiblePhases = phaseIds === null ? landPhases : landPhases.filter((p) => phaseIds.includes(p.id));
+  const allPhasesSelected = landPhases.length > 0 && selectedPhaseIds.length === landPhases.length;
+  const noPhaseSelected = data !== null && selectedPhaseIds.length === 0;
+
+  function togglePhase(id: string) {
+    const current = phaseIds ?? landPhases.map((p) => p.id);
+    const next = current.includes(id) ? current.filter((p) => p !== id) : [...current, id];
+    setPhaseIds(next.length === landPhases.length && landPhases.every((p) => next.includes(p.id)) ? null : next);
+    setSaveError(null);
+  }
+
+  function toggleAllPhases(checked: boolean) {
+    setPhaseIds(checked ? null : []);
+    setSaveError(null);
+  }
+
   const minScale = fitScale * 0.15;
   const maxScale = fitScale * 6;
   const zoomPercent = fitScale > 0 ? Math.round((transform.scale / fitScale) * 100) : 100;
 
-  function fitToScreen(width = viewportSize.width, height = viewportSize.height) {
+  // Fits the CHECKED phases (their combined bounds, after rotation) into the
+  // canvas — the same fit the TV applies to the phases it's given.
+  function fitToScreen(width = viewportSize.width, height = viewportSize.height, rotation = rotationDegrees) {
     if (!data || width <= 0 || height <= 0) return;
-    const fit = computeFitTransform(data.land, width, height, rotationDegrees);
+    const fit = computeFitTransformToPhases(data.land, visiblePhases, width, height, rotation);
     setFitScale(fit.scale);
     setTransform(fit);
   }
 
+  const visiblePhaseKey = visiblePhases.map((p) => p.id).join(",");
   function handleViewportSize(size: { width: number; height: number }) {
     setViewportSize(size);
-    const key = data ? `${data.land.id}:${dateRange.start}:${dateRange.end}:${activityFilterId ?? "all"}` : null;
+    const key = data ? `${data.land.id}:${dateRange.start}:${dateRange.end}:${activityFilterId ?? "all"}:${visiblePhaseKey}` : null;
     if (data && key && autoFitKeyRef.current !== key && size.width > 0 && size.height > 0) {
       autoFitKeyRef.current = key;
-      const fit = computeFitTransform(data.land, size.width, size.height, rotationDegrees);
-      setFitScale(fit.scale);
-      setTransform(fit);
+      fitToScreen(size.width, size.height);
     }
   }
+
+  // Checking/unchecking phases refits the preview to the new selection.
+  useEffect(() => {
+    if (!data || viewportSize.width <= 0 || viewportSize.height <= 0) return;
+    const key = `${data.land.id}:${dateRange.start}:${dateRange.end}:${activityFilterId ?? "all"}:${visiblePhaseKey}`;
+    if (autoFitKeyRef.current === key) return;
+    autoFitKeyRef.current = key;
+    fitToScreen();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visiblePhaseKey, data?.land.id]);
 
   function zoomByFactor(factor: number) {
     const newScale = Math.min(maxScale, Math.max(minScale, transform.scale * factor));
@@ -429,9 +485,7 @@ export function GreenhousePage() {
     if (!data) return;
     const next = nextRotation(rotationDegrees);
     setRotationDegrees(next);
-    const fit = computeFitTransform(data.land, viewportSize.width, viewportSize.height, next);
-    setFitScale(fit.scale);
-    setTransform(fit);
+    fitToScreen(viewportSize.width, viewportSize.height, next);
   }
 
   return (
@@ -598,11 +652,47 @@ export function GreenhousePage() {
                 </p>
               </div>
 
+              <fieldset className="greenhouse-office-section greenhouse-office-phases">
+                <legend className="greenhouse-office-phases-legend">Phases on the TV map</legend>
+                {!data ? (
+                  <p className="greenhouse-office-hint">Loading phases…</p>
+                ) : landPhases.length === 0 ? (
+                  <p className="greenhouse-office-hint">This land has no active phases.</p>
+                ) : (
+                  <>
+                    <label className="greenhouse-office-phase-option greenhouse-office-phase-all">
+                      <input
+                        type="checkbox"
+                        checked={allPhasesSelected}
+                        ref={(el) => {
+                          if (el) el.indeterminate = !allPhasesSelected && selectedPhaseIds.length > 0;
+                        }}
+                        onChange={(e) => toggleAllPhases(e.target.checked)}
+                      />
+                      <span>Select all phases</span>
+                    </label>
+                    <div className="greenhouse-office-phase-list">
+                      {landPhases.map((p) => (
+                        <label key={p.id} className="greenhouse-office-phase-option">
+                          <input type="checkbox" checked={selectedPhaseIds.includes(p.id)} onChange={() => togglePhase(p.id)} />
+                          <span>{p.name}</span>
+                        </label>
+                      ))}
+                    </div>
+                    {noPhaseSelected && (
+                      <p className="error-text" role="alert">
+                        Select at least one phase to publish.
+                      </p>
+                    )}
+                  </>
+                )}
+              </fieldset>
+
               <div className="greenhouse-office-section">
                 <button
                   type="button"
                   className="employees-add-button greenhouse-office-publish-button"
-                  disabled={!selectedDisplay || !isDirty || saving}
+                  disabled={!selectedDisplay || !isDirty || saving || noPhaseSelected}
                   onClick={handleSave}
                 >
                   <MonitorUp size={16} aria-hidden="true" />
@@ -647,7 +737,10 @@ export function GreenhousePage() {
                 ? `Published: ${selectedDisplay.activityName ?? "All activities"} · ${formatRangeLabel({
                     start: selectedDisplay.effectiveDateStart,
                     end: selectedDisplay.effectiveDateEnd,
-                  })}${selectedDisplay.datePreset ? " (advances daily)" : ""}`
+                  })}${selectedDisplay.datePreset ? " (advances daily)" : ""} · ${publishedPhasesLabel(
+                    selectedDisplay.phaseIds ?? null,
+                    selectedDisplay.landId === data?.land.id ? landPhases : []
+                  )}`
                 : "No display selected"}
             </span>
           </div>
@@ -657,7 +750,15 @@ export function GreenhousePage() {
               <label className="greenhouse-office-field greenhouse-office-land-field">
                 Land
                 <span className="greenhouse-office-select-wrap">
-                  <select className="greenhouse-office-select" value={landId ?? ""} onChange={(e) => setLandId(e.target.value)}>
+                  <select
+                    className="greenhouse-office-select"
+                    value={landId ?? ""}
+                    onChange={(e) => {
+                      setLandId(e.target.value);
+                      // Phases belong to a land: a different land starts with all of its phases.
+                      setPhaseIds(null);
+                    }}
+                  >
                     {lands.map((l) => (
                       <option key={l.id} value={l.id}>
                         {l.name}
@@ -678,9 +779,6 @@ export function GreenhousePage() {
           ) : (
             <div className="greenhouse-live-workspace">
               <GreenhouseLiveToolbar
-                phases={data.land.phases}
-                phaseFilterId={phaseFilterId}
-                onPhaseFilterChange={setPhaseFilterId}
                 zoomPercent={zoomPercent}
                 onZoomIn={() => zoomByFactor(ZOOM_BUTTON_FACTOR)}
                 onZoomOut={() => zoomByFactor(1 / ZOOM_BUTTON_FACTOR)}
@@ -694,8 +792,8 @@ export function GreenhousePage() {
               <div className="greenhouse-live-canvas-wrapper">
                 <GreenhouseLiveCanvas
                   land={data.land}
-                  phases={data.land.phases}
-                  phaseFilterId={phaseFilterId}
+                  phases={visiblePhases}
+                  phaseFilterId={null}
                   transform={transform}
                   onTransformChange={setTransform}
                   onViewportSize={handleViewportSize}

@@ -33,7 +33,8 @@ const DISPLAY_SELECT = `
          to_char(gd.date_start, 'YYYY-MM-DD') as date_start,
          to_char(gd.date_end, 'YYYY-MM-DD') as date_end,
          gd.is_active, gd.updated_at, gd.rotation_degrees, gd.display_key_plaintext,
-         gd.map_date_preset, gd.report_week, gd.report_include_today, gd.map_slide_seconds
+         gd.map_date_preset, gd.report_week, gd.report_include_today, gd.map_slide_seconds,
+         gd.map_phase_ids
   from greenhouse_displays gd
   join greenhouse_lands gl on gl.id = gd.land_id
   left join activities a on a.id = gd.activity_id
@@ -71,6 +72,8 @@ function serializeDisplay(row: any, includeToken: boolean) {
     reportWeek: row.report_week,
     reportIncludeToday: row.report_include_today,
     mapSlideSeconds: row.map_slide_seconds,
+    // Phases the TV map shows (063_display_map_phases.sql); null = all.
+    phaseIds: (row.map_phase_ids as string[] | null) ?? null,
     // null both when this display predates display_key_plaintext existing
     // (regenerate to get a retrievable one) and whenever includeToken is
     // false — the client only ever renders/copies a full URL built from
@@ -157,6 +160,21 @@ router.put(
       rotationDegrees?: number;
       datePreset?: string | null;
     };
+    // Phases to show (063_display_map_phases.sql): null = all phases; an
+    // array = exactly those (at least one, all on `landId`). Absent = keep
+    // the current selection (an office page from before phase selection),
+    // unless the land changes, which resets it to all.
+    const { phaseIds } = req.body as { phaseIds?: unknown };
+    if (
+      phaseIds !== undefined &&
+      phaseIds !== null &&
+      !(Array.isArray(phaseIds) && phaseIds.every((p) => typeof p === "string" && UUID_RE.test(p)))
+    ) {
+      return res.status(400).json({ error: "phaseIds must be a list of phase ids, or null for all phases" });
+    }
+    if (Array.isArray(phaseIds) && phaseIds.length === 0) {
+      return res.status(400).json({ error: "Select at least one phase to show on the TV map" });
+    }
     let { dateStart, dateEnd } = req.body as { dateStart?: string; dateEnd?: string };
 
     // No preset (absent or null, including any office page from before
@@ -191,6 +209,28 @@ router.put(
 
     const land = await pool.query("select id from greenhouse_lands where id = $1", [landId]);
     if (!land.rows[0]) return res.status(400).json({ error: "Land not found" });
+
+    let mapPhaseIds: string[] | null;
+    if (phaseIds === undefined) {
+      const current = await pool.query("select land_id, map_phase_ids from greenhouse_displays where id = $1", [id]);
+      if (!current.rows[0]) return res.status(404).json({ error: "Display not found" });
+      mapPhaseIds = current.rows[0].land_id === landId ? current.rows[0].map_phase_ids : null;
+    } else if (phaseIds === null) {
+      mapPhaseIds = null;
+    } else {
+      const requested = [...new Set(phaseIds as string[])];
+      const { rows: active } = await pool.query(
+        "select id from greenhouse_phases where land_id = $1 and is_active = true",
+        [landId]
+      );
+      const activeIds = new Set(active.map((r) => r.id as string));
+      if (!requested.every((p) => activeIds.has(p))) {
+        return res.status(400).json({ error: "One or more selected phases aren't active phases of this land" });
+      }
+      // Every phase selected = "all phases", so phases added later show too.
+      mapPhaseIds = requested.length === activeIds.size ? null : requested;
+    }
+
     if (activityId) {
       const activity = await pool.query("select id from activities where id = $1", [activityId]);
       if (!activity.rows[0]) return res.status(400).json({ error: "Activity not found" });
@@ -200,10 +240,10 @@ router.put(
       `update greenhouse_displays
        set land_id = $1, activity_id = $2, date_start = $3, date_end = $4,
            rotation_degrees = $5, updated_by_employee_id = $6, updated_at = now(),
-           map_date_preset = $8
+           map_date_preset = $8, map_phase_ids = $9
        where id = $7
        returning id`,
-      [landId, activityId ?? null, dateStart, dateEnd, resolvedRotation, req.employee!.id, id, preset]
+      [landId, activityId ?? null, dateStart, dateEnd, resolvedRotation, req.employee!.id, id, preset, mapPhaseIds]
     );
     if (!rows[0]) return res.status(404).json({ error: "Display not found" });
 

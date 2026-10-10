@@ -141,6 +141,26 @@ export function serializeLiveLand(row: any) {
   };
 }
 
+// Display → Map phase selection (063_display_map_phases.sql). `stored` is a
+// display's map_phase_ids: null = every phase. Returns the ids to show, or
+// null for "all" — also when none of the stored ids is still an active phase
+// of the land (deleted/deactivated since), so a TV never goes blank.
+export function resolveVisiblePhaseIds(stored: string[] | null, activePhaseIds: string[]): string[] | null {
+  if (!stored) return null;
+  const active = new Set(activePhaseIds);
+  const kept = stored.filter((id) => active.has(id));
+  return kept.length > 0 ? kept : null;
+}
+
+// The serialized live land limited to the visible phases (null = all).
+// Land dimensions are unchanged; the map fits itself to the phases shown.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function filterLandPhases<T extends { phases: any[] }>(land: T, visiblePhaseIds: string[] | null): T {
+  if (!visiblePhaseIds) return land;
+  const visible = new Set(visiblePhaseIds);
+  return { ...land, phases: land.phases.filter((p: { id: string }) => visible.has(p.id)) };
+}
+
 export interface LiveBlockSummary {
   id: string;
   name: string;
@@ -168,7 +188,9 @@ export interface LiveBlockSummary {
 // reads the same completedRows number the Dashboard would show for that
 // block's employee, from the exact same row_completions source of truth,
 // just not re-filtered by a density type the map doesn't have to hand.
-export async function getBlockSummariesForLand(landId: string): Promise<LiveBlockSummary[]> {
+// phaseIds (Display → Map phase selection): only rows in those phases count,
+// and a block with no rows there is left out of the legend. null = all.
+export async function getBlockSummariesForLand(landId: string, phaseIds: string[] | null = null): Promise<LiveBlockSummary[]> {
   const { rows } = await pool.query(
     `select eb.id, eb.name, eb.employee_id, e.first_name, e.last_name, eb.color_key,
             count(ebr.greenhouse_row_id) as total_rows,
@@ -181,9 +203,10 @@ export async function getBlockSummariesForLand(landId: string): Promise<LiveBloc
      join greenhouse_phases gp on gp.id = gr.phase_id and gp.is_active = true
      left join employees e on e.id = eb.employee_id
      where gp.land_id = $1
+       and ($2::uuid[] is null or gp.id = any($2::uuid[]))
      group by eb.id, e.first_name, e.last_name
      order by eb.name`,
-    [landId]
+    [landId, phaseIds]
   );
   return rows.map((r) => ({
     id: r.id,
