@@ -625,33 +625,6 @@ export function GreenhousePage() {
             <p className="placeholder-page">Loading...</p>
           ) : (
             <>
-              <div className="greenhouse-office-section">
-                <label className="greenhouse-office-field">
-                  Quick range
-                  <span className="greenhouse-office-select-wrap">
-                    <select className="greenhouse-office-select" value={preset} onChange={(e) => applyPreset(e.target.value)}>
-                      <option value="today">Today</option>
-                      <option value="yesterday">Yesterday</option>
-                      <option value="thisWeek">This week</option>
-                      <option value="lastWeek">Last week</option>
-                      <option value="last7">Last 7 days</option>
-                      <option value="thisMonth">This month</option>
-                      <option value="lastMonth">Last month</option>
-                      <option value="custom">Custom range (fixed dates)</option>
-                    </select>
-                  </span>
-                </label>
-
-                <DateRangeCalendar value={dateRange} onChange={handleCalendarChange} />
-
-                <p className="greenhouse-office-range-label">{formatRangeLabel(dateRange)}</p>
-                <p className="greenhouse-office-hint">
-                  {isMapDatePreset(preset)
-                    ? "The TV moves this range forward by itself each day — no need to republish."
-                    : "Fixed dates: the TV keeps showing exactly these days until you publish again."}
-                </p>
-              </div>
-
               <fieldset className="greenhouse-office-section greenhouse-office-phases">
                 <legend className="greenhouse-office-phases-legend">Phases on the TV map</legend>
                 {!data ? (
@@ -687,6 +660,33 @@ export function GreenhousePage() {
                   </>
                 )}
               </fieldset>
+
+              <div className="greenhouse-office-section">
+                <label className="greenhouse-office-field">
+                  Quick range
+                  <span className="greenhouse-office-select-wrap">
+                    <select className="greenhouse-office-select" value={preset} onChange={(e) => applyPreset(e.target.value)}>
+                      <option value="today">Today</option>
+                      <option value="yesterday">Yesterday</option>
+                      <option value="thisWeek">This week</option>
+                      <option value="lastWeek">Last week</option>
+                      <option value="last7">Last 7 days</option>
+                      <option value="thisMonth">This month</option>
+                      <option value="lastMonth">Last month</option>
+                      <option value="custom">Custom range (fixed dates)</option>
+                    </select>
+                  </span>
+                </label>
+
+                <DateRangeCalendar value={dateRange} onChange={handleCalendarChange} />
+
+                <p className="greenhouse-office-range-label">{formatRangeLabel(dateRange)}</p>
+                <p className="greenhouse-office-hint">
+                  {isMapDatePreset(preset)
+                    ? "The TV moves this range forward by itself each day — no need to republish."
+                    : "Fixed dates: the TV keeps showing exactly these days until you publish again."}
+                </p>
+              </div>
 
               <div className="greenhouse-office-section">
                 <button
