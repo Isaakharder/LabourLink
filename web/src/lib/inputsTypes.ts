@@ -222,3 +222,14 @@ export interface DailyInputsResponse {
   };
   canEdit: boolean;
 }
+
+// GET /api/inputs/employee-options — every active employee for the sidebar's
+// "Add employee to this day" picker, including ones with no entries on the
+// selected date (hasEntriesOnDate false).
+export interface InputsEmployeeOption {
+  id: string;
+  firstName: string;
+  lastName: string;
+  employeeGroup: { id: string; name: string } | null;
+  hasEntriesOnDate: boolean;
+}

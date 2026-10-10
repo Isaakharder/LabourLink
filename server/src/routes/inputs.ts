@@ -361,6 +361,49 @@ router.get(
   })
 );
 
+// Picker data for the sidebar's "Add employee to this day" modal — every
+// ACTIVE employee, deliberately including ones with no entries on `date`
+// (that's the whole point: someone who forgot their phone isn't in GET
+// /employees above yet). Active only, because POST /activities rejects an
+// inactive employee anyway. hasEntriesOnDate lets the modal mark who is
+// already on the day. Same minimal shape as GET /employees (no PII beyond
+// a name), for the same Supervisor-can't-call-GET-/api/employees reason.
+router.get(
+  "/employee-options",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const date = req.query.date as string | undefined;
+    if (!isValidDate(date)) {
+      return res.status(400).json({ error: "A valid date (YYYY-MM-DD) is required" });
+    }
+    const { start, end } = getDayBoundsUtc(date);
+    const { rows } = await pool.query(
+      `select e.id, e.first_name, e.last_name, e.employee_group_id, eg.name as employee_group_name,
+              exists (
+                select 1 from time_entries te
+                where te.employee_id = e.id
+                  and te.started_at >= $1 and te.started_at < $2
+                  and te.deleted_at is null
+              ) as has_entries
+       from employees e
+       left join employee_groups eg on eg.id = e.employee_group_id
+       where e.is_active = true
+       order by e.first_name, e.last_name, e.id`,
+      [start, end]
+    );
+    res.json({
+      employees: rows.map((r) => ({
+        id: r.id,
+        firstName: r.first_name,
+        lastName: r.last_name,
+        employeeGroup: r.employee_group_id ? { id: r.employee_group_id, name: r.employee_group_name } : null,
+        hasEntriesOnDate: r.has_entries,
+      })),
+    });
+  })
+);
+
 router.get(
   "/daily",
   requireAuth,
@@ -2362,6 +2405,21 @@ router.post(
 //
 // An OPEN-ENDED entry (no endTime — a currently-in-progress activity) keeps
 // the simpler behavior: any overlap at all is rejected, unchanged.
+//
+// Two opt-in fields, both used by the sidebar's "Add employee to this day"
+// modal (AddEmployeeToDayModal.tsx) and absent from Add activity's own
+// requests, so its behavior above is unchanged:
+//   - overlapPolicy: "reject" turns the boundary trimming off — a bounded
+//     entry is then rejected on ANY overlap, exactly like an open-ended one.
+//     That modal records a whole forgotten-phone stint and must never
+//     silently shorten something already on the day (a phone entry that
+//     did sync, or another supervisor's manual entry).
+//   - idempotencyKey (a client-generated UUID, stored in the existing
+//     time_entries.idempotency_key column instead of a server-generated
+//     one): a retry of a request that already committed — its response
+//     lost to a timeout, say — returns 200 { duplicate: true } instead of
+//     creating a second copy or a confusing overlap error. Checked inside
+//     the per-employee lock, so two concurrent copies can't both insert.
 router.post(
   "/activities",
   requireAuth,
@@ -2380,6 +2438,7 @@ router.post(
       endTime?: string | null;
       reason?: string;
     };
+    const { overlapPolicy, idempotencyKey } = req.body as { overlapPolicy?: unknown; idempotencyKey?: unknown };
     if (!employeeId || !UUID_RE.test(employeeId)) {
       return res.status(400).json({ error: "A valid employeeId is required" });
     }
@@ -2388,6 +2447,12 @@ router.post(
     }
     if (!isValidReason(reason)) {
       return res.status(400).json({ error: `A reason of at least ${MIN_REASON_LENGTH} characters is required` });
+    }
+    if (overlapPolicy !== undefined && overlapPolicy !== "trim" && overlapPolicy !== "reject") {
+      return res.status(400).json({ error: 'overlapPolicy must be "trim" or "reject"' });
+    }
+    if (idempotencyKey !== undefined && (typeof idempotencyKey !== "string" || !UUID_RE.test(idempotencyKey))) {
+      return res.status(400).json({ error: "idempotencyKey must be a UUID" });
     }
     if (!startTime || isNaN(Date.parse(startTime))) {
       return res.status(400).json({ error: "A valid startTime is required" });
@@ -2422,7 +2487,28 @@ router.post(
       await client.query("begin");
       await lockEmployeeForManualEntry(client, employeeId);
 
-      if (end) {
+      if (idempotencyKey) {
+        const prior = await client.query(`select employee_id from time_entries where idempotency_key = $1`, [
+          idempotencyKey,
+        ]);
+        if (prior.rows[0]) {
+          await client.query("rollback");
+          if (prior.rows[0].employee_id !== employeeId) {
+            return res.status(409).json({ error: "This request key was already used for a different employee." });
+          }
+          return res.status(200).json({ ok: true, duplicate: true });
+        }
+      }
+
+      if (end && overlapPolicy === "reject") {
+        const conflict = await findOverlappingEntry(client, employeeId, start, end);
+        if (conflict) {
+          await client.query("rollback");
+          return res.status(409).json({
+            error: `This time overlaps ${describeConflict(conflict)}. Change the times, or edit the existing entry from this employee's day.`,
+          });
+        }
+      } else if (end) {
         // Bounded entry — resolve boundary overlaps by trimming, only
         // reject a case that would need a split or a silent delete (see
         // planActivityInsertion's own comment).
@@ -2472,7 +2558,7 @@ router.post(
            (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source,
             greenhouse_row_id, carrier_id, density_type, density_count_per_row,
             created_by_employee_id, creation_reason)
-         values ($1, null, 'work', $2, gen_random_uuid(), $3, $4, 'manual', $5, $6, $7, $8, $9, $10)`,
+         values ($1, null, 'work', $2, coalesce($11::uuid, gen_random_uuid()), $3, $4, 'manual', $5, $6, $7, $8, $9, $10)`,
         [
           employeeId,
           activityId,
@@ -2484,12 +2570,25 @@ router.post(
           densityCountPerRow,
           req.employee!.id,
           reason.trim(),
+          idempotencyKey ?? null,
         ]
       );
 
       await client.query("commit");
     } catch (err) {
       await client.query("rollback");
+      // A phone's own sync (mobileTime.ts's openEntry) doesn't take this
+      // route's advisory lock, so it can open an entry for the same employee
+      // between the overlap check above and this insert. The one-open-entry
+      // index then rejects the second open row; report that as the conflict
+      // it is rather than a 500.
+      const pgErr = err as { code?: string; constraint?: string };
+      if (pgErr.code === "23505" && pgErr.constraint === "idx_time_entries_one_open_per_employee") {
+        return res.status(409).json({
+          error:
+            "This employee already has an in-progress entry (it may have just synced from their phone). Refresh and review their day first.",
+        });
+      }
       throw err;
     } finally {
       client.release();

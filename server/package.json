@@ -53,6 +53,7 @@
     "test:manual-entries": "ts-node src/routes/inputs.manualEntries.test.ts",
     "test:inputs-employees-list": "ts-node src/routes/inputs.employeesList.test.ts",
     "test:add-activity-boundary-trim": "ts-node src/routes/inputs.addActivityBoundaryTrim.test.ts",
+    "test:inputs-add-employee-to-day": "ts-node src/routes/inputs.addEmployeeToDay.test.ts",
     "test:activity-run-deletion": "ts-node src/routes/inputs.activityRunDeletion.test.ts",
     "test:storage": "ts-node src/lib/storage.test.ts",
     "test:break-reconciliation": "ts-node src/lib/breakReconciliation.test.ts",
