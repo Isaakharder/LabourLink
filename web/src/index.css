@@ -8414,6 +8414,52 @@ input {
   color: var(--color-muted);
 }
 
+/* Display > Map: which phases the TV map shows (published per display). */
+.greenhouse-office-phases {
+  margin: 0;
+  padding: 0;
+  border: none;
+  min-width: 0;
+  gap: 0.4rem;
+}
+
+.greenhouse-office-phases-legend {
+  padding: 0;
+  margin-bottom: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.greenhouse-office-phase-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding-left: 0.2rem;
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+/* Overrides `.greenhouse-office-section label` (stacked) for checkbox rows. */
+.greenhouse-office-section .greenhouse-office-phase-option {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--color-text);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.greenhouse-office-section .greenhouse-office-phase-all {
+  font-weight: 600;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.greenhouse-office-phase-option input {
+  margin: 0;
+  flex-shrink: 0;
+}
+
 /* ---------- Display > Setup ---------- */
 
 .display-setup-page {

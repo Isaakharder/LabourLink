@@ -8,9 +8,11 @@ import { calendarDateInAppTimezone, getRangeBoundsUtc, inclusiveDayCount } from 
 import {
   attachEmployeePhotoUrls,
   buildLiveLandQuery,
+  filterLandPhases,
   getBlockSummariesForLand,
   redactBlockEmployeeNames,
   redactEmployeeNamesForDisplay,
+  resolveVisiblePhaseIds,
   serializeLiveLand,
 } from "../lib/greenhouseLiveState";
 
@@ -73,8 +75,19 @@ router.get(
     const row = rows[0];
     if (!row) return res.status(404).json({ error: "Land not found" });
 
+    // The office preview always gets every phase (its phase checkboxes list
+    // them all); `phaseIds` (comma-separated, the draft selection) only
+    // narrows the employee-block legend to the phases being previewed.
     const land = await attachEmployeePhotoUrls(serializeLiveLand(row));
-    const blocks = await getBlockSummariesForLand(landId);
+    const requestedPhaseIds =
+      typeof req.query.phaseIds === "string" && req.query.phaseIds
+        ? req.query.phaseIds.split(",").filter((id) => UUID_RE.test(id))
+        : null;
+    const previewPhaseIds = resolveVisiblePhaseIds(
+      requestedPhaseIds,
+      land.phases.map((p: { id: string }) => p.id)
+    );
+    const blocks = await getBlockSummariesForLand(landId, previewPhaseIds);
 
     res.json({
       // Kept only when the range is a single day, for callers still reading
@@ -165,8 +178,15 @@ router.get(
       activityName = a.rows[0]?.name ?? null;
     }
 
-    const land = await attachEmployeePhotoUrls(serializeLiveLand(row));
-    const blocks = await getBlockSummariesForLand(d.landId);
+    // Only the display's selected phases (063_display_map_phases.sql); the
+    // TV fits the map to whatever phases it receives.
+    const fullLand = await attachEmployeePhotoUrls(serializeLiveLand(row));
+    const visiblePhaseIds = resolveVisiblePhaseIds(
+      d.mapPhaseIds,
+      fullLand.phases.map((p: { id: string }) => p.id)
+    );
+    const land = filterLandPhases(fullLand, visiblePhaseIds);
+    const blocks = await getBlockSummariesForLand(d.landId, visiblePhaseIds);
 
     res.json({
       name: d.name,
@@ -176,6 +196,8 @@ router.get(
       dateEnd: d.dateEnd,
       datePreset: d.mapDatePreset,
       rotationDegrees: d.rotationDegrees,
+      // null = all phases.
+      phaseIds: visiblePhaseIds,
       configVersion: d.updatedAt,
       generatedAt: new Date().toISOString(),
       land: redactEmployeeNamesForDisplay(land),

@@ -69,6 +69,7 @@
     "test:mobile-time-switch-warnings": "ts-node src/routes/mobileTime.switchWarnings.test.ts",
     "test:carriers": "ts-node src/routes/carriers.test.ts",
     "test:greenhouse-displays": "ts-node src/routes/greenhouseDisplays.test.ts",
+    "test:greenhouse-display-map-phases": "ts-node src/routes/greenhouseDisplays.mapPhases.test.ts",
     "test:greenhouse-row-restore": "ts-node src/routes/greenhouseLayout.rowRestore.test.ts",
     "test:dashboard-block-progress": "ts-node src/lib/dashboardBlockProgress.test.ts",
     "test:carrier-completion-attribution": "ts-node src/lib/carrierCompletionAttribution.test.ts",

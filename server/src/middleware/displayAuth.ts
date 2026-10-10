@@ -18,6 +18,8 @@ export interface AuthedDisplay {
   reportWeek: ReportWeek;
   reportIncludeToday: boolean;
   mapSlideSeconds: number;
+  // 063_display_map_phases.sql. null = every phase of the land.
+  mapPhaseIds: string[] | null;
 }
 
 declare global {
@@ -49,7 +51,7 @@ export async function requireDisplayKey(req: Request, res: Response, next: NextF
     // identical to_char cast in mobileTime.ts/breakReconciliation.ts).
     `select id, land_id, activity_id, to_char(date_start, 'YYYY-MM-DD') as date_start,
             to_char(date_end, 'YYYY-MM-DD') as date_end, name, updated_at, rotation_degrees,
-            map_date_preset, report_week, report_include_today, map_slide_seconds
+            map_date_preset, report_week, report_include_today, map_slide_seconds, map_phase_ids
      from greenhouse_displays
      where display_key_hash = $1 and is_active = true`,
     [tokenHash]
@@ -78,6 +80,7 @@ export async function requireDisplayKey(req: Request, res: Response, next: NextF
     reportWeek: row.report_week,
     reportIncludeToday: row.report_include_today,
     mapSlideSeconds: row.map_slide_seconds,
+    mapPhaseIds: row.map_phase_ids ?? null,
   };
   next();
 }

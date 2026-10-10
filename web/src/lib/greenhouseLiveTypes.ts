@@ -121,6 +121,9 @@ export interface GreenhouseDisplaySummary {
   reportWeek: ReportWeek;
   reportIncludeToday: boolean;
   mapSlideSeconds: number;
+  // Phases of the land the TV map shows (063_display_map_phases.sql);
+  // null = every phase, including ones added later.
+  phaseIds: string[] | null;
   // The display's current raw TV token, or null when either (a) this
   // display predates the token being stored retrievably and hasn't been
   // regenerated since, or (b) the current user isn't an Administrator (the
@@ -159,6 +162,9 @@ export interface GreenhouseDisplayStateResponse {
   generatedAt: string;
   land: LiveLand;
   blocks: LiveBlockSummary[];
+  // Phases shown (063_display_map_phases.sql); null = all. `land.phases`
+  // already contains only these.
+  phaseIds?: string[] | null;
 }
 
 // --- TV slideshow (GET /api/greenhouse/display/:key/slides) -----------------
