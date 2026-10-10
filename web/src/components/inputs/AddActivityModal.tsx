@@ -146,7 +146,7 @@ export function AddActivityModal({ employeeId, employeeName, date, onClose, onCr
           <button type="button" onClick={onClose} disabled={submitting}>
             Cancel
           </button>
-          <button type="submit" className="employees-add-button" disabled={!canSubmit}>
+          <button type="submit" className="employee-form-save" disabled={!canSubmit}>
             {submitting ? "Adding…" : "Add Activity"}
           </button>
         </div>

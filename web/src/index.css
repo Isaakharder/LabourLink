@@ -7838,6 +7838,32 @@ input {
   line-height: 1;
 }
 
+/* Two columns that may shrink below their content (minmax(0, 1fr) rather
+   than the shared grid's 1fr), so a long employee/activity name or a time
+   input with seconds can never push the form wider than the modal. At
+   900px and below the shared rules already switch to one full-width column. */
+@media (min-width: 901px) {
+  .inputs-add-employee-form .employee-form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.inputs-add-employee-form .employee-form-grid input,
+.inputs-add-employee-form .employee-form-grid select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.inputs-add-employee-form .employee-form-actions {
+  flex-wrap: wrap;
+}
+
+.inputs-add-employee-empty {
+  margin: 0;
+  color: var(--color-muted);
+}
+
 .inputs-add-employee-date {
   margin: 0 0 0.85rem;
   padding: 0.5rem 0.75rem;

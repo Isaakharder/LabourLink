@@ -38,6 +38,8 @@ const D_NEW = { str: "2019-06-03", d: 3 };
 const D_LISTED = { str: "2019-06-04", d: 4 };
 const D_PHONE_HANDOFF = { str: "2019-06-05", d: 5 };
 const D_PHONE_EARLIER = { str: "2019-06-06", d: 6 };
+const D_FILTER = { str: "2019-06-07", d: 7 };
+const D_RACE = { str: "2019-06-08", d: 8 };
 const at = (day: number, h: number, m = 0) => zonedWallTimeToUtc(2019, 6, day, h, m, 0).toISOString();
 
 async function main() {
@@ -221,13 +223,14 @@ async function main() {
     }
 
     // -----------------------------------------------------------------
-    // Picker lists active employees with no entries on the date.
+    // Picker lists active employees with no work on the date.
     // -----------------------------------------------------------------
     {
       const options = await call("GET", `/api/inputs/employee-options?date=${D_NEW.str}`, { token: supervisorToken });
       check(options.status === 200, "Supervisor can load employee options", options);
       const byId = new Map<string, any>((options.body?.employees ?? []).map((e: any) => [e.id, e]));
-      check(byId.get(forgotPhone.id)?.hasEntriesOnDate === false, "an employee with no entries that day is offered", byId.get(forgotPhone.id));
+      check(byId.has(forgotPhone.id), "an employee with no entries that day is offered", options.body);
+      check(byId.get(forgotPhone.id)?.hasEntriesOnDate === undefined, "options no longer carry hasEntriesOnDate", byId.get(forgotPhone.id));
       check(!byId.has(inactive.id), "an inactive employee is not offered");
       const sidebar = await call("GET", `/api/inputs/employees?date=${D_NEW.str}`, { token: adminToken });
       check(
@@ -349,8 +352,8 @@ async function main() {
       check(first.status === 201, "setup: existing 8:00-10:00 entry for the listed employee", first);
       const options = await call("GET", `/api/inputs/employee-options?date=${D_LISTED.str}`, { token: adminToken });
       check(
-        options.body?.employees?.find((e: any) => e.id === listed.id)?.hasEntriesOnDate === true,
-        "the picker marks an employee already on the day",
+        options.status === 200 && !(options.body?.employees ?? []).some((e: any) => e.id === listed.id),
+        "the picker leaves out an employee who already has work that day",
         options.body
       );
 
@@ -385,6 +388,227 @@ async function main() {
       check(trimDefault.status === 201, "without overlapPolicy (Add activity), the same boundary overlap still trims (201)", trimDefault);
       const trimmed = (await entriesFor(listed.id)).rows.find((r) => new Date(r.ended_at).toISOString() === at(D_LISTED.d, 10));
       check(new Date(trimmed?.started_at).toISOString() === at(D_LISTED.d, 9), "...the existing entry's start moved to 9:00 as before", trimmed);
+    }
+
+    // -----------------------------------------------------------------
+    // Picker filtering: only active employees with NO non-deleted work entry
+    // starting within the date's organization-timezone day.
+    // -----------------------------------------------------------------
+    const ADD_REASON = "Added manually through Inputs";
+    async function worker(label: string) {
+      const e = await createEmployee("Employee", label);
+      await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [
+        e.id,
+        groupId,
+      ]);
+      return e;
+    }
+    async function rawEntry(employeeId: string, opts: { start: string; end?: string | null; type?: "work" | "break"; deleted?: boolean }) {
+      const type = opts.type ?? "work";
+      await pool.query(
+        `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source, is_paid,
+                                   deleted_at, deleted_by_employee_id, deletion_reason)
+         values ($1, null, $2, $3, gen_random_uuid(), $4, $5, 'manual', $6, $7, $8, $9)`,
+        [
+          employeeId,
+          type,
+          type === "work" ? plainActivityId : null,
+          opts.start,
+          opts.end ?? null,
+          type === "break" ? false : null,
+          opts.deleted ? new Date() : null,
+          opts.deleted ? admin.id : null,
+          opts.deleted ? "QA deleted entry" : null,
+        ]
+      );
+    }
+    const localIso = (day: number, h: number, m = 0) => zonedWallTimeToUtc(2019, 6, day, h, m, 0).toISOString();
+    const F = D_FILTER.d;
+    const fNone = await worker("Filter None");
+    const fManual = await worker("Filter Manual");
+    const fOpen = await worker("Filter Open");
+    const fDeleted = await worker("Filter Deleted");
+    const fBreakOnly = await worker("Filter Break Only");
+    const fPrevDay = await worker("Filter Prev Day");
+    const fMidnight = await worker("Filter Midnight");
+    const fNextDay = await worker("Filter Next Day");
+    {
+      const manual = await call("POST", "/api/inputs/activities", {
+        token: adminToken,
+        body: { employeeId: fManual.id, date: D_FILTER.str, activityId: plainActivityId, startTime: at(F, 8), endTime: at(F, 9), reason: "Another supervisor" },
+      });
+      check(manual.status === 201, "filter setup: manual work for fManual", manual);
+      await rawEntry(fOpen.id, { start: at(F, 8), end: null });
+      await rawEntry(fDeleted.id, { start: at(F, 8), end: at(F, 9), deleted: true });
+      await rawEntry(fBreakOnly.id, { start: at(F, 12), end: at(F, 12, 30), type: "break" });
+      await rawEntry(fPrevDay.id, { start: localIso(F - 1, 23, 30), end: localIso(F - 1, 23, 59) });
+      await rawEntry(fMidnight.id, { start: localIso(F, 0, 0), end: localIso(F, 0, 30) });
+      await rawEntry(fNextDay.id, { start: localIso(F + 1, 0, 0), end: localIso(F + 1, 1, 0) });
+
+      const options = await call("GET", `/api/inputs/employee-options?date=${D_FILTER.str}`, { token: supervisorToken });
+      const ids = new Set<string>((options.body?.employees ?? []).map((e: any) => e.id));
+      check(ids.has(fNone.id), "filter: no entries at all -> offered");
+      check(!ids.has(fManual.id), "filter: manual work that day -> not offered");
+      check(!ids.has(fOpen.id), "filter: in-progress work that day -> not offered");
+      check(ids.has(fDeleted.id), "filter: only a deleted work entry -> offered");
+      check(ids.has(fBreakOnly.id), "filter: only a break (no work entry) -> offered");
+      check(ids.has(fPrevDay.id), "filter: work at 23:30 the previous local day -> offered");
+      check(!ids.has(fMidnight.id), "filter: work starting at local 00:00 of the date -> not offered");
+      check(ids.has(fNextDay.id), "filter: work starting at local 00:00 the next day -> offered");
+      check(!ids.has(inactive.id), "filter: inactive employee -> not offered");
+    }
+
+    // -----------------------------------------------------------------
+    // Saving without a reason: automatic creation reason, audit preserved.
+    // -----------------------------------------------------------------
+    {
+      const key = randomUUID();
+      const body = {
+        employeeId: fNone.id,
+        date: D_FILTER.str,
+        activityId: plainActivityId,
+        startTime: at(F, 7),
+        endTime: at(F, 10),
+        addEmployeeToDay: true,
+        idempotencyKey: key,
+      };
+      const created = await call("POST", "/api/inputs/activities", { token: supervisorToken, body });
+      check(created.status === 201, "save with addEmployeeToDay and no reason succeeds (201)", created);
+      const { rows } = await pool.query(
+        `select source, created_by_employee_id, creation_reason, created_at, device_id from time_entries
+         where employee_id = $1 and deleted_at is null`,
+        [fNone.id]
+      );
+      check(rows.length === 1, "exactly one entry created", rows);
+      check(
+        rows[0]?.source === "manual" &&
+          rows[0]?.device_id === null &&
+          rows[0]?.created_by_employee_id === supervisor.id &&
+          rows[0]?.creation_reason === ADD_REASON,
+        "entry records who created it, the automatic reason, and is manual",
+        rows[0]
+      );
+      check(
+        Boolean(rows[0]?.created_at) && Math.abs(Date.now() - new Date(rows[0].created_at).getTime()) < 5 * 60 * 1000,
+        "entry records when it was created",
+        rows[0]
+      );
+      const daily = await call("GET", `/api/inputs/daily?employeeId=${fNone.id}&date=${D_FILTER.str}`, { token: adminToken });
+      const run = daily.body?.runs?.[0];
+      check(
+        run?.manualEntry?.createdByEmployeeId === supervisor.id &&
+          run?.manualEntry?.createdByName === `${supervisor.first_name} ${supervisor.last_name}` &&
+          run?.manualEntry?.creationReason === ADD_REASON,
+        "GET /daily shows the Manual label data (created by, reason)",
+        run
+      );
+      const options = await call("GET", `/api/inputs/employee-options?date=${D_FILTER.str}`, { token: supervisorToken });
+      check(!(options.body?.employees ?? []).some((e: any) => e.id === fNone.id), "the employee drops out of the picker once added");
+
+      const retry = await call("POST", "/api/inputs/activities", { token: supervisorToken, body });
+      check(retry.status === 200 && retry.body?.duplicate === true, "a retry of the same submission is a duplicate, not a has-work rejection", retry);
+      check(
+        Number((await pool.query(`select count(*) from time_entries where employee_id = $1 and deleted_at is null`, [fNone.id])).rows[0].count) === 1,
+        "...and creates nothing"
+      );
+
+      const ignoredReason = await call("POST", "/api/inputs/activities", {
+        token: supervisorToken,
+        body: { ...body, employeeId: fPrevDay.id, reason: "Typed reason", idempotencyKey: randomUUID() },
+      });
+      check(ignoredReason.status === 201, "a reason sent with addEmployeeToDay is accepted", ignoredReason);
+      const prev = await pool.query(
+        `select creation_reason from time_entries where employee_id = $1 and deleted_at is null and started_at = $2`,
+        [fPrevDay.id, at(F, 7)]
+      );
+      check(prev.rows[0]?.creation_reason === ADD_REASON, "...but the standard reason is stored for this modal", prev.rows[0]);
+
+      const addActivityNoReason = await call("POST", "/api/inputs/activities", {
+        token: supervisorToken,
+        body: { employeeId: fDeleted.id, date: D_FILTER.str, activityId: plainActivityId, startTime: at(F, 7), endTime: at(F, 8) },
+      });
+      check(addActivityNoReason.status === 400, "Add activity (no addEmployeeToDay) still requires a reason (400)", addActivityNoReason);
+
+      const overBreak = await call("POST", "/api/inputs/activities", {
+        token: supervisorToken,
+        body: { ...body, employeeId: fBreakOnly.id, startTime: at(F, 11), endTime: at(F, 13), idempotencyKey: randomUUID() },
+      });
+      check(overBreak.status === 409 && /overlaps/.test(overBreak.body?.error ?? ""), "addEmployeeToDay still rejects overlaps (with a break) (409)", overBreak);
+
+      const asEmployee = await call("POST", "/api/inputs/activities", {
+        token: employeeToken,
+        body: { ...body, employeeId: fDeleted.id, idempotencyKey: randomUUID() },
+      });
+      check(asEmployee.status === 403, "addEmployeeToDay keeps the Inputs edit permissions (403 for Employee role)", asEmployee);
+      const badFlag = await call("POST", "/api/inputs/activities", {
+        token: supervisorToken,
+        body: { ...body, employeeId: fDeleted.id, addEmployeeToDay: "yes", idempotencyKey: randomUUID() },
+      });
+      check(badFlag.status === 400, "a non-boolean addEmployeeToDay is rejected (400)", badFlag);
+    }
+
+    // -----------------------------------------------------------------
+    // Save-time race: work added after the picker loaded.
+    // -----------------------------------------------------------------
+    {
+      const R = D_RACE.d;
+      const raceSupervisor = await worker("Race Supervisor Target");
+      const racePhone = await worker("Race Phone Target");
+      const raceDeviceIdentifier = randomUUID();
+      const raceDeviceId: string = (
+        await pool.query(`insert into devices (device_identifier, device_name, is_active) values ($1, $2, true) returning id`, [
+          raceDeviceIdentifier,
+          `QA Add To Day Race Device ${RUN_ID}`,
+        ])
+      ).rows[0].id;
+      deviceIds.push(raceDeviceId);
+      await pool.query(`insert into device_assignments (device_id, employee_id) values ($1, $2)`, [raceDeviceId, racePhone.id]);
+
+      const before = await call("GET", `/api/inputs/employee-options?date=${D_RACE.str}`, { token: supervisorToken });
+      const beforeIds = new Set<string>((before.body?.employees ?? []).map((e: any) => e.id));
+      check(beforeIds.has(raceSupervisor.id) && beforeIds.has(racePhone.id), "race: both employees offered when the modal opens");
+
+      // Another supervisor records work for one; the other's phone syncs.
+      const other = await call("POST", "/api/inputs/activities", {
+        token: adminToken,
+        body: { employeeId: raceSupervisor.id, date: D_RACE.str, activityId: plainActivityId, startTime: at(R, 13), endTime: at(R, 14), reason: "Other supervisor" },
+      });
+      check(other.status === 201, "race setup: another supervisor added work", other);
+      const phone = await sync(raceDeviceIdentifier, [
+        { clientEventId: randomUUID(), deviceSeq: 1, eventType: "work_start", occurredAtUtc: at(R, 13), activityId: plainActivityId, answers: null },
+        { clientEventId: randomUUID(), deviceSeq: 2, eventType: "end_day", occurredAtUtc: at(R, 14) },
+      ]);
+      check(phone.body?.results?.every((r: any) => r.status === "accepted"), "race setup: the phone synced work", phone.body);
+
+      const targets: [typeof raceSupervisor, string][] = [
+        [raceSupervisor, "another supervisor's entry"],
+        [racePhone, "a phone sync"],
+      ];
+      for (const [target, label] of targets) {
+        const countBefore = Number((await pool.query(`select count(*) from time_entries where employee_id = $1`, [target.id])).rows[0].count);
+        const late = await call("POST", "/api/inputs/activities", {
+          token: supervisorToken,
+          body: {
+            employeeId: target.id,
+            date: D_RACE.str,
+            activityId: plainActivityId,
+            startTime: at(R, 7),
+            endTime: at(R, 9),
+            addEmployeeToDay: true,
+            idempotencyKey: randomUUID(),
+          },
+        });
+        check(
+          late.status === 409 && late.body?.code === "EMPLOYEE_HAS_WORK" && /now has work recorded for this day/.test(late.body?.error ?? ""),
+          `race: saving after ${label} is rejected with EMPLOYEE_HAS_WORK (409)`,
+          late
+        );
+        const countAfter = Number((await pool.query(`select count(*) from time_entries where employee_id = $1`, [target.id])).rows[0].count);
+        check(countAfter === countBefore, `race: nothing created after ${label}`);
+      }
+      const after = await call("GET", `/api/inputs/employee-options?date=${D_RACE.str}`, { token: supervisorToken });
+      const afterIds = new Set<string>((after.body?.employees ?? []).map((e: any) => e.id));
+      check(!afterIds.has(raceSupervisor.id) && !afterIds.has(racePhone.id), "race: the refreshed picker no longer offers either employee");
     }
 
     // -----------------------------------------------------------------

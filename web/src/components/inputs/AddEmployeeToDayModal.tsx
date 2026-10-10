@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { api, ApiError } from "../../lib/api";
 import { uuid } from "../../lib/uuid";
@@ -18,7 +18,7 @@ import {
 } from "./ActivitySelectionFields";
 import { EmployeeActivityOption, InputsEmployeeOption } from "../../lib/inputsTypes";
 
-const MIN_REASON_LENGTH = 3;
+export const NO_ELIGIBLE_EMPLOYEES_MESSAGE = "All active employees already have work recorded for this day.";
 
 interface AddEmployeeToDayModalProps {
   date: string;
@@ -51,16 +51,16 @@ function groupOptions(employees: InputsEmployeeOption[]): EmployeeOptionGroup[] 
 }
 
 // "Add employee to this day" (the + beside Review all employees): records
-// work for an EXISTING employee who forgot their phone or couldn't start
-// work on it — never creates an employee. Saves through the same POST
-// /api/inputs/activities as Add activity (same EDIT_ROLES, activity/row/
-// carrier validation, created_by/creation_reason audit trail and Manual
-// label), with two differences requested by this flow:
-//   - overlapPolicy "reject": any overlap with something already on the day
-//     is reported, never resolved by trimming the existing entry.
-//   - an idempotency key per distinct submission: re-submitting the same
-//     values (e.g. after a timeout whose request actually committed) returns
-//     the already-created entry instead of a duplicate.
+// work for an EXISTING active employee who has no work on the selected date
+// yet — they forgot their phone or couldn't start work on it. Never creates
+// an employee. Saves through the same POST /api/inputs/activities as Add
+// activity (same roles, activity/row/carrier validation, created_by audit
+// trail and Manual label) in its addEmployeeToDay mode: no Reason field (the
+// server records a standard one), any overlap rejected rather than trimmed,
+// and a save-time recheck that the employee still has no work that day. An
+// idempotency key per distinct submission makes a retry of the same values
+// (e.g. after a timeout whose request actually committed) return the
+// already-created entry instead of a duplicate.
 export function AddEmployeeToDayModal({ date, onClose, onCreated }: AddEmployeeToDayModalProps) {
   const isPastDate = date < todayInAppTimezone();
   const [employees, setEmployees] = useState<InputsEmployeeOption[] | null>(null);
@@ -74,22 +74,32 @@ export function AddEmployeeToDayModal({ date, onClose, onCreated }: AddEmployeeT
     date === todayInAppTimezone() ? toTimeInputValue(new Date().toISOString()) : ""
   );
   const [endTime, setEndTime] = useState("");
-  const [reason, setReason] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   // The key is reused only while the request body is unchanged, so a retry
   // of the same submission is recognised but an edited one is a new entry.
   const lastSubmissionRef = useRef<{ body: string; key: string } | null>(null);
 
-  useEffect(() => {
-    api<{ employees: InputsEmployeeOption[] }>(`/api/inputs/employee-options?date=${encodeURIComponent(date)}`)
-      .then((res) => setEmployees(res.employees))
-      .catch((err) => setEmployeesError(err instanceof ApiError ? err.message : "Could not load employees"));
+  const loadEmployees = useCallback(() => {
+    return api<{ employees: InputsEmployeeOption[] }>(`/api/inputs/employee-options?date=${encodeURIComponent(date)}`)
+      .then((res) => {
+        setEmployees(res.employees);
+        setEmployeesError(null);
+        return res.employees;
+      })
+      .catch((err) => {
+        setEmployeesError(err instanceof ApiError ? err.message : "Could not load employees");
+        return null;
+      });
   }, [date]);
 
+  useEffect(() => {
+    void loadEmployees();
+  }, [loadEmployees]);
+
+  const noneEligible = employees !== null && employees.length === 0;
   const selectedEmployee = employees?.find((e) => e.id === employeeId);
   const selectedActivity = activities?.find((a) => a.id === selection.activityId);
-  const reasonValid = reason.trim().length >= MIN_REASON_LENGTH;
   const endBeforeStart = Boolean(startTime && endTime && endTime <= startTime);
   // An in-progress entry on a day that's already over would stay open until
   // the automatic cutoff closes it — require the end time instead.
@@ -99,7 +109,6 @@ export function AddEmployeeToDayModal({ date, onClose, onCreated }: AddEmployeeT
     Boolean(startTime) &&
     (!endTimeRequired || Boolean(endTime)) &&
     !endBeforeStart &&
-    reasonValid &&
     isActivitySelectionComplete(selectedActivity, selection) &&
     !submitting;
 
@@ -115,6 +124,7 @@ export function AddEmployeeToDayModal({ date, onClose, onCreated }: AddEmployeeT
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!canSubmit || !selectedEmployee) return;
+    const employeeName = `${selectedEmployee.firstName} ${selectedEmployee.lastName}`;
     setSubmitting(true);
     setError(null);
     const payload = {
@@ -124,8 +134,7 @@ export function AddEmployeeToDayModal({ date, onClose, onCreated }: AddEmployeeT
       answers: buildActivityAnswers(selectedActivity, selection),
       startTime: combineDateAndTimeToUtcIso(date, startTime),
       endTime: endTime ? combineDateAndTimeToUtcIso(date, endTime) : null,
-      reason: reason.trim(),
-      overlapPolicy: "reject" as const,
+      addEmployeeToDay: true,
     };
     const body = JSON.stringify(payload);
     const key = lastSubmissionRef.current?.body === body ? lastSubmissionRef.current.key : uuid();
@@ -135,106 +144,107 @@ export function AddEmployeeToDayModal({ date, onClose, onCreated }: AddEmployeeT
         method: "POST",
         body: JSON.stringify({ ...payload, idempotencyKey: key }),
       });
-      onCreated(
-        { id: selectedEmployee.id, name: `${selectedEmployee.firstName} ${selectedEmployee.lastName}` },
-        Boolean(res?.duplicate)
-      );
+      onCreated({ id: selectedEmployee.id, name: employeeName }, Boolean(res?.duplicate));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not add the work entry");
+      if (err instanceof ApiError && err.code === "EMPLOYEE_HAS_WORK") {
+        // Phone sync or another supervisor added work after this list
+        // loaded: nothing was created. Refresh so they drop out of it.
+        handleEmployeeChange("");
+        await loadEmployees();
+        // Set after the reset above, which clears any previous error.
+        setError(`${employeeName} now has work recorded for this day, so nothing was added. The employee list has been refreshed.`);
+      } else {
+        setError(err instanceof ApiError ? err.message : "Could not add the work entry");
+      }
       setSubmitting(false);
     }
   }
 
   return (
-    <Modal title="Add employee to this day" onClose={submitting ? () => {} : onClose}>
-      <form onSubmit={handleSubmit} className="employee-form" noValidate>
+    <Modal title="Add employee to this day" onClose={submitting ? () => {} : onClose} wide>
+      <form onSubmit={handleSubmit} className="employee-form inputs-add-employee-form" noValidate>
         <p className="inputs-add-employee-date">
           Recording work for <strong>{formatDateLong(date)}</strong>
         </p>
-        <div className="employee-form-grid">
-          <label>
-            Employee *
-            <select
-              value={employeeId}
-              onChange={(e) => handleEmployeeChange(e.target.value)}
-              disabled={submitting || !employees}
-              required
-            >
-              <option value="">{employees ? "Select an employee" : "Loading employees…"}</option>
-              {employees &&
-                groupOptions(employees).map((g) => (
-                  <optgroup key={g.key || "ungrouped"} label={g.name}>
-                    {g.employees.map((emp) => (
-                      <option key={emp.id} value={emp.id}>
-                        {emp.firstName} {emp.lastName}
-                        {emp.hasEntriesOnDate ? " (already on this day)" : ""}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-            </select>
-            {employeesError && <span className="field-error">{employeesError}</span>}
-            {employees && employees.length === 0 && <span className="field-error">No active employees found.</span>}
-          </label>
-          <label>
-            Date
-            <input type="text" value={formatDateLong(date)} disabled readOnly />
-          </label>
+        {noneEligible ? (
+          <p className="inputs-add-employee-empty" role="status">
+            {NO_ELIGIBLE_EMPLOYEES_MESSAGE}
+          </p>
+        ) : (
+          <div className="employee-form-grid">
+            <label>
+              Employee *
+              <select
+                value={employeeId}
+                onChange={(e) => handleEmployeeChange(e.target.value)}
+                disabled={submitting || !employees}
+                required
+              >
+                <option value="">{employees ? "Select an employee" : "Loading employees…"}</option>
+                {employees &&
+                  groupOptions(employees).map((g) => (
+                    <optgroup key={g.key || "ungrouped"} label={g.name}>
+                      {g.employees.map((emp) => (
+                        <option key={emp.id} value={emp.id}>
+                          {emp.firstName} {emp.lastName}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+              </select>
+              {employeesError && <span className="field-error">{employeesError}</span>}
+            </label>
 
-          {selectedEmployee && (
-            <ActivitySelectionFields
-              key={selectedEmployee.id}
-              employeeId={selectedEmployee.id}
-              value={selection}
-              onChange={setSelection}
-              disabled={submitting}
-              onActivitiesLoaded={setActivities}
-            />
-          )}
-
-          <label>
-            Work start time *
-            <input
-              type="time"
-              step={1}
-              value={startTime}
-              onChange={(e) => setStartTime(e.target.value)}
-              disabled={submitting}
-              required
-            />
-          </label>
-
-          <label>
-            End time {endTimeRequired ? "*" : "(optional)"}
-            <input
-              type="time"
-              step={1}
-              value={endTime}
-              onChange={(e) => setEndTime(e.target.value)}
-              disabled={submitting}
-              required={endTimeRequired}
-            />
-            {endBeforeStart ? (
-              <span className="field-error">End time must be after the start time.</span>
-            ) : endTimeRequired ? (
-              <span className="field-hint">Required for a past day.</span>
+            {selectedEmployee ? (
+              <ActivitySelectionFields
+                key={selectedEmployee.id}
+                employeeId={selectedEmployee.id}
+                value={selection}
+                onChange={setSelection}
+                disabled={submitting}
+                onActivitiesLoaded={setActivities}
+              />
             ) : (
-              <span className="field-hint">Leave blank if they're still working.</span>
+              <label>
+                Activity *
+                <select disabled value="">
+                  <option value="">Select an employee first</option>
+                </select>
+              </label>
             )}
-          </label>
 
-          <label>
-            Reason *
-            <input
-              type="text"
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="e.g. Forgot their phone"
-              disabled={submitting}
-              required
-            />
-          </label>
-        </div>
+            <label>
+              Work start time *
+              <input
+                type="time"
+                step={1}
+                value={startTime}
+                onChange={(e) => setStartTime(e.target.value)}
+                disabled={submitting}
+                required
+              />
+            </label>
+
+            <label>
+              End time {endTimeRequired ? "*" : "(optional)"}
+              <input
+                type="time"
+                step={1}
+                value={endTime}
+                onChange={(e) => setEndTime(e.target.value)}
+                disabled={submitting}
+                required={endTimeRequired}
+              />
+              {endBeforeStart ? (
+                <span className="field-error">End time must be after the start time.</span>
+              ) : endTimeRequired ? (
+                <span className="field-hint">Required for a past day.</span>
+              ) : (
+                <span className="field-hint">Leave blank if they're still working.</span>
+              )}
+            </label>
+          </div>
+        )}
 
         {error && (
           <p className="error-text" role="alert">
@@ -244,11 +254,13 @@ export function AddEmployeeToDayModal({ date, onClose, onCreated }: AddEmployeeT
 
         <div className="employee-form-actions">
           <button type="button" onClick={onClose} disabled={submitting}>
-            Cancel
+            {noneEligible ? "Close" : "Cancel"}
           </button>
-          <button type="submit" className="employees-add-button" disabled={!canSubmit}>
-            {submitting ? "Adding…" : "Add to day"}
-          </button>
+          {!noneEligible && (
+            <button type="submit" className="employee-form-save" disabled={!canSubmit}>
+              {submitting ? "Adding…" : "Add to day"}
+            </button>
+          )}
         </div>
       </form>
     </Modal>
