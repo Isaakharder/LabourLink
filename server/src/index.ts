@@ -37,11 +37,17 @@ import passwordResetRoutes from "./routes/passwordReset";
 import plantDensitiesRoutes from "./routes/plantDensities";
 import reportsRoutes from "./routes/reports";
 import rowCompletionsRoutes from "./routes/rowCompletions";
-import { installProcessSafetyNet } from "./lib/processSafety";
+import { installAsyncErrorForwarding, installProcessSafetyNet } from "./lib/processSafety";
+import { createGracefulShutdown } from "./lib/gracefulShutdown";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
 const CORS_ORIGIN = parseCorsOrigins(process.env.CORS_ORIGIN);
+
+// Request-level containment: any async route/middleware rejection becomes
+// next(err) -> the error handler below -> a 500 for that request, instead of
+// a hung request or a crashed process (lib/processSafety.ts).
+installAsyncErrorForwarding();
 
 app.use(cors({ origin: CORS_ORIGIN, credentials: true }));
 app.use(express.json());
@@ -85,42 +91,30 @@ app.use("/api/integrations", integrationsRoutes);
 // Safety net: any error forwarded via next(err) (see asyncHandler) lands
 // here instead of crashing the process. Logged server-side; the client only
 // gets a generic message so we never leak DB/internal details.
-app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
   console.error("Unhandled request error:", err);
+  // A handler that failed after responding: let Express close the
+  // connection rather than trying to send a second response.
+  if (res.headersSent) return next(err);
   res.status(500).json({ error: "Internal server error" });
 });
-
-// One request's unhandled rejection must never take the whole API down
-// (see lib/processSafety.ts).
-installProcessSafetyNet();
 
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`LabourLink API listening on port ${PORT}`);
 });
 
-// Graceful shutdown. Railway sends SIGTERM to the previous deployment when a
-// new one goes live (and SIGKILLs it after deploy.drainingSeconds — see
-// railway.json). Without this handler Node exited immediately and cut off
-// in-flight requests: on 2026-10-10 a deploy killed a bulk speed review
-// mid-batch and the browser got only Railway's error page. Stop accepting
-// new connections, let in-flight requests finish, then exit; force the exit
-// if something hangs past the draining window.
+// Graceful shutdown (lib/gracefulShutdown.ts): on SIGTERM from a Railway
+// deploy, finish in-flight requests before exiting (2026-10-10: a deploy
+// used to cut a bulk speed review off mid-batch). A fatal uncaught exception
+// uses the same path with exit code 1 and a shorter grace, so Railway's
+// ON_FAILURE restart policy starts a fresh process.
 const SHUTDOWN_GRACE_MS = 25_000;
-let shuttingDown = false;
-function shutdown(signal: string) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.log(`[shutdown] ${signal} received — finishing in-flight requests`);
-  server.close(() => {
-    console.log("[shutdown] all requests finished");
-    process.exit(0);
-  });
-  // Idle keep-alive sockets would otherwise hold close() open.
-  server.closeIdleConnections();
-  setTimeout(() => {
-    console.warn("[shutdown] grace period over — exiting");
-    process.exit(0);
-  }, SHUTDOWN_GRACE_MS).unref();
-}
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+const FATAL_SHUTDOWN_GRACE_MS = 10_000;
+const shutdown = createGracefulShutdown(server, SHUTDOWN_GRACE_MS);
+process.on("SIGTERM", () => shutdown("SIGTERM received"));
+process.on("SIGINT", () => shutdown("SIGINT received"));
+
+// Rejections outside any request are logged and the API keeps running;
+// uncaught exceptions are never swallowed — graceful shutdown, exit 1,
+// restart (lib/processSafety.ts).
+installProcessSafetyNet({ onFatal: () => shutdown("fatal uncaught exception", 1, FATAL_SHUTDOWN_GRACE_MS) });
