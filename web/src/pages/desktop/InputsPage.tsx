@@ -11,6 +11,7 @@ import { DeleteTimeEntryModal } from "../../components/inputs/DeleteTimeEntryMod
 import { AddWorkStartModal } from "../../components/inputs/AddWorkStartModal";
 import { AddBreakModal } from "../../components/inputs/AddBreakModal";
 import { AddActivityModal } from "../../components/inputs/AddActivityModal";
+import { AddEmployeeToDayModal } from "../../components/inputs/AddEmployeeToDayModal";
 import { BreakCorrectionPreviewModal } from "../../components/inputs/BreakCorrectionPreviewModal";
 import { SpeedReviewModal } from "../../components/inputs/SpeedReviewModal";
 import { SpeedReviewGroupsResponse } from "../../lib/speedReviewTypes";
@@ -156,6 +157,23 @@ export function InputsPage() {
   // effect below (same as pendingDeletion) so background polling can't
   // yank the page out from under an admin mid-entry.
   const [addModal, setAddModal] = useState<"work-start" | "break" | "activity" | null>(null);
+  // "Add employee to this day" (the sidebar's + button). Separate from
+  // addModal because it isn't tied to the selected employee: the employee
+  // switch it ends with must not close it mid-save, and it needs no `daily`.
+  // Same roles as the server's manual-entry routes (EDIT_ROLES).
+  const canAddEmployeeToDay =
+    currentEmployee?.securityRole === "Administrator" ||
+    currentEmployee?.securityRole === "Manager" ||
+    currentEmployee?.securityRole === "Supervisor";
+  const [addEmployeeToDayOpen, setAddEmployeeToDayOpen] = useState(false);
+  // Success message to show once the employee switch that follows a save has
+  // happened — that switch's reset effect clears successMessage itself.
+  const pendingSuccessMessageRef = useRef<string | null>(null);
+  // The modal records work for the date it was opened on; never let it
+  // carry over to a different date.
+  useEffect(() => {
+    setAddEmployeeToDayOpen(false);
+  }, [date]);
 
   // Bulk speed review (SpeedReviewModal). Viewing the review groups needs
   // the same roles as the individual review modal's candidate list
@@ -433,6 +451,7 @@ export function InputsPage() {
       pendingDeletion !== null ||
       deletionSubmitting ||
       addModal !== null ||
+      addEmployeeToDayOpen ||
       reviewModal !== null;
     const wasPaused = pausedRef.current;
     pausedRef.current = nowPaused;
@@ -451,6 +470,7 @@ export function InputsPage() {
     pendingDeletion,
     deletionSubmitting,
     addModal,
+    addEmployeeToDayOpen,
     reviewModal,
     loadDaily,
   ]);
@@ -460,7 +480,8 @@ export function InputsPage() {
     // effect's only trigger, since loadDaily's identity only changes with
     // those two deps) — any success banner or action-error left over from a
     // previous action no longer applies to what's about to be shown.
-    setSuccessMessage(null);
+    setSuccessMessage(pendingSuccessMessageRef.current);
+    pendingSuccessMessageRef.current = null;
     setActionError(null);
     // Immediately stop displaying the previous employee's data — `daily`
     // is cleared synchronously, before loadDaily's request even starts, so
@@ -851,6 +872,26 @@ export function InputsPage() {
     setSuccessMessage(message);
   }
 
+  // After "Add employee to this day" saves: show and select that employee so
+  // further activities/breaks can be added from their day as usual. The
+  // search box is cleared so the new row can't be filtered out of view.
+  async function handleEmployeeAddedToDay(employee: { id: string; name: string }, duplicate: boolean) {
+    setAddEmployeeToDayOpen(false);
+    setEmployeeSearch("");
+    const message = duplicate ? `${employee.name}'s work entry was already saved.` : `${employee.name} added to this day.`;
+    if (employee.id === selectedEmployeeId) {
+      await loadDaily();
+      loadEmployees();
+      setSuccessMessage(message);
+    } else {
+      // The switch below reloads the day (loadDaily's reset effect) and the
+      // employee list (loadEmployees re-runs from the cleared search).
+      pendingSuccessMessageRef.current = message;
+      updateParams({ employee: employee.id });
+      if (!employeeSearch) loadEmployees();
+    }
+  }
+
   const activityHeaderStatus: InputsHeaderStatus | null = actionError
     ? { tone: "error", message: actionError }
     : error
@@ -881,15 +922,30 @@ export function InputsPage() {
           search={employeeSearch}
           onSearchChange={setEmployeeSearch}
           headerAction={
-            canReviewSpeeds ? (
-              <button
-                type="button"
-                className="inputs-section-header-button inputs-review-button inputs-employee-review-all"
-                onClick={() => setReviewModal({ employeeId: null })}
-              >
-                Review all employees
-                <ReviewCountBadge count={reviewCounts?.total ?? null} label="pending speed reviews for all employees" />
-              </button>
+            canReviewSpeeds || canAddEmployeeToDay ? (
+              <div className="inputs-employee-header-actions">
+                {canReviewSpeeds && (
+                  <button
+                    type="button"
+                    className="inputs-section-header-button inputs-review-button inputs-employee-review-all"
+                    onClick={() => setReviewModal({ employeeId: null })}
+                  >
+                    Review all employees
+                    <ReviewCountBadge count={reviewCounts?.total ?? null} label="pending speed reviews for all employees" />
+                  </button>
+                )}
+                {canAddEmployeeToDay && (
+                  <button
+                    type="button"
+                    className="inputs-section-header-button inputs-add-employee-button"
+                    title="Add employee to this day"
+                    aria-label="Add employee to this day"
+                    onClick={() => setAddEmployeeToDayOpen(true)}
+                  >
+                    <span aria-hidden="true">+</span>
+                  </button>
+                )}
+              </div>
             ) : null
           }
         />
@@ -1088,6 +1144,13 @@ export function InputsPage() {
           workEndTime={daily.workEndTime}
           onClose={() => setAddModal(null)}
           onCreated={() => handleManualEntryCreated("Break added.")}
+        />
+      )}
+      {addEmployeeToDayOpen && (
+        <AddEmployeeToDayModal
+          date={date}
+          onClose={() => setAddEmployeeToDayOpen(false)}
+          onCreated={handleEmployeeAddedToDay}
         />
       )}
       {reviewModal && (

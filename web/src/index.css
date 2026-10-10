@@ -7818,6 +7818,34 @@ input {
   justify-content: center;
 }
 
+/* "Review all employees" + the "Add employee to this day" button beside it. */
+.inputs-employee-header-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.inputs-employee-header-actions .inputs-employee-review-all {
+  flex: 1;
+  min-width: 0;
+}
+
+.inputs-employee-header-actions .inputs-add-employee-button {
+  flex: none;
+  width: 2rem;
+  padding: 0;
+  min-height: 1.9rem;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.inputs-add-employee-date {
+  margin: 0 0 0.85rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+}
+
 /* Sticks flush to the top of the scrolling modal body: -1.5rem cancels the
    body's own top padding (.modal-body), which would otherwise leave a strip
    above the toolbar where scrolled cards show through. */
