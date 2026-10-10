@@ -6,6 +6,8 @@ import { isDemoInstanceEnabled } from "../lib/demoInstance";
 import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
 import { reconcileMidnightCutoff, MIDNIGHT_CUTOFF_REASON } from "../lib/midnightCutoff";
 import { findMostRecentShiftClosureBoundary } from "../lib/longShiftAdminEnd";
+import { lockEmployeeForManualEntry } from "../lib/manualTimeEntries";
+import { PoolClient } from "pg";
 import { APP_TIMEZONE, calendarDateInAppTimezone } from "../lib/timezone";
 import { applyBreakBoundaryFloor, resolveFixedBreakCloseBoundary, resolveStartBreakMatch } from "../lib/fixedBreakMatching";
 import {
@@ -82,6 +84,113 @@ interface OpenEntryOverrides {
   // this and gets the activity's live config exactly as before — that IS a
   // new logical run, so it's supposed to pick up the new config.
   densitySnapshot?: { densityType: "plants" | "stems" | null; densityCountPerRow: number | null };
+  // Set by the offline sync path (applySyncedEvent) only — see
+  // resolveManualEntryGuard. The direct online routes leave it unset and
+  // behave exactly as before.
+  protectManualEntries?: boolean;
+}
+
+// What openEntry() returns: the entry now open, or — only when
+// protectManualEntries is set — a refusal to apply the event because it
+// conflicts with a manual Inputs entry (nothing was opened for it).
+type OpenEntryResult =
+  | (OpenEntry & { boundaryNote?: string; manualReviewNote?: string; manualConflict?: undefined })
+  | { manualConflict: string };
+
+// Manual Inputs entries (created_by_employee_id set — Add activity, Add
+// work start, "Add employee to this day") record time a supervisor entered
+// because the phone didn't. A phone event for the same employee can still
+// arrive later (an offline queue syncing once the phone is back), and it
+// must never overwrite or overlap that manual record:
+//   1. An event at or before the start of an OPEN manual entry would
+//      otherwise hit openEntry()'s rounding collapse/void branch (which
+//      rewrites the open row's activity/row/carrier, or soft-deletes it)
+//      or close it before it started. Refused.
+//   2. Closing the currently open entry at `closeAt` would make it run
+//      across a FINISHED manual entry that starts after it — it is ended at
+//      that manual entry's start instead (clipAt), and the event flagged
+//      for review. If the open entry already starts inside a manual entry
+//      (it can't be clipped to a valid range), the event is refused.
+//   3. An event that opens a new entry inside a FINISHED manual entry would
+//      start a phone record overlapping it. Refused — but the clip from 2
+//      still applies, so an open phone entry can't later be closed (by a
+//      later event, the midnight cutoff, ...) across the manual time.
+// A refused event is recorded as permanent_conflict by the sync loop: kept
+// in mobile_time_events and listed on Sync Conflicts for resolution.
+// Normal syncing (no manual entries involved) never matches any of this.
+interface ManualEntryGuard {
+  conflict: string | null;
+  clipAt: Date | null;
+  reviewNote: string | null;
+}
+
+async function resolveManualEntryGuard(
+  client: PoolClient,
+  employeeId: string,
+  open: { id: string; started_at: string | Date; created_by_employee_id: string | null } | undefined,
+  eventAt: Date,
+  closeAt: Date,
+  opensEntry: boolean
+): Promise<ManualEntryGuard> {
+  const iso = (d: Date | string) => new Date(d).toISOString();
+  if (open && open.created_by_employee_id && eventAt.getTime() <= new Date(open.started_at).getTime()) {
+    return {
+      conflict: `event at ${iso(eventAt)} is at or before the start (${iso(open.started_at)}) of an in-progress manual Inputs entry — the manual entry was kept unchanged`,
+      clipAt: null,
+      reviewNote: null,
+    };
+  }
+
+  let clipAt: Date | null = null;
+  let clipped: { started_at: Date; ended_at: Date } | null = null;
+  if (open) {
+    const { rows } = await client.query(
+      `select started_at, ended_at from time_entries
+       where employee_id = $1 and deleted_at is null and created_by_employee_id is not null
+         and ended_at is not null and id <> $2
+         and started_at < $3 and ended_at > $4
+       order by started_at asc limit 1`,
+      [employeeId, open.id, closeAt, open.started_at]
+    );
+    if (rows[0]) {
+      if (new Date(rows[0].started_at).getTime() <= new Date(open.started_at).getTime()) {
+        return {
+          conflict: `the open entry from ${iso(open.started_at)} already overlaps a manual Inputs entry (${iso(rows[0].started_at)} to ${iso(rows[0].ended_at)}) — nothing was changed`,
+          clipAt: null,
+          reviewNote: null,
+        };
+      }
+      clipped = rows[0];
+      clipAt = new Date(rows[0].started_at);
+    }
+  }
+
+  if (opensEntry) {
+    const { rows } = await client.query(
+      `select started_at, ended_at from time_entries
+       where employee_id = $1 and deleted_at is null and created_by_employee_id is not null
+         and ended_at is not null and started_at <= $2 and ended_at > $2
+       order by started_at asc limit 1`,
+      [employeeId, eventAt]
+    );
+    if (rows[0]) {
+      return {
+        conflict:
+          `event at ${iso(eventAt)} falls inside a manual Inputs entry (${iso(rows[0].started_at)} to ${iso(rows[0].ended_at)}) — not applied, the manual entry was kept` +
+          (clipAt ? `; the previous phone entry was ended at ${iso(clipAt)} where the manual entry starts` : ""),
+        clipAt,
+        reviewNote: null,
+      };
+    }
+  }
+
+  return {
+    conflict: null,
+    clipAt,
+    reviewNote: clipped
+      ? `the phone entry was ended at ${iso(clipped.started_at)} instead of ${iso(closeAt)} so it doesn't overlap a manual Inputs entry (${iso(clipped.started_at)} to ${iso(clipped.ended_at)}) — phone time after the manual entry needs review`
+      : null,
+  };
 }
 
 async function getOpenEntry(employeeId: string): Promise<OpenEntry | null> {
@@ -152,24 +261,33 @@ async function openEntry(
   activityId: string | null,
   idempotencyKey: string,
   overrides: OpenEntryOverrides = {}
-): Promise<OpenEntry & { boundaryNote?: string }> {
+): Promise<OpenEntryResult> {
   const client = await pool.connect();
   try {
     await client.query("begin");
+    // Serializes with the manual Inputs routes (same advisory lock), so a
+    // manual entry can't appear between the guard below and this insert.
+    if (overrides.protectManualEntries) await lockEmployeeForManualEntry(client, employeeId);
     // Locked peek at whatever's currently open (if anything) — needed up
     // front, not just implicitly during a blind close UPDATE, because the
     // boundary comparison below needs its started_at before deciding how
     // to proceed.
     const openRes = await client.query(
       `select id, entry_type, activity_id, started_at, greenhouse_row_id, carrier_id,
-              density_type, density_count_per_row, idempotency_key
+              density_type, density_count_per_row, idempotency_key, created_by_employee_id
        from time_entries
        where employee_id = $1 and ended_at is null and deleted_at is null
        for update`,
       [employeeId]
     );
     const open = openRes.rows[0] as
-      | { id: string; entry_type: "work" | "break"; started_at: string; idempotency_key: string }
+      | {
+          id: string;
+          entry_type: "work" | "break";
+          started_at: string;
+          idempotency_key: string;
+          created_by_employee_id: string | null;
+        }
       | undefined;
 
     if (open && open.idempotency_key === idempotencyKey) {
@@ -189,6 +307,21 @@ async function openEntry(
 
     const closeBoundary = overrides.startedAt ?? new Date();
     let boundaryNote: string | undefined;
+
+    let manualClipAt: Date | null = null;
+    let manualReviewNote: string | undefined;
+    if (overrides.protectManualEntries) {
+      const guard = await resolveManualEntryGuard(client, employeeId, open, closeBoundary, closeBoundary, true);
+      if (guard.conflict) {
+        if (guard.clipAt && open) {
+          await client.query(`update time_entries set ended_at = $2 where id = $1`, [open.id, guard.clipAt]);
+        }
+        await client.query("commit");
+        return { manualConflict: guard.conflict };
+      }
+      manualClipAt = guard.clipAt;
+      manualReviewNote = guard.reviewNote ?? undefined;
+    }
     const openStartedAtMs = open ? new Date(open.started_at).getTime() : 0;
     // work_start_rounding_interval_minutes is capped at 60 (migrations/030_work_start_rounding.sql),
     // so rounding alone can never push the boundary more than an hour past the raw tap. A gap
@@ -292,7 +425,7 @@ async function openEntry(
          set ended_at = coalesce($3, now()),
              actual_ended_at = coalesce($4, actual_ended_at)
          where employee_id = $1 and ended_at is null and deleted_at is null and idempotency_key <> $2`,
-        [employeeId, idempotencyKey, overrides.startedAt ?? null, overrides.actualEndedAt ?? null]
+        [employeeId, idempotencyKey, manualClipAt ?? overrides.startedAt ?? null, overrides.actualEndedAt ?? null]
       );
     }
 
@@ -350,7 +483,7 @@ async function openEntry(
     }
 
     await client.query("commit");
-    return boundaryNote ? { ...row, boundaryNote } : row;
+    return { ...row, ...(boundaryNote ? { boundaryNote } : {}), ...(manualReviewNote ? { manualReviewNote } : {}) };
   } catch (err) {
     await client.query("rollback").catch(() => {});
     if ((err as { code?: string }).code === "23505") {
@@ -1326,6 +1459,22 @@ interface SyncApplyOutcome {
   timeEntryId?: string | null;
   conflictReason?: string | null;
   conflictDetail?: unknown;
+  // Accepted, but adjusted around a manual Inputs entry (see
+  // resolveManualEntryGuard) — always recorded for review.
+  reviewNote?: string | null;
+}
+
+// openEntry() result -> sync outcome, for the sync path's three openEntry calls.
+function syncOutcomeFromEntry(entry: OpenEntryResult): SyncApplyOutcome {
+  if (entry.manualConflict !== undefined) {
+    return { status: "permanent_conflict", conflictReason: entry.manualConflict };
+  }
+  return {
+    status: "accepted",
+    timeEntryId: entry.id,
+    conflictReason: entry.boundaryNote ?? null,
+    reviewNote: entry.manualReviewNote ?? null,
+  };
 }
 
 // Applies one already-locally-committed event through the same domain logic
@@ -1403,8 +1552,11 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
           overrides.startedAt = applyBreakBoundaryFloor(fixedEnd, new Date(currentlyOpen!.started_at), original);
         }
       }
-      const entry = await openEntry(employeeId, deviceId, "work", event.activityId, event.clientEventId, overrides);
-      return { status: "accepted", timeEntryId: entry.id, conflictReason: entry.boundaryNote ?? null };
+      const entry = await openEntry(employeeId, deviceId, "work", event.activityId, event.clientEventId, {
+        ...overrides,
+        protectManualEntries: true,
+      });
+      return syncOutcomeFromEntry(entry);
     }
     case "break_start": {
       // Same anchoring as POST /time-entries/break/start: matching is
@@ -1442,8 +1594,11 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
         }
       }
 
-      const entry = await openEntry(employeeId, deviceId, "break", null, event.clientEventId, overrides);
-      return { status: "accepted", timeEntryId: entry.id, conflictReason: entry.boundaryNote ?? null };
+      const entry = await openEntry(employeeId, deviceId, "break", null, event.clientEventId, {
+        ...overrides,
+        protectManualEntries: true,
+      });
+      return syncOutcomeFromEntry(entry);
     }
     case "break_end": {
       // See the identical comment on POST /time-entries/break/end's own
@@ -1494,16 +1649,21 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
         overrides.startedAt = applyBreakBoundaryFloor(effectiveEnd, new Date(open.started_at), originalTap);
       }
 
-      const entry = await openEntry(employeeId, deviceId, "work", resumeActivityId, event.clientEventId, overrides);
-      return { status: "accepted", timeEntryId: entry.id, conflictReason: entry.boundaryNote ?? null };
+      const entry = await openEntry(employeeId, deviceId, "work", resumeActivityId, event.clientEventId, {
+        ...overrides,
+        protectManualEntries: true,
+      });
+      return syncOutcomeFromEntry(entry);
     }
     case "end_day": {
       const client = await pool.connect();
       let closedId: string | null = null;
+      let reviewNote: string | null = null;
       try {
         await client.query("begin");
+        await lockEmployeeForManualEntry(client, employeeId);
         const openRes = await client.query(
-          `select id, started_at from time_entries
+          `select id, started_at, created_by_employee_id from time_entries
            where employee_id = $1 and ended_at is null and deleted_at is null
            for update`,
           [employeeId]
@@ -1522,6 +1682,18 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
             effectiveEnd = rounded;
             actualEndedAt = original;
           }
+          // Same manual-entry protection as openEntry() (see
+          // resolveManualEntryGuard); end_day opens nothing, so only the
+          // in-progress-manual and clip rules apply.
+          const guard = await resolveManualEntryGuard(client, employeeId, open, original, effectiveEnd, false);
+          if (guard.conflict) {
+            await client.query("rollback");
+            return { status: "permanent_conflict", conflictReason: guard.conflict };
+          }
+          if (guard.clipAt) {
+            effectiveEnd = guard.clipAt;
+            reviewNote = guard.reviewNote;
+          }
           await client.query(`update time_entries set ended_at = $2, actual_ended_at = $3 where id = $1`, [
             open.id,
             effectiveEnd,
@@ -1535,7 +1707,7 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
         // server independently already closed some other way) — not a
         // conflict, same "closes whatever's open" idempotency the direct
         // /time-entries/end-day route already relies on.
-        return { status: "accepted", timeEntryId: closedId };
+        return { status: "accepted", timeEntryId: closedId, reviewNote };
       } catch (err) {
         await client.query("rollback").catch(() => {});
         throw err;
@@ -1795,8 +1967,15 @@ router.post(
         // this event (see openEntry's own comment). Merged with the
         // device-clock anomaly flag on the same "accepted, but reviewable"
         // convention — either, both, or neither can apply to one event.
-        const acceptedReason = anomaly?.reason ?? outcome.conflictReason ?? null;
-        const acceptedDetail = anomaly?.detail ?? (outcome.conflictReason ? { reason: outcome.conflictReason } : undefined) ?? null;
+        let acceptedReason = anomaly?.reason ?? outcome.conflictReason ?? null;
+        let acceptedDetail: unknown =
+          anomaly?.detail ?? (outcome.conflictReason ? { reason: outcome.conflictReason } : undefined) ?? null;
+        // A manual-entry adjustment (resolveManualEntryGuard) is always kept
+        // visible for review, alongside any other note.
+        if (outcome.reviewNote) {
+          acceptedReason = [outcome.reviewNote, acceptedReason].filter(Boolean).join("; ");
+          acceptedDetail = { ...((acceptedDetail as Record<string, unknown> | null) ?? {}), reason: acceptedReason };
+        }
         await recordSyncedEvent(d.id, d.employeeId, event, "accepted", outcome.timeEntryId ?? null, acceptedReason, acceptedDetail);
         lastAcceptedOccurredAtUtc = new Date(event.occurredAtUtc);
         lastProcessedSeq = event.deviceSeq;
