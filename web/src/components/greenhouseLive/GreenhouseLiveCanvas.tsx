@@ -4,9 +4,8 @@ import { LiveBlockSummary, LivePhase, LiveRow } from "../../lib/greenhouseLiveTy
 import { CanvasTransform, RotationDegrees, clampPan, zoomAtPoint } from "../../lib/canvasTransform";
 import { rowScreenRect } from "../../lib/rowLayout";
 import { formatTimeInAppTimezone } from "../../lib/timezone";
-import { employeeBlockColorDef } from "../../lib/employeeBlockColors";
 import { EmployeeLocationBubbles } from "./EmployeeLocationBubbles";
-import { BlockClusterLabels } from "./BlockClusterLabels";
+import { BlockClusterLabels, computeBlockClusters } from "./BlockClusterLabels";
 
 interface GreenhouseLiveCanvasProps {
   land: { northSouthFeet: number; eastWestFeet: number };
@@ -53,11 +52,11 @@ interface GreenhouseLiveCanvasProps {
   interactive?: boolean;
   // Employee Blocks present on this land — omit entirely in selection mode
   // (Employee Blocks'/Plant Density's own Link Rows canvases never pass
-  // this) or when there simply are none. A row only ever renders its
-  // block's colour when NOT in selection mode and its own state is still
-  // "neutral" — blue (currently working) and green (completed) always win,
-  // computed with no awareness of blocks at all, so this can never
-  // override them. See employeeBlockColors.ts for the fixed preset shades.
+  // this) or when there simply are none. Blocks are shown by a dashed
+  // outline around each block's rows (per phase) plus its name/employee
+  // label — never by recolouring rows: a row's fill is only ever its work
+  // state (working / completed / the uniform "no activity" orange), so the
+  // map reads the same whichever block a row belongs to.
   blocks?: LiveBlockSummary[];
 }
 
@@ -230,6 +229,10 @@ export function GreenhouseLiveCanvas({
   // Block cluster labels only make sense outside row-selection mode, same
   // reasoning as showEmployeeBubbles below.
   const showBlockLabels = !selectable && (blocks ?? []).length > 0;
+  // Block boundaries: the same (block, phase) clusters the labels use, only
+  // for blocks this map knows about.
+  const blockOutlines = showBlockLabels ? computeBlockClusters(visiblePhases).filter((c) => blockById.has(c.blockId)) : [];
+  const BLOCK_OUTLINE_PAD_FT = 1;
   // Employee location bubbles only make sense outside row-selection mode —
   // Employee Blocks' and Plant Density's Link Rows steps pass onRowClick
   // with placeholder land/employees data that has no real live work status
@@ -309,14 +312,8 @@ export function GreenhouseLiveCanvas({
                         : "available"
                     : row.state;
 
-                  // Only when the row's own state has nothing else to show
-                  // (not blue/green) — an inline style always wins over any
-                  // CSS class, including the TV display's own higher-
-                  // specificity `.greenhouse-tv-canvas-wrapper
-                  // .greenhouse-live-row-neutral` contrast override, so
-                  // this never needs a competing class per colour.
+                  // For the tooltip only — rows are never coloured by block.
                   const block = !selectable && row.state === "neutral" && row.blockId ? blockById.get(row.blockId) : undefined;
-                  const blockColor = block ? employeeBlockColorDef(block.colorKey) : null;
 
                   return (
                     <g key={row.id} className="greenhouse-row-group">
@@ -328,7 +325,6 @@ export function GreenhouseLiveCanvas({
                         className={`greenhouse-live-row-rect greenhouse-live-row-${visualState}${
                           selectable ? " greenhouse-live-row-selectable" : ""
                         }`}
-                        style={blockColor ? { fill: blockColor.fill, stroke: blockColor.stroke } : undefined}
                         vectorEffect="non-scaling-stroke"
                         onClick={selectable ? (e) => handleRowSelectionClick(row, e) : undefined}
                       >
@@ -353,6 +349,21 @@ export function GreenhouseLiveCanvas({
               </g>
             );
           })}
+          {/* Block boundaries — drawn over the rows (no fill, so row
+              states stay visible underneath), inside the rotated group so
+              they turn with the map. */}
+          {blockOutlines.map((c) => (
+            <rect
+              key={`outline-${c.key}`}
+              x={c.minXFt - BLOCK_OUTLINE_PAD_FT}
+              y={c.minYFt - BLOCK_OUTLINE_PAD_FT}
+              width={c.maxXFt - c.minXFt + BLOCK_OUTLINE_PAD_FT * 2}
+              height={c.maxYFt - c.minYFt + BLOCK_OUTLINE_PAD_FT * 2}
+              className="greenhouse-live-block-outline"
+              vectorEffect="non-scaling-stroke"
+              pointerEvents="none"
+            />
+          ))}
           </g>
         </g>
       </svg>

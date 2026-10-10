@@ -51,7 +51,7 @@ function boxesOverlap(
 // non-adjacent clusters separated by a walkway) would either force a single
 // label to sit oddly far from one of its sections or require a bounding box
 // spanning unrelated rows in between.
-interface BlockCluster {
+export interface BlockCluster {
   key: string;
   blockId: string;
   minXFt: number;
@@ -60,7 +60,9 @@ interface BlockCluster {
   maxYFt: number;
 }
 
-function computeBlockClusters(phases: LivePhase[]): BlockCluster[] {
+// Also drives the map's block outlines (GreenhouseLiveCanvas), so a
+// block's boundary and its label always describe the same rows.
+export function computeBlockClusters(phases: LivePhase[]): BlockCluster[] {
   const byKey = new Map<string, BlockCluster>();
   for (const phase of phases) {
     for (const row of phase.rows) {

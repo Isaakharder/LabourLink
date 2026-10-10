@@ -255,6 +255,9 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
             <span>
               <span className="greenhouse-live-legend-swatch greenhouse-live-row-green" /> Completed Row
             </span>
+            <span>
+              <span className="greenhouse-live-legend-swatch greenhouse-live-row-neutral" /> No activity
+            </span>
           </div>
           {data && <EmployeeBlockLegend blocks={data.blocks} />}
         </>
