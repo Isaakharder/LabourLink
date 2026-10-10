@@ -1,6 +1,7 @@
 import dns from "dns";
 import { Router } from "express";
 import { Pool } from "pg";
+import { asyncHandler } from "../lib/asyncHandler";
 
 const router = Router();
 
@@ -97,7 +98,7 @@ async function checkConnection(
 // issue — remove once resolved. Fails closed (404, not 401/403, so its
 // existence isn't revealed) unless DIAGNOSTIC_TOKEN is set and matched,
 // so it can't be left accidentally open if the env var is ever unset.
-router.get("/db-check", async (req, res) => {
+router.get("/db-check", asyncHandler(async (req, res) => {
   const token = process.env.DIAGNOSTIC_TOKEN;
   if (!token || req.query.token !== token) {
     return res.status(404).end();
@@ -122,6 +123,6 @@ router.get("/db-check", async (req, res) => {
 
   console.log("[db-check]", JSON.stringify(results));
   res.json({ results });
-});
+}));
 
 export default router;
