@@ -118,7 +118,7 @@ export function AddWorkStartModal({ employeeId, employeeName, date, onClose, onC
           <button type="button" onClick={onClose} disabled={submitting}>
             Cancel
           </button>
-          <button type="submit" className="employees-add-button" disabled={!canSubmit}>
+          <button type="submit" className="employee-form-save" disabled={!canSubmit}>
             {submitting ? "Adding…" : "Add Work Start"}
           </button>
         </div>
