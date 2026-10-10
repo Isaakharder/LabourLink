@@ -73,4 +73,16 @@ export interface BulkReviewResult {
   ok: boolean;
   error?: string;
   completionIds?: string[];
+  // Already completed exactly this way before this request (a retry).
+  alreadySaved?: boolean;
+  // Failure responses only: why this group blocked the batch.
+  status?: "ready" | "alreadySaved" | "stale" | "invalid";
+}
+
+// POST /api/row-completions/bulk-review. All or nothing: `saved` says
+// whether this request saved the batch. A refusal (409/400/500) carries the
+// same shape in ApiError.body with saved: false.
+export interface BulkReviewResponse {
+  saved: boolean;
+  results: BulkReviewResult[];
 }

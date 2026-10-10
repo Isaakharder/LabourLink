@@ -12,7 +12,7 @@
 // entries (row_completion_segments), so the original activity logs, rows,
 // timestamps and frozen quantities are preserved untouched.
 import { PoolClient } from "pg";
-import { getUnresolvedRunsForRow } from "./rowCompletionCandidates";
+import { CandidateRun, getUnresolvedRunsForRow } from "./rowCompletionCandidates";
 import { getRowReviewWindowDays } from "./rowReviewWindow";
 
 export class RowCompletionError extends Error {
@@ -31,10 +31,17 @@ export interface CreatedRowCompletion {
   segmentCount: number;
 }
 
+// opts (bulk review only): the Row review window and this row+activity+
+// density's unresolved visits, already loaded once for the whole batch from
+// the same committed state this function would otherwise re-read per call
+// (getUnresolvedRunsForRow is several round trips over the row's history —
+// ~1.3s per completion in production). The validation below is identical
+// either way.
 export async function createRowCompletion(
   client: PoolClient,
   timeEntryIds: string[],
-  confirmedByEmployeeId: string
+  confirmedByEmployeeId: string,
+  opts: { windowDays?: number; candidates?: CandidateRun[] } = {}
 ): Promise<CreatedRowCompletion> {
   const { rows } = await client.query(
     `select te.id, te.entry_type, te.deleted_at, te.ended_at, te.greenhouse_row_id, te.activity_id,
@@ -81,13 +88,12 @@ export async function createRowCompletion(
   // activities already is above. Reads via the shared pool (not `client`): it sees the
   // committed not-yet-completed state the review was built from, never
   // a sibling completion this same transaction inserted moments ago.
-  const windowDays = await getRowReviewWindowDays();
-  const candidates = await getUnresolvedRunsForRow(
-    first.greenhouse_row_id,
-    first.activity_id,
-    first.density_type as "plants" | "stems",
-    { windowDays }
-  );
+  const windowDays = opts.windowDays ?? (await getRowReviewWindowDays());
+  const candidates =
+    opts.candidates ??
+    (await getUnresolvedRunsForRow(first.greenhouse_row_id, first.activity_id, first.density_type as "plants" | "stems", {
+      windowDays,
+    }));
   const candidateBySegmentId = new Map<string, (typeof candidates)[number]>();
   for (const c of candidates) {
     for (const segId of c.segmentIds) candidateBySegmentId.set(segId, c);

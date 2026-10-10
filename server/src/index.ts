@@ -89,6 +89,33 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ error: "Internal server error" });
 });
 
-app.listen(PORT, "0.0.0.0", () => {
+const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`LabourLink API listening on port ${PORT}`);
 });
+
+// Graceful shutdown. Railway sends SIGTERM to the previous deployment when a
+// new one goes live (and SIGKILLs it after deploy.drainingSeconds — see
+// railway.json). Without this handler Node exited immediately and cut off
+// in-flight requests: on 2026-10-10 a deploy killed a bulk speed review
+// mid-batch and the browser got only Railway's error page. Stop accepting
+// new connections, let in-flight requests finish, then exit; force the exit
+// if something hangs past the draining window.
+const SHUTDOWN_GRACE_MS = 25_000;
+let shuttingDown = false;
+function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal} received — finishing in-flight requests`);
+  server.close(() => {
+    console.log("[shutdown] all requests finished");
+    process.exit(0);
+  });
+  // Idle keep-alive sockets would otherwise hold close() open.
+  server.closeIdleConnections();
+  setTimeout(() => {
+    console.warn("[shutdown] grace period over — exiting");
+    process.exit(0);
+  }, SHUTDOWN_GRACE_MS).unref();
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
