@@ -65,6 +65,7 @@
     "test:fixed-break-matching": "ts-node src/routes/mobileTime.fixedBreakMatching.test.ts",
     "test:device-assignment": "ts-node src/routes/deviceAssignment.test.ts",
     "test:nfc-tags": "ts-node src/routes/nfcTags.test.ts",
+    "test:nfc-tag-actions": "ts-node src/routes/nfcTags.actionTargets.test.ts",
     "test:mobile-time-switch-warnings": "ts-node src/routes/mobileTime.switchWarnings.test.ts",
     "test:carriers": "ts-node src/routes/carriers.test.ts",
     "test:greenhouse-displays": "ts-node src/routes/greenhouseDisplays.test.ts",

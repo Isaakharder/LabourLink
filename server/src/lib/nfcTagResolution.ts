@@ -7,7 +7,20 @@ import { Pool, PoolClient } from "pg";
 
 type Queryable = Pick<Pool | PoolClient, "query">;
 
-export type TargetType = "greenhouse_row" | "carrier";
+// "activity": start/switch to that job. "action": a fixed work action (see
+// TAG_ACTIONS). Rows/carriers allow one active tag per target; activities
+// and actions may have several (migration 062).
+export type TargetType = "greenhouse_row" | "carrier" | "activity" | "action";
+export const LEGACY_TARGET_TYPES: readonly TargetType[] = ["greenhouse_row", "carrier"];
+export const TAG_ACTIONS = ["start_break", "end_break", "end_work"] as const;
+export type TagAction = (typeof TAG_ACTIONS)[number];
+export function isTagAction(v: unknown): v is TagAction {
+  return typeof v === "string" && (TAG_ACTIONS as readonly string[]).includes(v);
+}
+// Only rows and carriers are limited to one active tag per target.
+export function targetAllowsSingleTag(targetType: TargetType): boolean {
+  return targetType === "greenhouse_row" || targetType === "carrier";
+}
 
 export interface TagMapping {
   id: string;
@@ -36,7 +49,9 @@ function targetLabelSelect(): string {
       (select gp.name || ' · Row ' || gr.row_number
        from greenhouse_rows gr join greenhouse_phases gp on gp.id = gr.phase_id
        where gr.id = m.greenhouse_row_id),
-      (select c.name from carriers c where c.id = m.carrier_id)
+      (select c.name from carriers c where c.id = m.carrier_id),
+      (select a.name from activities a where a.id = m.activity_id),
+      case m.action when 'start_break' then 'Start Break' when 'end_break' then 'End Break' when 'end_work' then 'End Work' end
     ) as label
   `;
 }
@@ -45,6 +60,8 @@ function toMapping(row: {
   id: string;
   greenhouse_row_id: string | null;
   carrier_id: string | null;
+  activity_id: string | null;
+  action: string | null;
   label: string;
   tag_kind: "labourlink" | "ridder";
   labourlink_tag_uuid: string | null;
@@ -52,8 +69,14 @@ function toMapping(row: {
 }): TagMapping {
   return {
     id: row.id,
-    targetType: row.greenhouse_row_id ? "greenhouse_row" : "carrier",
-    targetId: row.greenhouse_row_id ?? (row.carrier_id as string),
+    targetType: row.greenhouse_row_id
+      ? "greenhouse_row"
+      : row.carrier_id
+        ? "carrier"
+        : row.activity_id
+          ? "activity"
+          : "action",
+    targetId: (row.greenhouse_row_id ?? row.carrier_id ?? row.activity_id ?? row.action) as string,
     label: row.label,
     tagKind: row.tag_kind,
     labourlinkTagUuid: row.labourlink_tag_uuid,
@@ -66,7 +89,7 @@ export async function findActiveMappingByIdentifier(
   identifier: { labourlinkTagUuid: string } | { ridderHardwareId: string }
 ): Promise<TagMapping | null> {
   const { rows } = await db.query(
-    `select m.id, m.greenhouse_row_id, m.carrier_id, m.tag_kind, m.labourlink_tag_uuid, m.ridder_hardware_id,
+    `select m.id, m.greenhouse_row_id, m.carrier_id, m.activity_id, m.action, m.tag_kind, m.labourlink_tag_uuid, m.ridder_hardware_id,
             ${targetLabelSelect()}
      from nfc_tag_mappings m
      where m.deactivated_at is null
@@ -76,12 +99,15 @@ export async function findActiveMappingByIdentifier(
   return rows[0] ? toMapping(rows[0]) : null;
 }
 
+// The single active tag of a row/carrier. Activities and actions can have
+// several tags, so they never have a "target conflict" — returns null.
 export async function findActiveMappingByTarget(
   db: Queryable,
   target: { targetType: TargetType; targetId: string }
 ): Promise<TagMapping | null> {
+  if (!targetAllowsSingleTag(target.targetType)) return null;
   const { rows } = await db.query(
-    `select m.id, m.greenhouse_row_id, m.carrier_id, m.tag_kind, m.labourlink_tag_uuid, m.ridder_hardware_id,
+    `select m.id, m.greenhouse_row_id, m.carrier_id, m.activity_id, m.action, m.tag_kind, m.labourlink_tag_uuid, m.ridder_hardware_id,
             ${targetLabelSelect()}
      from nfc_tag_mappings m
      where m.deactivated_at is null
@@ -94,12 +120,16 @@ export async function findActiveMappingByTarget(
 // Every active mapping — the full list an employee's device caches for
 // offline scan resolution (GET /api/mobile/tags/mappings). No role check:
 // any paired device needs this to resolve a scan, not just admins.
-export async function listActiveMappings(db: Queryable): Promise<TagMapping[]> {
+// includeAll=false (what pre-062 clients get) returns only row/carrier
+// mappings: an old client that saw an activity/action mapping would treat
+// it as a carrier.
+export async function listActiveMappings(db: Queryable, options: { includeAll?: boolean } = {}): Promise<TagMapping[]> {
   const { rows } = await db.query(
-    `select m.id, m.greenhouse_row_id, m.carrier_id, m.tag_kind, m.labourlink_tag_uuid, m.ridder_hardware_id,
+    `select m.id, m.greenhouse_row_id, m.carrier_id, m.activity_id, m.action, m.tag_kind, m.labourlink_tag_uuid, m.ridder_hardware_id,
             ${targetLabelSelect()}
      from nfc_tag_mappings m
-     where m.deactivated_at is null`
+     where m.deactivated_at is null
+       ${options.includeAll ? "" : "and (m.greenhouse_row_id is not null or m.carrier_id is not null)"}`
   );
   return rows.map(toMapping);
 }
