@@ -4,6 +4,7 @@ import { api, ApiError } from "../../lib/api";
 import { formatSpeedValue } from "../../lib/reportTypes";
 import { formatDateLong, formatDurationHMS, formatTimeInAppTimezone } from "../../lib/timezone";
 import {
+  BulkReviewResponse,
   BulkReviewResult,
   SpeedPreview,
   SpeedReviewChoice,
@@ -41,6 +42,10 @@ interface SpeedReviewModalProps {
 }
 
 type BulkChoice = SpeedReviewChoice | "suggested";
+
+// A bulk apply is one transaction over every selected group; give it far
+// more room than api()'s 15s default before giving up on the answer.
+const BULK_APPLY_TIMEOUT_MS = 120_000;
 
 const ACTION_LABEL: Record<SpeedReviewChoice, string> = {
   merge: "Merge for speed",
@@ -85,6 +90,9 @@ export function SpeedReviewModal({ date, employeeId, employeeName, canApply, onC
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [results, setResults] = useState<Map<string, BulkReviewResult> | null>(null);
+  // Per-group reasons from a refused apply (nothing saved): shown on the
+  // cards while the selections stay editable for another try.
+  const [groupErrors, setGroupErrors] = useState<Map<string, string>>(new Map());
   const submittingRef = useRef(false);
   const [loadSeq, setLoadSeq] = useState(0);
 
@@ -102,6 +110,7 @@ export function SpeedReviewModal({ date, employeeId, employeeName, canApply, onC
         setChoices(Object.fromEntries(res.groups.map((g) => [g.id, g.suggestedAction ?? "skip"])));
         setSelected(new Set());
         setResults(null);
+        setGroupErrors(new Map());
       })
       .catch((err) => {
         if (!cancelled) setLoadError(err instanceof ApiError ? err.message : "Could not load the speed review");
@@ -171,14 +180,51 @@ export function SpeedReviewModal({ date, employeeId, employeeName, canApply, onC
     );
   }
 
+  function showSaved(res: BulkReviewResponse) {
+    setResults(new Map(res.results.map((r) => [r.groupId, r])));
+    setGroupErrors(new Map());
+    if (res.results.some((r) => r.ok)) onApplied();
+  }
+
+  // The server is all-or-nothing, but when its answer never arrives
+  // (timeout, dropped connection, a proxy error page during a deploy) the
+  // browser can't know which happened. Ask: reload the review and see
+  // whether the submitted groups are still pending.
+  async function settleUnknownOutcome(submittedIds: string[], why: string) {
+    const params = new URLSearchParams({ date });
+    if (employeeId) params.set("employeeId", employeeId);
+    try {
+      const fresh = await api<SpeedReviewGroupsResponse>(`/api/row-completions/review-groups?${params.toString()}`);
+      const stillPending = new Set(fresh.groups.map((g) => g.id));
+      const pending = submittedIds.filter((id) => stillPending.has(id));
+      if (pending.length === 0) {
+        showSaved({ saved: true, results: submittedIds.map((groupId) => ({ groupId, ok: true })) });
+        setSubmitError(`${why}, but the review shows all ${submittedIds.length} selected groups were saved.`);
+      } else if (pending.length === submittedIds.length) {
+        setSubmitError(`${why}. Nothing was saved — all ${submittedIds.length} selected groups are still pending. Your selections are kept; applying again is safe.`);
+      } else {
+        setSubmitError(
+          `${why}. ${submittedIds.length - pending.length} of the selected groups are no longer pending (possibly resolved by another review). Reload the review to see the current state before applying again.`
+        );
+      }
+    } catch {
+      setSubmitError(
+        `${why}, and the review couldn't be reloaded to check what was saved. Changes are saved all-or-nothing, so applying again is safe — groups that were already saved won't be counted twice.`
+      );
+    }
+  }
+
   async function handleApply() {
     if (submittingRef.current || toApply.length === 0 || !canApply) return;
     submittingRef.current = true;
     setSubmitting(true);
     setSubmitError(null);
+    setGroupErrors(new Map());
+    const submittedIds = toApply.map((g) => g.id);
     try {
-      const res = await api<{ results: BulkReviewResult[] }>("/api/row-completions/bulk-review", {
+      const res = await api<BulkReviewResponse>("/api/row-completions/bulk-review", {
         method: "POST",
+        timeoutMs: BULK_APPLY_TIMEOUT_MS,
         body: JSON.stringify({
           date,
           groups: toApply.map((g) => ({
@@ -188,10 +234,29 @@ export function SpeedReviewModal({ date, employeeId, employeeName, canApply, onC
           })),
         }),
       });
-      setResults(new Map(res.results.map((r) => [r.groupId, r])));
-      if (res.results.some((r) => r.ok)) onApplied();
+      showSaved(res);
     } catch (err) {
-      setSubmitError(err instanceof ApiError ? err.message : "Could not apply the changes — nothing was saved");
+      const body = err instanceof ApiError ? (err.body as Partial<BulkReviewResponse> & { code?: string } | undefined) : undefined;
+      if (err instanceof ApiError && body && body.saved === false) {
+        // The server refused the batch and saved nothing; it says why, per
+        // group. Stale groups are deselected, everything else stays chosen.
+        const errors = new Map<string, string>();
+        for (const r of body.results ?? []) if (r.error) errors.set(r.groupId, r.error);
+        setGroupErrors(errors);
+        if (body.code === "BULK_REVIEW_STALE") {
+          const blocked = new Set((body.results ?? []).filter((r) => r.status === "stale" || r.status === "invalid").map((r) => r.groupId));
+          setSelected((prev) => new Set([...prev].filter((id) => !blocked.has(id))));
+        }
+        setSubmitError(err.message);
+      } else {
+        const why =
+          err instanceof ApiError
+            ? `The server didn't confirm the result (HTTP ${err.status})`
+            : (err as { timeout?: boolean })?.timeout
+            ? "The server took too long to confirm the result"
+            : "The connection was lost before the server confirmed the result";
+        await settleUnknownOutcome(submittedIds, why);
+      }
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
@@ -297,6 +362,7 @@ export function SpeedReviewModal({ date, employeeId, employeeName, canApply, onC
                     expanded={expanded.has(g.id)}
                     locked={locked}
                     result={results?.get(g.id) ?? null}
+                    error={groupErrors.get(g.id) ?? null}
                     onToggleSelected={() => toggleSelected(g.id)}
                     onToggleExpanded={() => toggleExpanded(g.id)}
                     onChoose={(c) => setChoices((prev) => ({ ...prev, [g.id]: c }))}
@@ -319,12 +385,14 @@ interface ReviewCardProps {
   expanded: boolean;
   locked: boolean;
   result: BulkReviewResult | null;
+  // Why a refused apply couldn't save this group (nothing was saved).
+  error: string | null;
   onToggleSelected: () => void;
   onToggleExpanded: () => void;
   onChoose: (c: SpeedReviewChoice) => void;
 }
 
-function ReviewCard({ group: g, windowDays, selected, choice, expanded, locked, result, onToggleSelected, onToggleExpanded, onChoose }: ReviewCardProps) {
+function ReviewCard({ group: g, windowDays, selected, choice, expanded, locked, result, error, onToggleSelected, onToggleExpanded, onChoose }: ReviewCardProps) {
   const eligible = isEligible(g);
   const carriers = [...new Set(g.visits.flatMap((v) => v.carriers))];
   const totalSeconds = g.visits.reduce((s, v) => s + v.durationSeconds, 0);
@@ -366,7 +434,11 @@ function ReviewCard({ group: g, windowDays, selected, choice, expanded, locked, 
         </div>
         {result ? (
           <span className={result.ok ? "speed-review-result-ok" : "speed-review-result-failed"} role="status">
-            {result.ok ? "Saved" : "Not saved"}
+            {result.ok ? (result.alreadySaved ? "Already saved" : "Saved") : "Not saved"}
+          </span>
+        ) : error ? (
+          <span className="speed-review-result-failed" role="status">
+            Not saved
           </span>
         ) : (
           <span className="inputs-row-completion-warning">Needs review</span>
@@ -402,9 +474,9 @@ function ReviewCard({ group: g, windowDays, selected, choice, expanded, locked, 
       )}
 
       {preview && <p className="speed-review-preview">Result: {preview}</p>}
-      {result && !result.ok && (
+      {(result && !result.ok ? result.error : error) && (
         <p className="error-text" role="alert">
-          {result.error}
+          {result && !result.ok ? result.error : error}
         </p>
       )}
 

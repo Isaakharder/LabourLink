@@ -8,9 +8,11 @@
 // group; rows sharing a bin never grouped), break exclusion from working
 // time, the row's quantity counted once, employee/date isolation (other
 // employees and other dates are context only, never merged), badge parity
-// with Inputs, open visits left pending with a reason, permissions, and a
-// mixed bulk save with per-group success/failure that never touches the
-// original time entries.
+// with Inputs, open visits left pending with a reason, permissions, and
+// all-or-nothing bulk saves (a batch containing any stale/invalid group saves
+// nothing and says which; the valid groups then save on their own) that never
+// touch the original time entries. Interrupted batches and retries:
+// rowCompletions.bulkReviewAtomic.test.ts.
 //
 // Run with: npm run test:row-completion-bulk-review
 import "dotenv/config";
@@ -274,9 +276,14 @@ async function main() {
     check(managerPost.status === 403, "5) only an Administrator can apply", managerPost);
     check((await call("GET", `/api/row-completions/review-groups?date=bad`, admin.token)).status === 400, "5) a malformed date is rejected");
 
-    // ---- 6) Bulk apply with mixed outcomes ---------------------------------
+    // ---- 6) Bulk apply: all or nothing ------------------------------------
     const visitsOf = (g: any) => g.visits.map((v: any) => v.segmentIds);
-    const apply = await call("POST", "/api/row-completions/bulk-review", admin.token, {
+    const completionsOnRows = async () =>
+      Number(
+        (await pool.query(`select count(*)::int as n from row_completions where greenhouse_row_id = any($1::uuid[])`, [[r570, r174, r172, r92]]))
+          .rows[0].n
+      );
+    const mixed = await call("POST", "/api/row-completions/bulk-review", admin.token, {
       date: D,
       groups: [
         { groupId: g570.id, action: "merge", visits: visitsOf(g570) },
@@ -285,17 +292,38 @@ async function main() {
         // Tampered: tries to pull Larry's visit (another employee/date) into Khen's group.
         { groupId: g172.id, action: "merge", visits: [[k172], [larry172]] },
         { groupId: jeffGroup.id, action: "separate", visits: visitsOf(jeffGroup) },
-        { groupId: "not-a-real-group", action: "merge", visits: [[k172]] },
+        { groupId: "not-a-real-group", action: "merge", visits: [[larry174a]] },
+      ],
+    });
+    const mixedResult = new Map((mixed.body?.results ?? []).map((r: any) => [r.groupId, r]));
+    check(
+      mixed.status === 409 && mixed.body?.code === "BULK_REVIEW_STALE" && mixed.body?.saved === false && /nothing was saved/.test(mixed.body?.error ?? ""),
+      "6) a batch containing any stale/invalid group is refused as a whole and says nothing was saved",
+      mixed.body
+    );
+    check((await completionsOnRows()) === 0, "6) ...and really saved nothing, not even the valid groups");
+    check(/changed/.test((mixedResult.get(g172.id) as any)?.error ?? "") && (mixedResult.get(g172.id) as any)?.status === "stale", "6) the tampered group is reported stale — other employees/dates can't be merged in", mixedResult.get(g172.id));
+    check(/in progress/.test((mixedResult.get(jeffGroup.id) as any)?.error ?? "") && (mixedResult.get(jeffGroup.id) as any)?.status === "invalid", "6) the open visit is reported with its reason", mixedResult.get(jeffGroup.id));
+    check((mixedResult.get("not-a-real-group") as any)?.status === "stale", "6) an unknown group is reported stale");
+    check(
+      [g570.id, g174.id, otherGroup.id].every((id) => (mixedResult.get(id) as any)?.status === "ready" && !(mixedResult.get(id) as any)?.error),
+      "6) the valid groups are reported ready (not failed), so the client keeps them selected",
+      mixed.body?.results
+    );
+
+    const apply = await call("POST", "/api/row-completions/bulk-review", admin.token, {
+      date: D,
+      groups: [
+        { groupId: g570.id, action: "merge", visits: visitsOf(g570) },
+        { groupId: g174.id, action: "separate", visits: visitsOf(g174) },
+        { groupId: otherGroup.id, action: "separate", visits: visitsOf(otherGroup) },
       ],
     });
     const result = new Map((apply.body?.results ?? []).map((r: any) => [r.groupId, r]));
-    check(apply.status === 200, "6) bulk apply responds with per-group results", apply);
+    check(apply.status === 200 && apply.body?.saved === true, "6) re-applying just the valid groups saves them", apply);
     check((result.get(g570.id) as any)?.ok === true && (result.get(g570.id) as any).completionIds.length === 1, "6) row 570 merged into ONE completion");
     check((result.get(g174.id) as any)?.ok === true, "6) Khen's row 174 kept separate");
     check((result.get(otherGroup.id) as any)?.ok === true, "6) the other employee's row 174 kept separate, independently");
-    check(/changed/.test((result.get(g172.id) as any)?.error ?? ""), "6) a group whose visits don't match the server's is refused — other employees/dates can't be merged in", result.get(g172.id));
-    check(/in progress/.test((result.get(jeffGroup.id) as any)?.error ?? ""), "6) the open visit stays pending with its reason", result.get(jeffGroup.id));
-    check((result.get("not-a-real-group") as any)?.ok === false, "6) an unknown group is refused");
 
     const comp570 = await pool.query(
       `select rc.quantity_per_row, array_agg(rcs.time_entry_id::text order by rcs.time_entry_id) as segs
@@ -352,7 +380,11 @@ async function main() {
       date: D,
       groups: [{ groupId: g174.id, action: "separate", visits: visitsOf(g174) }],
     });
-    check(again.body?.results?.[0]?.ok === false, "8) re-submitting an applied group is refused, never double-counted", again.body);
+    check(
+      again.status === 200 && again.body?.results?.[0]?.ok === true && again.body.results[0].alreadySaved === true && !again.body.results[0].completionIds,
+      "8) re-submitting an applied group reports it as already saved and creates nothing — never double-counted",
+      again.body
+    );
     const comp174 = await pool.query(
       `select count(*)::int as n from row_completion_segments rcs join row_completions rc on rc.id = rcs.row_completion_id where rc.greenhouse_row_id = $1`,
       [r174]

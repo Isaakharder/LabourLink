@@ -107,6 +107,7 @@
     "test:row-completion-visit-cycles": "ts-node src/routes/rowCompletions.visitCycles.test.ts",
     "test:reports-query-count": "ts-node src/lib/reportQueries.queryCount.test.ts",
     "test:row-completion-bulk-review": "ts-node src/routes/rowCompletions.bulkReview.test.ts",
+    "test:row-completion-bulk-review-atomic": "ts-node src/routes/rowCompletions.bulkReviewAtomic.test.ts",
     "test:inputs-bulk-delete": "ts-node src/routes/inputs.bulkDelete.test.ts",
     "test:employee-groups": "ts-node src/routes/employeeGroups.test.ts",
     "test:reports-cross-day-completion": "ts-node src/routes/reports.crossDayCompletion.test.ts",
