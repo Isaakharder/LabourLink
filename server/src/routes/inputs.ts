@@ -361,13 +361,29 @@ router.get(
   })
 );
 
-// Picker data for the sidebar's "Add employee to this day" modal — every
-// ACTIVE employee, deliberately including ones with no entries on `date`
-// (that's the whole point: someone who forgot their phone isn't in GET
-// /employees above yet). Active only, because POST /activities rejects an
-// inactive employee anyway. hasEntriesOnDate lets the modal mark who is
-// already on the day. Same minimal shape as GET /employees (no PII beyond
-// a name), for the same Supervisor-can't-call-GET-/api/employees reason.
+// Picker data for the sidebar's "Add employee to this day" modal: ACTIVE
+// employees with no work recorded on `date` — no non-deleted work entry
+// (phone, manual or still in progress) starting within the date's
+// organization-timezone day bounds (getDayBoundsUtc, same as GET /employees
+// and GET /daily). Anyone who already has work that day is edited from their
+// own day instead. Active only, because POST /activities rejects an inactive
+// employee anyway. Same minimal shape as GET /employees (no PII beyond a
+// name), for the same Supervisor-can't-call-GET-/api/employees reason.
+// "Has work recorded on this day": a non-deleted work entry for e.id starting
+// within [$1, $2) — the date's getDayBoundsUtc bounds. Shared by the picker
+// above and POST /activities' addEmployeeToDay save-time recheck, so the two
+// can never disagree about who qualifies.
+const WORK_ON_DATE_EXISTS_SQL = `exists (
+  select 1 from time_entries te
+  where te.employee_id = e.id and te.entry_type = 'work' and te.deleted_at is null
+    and te.started_at >= $1 and te.started_at < $2
+)`;
+
+// creation_reason for entries saved by "Add employee to this day", which has
+// no Reason field. created_by_employee_id and created_at still record who
+// added the entry and when, and drive the Manual label.
+const ADD_EMPLOYEE_TO_DAY_REASON = "Added manually through Inputs";
+
 router.get(
   "/employee-options",
   requireAuth,
@@ -379,16 +395,11 @@ router.get(
     }
     const { start, end } = getDayBoundsUtc(date);
     const { rows } = await pool.query(
-      `select e.id, e.first_name, e.last_name, e.employee_group_id, eg.name as employee_group_name,
-              exists (
-                select 1 from time_entries te
-                where te.employee_id = e.id
-                  and te.started_at >= $1 and te.started_at < $2
-                  and te.deleted_at is null
-              ) as has_entries
+      `select e.id, e.first_name, e.last_name, e.employee_group_id, eg.name as employee_group_name
        from employees e
        left join employee_groups eg on eg.id = e.employee_group_id
        where e.is_active = true
+         and not ${WORK_ON_DATE_EXISTS_SQL}
        order by e.first_name, e.last_name, e.id`,
       [start, end]
     );
@@ -398,7 +409,6 @@ router.get(
         firstName: r.first_name,
         lastName: r.last_name,
         employeeGroup: r.employee_group_id ? { id: r.employee_group_id, name: r.employee_group_name } : null,
-        hasEntriesOnDate: r.has_entries,
       })),
     });
   })
@@ -2406,9 +2416,16 @@ router.post(
 // An OPEN-ENDED entry (no endTime — a currently-in-progress activity) keeps
 // the simpler behavior: any overlap at all is rejected, unchanged.
 //
-// Two opt-in fields, both used by the sidebar's "Add employee to this day"
-// modal (AddEmployeeToDayModal.tsx) and absent from Add activity's own
-// requests, so its behavior above is unchanged:
+// Opt-in fields used by the sidebar's "Add employee to this day" modal
+// (AddEmployeeToDayModal.tsx) and absent from Add activity's own requests, so
+// its behavior above is unchanged:
+//   - addEmployeeToDay: true — that modal's mode. Implies overlapPolicy
+//     "reject"; uses ADD_EMPLOYEE_TO_DAY_REASON as the creation reason (the
+//     modal has no Reason field, any `reason` sent is ignored); and rechecks,
+//     inside the per-employee lock, that the employee still has no work on
+//     `date` — phone sync or another supervisor may have added some since
+//     the picker loaded — answering 409 { code: "EMPLOYEE_HAS_WORK" }
+//     without creating anything.
 //   - overlapPolicy: "reject" turns the boundary trimming off — a bounded
 //     entry is then rejected on ANY overlap, exactly like an open-ended one.
 //     That modal records a whole forgotten-phone stint and must never
@@ -2438,19 +2455,25 @@ router.post(
       endTime?: string | null;
       reason?: string;
     };
-    const { overlapPolicy, idempotencyKey } = req.body as { overlapPolicy?: unknown; idempotencyKey?: unknown };
+    const { idempotencyKey, addEmployeeToDay } = req.body as { idempotencyKey?: unknown; addEmployeeToDay?: unknown };
+    let { overlapPolicy } = req.body as { overlapPolicy?: unknown };
+    if (addEmployeeToDay !== undefined && typeof addEmployeeToDay !== "boolean") {
+      return res.status(400).json({ error: "addEmployeeToDay must be a boolean" });
+    }
     if (!employeeId || !UUID_RE.test(employeeId)) {
       return res.status(400).json({ error: "A valid employeeId is required" });
     }
     if (!isValidDate(date)) {
       return res.status(400).json({ error: "A valid date (YYYY-MM-DD) is required" });
     }
-    if (!isValidReason(reason)) {
+    const creationReason = addEmployeeToDay ? ADD_EMPLOYEE_TO_DAY_REASON : reason;
+    if (!isValidReason(creationReason)) {
       return res.status(400).json({ error: `A reason of at least ${MIN_REASON_LENGTH} characters is required` });
     }
     if (overlapPolicy !== undefined && overlapPolicy !== "trim" && overlapPolicy !== "reject") {
       return res.status(400).json({ error: 'overlapPolicy must be "trim" or "reject"' });
     }
+    if (addEmployeeToDay) overlapPolicy = "reject";
     if (idempotencyKey !== undefined && (typeof idempotencyKey !== "string" || !UUID_RE.test(idempotencyKey))) {
       return res.status(400).json({ error: "idempotencyKey must be a UUID" });
     }
@@ -2497,6 +2520,21 @@ router.post(
             return res.status(409).json({ error: "This request key was already used for a different employee." });
           }
           return res.status(200).json({ ok: true, duplicate: true });
+        }
+      }
+
+      if (addEmployeeToDay) {
+        const { start: dayStart, end: dayEnd } = getDayBoundsUtc(date);
+        const hasWork = await client.query(
+          `select ${WORK_ON_DATE_EXISTS_SQL} as has_work from employees e where e.id = $3`,
+          [dayStart, dayEnd, employeeId]
+        );
+        if (hasWork.rows[0]?.has_work) {
+          await client.query("rollback");
+          return res.status(409).json({
+            code: "EMPLOYEE_HAS_WORK",
+            error: "This employee now has work recorded for this day, so nothing was added. Choose another employee, or edit their day from the sidebar.",
+          });
         }
       }
 
@@ -2569,7 +2607,7 @@ router.post(
           densityType,
           densityCountPerRow,
           req.employee!.id,
-          reason.trim(),
+          creationReason.trim(),
           idempotencyKey ?? null,
         ]
       );
