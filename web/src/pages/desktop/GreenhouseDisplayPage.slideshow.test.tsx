@@ -115,6 +115,22 @@ describe("TV slideshow", () => {
     expect(document.querySelector(".tv-slide-dots")).toBeNull();
   });
 
+  it("shows the work-status legend but no block-name / assigned-employee legend", async () => {
+    mapReply = () =>
+      json(200, {
+        ...mapState,
+        blocks: [
+          { id: "bA", name: "Block A", employeeId: "e1", employeeFirstName: "Mia", employeeLastName: "Cruz", colorKey: "slate", totalRows: 4, completedRows: 1 },
+        ],
+      });
+    render(<GreenhouseDisplayPage displayKey={KEY} />);
+    await flush();
+    for (const label of ["Currently working", "Completed Row", "No activity"]) expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.queryByText(/Block A/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Mia Cruz/)).not.toBeInTheDocument();
+    expect(document.querySelector(".greenhouse-live-block-legend")).toBeNull();
+  });
+
   it("rotates map -> ranking -> map using each slide's duration, with unit and dates", async () => {
     slidesReply = () => json(200, slidesResponse([activitySlide()]));
     render(<GreenhouseDisplayPage displayKey={KEY} />);
@@ -122,12 +138,13 @@ describe("TV slideshow", () => {
     expect(screen.getByText("Currently working")).toBeInTheDocument();
     await advance(20_000);
     expect(screen.getByText("Winding & Pruning")).toBeInTheDocument();
-    expect(screen.getByText("Stems per hour")).toBeInTheDocument();
+    // Graphs show stems/hour as stm/hr (the stored unit stays stems/hour).
+    expect(screen.getByText("stm/hr", { selector: ".tv-chart-caption" })).toBeInTheDocument();
     expect(screen.getByText("Date:").parentElement).toHaveTextContent(/This week, .*\(including today\)/);
     expect(screen.getByText("Ana A.")).toBeInTheDocument();
-    expect(screen.getByText("812 stems/hour")).toBeInTheDocument();
+    expect(screen.getByText("812 stm/hr")).toBeInTheDocument();
     expect(screen.getByText(/1 under the 0.5 h minimum not shown/)).toBeInTheDocument();
-    expect(screen.getByText("Target:").parentElement).toHaveTextContent("Target: 500 stems/hour");
+    expect(screen.getByText("Target:").parentElement).toHaveTextContent("Target: 500 stm/hr");
     expect(screen.getByText("Top:").parentElement).toHaveTextContent("Top: All");
     expect(screen.getByText("Min hours:").parentElement).toHaveTextContent("Min hours: 0.5 h");
     await advance(15_000);

@@ -5057,35 +5057,6 @@ input {
   cursor: pointer;
 }
 
-/* Block cluster labels (BlockClusterLabels.tsx) — a plain HTML overlay, same
-   technique as .greenhouse-bubble-layer above: each pill's left/top is a
-   screen-px position computed from the live row geometry, fixed CSS size so
-   it stays readable at any map zoom level rather than shrinking to a few px
-   on a large real greenhouse the way world-feet-sized SVG text did. Kept
-   deliberately colour-neutral (near-white, dark text) rather than matching
-   each block's own colour, so text contrast never depends on which of the 8
-   presets happens to be in play. */
-.greenhouse-block-label-layer {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  overflow: hidden;
-  z-index: 2;
-}
-
-.greenhouse-live-block-label-pill {
-  position: absolute;
-  background: rgba(255, 255, 255, 0.9);
-  border: 1px solid rgba(15, 23, 42, 0.18);
-  border-radius: 999px;
-  padding: 2px 8px;
-  font-size: 0.7rem;
-  font-weight: 600;
-  color: #1e293b;
-  white-space: nowrap;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-}
-
 /* Visually hidden but still announced to screen readers — used for the
    colour swatch buttons' own name (EmployeeBlockFormModal.tsx), since each
    swatch's only visible content is its colour, not text. */
@@ -8345,8 +8316,9 @@ input {
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.15);
 }
 
-.tv-chart-name,
-.tv-chart-speed {
+/* One label per bar: "Name · 1389 stm/hr". Positioned by the layout
+   (barChartLayout.ts) inside the bar or just after it. */
+.tv-chart-label {
   position: absolute;
   top: 50%;
   transform: translateY(-50%);

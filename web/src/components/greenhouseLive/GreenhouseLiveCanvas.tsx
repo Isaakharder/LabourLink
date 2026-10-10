@@ -5,7 +5,7 @@ import { CanvasTransform, RotationDegrees, clampPan, zoomAtPoint } from "../../l
 import { rowScreenRect } from "../../lib/rowLayout";
 import { formatTimeInAppTimezone } from "../../lib/timezone";
 import { EmployeeLocationBubbles } from "./EmployeeLocationBubbles";
-import { BlockClusterLabels, computeBlockClusters } from "./BlockClusterLabels";
+import { computeBlockClusters } from "../../lib/blockClusters";
 
 interface GreenhouseLiveCanvasProps {
   land: { northSouthFeet: number; eastWestFeet: number };
@@ -52,9 +52,9 @@ interface GreenhouseLiveCanvasProps {
   interactive?: boolean;
   // Employee Blocks present on this land — omit entirely in selection mode
   // (Employee Blocks'/Plant Density's own Link Rows canvases never pass
-  // this) or when there simply are none. Blocks are shown by a dashed
-  // outline around each block's rows (per phase) plus its name/employee
-  // label — never by recolouring rows: a row's fill is only ever its work
+  // this) or when there simply are none. Blocks are shown only by a dashed
+  // outline around each block's rows (per phase) — no floating name/employee
+  // label, and never by recolouring rows: a row's fill is only ever its work
   // state (working / completed / the uniform "no activity" orange), so the
   // map reads the same whichever block a row belongs to.
   blocks?: LiveBlockSummary[];
@@ -220,18 +220,18 @@ export function GreenhouseLiveCanvas({
 
   const visiblePhases = phaseFilterId ? phases.filter((p) => p.id === phaseFilterId) : phases;
   const selectable = Boolean(onRowClick);
-  // Block colour/labels only ever apply outside selection mode — selection
+  // Block outlines (and block names in row tooltips) only ever apply outside selection mode — selection
   // mode's own three-state palette (selected/taken/available) already
   // covers the whole row, and its placeholder land data has no real block
   // assignments worth showing (see buildSelectionLand's own comment in
   // EmployeeBlockFormModal.tsx/PlantDensityFormModal.tsx).
   const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
-  // Block cluster labels only make sense outside row-selection mode, same
-  // reasoning as showEmployeeBubbles below.
-  const showBlockLabels = !selectable && (blocks ?? []).length > 0;
-  // Block boundaries: the same (block, phase) clusters the labels use, only
-  // for blocks this map knows about.
-  const blockOutlines = showBlockLabels ? computeBlockClusters(visiblePhases).filter((c) => blockById.has(c.blockId)) : [];
+  // Block outlines only make sense outside row-selection mode, same
+  // reasoning as showEmployeeBubbles below. One per (block, phase), only for
+  // blocks this map knows about. Blocks get no floating name label — the
+  // outline (and the legend below the map) is the whole block display.
+  const showBlockOutlines = !selectable && (blocks ?? []).length > 0;
+  const blockOutlines = showBlockOutlines ? computeBlockClusters(visiblePhases).filter((c) => blockById.has(c.blockId)) : [];
   const BLOCK_OUTLINE_PAD_FT = 1;
   // Employee location bubbles only make sense outside row-selection mode —
   // Employee Blocks' and Plant Density's Link Rows steps pass onRowClick
@@ -374,22 +374,6 @@ export function GreenhouseLiveCanvas({
           land={land}
           transform={transform}
           rotationDegrees={rotationDegrees}
-        />
-      )}
-
-      {/* Block cluster labels — a plain HTML overlay (not part of the SVG's
-          pan/zoom transform stack), same technique as the employee bubbles
-          above: each pill's left/top is computed in screen px from the live
-          row geometry (see BlockClusterLabels.tsx) so it stays a readable
-          fixed size at any map zoom level, instead of shrinking to a few px
-          on a large real greenhouse the way world-feet-sized SVG text did. */}
-      {showBlockLabels && (
-        <BlockClusterLabels
-          phases={visiblePhases}
-          land={land}
-          transform={transform}
-          rotationDegrees={rotationDegrees}
-          blocks={blocks ?? []}
         />
       )}
 

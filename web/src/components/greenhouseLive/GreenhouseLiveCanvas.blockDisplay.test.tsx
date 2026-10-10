@@ -3,8 +3,9 @@
 // Display → Map block display (office preview and TV share this canvas and
 // legend): rows are coloured only by work state — idle rows are the same
 // uniform "no activity" style whichever Employee Block they belong to — and
-// each block is shown by a dashed outline per phase plus its label, never by
-// recolouring its rows.
+// each block is shown only by a dashed outline per phase: no floating
+// "Block — Employee" label and no recoloured rows. Live employee location
+// bubbles still show who is working where.
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -23,7 +24,9 @@ beforeAll(() => {
 afterEach(cleanup);
 
 function row(n: number, blockId: string | null, state: "blue" | "green" | "neutral") {
-  return { id: `r${n}`, rowNumber: n, xFt: 2, yFt: (n % 100) * 6, widthFt: 4, lengthFt: 50, orientation: "horizontal" as const, state, employees: [], blockId };
+  const employees =
+    state === "blue" ? [{ id: "e9", firstName: "Khen", lastName: "Lagto", activityName: "Picking", startedAt: new Date().toISOString() }] : [];
+  return { id: `r${n}`, rowNumber: n, xFt: 2, yFt: (n % 100) * 6, widthFt: 4, lengthFt: 50, orientation: "horizontal" as const, state, employees, blockId };
 }
 const phases: LivePhase[] = [
   {
@@ -74,12 +77,44 @@ describe("Display → Map block display", () => {
     expect(rowRect(container, 201)).toHaveClass("greenhouse-live-row-blue");
   });
 
-  it("draws one dashed outline per block per phase and labels each with block and employee", () => {
+  it("draws one dashed outline per block per phase, with no floating block/employee labels", () => {
     const { container } = renderCanvas();
     // A in phase 1, B in phases 1 and 2, C in phase 2.
     expect(container.querySelectorAll("rect.greenhouse-live-block-outline")).toHaveLength(4);
-    const pills = [...container.querySelectorAll(".greenhouse-live-block-label-pill")].map((p) => p.textContent);
-    expect(pills).toEqual(expect.arrayContaining(["Block A — Mia Cruz", "Block B — Larry B", "Block C — Unassigned"]));
+    // Visible text only: a row's hover tooltip (<title>) may still name its
+    // block, but nothing is drawn on the map itself.
+    const visible = container.cloneNode(true) as HTMLElement;
+    visible.querySelectorAll("title").forEach((t) => t.remove());
+    expect(visible.textContent).not.toMatch(/Block [ABC]/);
+    expect(visible.textContent).not.toMatch(/Mia Cruz|Larry B|Unassigned/);
+  });
+
+  it("still shows the live employee location bubble for whoever is working", () => {
+    const { container } = renderCanvas();
+    expect(container.textContent).toMatch(/Khen/);
+  });
+
+  it("outlines follow the phase selection and rotation", () => {
+    const onlyPhase1 = phases.filter((p) => p.id === "p1");
+    const phase1Land = { ...land, phases: onlyPhase1 };
+    const { container } = render(
+      <GreenhouseLiveCanvas
+        land={phase1Land}
+        phases={onlyPhase1}
+        phaseFilterId={null}
+        transform={{ pan: { x: 0, y: 0 }, scale: 4 }}
+        onTransformChange={() => {}}
+        onViewportSize={() => {}}
+        minScale={0.1}
+        maxScale={20}
+        rotationDegrees={90}
+        blocks={blocks}
+      />
+    );
+    // Phase 1 only: blocks A and B.
+    expect(container.querySelectorAll("rect.greenhouse-live-block-outline")).toHaveLength(2);
+    const group = container.querySelector("rect.greenhouse-live-block-outline")!.parentElement!;
+    expect(group.getAttribute("transform")).toMatch(/^rotate\(90 /);
   });
 
   it("draws no outlines when the map has no blocks (selection-mode canvases)", () => {

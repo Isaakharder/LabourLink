@@ -53,7 +53,7 @@ describe("TV bar chart slide", () => {
     const rows = screen.getAllByRole("listitem");
     expect(rows).toHaveLength(60);
     expect(rows[0]).toHaveTextContent("Worker1 Q.");
-    expect(rows[0]).toHaveTextContent("1000 stems/hour");
+    expect(rows[0]).toHaveTextContent("Worker1 Q. · 1000 stm/hr");
     expect(rows[59]).toHaveTextContent("Worker60 Q.");
     const tops = rows.map((r) => parseFloat(r.style.top));
     expect(tops).toEqual([...tops].sort((a, b) => a - b));
@@ -88,6 +88,26 @@ describe("TV bar chart slide", () => {
     const rows = screen.getAllByRole("listitem");
     expect(rows[0]).toHaveClass("tv-chart-label-inside");
     expect(rows[1]).toHaveClass("tv-chart-label-outside");
+  });
+
+  it("shows name and speed as one label, the speed right after the name", () => {
+    const s = slide(2);
+    s.employees[0].displayName = "Jhang Jhang";
+    s.employees[0].speed = 1389;
+    renderSlide(s);
+    const rows = screen.getAllByRole("listitem");
+    const labels = rows[0].querySelectorAll(".tv-chart-label");
+    expect(labels).toHaveLength(1);
+    expect(labels[0]).toHaveTextContent("Jhang Jhang · 1389 stm/hr");
+    // name, separator, speed — in that order inside the one label
+    expect([...labels[0].children].map((c) => c.className)).toEqual(["tv-chart-name", "tv-chart-sep", "tv-chart-speed"]);
+    expect(rows[0].querySelector(".tv-chart-speed")!.getAttribute("style")).toBeNull();
+  });
+
+  it("keeps other speed units exactly as stored", () => {
+    renderSlide(slide(1, { speedUnit: "plants/hour" }));
+    expect(screen.getByRole("listitem")).toHaveTextContent("1000 plants/hour");
+    expect(screen.getByText("Plants per hour")).toBeInTheDocument();
   });
 
   it("shows the full display name when the server sends one", () => {
