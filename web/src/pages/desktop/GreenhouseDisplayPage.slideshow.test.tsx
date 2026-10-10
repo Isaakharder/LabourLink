@@ -115,6 +115,22 @@ describe("TV slideshow", () => {
     expect(document.querySelector(".tv-slide-dots")).toBeNull();
   });
 
+  it("shows the work-status legend but no block-name / assigned-employee legend", async () => {
+    mapReply = () =>
+      json(200, {
+        ...mapState,
+        blocks: [
+          { id: "bA", name: "Block A", employeeId: "e1", employeeFirstName: "Mia", employeeLastName: "Cruz", colorKey: "slate", totalRows: 4, completedRows: 1 },
+        ],
+      });
+    render(<GreenhouseDisplayPage displayKey={KEY} />);
+    await flush();
+    for (const label of ["Currently working", "Completed Row", "No activity"]) expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.queryByText(/Block A/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Mia Cruz/)).not.toBeInTheDocument();
+    expect(document.querySelector(".greenhouse-live-block-legend")).toBeNull();
+  });
+
   it("rotates map -> ranking -> map using each slide's duration, with unit and dates", async () => {
     slidesReply = () => json(200, slidesResponse([activitySlide()]));
     render(<GreenhouseDisplayPage displayKey={KEY} />);

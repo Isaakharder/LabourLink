@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GreenhouseLiveCanvas } from "../../components/greenhouseLive/GreenhouseLiveCanvas";
-import { EmployeeBlockLegend } from "../../components/greenhouseLive/EmployeeBlockLegend";
 import { TvRankingSlide } from "../../components/greenhouseLive/TvRankingSlide";
 import { api } from "../../lib/api";
 import { CanvasTransform, computeFitTransformToPhases } from "../../lib/canvasTransform";
@@ -246,21 +245,21 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
         )}
       </div>
 
+      {/* Work-status legend only. The TV deliberately has no block-name /
+          assigned-employee legend (or labels): blocks are shown by their
+          outlines, and who is working where by the live bubbles. */}
       {!onActivity && (
-        <>
-          <div className="greenhouse-tv-legend">
-            <span>
-              <span className="greenhouse-live-legend-swatch greenhouse-live-row-blue" /> Currently working
-            </span>
-            <span>
-              <span className="greenhouse-live-legend-swatch greenhouse-live-row-green" /> Completed Row
-            </span>
-            <span>
-              <span className="greenhouse-live-legend-swatch greenhouse-live-row-neutral" /> No activity
-            </span>
-          </div>
-          {data && <EmployeeBlockLegend blocks={data.blocks} />}
-        </>
+        <div className="greenhouse-tv-legend">
+          <span>
+            <span className="greenhouse-live-legend-swatch greenhouse-live-row-blue" /> Currently working
+          </span>
+          <span>
+            <span className="greenhouse-live-legend-swatch greenhouse-live-row-green" /> Completed Row
+          </span>
+          <span>
+            <span className="greenhouse-live-legend-swatch greenhouse-live-row-neutral" /> No activity
+          </span>
+        </div>
       )}
     </div>
   );
