@@ -53,7 +53,8 @@ describe("TV bar chart slide", () => {
     const rows = screen.getAllByRole("listitem");
     expect(rows).toHaveLength(60);
     expect(rows[0]).toHaveTextContent("Worker1 Q.");
-    expect(rows[0]).toHaveTextContent("Worker1 Q. · 1000 stm/hr");
+    expect(rows[0].querySelector(".tv-chart-name")).toHaveTextContent("Worker1 Q.");
+    expect(rows[0].querySelector(".tv-chart-speed")).toHaveTextContent("1000 stm/hr");
     expect(rows[59]).toHaveTextContent("Worker60 Q.");
     const tops = rows.map((r) => parseFloat(r.style.top));
     expect(tops).toEqual([...tops].sort((a, b) => a - b));
@@ -81,27 +82,57 @@ describe("TV bar chart slide", () => {
     expect((after[39].querySelector(".tv-chart-bar") as HTMLElement).getAttribute("data-color")).toBe("#f59e0b");
   });
 
-  it("puts a very short bar's labels outside", () => {
-    const s = slide(2);
-    s.employees[1].speed = 15;
-    renderSlide(s);
-    const rows = screen.getAllByRole("listitem");
-    expect(rows[0]).toHaveClass("tv-chart-label-inside");
-    expect(rows[1]).toHaveClass("tv-chart-label-outside");
-  });
-
-  it("shows name and speed as one label, the speed right after the name", () => {
+  it("both fit: name at the bar's left, speed right-aligned to the bar's end", () => {
     const s = slide(2);
     s.employees[0].displayName = "Jhang Jhang";
     s.employees[0].speed = 1389;
     renderSlide(s);
-    const rows = screen.getAllByRole("listitem");
-    const labels = rows[0].querySelectorAll(".tv-chart-label");
+    const row = screen.getAllByRole("listitem")[0];
+    expect(row).toHaveClass("tv-chart-label-split");
+    const name = row.querySelector(".tv-chart-name") as HTMLElement;
+    const speed = row.querySelector(".tv-chart-speed") as HTMLElement;
+    expect(name).toHaveTextContent("Jhang Jhang");
+    expect(speed).toHaveTextContent("1389 stm/hr");
+    expect(row.querySelector(".tv-chart-sep")).toBeNull();
+    // Full-width bar: speed's right edge one padding (16px at 32px text) in from the bar's end.
+    expect(speed.style.right).toBe("16px");
+    expect(speed.style.left).toBe("");
+    expect(speed.style.color).toBe(name.style.color);
+  });
+
+  it("name fits but not both: speed immediately past the bar, in the normal text colour", () => {
+    const s = slide(2, { target: null });
+    s.employees[0].speed = 1000;
+    s.employees[1].speed = 150; // ~281px bar at 1872px
+    s.employees[1].displayName = "Ana";
+    renderSlide(s);
+    const row = screen.getAllByRole("listitem")[1];
+    expect(row).toHaveClass("tv-chart-label-name-inside");
+    const bar = row.querySelector(".tv-chart-bar") as HTMLElement;
+    const speed = row.querySelector(".tv-chart-speed") as HTMLElement;
+    expect(parseFloat(speed.style.left)).toBeCloseTo(parseFloat(bar.style.width) + 16);
+    expect(speed.style.color).toBe("");
+    expect(parseFloat(speed.style.left)).toBeLessThan(1872 / 2);
+  });
+
+  it("name doesn't fit: one 'Name · speed' label just past the short bar", () => {
+    const s = slide(2);
+    s.employees[1].speed = 15;
+    s.employees[1].displayName = "Marcelino Besa";
+    renderSlide(s);
+    const row = screen.getAllByRole("listitem")[1];
+    expect(row).toHaveClass("tv-chart-label-outside");
+    const labels = row.querySelectorAll(".tv-chart-label");
     expect(labels).toHaveLength(1);
-    expect(labels[0]).toHaveTextContent("Jhang Jhang · 1389 stm/hr");
-    // name, separator, speed — in that order inside the one label
+    expect(labels[0]).toHaveTextContent("Marcelino Besa · 15 stm/hr");
     expect([...labels[0].children].map((c) => c.className)).toEqual(["tv-chart-name", "tv-chart-sep", "tv-chart-speed"]);
-    expect(rows[0].querySelector(".tv-chart-speed")!.getAttribute("style")).toBeNull();
+    const bar = row.querySelector(".tv-chart-bar") as HTMLElement;
+    expect(parseFloat((labels[0] as HTMLElement).style.left)).toBeCloseTo(parseFloat(bar.style.width) + 16);
+  });
+
+  it("text is 20% smaller (32px with few employees, was 40px)", () => {
+    renderSlide(slide(2));
+    expect(screen.getAllByRole("listitem")[0].style.fontSize).toBe("32px");
   });
 
   it("keeps other speed units exactly as stored", () => {

@@ -114,20 +114,34 @@ export function TvRankingSlide({ item }: TvRankingSlideProps) {
                 data-color={row.color}
                 style={{ width: row.barWidth, background: `linear-gradient(90deg, ${row.color}, ${lighten(row.color)})` }}
               />
-              {/* One label: name, a small gap, then the speed. */}
-              <span
-                className="tv-chart-label"
-                style={{
-                  left: row.labelLeft,
-                  color: row.labelMode === "inside" ? row.insideTextColor : undefined,
-                }}
-              >
-                <span className="tv-chart-name">{row.name}</span>
-                <span className="tv-chart-sep" aria-hidden="true">
-                  {LABEL_SEPARATOR}
+              {row.labelMode === "outside" ? (
+                // Short bar: "Name · 350 stm/hr" just past the bar's end.
+                <span className="tv-chart-label" style={{ left: row.nameBox.left }}>
+                  <span className="tv-chart-name">{row.name}</span>
+                  <span className="tv-chart-sep" aria-hidden="true">
+                    {LABEL_SEPARATOR}
+                  </span>
+                  <span className="tv-chart-speed">{row.speedLabel}</span>
                 </span>
-                <span className="tv-chart-speed">{row.speedLabel}</span>
-              </span>
+              ) : (
+                <>
+                  <span className="tv-chart-label tv-chart-name" style={{ left: row.nameBox.left, color: row.insideTextColor }}>
+                    {row.name}
+                  </span>
+                  {/* Inside: right-aligned to the bar's end (less its padding).
+                      Otherwise just past the bar's end. */}
+                  <span
+                    className="tv-chart-label tv-chart-speed"
+                    style={
+                      row.labelMode === "split"
+                        ? { right: size.width - row.barWidth + layout.padding, color: row.insideTextColor }
+                        : { left: row.speedBox.left }
+                    }
+                  >
+                    {row.speedLabel}
+                  </span>
+                </>
+              )}
             </div>
           ))}
       </div>
