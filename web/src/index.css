@@ -8316,8 +8316,9 @@ input {
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.15);
 }
 
-/* One label per bar: "Name · 1389 stm/hr". Positioned by the layout
-   (barChartLayout.ts) inside the bar or just after it. */
+/* Name and speed, placed by the layout (barChartLayout.ts): both inside the
+   bar (name left, speed at the bar's right end), name inside with the speed
+   just past the bar, or "Name · 350 stm/hr" just past a short bar. */
 .tv-chart-label {
   position: absolute;
   top: 50%;
