@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildSlideSequence, formatAge, indexAfterUpdate, isStale, reportingPeriodFor } from "./displaySlideshow";
+import { buildSlideSequence, formatAge, indexAfterUpdate, isStale, msUntilScheduleCheck, reportingPeriodFor } from "./displaySlideshow";
+import { formatDays, summarizeSchedule } from "./displaySchedule";
 import { ActivitySlide } from "./greenhouseLiveTypes";
 
 function slide(id: string, employees: number, seconds = 15): ActivitySlide {
@@ -85,5 +86,35 @@ describe("reportingPeriodFor (mirror of the server rule)", () => {
     expect(reportingPeriodFor("this_week", false, "2026-10-14")).toEqual({ dateStart: "2026-10-12", dateEnd: "2026-10-13", empty: false });
     expect(reportingPeriodFor("last_week", false, "2026-10-18")).toEqual({ dateStart: "2026-10-05", dateEnd: "2026-10-11", empty: false });
     expect(reportingPeriodFor("this_week", true, "2026-10-19").dateStart).toBe("2026-10-19");
+  });
+});
+
+describe("schedules on the TV", () => {
+  it("leaves the map out when it isn't sent to the TV or its schedule is off", () => {
+    expect(buildSlideSequence([slide("a", 3)], 20, false).map((i) => i.key)).toEqual(["a"]);
+    expect(buildSlideSequence([], 20, false)).toEqual([]);
+    expect(buildSlideSequence([slide("a", 3)], 20).map((i) => i.key)).toEqual(["map", "a"]);
+  });
+
+  it("re-checks just after the next boundary, only when sooner than the regular poll", () => {
+    const now = Date.parse("2026-10-12T14:00:00Z");
+    expect(msUntilScheduleCheck("2026-10-12T14:00:30Z", now, 60_000)).toBe(31_000);
+    expect(msUntilScheduleCheck("2026-10-12T14:05:00Z", now, 60_000)).toBeNull();
+    expect(msUntilScheduleCheck("2026-10-12T13:59:00Z", now, 60_000)).toBe(1_000);
+    expect(msUntilScheduleCheck(null, now, 60_000)).toBeNull();
+  });
+});
+
+describe("schedule summaries (Display → Setup cards)", () => {
+  it("describes days and times plainly", () => {
+    expect(formatDays([1, 2, 3, 4, 5])).toBe("Mon–Fri");
+    expect(formatDays([1, 3, 5])).toBe("Mon, Wed, Fri");
+    expect(formatDays([6, 7])).toBe("Sat–Sun");
+    expect(formatDays([1, 2, 3, 4, 5, 6, 7])).toBe("Every day");
+    expect(summarizeSchedule({ enabled: false, days: [], start: "06:00", end: "18:00" })).toBe("Always shown");
+    expect(summarizeSchedule({ enabled: true, days: [1, 2, 3, 4, 5], start: "06:00", end: "18:00" })).toBe("Mon–Fri · 6:00 AM–6:00 PM");
+    expect(summarizeSchedule({ enabled: true, days: [5], start: "22:00", end: "06:00" })).toBe("Fri · 10:00 PM–6:00 AM (next day)");
+    expect(summarizeSchedule({ enabled: true, days: [6, 7], start: "00:00", end: "00:00" })).toBe("Sat–Sun · all day");
+    expect(summarizeSchedule({ enabled: true, days: [1], start: "12:00", end: "12:00" })).toBe("Mon · 24 h from 12:00 PM");
   });
 });

@@ -3,6 +3,7 @@ import { pool } from "../db";
 import { hashDisplayKey } from "../lib/displayToken";
 import { MapDatePreset, ReportWeek, resolveMapPreset } from "../lib/displayPeriods";
 import { calendarDateInAppTimezone } from "../lib/timezone";
+import { scheduleFromRow, SlideSchedule } from "../lib/displaySchedule";
 
 export interface AuthedDisplay {
   id: string;
@@ -20,6 +21,9 @@ export interface AuthedDisplay {
   mapSlideSeconds: number;
   // 063_display_map_phases.sql. null = every phase of the land.
   mapPhaseIds: string[] | null;
+  // 064_display_slide_schedules.sql. Whether the map is a slide, and when.
+  mapSendToTv: boolean;
+  mapSchedule: SlideSchedule;
 }
 
 declare global {
@@ -51,7 +55,8 @@ export async function requireDisplayKey(req: Request, res: Response, next: NextF
     // identical to_char cast in mobileTime.ts/breakReconciliation.ts).
     `select id, land_id, activity_id, to_char(date_start, 'YYYY-MM-DD') as date_start,
             to_char(date_end, 'YYYY-MM-DD') as date_end, name, updated_at, rotation_degrees,
-            map_date_preset, report_week, report_include_today, map_slide_seconds, map_phase_ids
+            map_date_preset, report_week, report_include_today, map_slide_seconds, map_phase_ids,
+            map_send_to_tv, map_schedule_enabled, map_schedule_days, map_schedule_start::text, map_schedule_end::text
      from greenhouse_displays
      where display_key_hash = $1 and is_active = true`,
     [tokenHash]
@@ -81,6 +86,8 @@ export async function requireDisplayKey(req: Request, res: Response, next: NextF
     reportIncludeToday: row.report_include_today,
     mapSlideSeconds: row.map_slide_seconds,
     mapPhaseIds: row.map_phase_ids ?? null,
+    mapSendToTv: row.map_send_to_tv,
+    mapSchedule: scheduleFromRow(row.map_schedule_enabled, row.map_schedule_days, row.map_schedule_start, row.map_schedule_end),
   };
   next();
 }

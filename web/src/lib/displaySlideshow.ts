@@ -7,12 +7,17 @@ export type SlideItem =
   | { kind: "map"; key: string; seconds: number }
   | { kind: "activity"; key: string; seconds: number; slide: ActivitySlide };
 
-// Map first, then one slide per activity with EVERY eligible employee on it
-// (the bar chart sizes itself to fit — no pagination). Top N, when chosen,
-// is already applied by the server. With no activity slides the map is the
-// only item and the TV simply stays on it.
-export function buildSlideSequence(slides: ActivitySlide[] | null | undefined, mapSeconds: number): SlideItem[] {
-  const items: SlideItem[] = [{ kind: "map", key: "map", seconds: mapSeconds }];
+// Map first (when it is sent to the TV and its schedule allows it), then one
+// slide per activity with EVERY eligible employee on it (the bar chart sizes
+// itself to fit — no pagination). Top N, when chosen, and every schedule are
+// already applied by the server. One item: the TV simply stays on it. No
+// items: the TV says nothing is scheduled right now.
+export function buildSlideSequence(
+  slides: ActivitySlide[] | null | undefined,
+  mapSeconds: number,
+  mapEnabled: boolean = true
+): SlideItem[] {
+  const items: SlideItem[] = mapEnabled ? [{ kind: "map", key: "map", seconds: mapSeconds }] : [];
   for (const slide of slides ?? []) {
     items.push({ kind: "activity", key: slide.activityId, seconds: slide.slideSeconds, slide });
   }
@@ -20,7 +25,7 @@ export function buildSlideSequence(slides: ActivitySlide[] | null | undefined, m
 }
 
 // After the sequence changes (new data), stay on the same slide if it still
-// exists, otherwise go back to the map.
+// exists, otherwise start from the first slide.
 export function indexAfterUpdate(previous: SlideItem | undefined, next: SlideItem[]): number {
   if (!previous) return 0;
   const i = next.findIndex((item) => item.key === previous.key);
@@ -62,4 +67,16 @@ export function reportingPeriodFor(
   const end = includeToday ? today : addCalendarDays(today, -1);
   if (end < monday) return { dateStart: monday, dateEnd: monday, empty: true };
   return { dateStart: monday, dateEnd: end, empty: false };
+}
+
+// How long until the TV should re-check the schedule: just after the next
+// schedule boundary, never sooner than a second and never later than the
+// regular poll. null = no scheduled change to wait for.
+export function msUntilScheduleCheck(nextChangeAt: string | null | undefined, nowMs: number, pollMs: number): number | null {
+  if (!nextChangeAt) return null;
+  const at = Date.parse(nextChangeAt);
+  if (Number.isNaN(at)) return null;
+  const wait = at - nowMs + 1000;
+  if (wait >= pollMs) return null;
+  return Math.max(1000, wait);
 }

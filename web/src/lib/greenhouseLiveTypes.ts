@@ -1,3 +1,4 @@
+import type { SlideSchedule } from "./displaySchedule";
 // DTOs for GET /api/greenhouse/live — server/src/routes/greenhouseLive.ts.
 // Live row state is derived server-side from time_entries, never stored;
 // see that route's LIVE_LAND_SELECT comment for the blue/green/neutral rules.
@@ -208,6 +209,11 @@ export interface DisplaySlidesResponse {
   timezone: string;
   period: { week: ReportWeek; includeToday: boolean; dateStart: string; dateEnd: string; empty: boolean };
   mapSlideSeconds: number;
+  // Whether the map is a slide right now (Send to TV + its schedule).
+  // Absent from servers before schedules existed: treat as true.
+  mapEnabled?: boolean;
+  // Next time a schedule starts or ends; the TV re-checks then.
+  nextScheduleChangeAt?: string | null;
   slides: ActivitySlide[];
 }
 
@@ -226,12 +232,17 @@ export interface ActivitySlideSetting {
   slideSeconds: number;
   atTargetColor: string;
   belowTargetColor: string;
+  schedule: SlideSchedule;
 }
 
 export interface DisplaySlidesConfig {
   reportWeek: ReportWeek;
   reportIncludeToday: boolean;
   mapSlideSeconds: number;
+  map: { sendToTv: boolean; schedule: SlideSchedule };
+  // Setup cards hidden on this page ('map' or an activity id).
+  hiddenCards: string[];
+  timezone: string;
   period: { dateStart: string; dateEnd: string; empty: boolean };
   activities: ActivitySlideSetting[];
 }

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Save } from "lucide-react";
+import { Clock, EyeOff, Save } from "lucide-react";
 import { useUnsavedChangesGuard } from "../../context/UnsavedChangesContext";
 import { api, ApiError } from "../../lib/api";
 import { reportingPeriodFor } from "../../lib/displaySlideshow";
+import { DAY_SHORT, endsNextDay, SlideSchedule, summarizeSchedule } from "../../lib/displaySchedule";
 import {
   ActivitySlideSetting,
   DisplaySlidesConfig,
@@ -12,24 +13,31 @@ import {
 } from "../../lib/greenhouseLiveTypes";
 import { formatDateLong, todayInAppTimezone } from "../../lib/timezone";
 
-// Display > Setup: which activities this TV turns into employee speed-ranking
-// slides, and over which reporting period. Settings are per display, so two
-// TVs can show different slides. The map (Display > Map) is always the first
-// slide; with nothing sent to the TV, or no work in the period, the TV shows
-// only the map.
+// Display > Setup: which slides this TV shows — the map, and one employee
+// speed-ranking slide per activity — when (an optional weekly schedule per
+// slide, in the organization's time zone), and over which reporting period.
+// Settings are per display, so two TVs can show different slides. The map's
+// phases, dates, rotation and land stay on Display > Map. Hiding a card only
+// tidies this page; it never changes what the TV shows.
 
 interface Draft {
   reportWeek: ReportWeek;
   reportIncludeToday: boolean;
   mapSlideSeconds: string;
+  mapSendToTv: boolean;
+  mapSchedule: SlideSchedule;
   activities: (ActivitySlideSetting & { targetText: string; minHoursText: string; topNText: string; secondsText: string })[];
 }
+
+const MAP_CARD = "map";
 
 function toDraft(config: DisplaySlidesConfig): Draft {
   return {
     reportWeek: config.reportWeek,
     reportIncludeToday: config.reportIncludeToday,
     mapSlideSeconds: String(config.mapSlideSeconds),
+    mapSendToTv: config.map.sendToTv,
+    mapSchedule: config.map.schedule,
     activities: config.activities.map((a) => ({
       ...a,
       targetText: a.targetOverride != null ? String(a.targetOverride) : "",
@@ -46,6 +54,8 @@ function draftKey(d: Draft | null): string {
     d.reportWeek,
     d.reportIncludeToday,
     d.mapSlideSeconds,
+    d.mapSendToTv,
+    d.mapSchedule,
     d.activities.map((a) => [
       a.activityId,
       a.sendToTv,
@@ -55,6 +65,7 @@ function draftKey(d: Draft | null): string {
       a.secondsText,
       a.atTargetColor,
       a.belowTargetColor,
+      a.schedule,
     ]),
   ]);
 }
@@ -81,6 +92,12 @@ export function DisplaySetupPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [timezone, setTimezone] = useState("");
+  // Hidden cards are saved on their own, at once — never part of the draft.
+  const [hiddenCards, setHiddenCards] = useState<string[]>([]);
+  const [hideError, setHideError] = useState<string | null>(null);
+  // Which card's schedule is open: MAP_CARD or an activity id.
+  const [scheduleFor, setScheduleFor] = useState<string | null>(null);
 
   useEffect(() => {
     api<{ displays: GreenhouseDisplaySummary[] }>("/api/greenhouse/displays")
@@ -95,11 +112,15 @@ export function DisplaySetupPage() {
     setDraft(null);
     setSaved(null);
     setLoadError(null);
+    setHideError(null);
+    setScheduleFor(null);
     api<DisplaySlidesConfig>(`/api/greenhouse/displays/${id}/slides-config`)
       .then((config) => {
         const d = toDraft(config);
         setSaved(d);
         setDraft(d);
+        setHiddenCards(config.hiddenCards ?? []);
+        setTimezone(config.timezone ?? "");
       })
       .catch(() => setLoadError("Could not load this display's settings."));
   }, []);
@@ -124,6 +145,34 @@ export function DisplaySetupPage() {
     setDraft((d) => (d ? { ...d, activities: d.activities.map((a) => (a.activityId === activityId ? { ...a, ...patch } : a)) } : d));
   }
 
+  function scheduleOf(card: string): SlideSchedule | null {
+    if (!draft) return null;
+    if (card === MAP_CARD) return draft.mapSchedule;
+    return draft.activities.find((a) => a.activityId === card)?.schedule ?? null;
+  }
+
+  function setScheduleOf(card: string, schedule: SlideSchedule) {
+    if (card === MAP_CARD) setDraft((d) => (d ? { ...d, mapSchedule: schedule } : d));
+    else updateActivity(card, { schedule });
+  }
+
+  async function saveHidden(next: string[]) {
+    if (!displayId) return;
+    const previous = hiddenCards;
+    setHiddenCards(next);
+    setHideError(null);
+    try {
+      const res = await api<{ hiddenCards: string[] }>(`/api/greenhouse/displays/${displayId}/setup-hidden-cards`, {
+        method: "PUT",
+        body: JSON.stringify({ hiddenCards: next }),
+      });
+      setHiddenCards(res.hiddenCards);
+    } catch {
+      setHiddenCards(previous);
+      setHideError("Could not save which cards are hidden.");
+    }
+  }
+
   // Returns an error message, or the request body.
   function buildBody(d: Draft): string | object {
     const mapSeconds = parseWhole(d.mapSlideSeconds);
@@ -139,6 +188,7 @@ export function DisplaySetupPage() {
       const seconds = parseWhole(a.secondsText);
       if (seconds == null || seconds < 5 || seconds > 600) return `${a.name}: slide duration must be 5–600 seconds.`;
       if (!HEX_COLOR.test(a.atTargetColor) || !HEX_COLOR.test(a.belowTargetColor)) return `${a.name}: bar colours must be hex colours.`;
+      if (a.schedule.enabled && a.schedule.days.length === 0) return `${a.name}: choose at least one day for the schedule.`;
       activities.push({
         activityId: a.activityId,
         sendToTv: a.sendToTv,
@@ -148,9 +198,17 @@ export function DisplaySetupPage() {
         slideSeconds: seconds,
         atTargetColor: a.atTargetColor,
         belowTargetColor: a.belowTargetColor,
+        schedule: a.schedule,
       });
     }
-    return { reportWeek: d.reportWeek, reportIncludeToday: d.reportIncludeToday, mapSlideSeconds: mapSeconds, activities };
+    if (d.mapSchedule.enabled && d.mapSchedule.days.length === 0) return "Map: choose at least one day for the schedule.";
+    return {
+      reportWeek: d.reportWeek,
+      reportIncludeToday: d.reportIncludeToday,
+      mapSlideSeconds: mapSeconds,
+      map: { sendToTv: d.mapSendToTv, schedule: d.mapSchedule },
+      activities,
+    };
   }
 
   async function handleSave() {
@@ -181,6 +239,48 @@ export function DisplaySetupPage() {
   }
 
   const sentCount = draft?.activities.filter((a) => a.sendToTv).length ?? 0;
+  const hiddenSet = new Set(hiddenCards);
+  const hiddenStillSent = draft
+    ? (hiddenSet.has(MAP_CARD) && draft.mapSendToTv ? 1 : 0) +
+      draft.activities.filter((a) => hiddenSet.has(a.activityId) && a.sendToTv).length
+    : 0;
+  const hiddenCount = draft ? (hiddenSet.has(MAP_CARD) ? 1 : 0) + draft.activities.filter((a) => hiddenSet.has(a.activityId)).length : 0;
+
+  // Clock + Hide, the same on every card.
+  function cardTools(card: string, name: string, schedule: SlideSchedule) {
+    return (
+      <div className="display-setup-card-tools">
+        <button
+          type="button"
+          className={`display-setup-icon-button${schedule.enabled ? " scheduled" : ""}`}
+          aria-label={`Schedule for ${name}`}
+          title={schedule.enabled ? `Scheduled: ${summarizeSchedule(schedule)}` : "Always shown — click to schedule"}
+          onClick={() => setScheduleFor(card)}
+        >
+          <Clock size={16} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className="display-setup-hide-button"
+          aria-label={`Hide ${name}`}
+          aria-describedby="display-setup-hide-note"
+          onClick={() => saveHidden([...hiddenCards.filter((c) => c !== card), card])}
+        >
+          <EyeOff size={14} aria-hidden="true" />
+          Hide
+        </button>
+        <span className="display-setup-hide-hint">Page only — TV unaffected</span>
+      </div>
+    );
+  }
+
+  function scheduleLine(schedule: SlideSchedule) {
+    return (
+      <p className={`display-setup-schedule-line${schedule.enabled ? " scheduled" : ""}`}>
+        <Clock size={13} aria-hidden="true" /> {summarizeSchedule(schedule)}
+      </p>
+    );
+  }
 
   return (
     <div className="display-setup-page">
@@ -188,9 +288,9 @@ export function DisplaySetupPage() {
         <div>
           <h1>Display setup</h1>
           <p className="display-setup-subtitle">
-            Choose which activities this TV shows as employee speed rankings. The{" "}
-            <Link to="/display/map">map</Link> is always the first slide; with nothing sent to the TV, or no work in the
-            reporting period, the TV shows only the map.
+            Choose which slides this TV shows — the map and employee speed rankings per activity — and when. The{" "}
+            <Link to="/display/map">map</Link>'s phases, dates, rotation and land are set on Display → Map. With no slide
+            scheduled, the TV says so and resumes on its own when a schedule starts.
           </p>
         </div>
         <label className="greenhouse-office-field display-setup-display-select">
@@ -251,33 +351,67 @@ export function DisplaySetupPage() {
                 />
                 Include today
               </label>
-              <label className="display-setup-inline-field">
-                Map slide
-                <input
-                  type="number"
-                  min={5}
-                  max={600}
-                  value={draft.mapSlideSeconds}
-                  onChange={(e) => setDraft({ ...draft, mapSlideSeconds: e.target.value })}
-                />
-                s
-              </label>
             </div>
             {period && (
               <p className="display-setup-period">
                 {period.empty
-                  ? "No days yet this week without today — the TV shows only the map until tomorrow."
+                  ? "No days yet this week without today — no ranking slides until tomorrow."
                   : `Rankings cover ${formatDateLong(period.dateStart)}${period.dateStart === period.dateEnd ? "" : ` – ${formatDateLong(period.dateEnd)}`} (weeks start Monday, organization time zone).`}
               </p>
             )}
           </section>
 
           <section className="display-setup-section">
-            <h2>
-              Activities <span className="display-setup-count">{sentCount} sent to TV</span>
-            </h2>
+            <div className="display-setup-section-head">
+              <h2>
+                Slides <span className="display-setup-count">{sentCount} sent to TV</span>
+              </h2>
+              {hiddenCount > 0 && (
+                <div className="display-setup-hidden-bar">
+                  <span>
+                    {hiddenCount} hidden on this page
+                    {hiddenStillSent > 0 ? ` (${hiddenStillSent} still sent to TV)` : ""}
+                  </span>
+                  <button type="button" className="display-setup-unhide" onClick={() => saveHidden([])}>
+                    Unhide all
+                  </button>
+                </div>
+              )}
+            </div>
+            <p id="display-setup-hide-note" className="display-setup-hint">
+              Hide only tidies this page. A hidden card keeps its Send to TV setting and schedule, so the TV is unaffected.
+            </p>
+            {hideError && <p className="error-text">{hideError}</p>}
             <div className="display-setup-cards">
-              {draft.activities.map((a) => (
+              {!hiddenSet.has(MAP_CARD) && (
+                <div className={`display-setup-card display-setup-map-card${draft.mapSendToTv ? " sent" : ""}`}>
+                  <div className="display-setup-card-head">
+                    <h3>Map</h3>
+                    <label className="display-setup-checkbox display-setup-send">
+                      <input type="checkbox" checked={draft.mapSendToTv} onChange={(e) => setDraft({ ...draft, mapSendToTv: e.target.checked })} />
+                      Send to TV
+                    </label>
+                  </div>
+                  {cardTools(MAP_CARD, "Map", draft.mapSchedule)}
+                  {scheduleLine(draft.mapSchedule)}
+                  <p className="display-setup-unit">
+                    The live greenhouse map. Phases, dates, rotation and land are set on <Link to="/display/map">Display → Map</Link>.
+                  </p>
+                  <div className={`display-setup-card-fields${draft.mapSendToTv ? "" : " muted"}`}>
+                    <label>
+                      Slide duration (s)
+                      <input
+                        type="number"
+                        min={5}
+                        max={600}
+                        value={draft.mapSlideSeconds}
+                        onChange={(e) => setDraft({ ...draft, mapSlideSeconds: e.target.value })}
+                      />
+                    </label>
+                  </div>
+                </div>
+              )}
+              {draft.activities.filter((a) => !hiddenSet.has(a.activityId)).map((a) => (
                 <div key={a.activityId} className={`display-setup-card${a.sendToTv ? " sent" : ""}`}>
                   <div className="display-setup-card-head">
                     <h3>{a.name}</h3>
@@ -286,6 +420,8 @@ export function DisplaySetupPage() {
                       Send to TV
                     </label>
                   </div>
+                  {cardTools(a.activityId, a.name, a.schedule)}
+                  {scheduleLine(a.schedule)}
                   <p className="display-setup-unit">
                     {a.densitySource
                       ? `Speed: ${a.speedUnit ?? `${a.densitySource}/hour`}`
@@ -373,16 +509,127 @@ export function DisplaySetupPage() {
             </div>
           </section>
 
+          {scheduleFor && scheduleOf(scheduleFor) && (
+            <ScheduleDialog
+              name={scheduleFor === MAP_CARD ? "Map" : draft.activities.find((a) => a.activityId === scheduleFor)?.name ?? ""}
+              schedule={scheduleOf(scheduleFor)!}
+              timezone={timezone}
+              onChange={(next) => setScheduleOf(scheduleFor, next)}
+              onClose={() => setScheduleFor(null)}
+            />
+          )}
+
           <div className="display-setup-actions">
             <button type="button" className="employees-add-button" disabled={!isDirty || saving} onClick={handleSave}>
               <Save size={16} aria-hidden="true" />
               {saving ? "Saving..." : "Save TV settings"}
             </button>
             {saveError && <p className="error-text">{saveError}</p>}
-            {saveSuccess && <p className="success-text">Saved. The TV picks this up within a minute.</p>}
+            {saveSuccess && <p className="success-text">Saved. The TV picks this up within a minute — no refresh needed.</p>}
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+// The schedule for one card. Edits go into the page's draft and are saved
+// with "Save TV settings", like every other card setting.
+function ScheduleDialog({
+  name,
+  schedule,
+  timezone,
+  onChange,
+  onClose,
+}: {
+  name: string;
+  schedule: SlideSchedule;
+  timezone: string;
+  onChange: (next: SlideSchedule) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const toggleDay = (day: number) =>
+    onChange({
+      ...schedule,
+      days: schedule.days.includes(day) ? schedule.days.filter((d) => d !== day) : [...schedule.days, day].sort((a, b) => a - b),
+    });
+
+  return (
+    <div className="display-setup-dialog-backdrop" onClick={onClose}>
+      <div
+        className="display-setup-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Schedule for ${name}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3>Schedule — {name}</h3>
+        <div className="display-setup-segmented" role="radiogroup" aria-label="When to show this slide">
+          <label className={!schedule.enabled ? "selected" : ""}>
+            <input type="radio" name="schedule-mode" checked={!schedule.enabled} onChange={() => onChange({ ...schedule, enabled: false })} />
+            Always show
+          </label>
+          <label className={schedule.enabled ? "selected" : ""}>
+            <input type="radio" name="schedule-mode" checked={schedule.enabled} onChange={() => onChange({ ...schedule, enabled: true })} />
+            Use schedule
+          </label>
+        </div>
+        <fieldset className="display-setup-schedule-fields" disabled={!schedule.enabled}>
+          <legend>Days</legend>
+          <div className="display-setup-days">
+            {DAY_SHORT.map((label, i) => (
+              <label key={label} className={schedule.days.includes(i + 1) ? "selected" : ""}>
+                <input type="checkbox" checked={schedule.days.includes(i + 1)} onChange={() => toggleDay(i + 1)} />
+                {label}
+              </label>
+            ))}
+          </div>
+          <div className="display-setup-days-presets">
+            <button type="button" onClick={() => onChange({ ...schedule, days: [1, 2, 3, 4, 5] })}>
+              Mon–Fri
+            </button>
+            <button type="button" onClick={() => onChange({ ...schedule, days: [1, 2, 3, 4, 5, 6, 7] })}>
+              Every day
+            </button>
+          </div>
+          <div className="display-setup-times">
+            <label>
+              Start
+              <input type="time" value={schedule.start} onChange={(e) => e.target.value && onChange({ ...schedule, start: e.target.value })} />
+            </label>
+            <label>
+              End
+              <input type="time" value={schedule.end} onChange={(e) => e.target.value && onChange({ ...schedule, end: e.target.value })} />
+            </label>
+          </div>
+          {schedule.enabled && endsNextDay(schedule) && (
+            <p className="display-setup-hint">
+              {schedule.start === schedule.end
+                ? "Start and end are the same: the slide shows for 24 hours from the start on each chosen day."
+                : "Ends the next day: the slide shows from the start on each chosen day until the end time the following morning."}
+            </p>
+          )}
+          {schedule.enabled && schedule.days.length === 0 && <p className="error-text">Choose at least one day.</p>}
+        </fieldset>
+        <p className="display-setup-hint">
+          Times are in the organization's time zone{timezone ? ` (${timezone})` : ""}. The slide still needs Send to TV, and an
+          activity slide still needs work in the reporting period.
+        </p>
+        <p className="display-setup-schedule-summary">{summarizeSchedule(schedule)}</p>
+        <div className="display-setup-dialog-actions">
+          <button type="button" className="employees-add-button" onClick={onClose}>
+            Done
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

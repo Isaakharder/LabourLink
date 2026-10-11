@@ -3,7 +3,8 @@ import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { generateDisplayKey } from "../lib/displayToken";
-import { calendarDateInAppTimezone, inclusiveDayCount } from "../lib/timezone";
+import { APP_TIMEZONE, calendarDateInAppTimezone, inclusiveDayCount } from "../lib/timezone";
+import { parseSchedule, scheduleFromRow, SlideSchedule } from "../lib/displaySchedule";
 import { isMapDatePreset, isReportWeek, MapDatePreset, resolveMapPreset, resolveReportingPeriod } from "../lib/displayPeriods";
 import { DEFAULT_AT_TARGET_COLOR, DEFAULT_BELOW_TARGET_COLOR, normalizeHexColor } from "../lib/displaySlideColors";
 import { MAX_DATE_RANGE_DAYS } from "./greenhouseLive";
@@ -284,7 +285,10 @@ const MAX_SLIDE_SECONDS = 600;
 
 async function loadSlidesConfig(displayId: string) {
   const { rows: d } = await pool.query(
-    `select id, report_week, report_include_today, map_slide_seconds from greenhouse_displays where id = $1`,
+    `select id, report_week, report_include_today, map_slide_seconds,
+            map_send_to_tv, map_schedule_enabled, map_schedule_days, map_schedule_start::text, map_schedule_end::text,
+            setup_hidden_cards
+     from greenhouse_displays where id = $1`,
     [displayId]
   );
   if (!d[0]) return null;
@@ -294,7 +298,11 @@ async function loadSlidesConfig(displayId: string) {
             coalesce(s.minimum_activity_hours, 0) as minimum_activity_hours,
             s.top_n, coalesce(s.slide_seconds, 15) as slide_seconds,
             coalesce(s.at_target_color, $2) as at_target_color,
-            coalesce(s.below_target_color, $3) as below_target_color
+            coalesce(s.below_target_color, $3) as below_target_color,
+            coalesce(s.schedule_enabled, false) as schedule_enabled,
+            coalesce(s.schedule_days, '{1,2,3,4,5,6,7}') as schedule_days,
+            coalesce(s.schedule_start, '06:00')::text as schedule_start,
+            coalesce(s.schedule_end, '18:00')::text as schedule_end
      from activities a
      left join greenhouse_display_activity_slides s on s.activity_id = a.id and s.display_id = $1
      where a.is_active = true
@@ -306,6 +314,16 @@ async function loadSlidesConfig(displayId: string) {
     reportWeek: d[0].report_week,
     reportIncludeToday: d[0].report_include_today,
     mapSlideSeconds: d[0].map_slide_seconds,
+    // The map card (064_display_slide_schedules.sql). Its phases, dates,
+    // rotation and land stay on Display → Map.
+    map: {
+      sendToTv: d[0].map_send_to_tv as boolean,
+      schedule: scheduleFromRow(d[0].map_schedule_enabled, d[0].map_schedule_days, d[0].map_schedule_start, d[0].map_schedule_end),
+    },
+    // Cards hidden on this page only ('map' or an activity id).
+    hiddenCards: (d[0].setup_hidden_cards as string[]) ?? [],
+    // Schedules are in the organization's time zone.
+    timezone: APP_TIMEZONE,
     period: resolveReportingPeriod(d[0].report_week, d[0].report_include_today, today),
     activities: rows.map((r) => ({
       activityId: r.id,
@@ -320,6 +338,7 @@ async function loadSlidesConfig(displayId: string) {
       slideSeconds: r.slide_seconds,
       atTargetColor: r.at_target_color,
       belowTargetColor: r.below_target_color,
+      schedule: scheduleFromRow(r.schedule_enabled, r.schedule_days, r.schedule_start, r.schedule_end),
     })),
   };
 }
@@ -346,6 +365,7 @@ interface SlideSettingInput {
   slideSeconds?: unknown;
   atTargetColor?: unknown;
   belowTargetColor?: unknown;
+  schedule?: unknown;
 }
 
 function isFiniteNumber(v: unknown): v is number {
@@ -363,12 +383,22 @@ router.put(
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid display id" });
-    const { reportWeek, reportIncludeToday, mapSlideSeconds, activities } = req.body as {
+    const { reportWeek, reportIncludeToday, mapSlideSeconds, activities, map } = req.body as {
       reportWeek?: unknown;
       reportIncludeToday?: unknown;
       mapSlideSeconds?: unknown;
       activities?: SlideSettingInput[];
+      map?: { sendToTv?: unknown; schedule?: unknown };
     };
+    // The map card and schedules are optional in the request (a Setup page
+    // from before 064): absent means "leave as saved".
+    let mapSettings: { sendToTv: boolean; schedule: SlideSchedule } | null = null;
+    if (map !== undefined) {
+      if (!map || typeof map.sendToTv !== "boolean") return res.status(400).json({ error: "Map: Send to TV is required" });
+      const schedule = parseSchedule(map.schedule, "Map");
+      if (typeof schedule === "string") return res.status(400).json({ error: schedule });
+      mapSettings = { sendToTv: map.sendToTv, schedule };
+    }
     if (!isReportWeek(reportWeek)) return res.status(400).json({ error: "reportWeek must be this_week or last_week" });
     if (typeof reportIncludeToday !== "boolean") return res.status(400).json({ error: "reportIncludeToday is required" });
     if (!isWholeInRange(mapSlideSeconds, 5, MAX_SLIDE_SECONDS)) {
@@ -385,6 +415,7 @@ router.put(
       slideSeconds: number;
       atTargetColor: string;
       belowTargetColor: string;
+      schedule: SlideSchedule | null;
     }[] = [];
     for (const a of activities) {
       if (typeof a.activityId !== "string" || !UUID_RE.test(a.activityId)) return res.status(400).json({ error: "Invalid activityId" });
@@ -408,8 +439,15 @@ router.put(
       if (!atTargetColor || !belowTargetColor) {
         return res.status(400).json({ error: "Bar colours must be hex colours like #15803d" });
       }
+      let schedule: SlideSchedule | null = null;
+      if (a.schedule !== undefined) {
+        const parsed = parseSchedule(a.schedule, "Activity");
+        if (typeof parsed === "string") return res.status(400).json({ error: parsed });
+        schedule = parsed;
+      }
       settings.push({
         activityId: a.activityId,
+        schedule,
         atTargetColor,
         belowTargetColor,
         sendToTv: a.sendToTv,
@@ -434,6 +472,15 @@ router.put(
         await client.query("rollback");
         return res.status(404).json({ error: "Display not found" });
       }
+      if (mapSettings) {
+        await client.query(
+          `update greenhouse_displays
+           set map_send_to_tv = $1, map_schedule_enabled = $2, map_schedule_days = $3,
+               map_schedule_start = $4, map_schedule_end = $5
+           where id = $6`,
+          [mapSettings.sendToTv, mapSettings.schedule.enabled, mapSettings.schedule.days, mapSettings.schedule.start, mapSettings.schedule.end, id]
+        );
+      }
       const ids = [...new Set(settings.map((x) => x.activityId))];
       if (ids.length) {
         const known = await client.query(`select id from activities where id = any($1::uuid[])`, [ids]);
@@ -457,6 +504,14 @@ router.put(
           [id, x.activityId, x.sendToTv, x.targetOverride, x.minimumActivityHours, x.topN, x.slideSeconds, req.employee!.id,
            x.atTargetColor, x.belowTargetColor]
         );
+        if (x.schedule) {
+          await client.query(
+            `update greenhouse_display_activity_slides
+             set schedule_enabled = $3, schedule_days = $4, schedule_start = $5, schedule_end = $6
+             where display_id = $1 and activity_id = $2`,
+            [id, x.activityId, x.schedule.enabled, x.schedule.days, x.schedule.start, x.schedule.end]
+          );
+        }
       }
       await client.query("commit");
     } catch (err) {
@@ -466,6 +521,30 @@ router.put(
       client.release();
     }
     res.json(await loadSlidesConfig(id));
+  })
+);
+
+// Which Setup cards are hidden on this page ('map' or an activity id). Saved
+// on its own, at once, and only tidies the page: it never changes a card's
+// Send to TV setting or schedule, so it never changes what the TV shows.
+router.put(
+  "/:id/setup-hidden-cards",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid display id" });
+    const { hiddenCards } = req.body as { hiddenCards?: unknown };
+    if (!Array.isArray(hiddenCards) || !hiddenCards.every((c) => c === "map" || (typeof c === "string" && UUID_RE.test(c)))) {
+      return res.status(400).json({ error: "hiddenCards must list 'map' and/or activity ids" });
+    }
+    const cards = [...new Set(hiddenCards as string[])].slice(0, 500);
+    const { rows } = await pool.query(
+      "update greenhouse_displays set setup_hidden_cards = $1 where id = $2 returning setup_hidden_cards",
+      [cards, id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: "Display not found" });
+    res.json({ hiddenCards: rows[0].setup_hidden_cards });
   })
 );
 

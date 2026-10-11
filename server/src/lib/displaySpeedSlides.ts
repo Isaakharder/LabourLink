@@ -12,6 +12,7 @@ import { getActivityReportDataWithAttribution } from "./reportQueries";
 import { aggregateDensitySpeed } from "./densitySpeed";
 import { APP_TIMEZONE, getRangeBoundsUtc } from "./timezone";
 import { ReportWeek, resolveReportingPeriod } from "./displayPeriods";
+import { DEFAULT_SCHEDULE, nextScheduleBoundary, scheduleAllowsAt, scheduleFromRow, SlideSchedule } from "./displaySchedule";
 
 export interface SpeedRow {
   employeeId: string;
@@ -123,6 +124,12 @@ export interface DisplaySlidesPayload {
   timezone: string;
   period: { week: ReportWeek; includeToday: boolean; dateStart: string; dateEnd: string; empty: boolean };
   mapSlideSeconds: number;
+  // 064_display_slide_schedules.sql: the map is a slide only while it is
+  // sent to the TV and its schedule allows it.
+  mapEnabled: boolean;
+  // The next time any of this display's schedules starts or ends — the TV
+  // re-checks then. null when nothing is scheduled.
+  nextScheduleChangeAt: string | null;
   slides: ActivitySlide[];
 }
 
@@ -131,6 +138,8 @@ interface DisplayReportSettings {
   reportWeek: ReportWeek;
   reportIncludeToday: boolean;
   mapSlideSeconds: number;
+  mapSendToTv?: boolean;
+  mapSchedule?: SlideSchedule;
 }
 
 // Activities (of the given ids) with any work entry — finished or still
@@ -148,27 +157,39 @@ async function activitiesWithWork(activityIds: string[], dateStart: string, date
   return new Set(rows.map((r) => r.activity_id as string));
 }
 
-export async function buildDisplaySlides(display: DisplayReportSettings, today: string): Promise<DisplaySlidesPayload> {
+// `now` decides which schedules allow their slide (organization time zone).
+export async function buildDisplaySlides(display: DisplayReportSettings, today: string, now: Date = new Date()): Promise<DisplaySlidesPayload> {
   const period = resolveReportingPeriod(display.reportWeek, display.reportIncludeToday, today);
-  const base: DisplaySlidesPayload = {
-    generatedAt: new Date().toISOString(),
-    timezone: APP_TIMEZONE,
-    period: { week: display.reportWeek, includeToday: display.reportIncludeToday, ...period },
-    mapSlideSeconds: display.mapSlideSeconds,
-    slides: [],
-  };
-  if (period.empty) return base;
+  const mapSendToTv = display.mapSendToTv ?? true;
+  const mapSchedule = display.mapSchedule ?? DEFAULT_SCHEDULE;
 
-  const { rows: enabled } = await pool.query(
+  // Every activity sent to this TV, with its schedule. Only those whose
+  // schedule allows them now go on to the existing activity/data rules.
+  const { rows: sent } = await pool.query(
     `select a.id, a.name, a.speed_unit, a.density_source, a.normal_speed,
             s.target_override, s.minimum_activity_hours, s.top_n, s.slide_seconds,
-            s.at_target_color, s.below_target_color
+            s.at_target_color, s.below_target_color,
+            s.schedule_enabled, s.schedule_days, s.schedule_start::text, s.schedule_end::text
      from greenhouse_display_activity_slides s
      join activities a on a.id = s.activity_id and a.is_active = true
      where s.display_id = $1 and s.send_to_tv = true
      order by a.sort_order, lower(a.name)`,
     [display.id]
   );
+  const schedules = sent.map((r) => scheduleFromRow(r.schedule_enabled, r.schedule_days, r.schedule_start, r.schedule_end));
+  const next = nextScheduleBoundary(mapSendToTv ? [mapSchedule, ...schedules] : schedules, now);
+  const enabled = sent.filter((_, i) => scheduleAllowsAt(schedules[i], now));
+
+  const base: DisplaySlidesPayload = {
+    generatedAt: now.toISOString(),
+    timezone: APP_TIMEZONE,
+    period: { week: display.reportWeek, includeToday: display.reportIncludeToday, ...period },
+    mapSlideSeconds: display.mapSlideSeconds,
+    mapEnabled: mapSendToTv && scheduleAllowsAt(mapSchedule, now),
+    nextScheduleChangeAt: next ? next.toISOString() : null,
+    slides: [],
+  };
+  if (period.empty) return base;
   if (enabled.length === 0) return base;
 
   const withWork = await activitiesWithWork(

@@ -214,14 +214,22 @@ router.get(
 
 // TV slideshow (059_display_slideshow.sql) — the ranking slides for this
 // display, same display-key auth as /state above. Polled on its own,
-// slower timer; an empty `slides` list means the TV shows only the map.
+// slower timer. `mapEnabled` says whether the map is a slide right now; with
+// no slides and the map off, the TV says nothing is scheduled.
 router.get(
   "/display/:displayKey/slides",
   asyncHandler(requireDisplayKey),
   asyncHandler(async (req, res) => {
     const d = req.display!;
     const payload = await buildDisplaySlides(
-      { id: d.id, reportWeek: d.reportWeek, reportIncludeToday: d.reportIncludeToday, mapSlideSeconds: d.mapSlideSeconds },
+      {
+        id: d.id,
+        reportWeek: d.reportWeek,
+        reportIncludeToday: d.reportIncludeToday,
+        mapSlideSeconds: d.mapSlideSeconds,
+        mapSendToTv: d.mapSendToTv,
+        mapSchedule: d.mapSchedule,
+      },
       calendarDateInAppTimezone(new Date())
     );
     res.json(payload);
