@@ -8698,3 +8698,233 @@ input {
   padding: 0.15rem;
   cursor: pointer;
 }
+
+/* ---------- Display > Setup: hide cards, map card, slide schedules ---------- */
+
+.display-setup-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+}
+
+.display-setup-hidden-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.display-setup-unhide {
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 0.25rem 0.65rem;
+  cursor: pointer;
+}
+
+.display-setup-card-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+}
+
+.display-setup-icon-button,
+.display-setup-hide-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--color-muted);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 0.2rem 0.45rem;
+  cursor: pointer;
+}
+
+/* A scheduled card's clock stands out from "Always shown". */
+.display-setup-icon-button.scheduled {
+  color: #ffffff;
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.display-setup-hide-hint {
+  font-size: 0.72rem;
+  color: var(--color-muted);
+}
+
+.display-setup-schedule-line {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin: 0.4rem 0 0;
+  font-size: 0.78rem;
+  color: var(--color-muted);
+}
+
+.display-setup-schedule-line.scheduled {
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.display-setup-map-card {
+  grid-column: 1 / -1;
+}
+
+.display-setup-map-card .display-setup-card-fields {
+  grid-template-columns: minmax(0, 200px);
+}
+
+.display-setup-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.display-setup-dialog {
+  width: min(460px, 100%);
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  background: var(--color-surface);
+  border-radius: 12px;
+  padding: 1.1rem 1.25rem;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.2);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.display-setup-dialog h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.display-setup-schedule-fields {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.display-setup-schedule-fields:disabled {
+  opacity: 0.5;
+}
+
+.display-setup-schedule-fields legend {
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+.display-setup-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.display-setup-days label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.7rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.display-setup-days label.selected {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #ffffff;
+}
+
+.display-setup-days input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.display-setup-days label:has(input:focus-visible) {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.display-setup-days-presets {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.display-setup-days-presets button {
+  font: inherit;
+  font-size: 0.75rem;
+  color: var(--color-primary);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.display-setup-times {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.display-setup-times label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+  color: var(--color-muted);
+}
+
+.display-setup-times input {
+  font: inherit;
+  font-size: 0.9rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+
+.display-setup-schedule-summary {
+  margin: 0;
+  font-weight: 600;
+}
+
+.display-setup-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* TV: nothing allowed by any schedule right now. Covers the map, which
+   stays mounted underneath so it resumes without re-fitting. */
+.tv-nothing-scheduled {
+  align-items: center;
+  justify-content: center;
+}
+
+.tv-nothing-scheduled p {
+  margin: 0;
+  font-size: 3rem;
+  font-weight: 800;
+  color: var(--color-muted);
+}

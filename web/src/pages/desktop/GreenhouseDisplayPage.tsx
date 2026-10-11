@@ -4,7 +4,7 @@ import { TvRankingSlide } from "../../components/greenhouseLive/TvRankingSlide";
 import { graphSpeedUnit } from "../../lib/speedUnitDisplay";
 import { api } from "../../lib/api";
 import { CanvasTransform, computeFitTransformToPhases } from "../../lib/canvasTransform";
-import { buildSlideSequence, formatAge, indexAfterUpdate, isStale, SlideItem } from "../../lib/displaySlideshow";
+import { buildSlideSequence, formatAge, indexAfterUpdate, isStale, msUntilScheduleCheck, SlideItem } from "../../lib/displaySlideshow";
 import { ActivitySlide, DisplaySlidesResponse, GreenhouseDisplayStateResponse } from "../../lib/greenhouseLiveTypes";
 import { formatDateLong, formatTimeInAppTimezone } from "../../lib/timezone";
 
@@ -24,8 +24,10 @@ function isNotFound(err: unknown): boolean {
 // what the office has published (display-key auth, see
 // server/src/middleware/displayAuth.ts). A slideshow: the map, plus one
 // employee speed-ranking slide per activity sent to this TV that has work
-// in the reporting period (GET .../slides). Never blanks on a failed poll —
-// the last good data stays on screen, labelled with its age.
+// in the reporting period (GET .../slides) — each only while its Display →
+// Setup schedule allows it. With nothing scheduled it says so, and it
+// re-checks the moment a schedule starts or ends. Never blanks on a failed
+// poll — the last good data stays on screen, labelled with its age.
 export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps) {
   const [data, setData] = useState<GreenhouseDisplayStateResponse | null>(null);
   const [mapLastOk, setMapLastOk] = useState<number | null>(null);
@@ -98,9 +100,19 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
     };
   }, [loadMap, loadSlides]);
 
+  // Re-check exactly when a schedule starts or ends, not only on the next
+  // regular poll.
+  useEffect(() => {
+    const wait = msUntilScheduleCheck(slidesData?.nextScheduleChangeAt, Date.now(), SLIDES_POLL_MS);
+    if (wait == null) return;
+    const timer = window.setTimeout(loadSlides, wait);
+    return () => window.clearTimeout(timer);
+  }, [slidesData, loadSlides]);
+
   // --- Slide rotation -------------------------------------------------------
+  // Until the first slides response arrives the map shows, as before.
   const sequence = useMemo(
-    () => buildSlideSequence(slidesData?.slides, slidesData?.mapSlideSeconds ?? DEFAULT_MAP_SECONDS),
+    () => buildSlideSequence(slidesData?.slides, slidesData?.mapSlideSeconds ?? DEFAULT_MAP_SECONDS, slidesData?.mapEnabled ?? true),
     [slidesData]
   );
   const [index, setIndex] = useState(0);
@@ -108,10 +120,10 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
   useEffect(() => {
     setIndex(indexAfterUpdate(currentRef.current, sequence));
   }, [sequence]);
-  const current = sequence[Math.min(index, sequence.length - 1)];
+  const current: SlideItem | undefined = sequence[Math.min(index, sequence.length - 1)];
   currentRef.current = current;
   useEffect(() => {
-    if (sequence.length <= 1) return; // map only: no rotation
+    if (!current || sequence.length <= 1) return; // one slide (or none): no rotation
     const timer = window.setTimeout(() => setIndex((i) => (i + 1) % sequence.length), current.seconds * 1000);
     return () => window.clearTimeout(timer);
   }, [current, sequence.length]);
@@ -145,6 +157,7 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
   const mapStale = mapFailing || isStale(mapLastOk, now, MAP_POLL_MS);
   const slidesStale = slidesFailing && slidesLastOk !== null;
   const onActivity = current?.kind === "activity";
+  const nothingScheduled = sequence.length === 0;
 
   return (
     <div className="greenhouse-tv-page">
@@ -181,7 +194,7 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
                 <p className="tv-header-footnotes">{slideFootnotes(current.slide)}</p>
               )}
             </>
-          ) : (
+          ) : nothingScheduled ? null : (
             data && (
               <>
                 <p className="greenhouse-tv-activity">{data.activityName ?? "All activities"}</p>
@@ -191,7 +204,7 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
           )}
         </div>
         <div className="greenhouse-tv-status">
-          {onActivity ? (
+          {onActivity || nothingScheduled ? (
             slidesStale ? (
               <span className="status-pill greenhouse-tv-stale-badge">
                 Reconnecting… Rankings from {formatTimeInAppTimezone(new Date(slidesLastOk!).toISOString())} (
@@ -239,9 +252,14 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
         ) : (
           <p className="placeholder-page greenhouse-tv-loading">{mapFailing ? "Map unavailable — retrying…" : "Loading…"}</p>
         )}
-        {onActivity && (
+        {current?.kind === "activity" && (
           <div className="tv-slide-overlay">
             <TvRankingSlide item={current} />
+          </div>
+        )}
+        {nothingScheduled && (
+          <div className="tv-slide-overlay tv-nothing-scheduled" role="status">
+            <p>No slides scheduled right now</p>
           </div>
         )}
       </div>
@@ -249,7 +267,7 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
       {/* Work-status legend only. The TV deliberately has no block-name /
           assigned-employee legend (or labels): blocks are shown by their
           outlines, and who is working where by the live bubbles. */}
-      {!onActivity && (
+      {current?.kind === "map" && (
         <div className="greenhouse-tv-legend">
           <span>
             <span className="greenhouse-live-legend-swatch greenhouse-live-row-blue" /> Currently working
