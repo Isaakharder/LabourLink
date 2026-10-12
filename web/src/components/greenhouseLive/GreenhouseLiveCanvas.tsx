@@ -4,7 +4,7 @@ import { LiveBlockSummary, LivePhase, LiveRow } from "../../lib/greenhouseLiveTy
 import { CanvasTransform, RotationDegrees, clampPan, zoomAtPoint } from "../../lib/canvasTransform";
 import { rowScreenRect } from "../../lib/rowLayout";
 import { formatTimeInAppTimezone } from "../../lib/timezone";
-import { EmployeeLocationBubbles } from "./EmployeeLocationBubbles";
+import { EmployeeLocationCards, computeEmployeeCards } from "./EmployeeLocationCards";
 import { computeBlockClusters } from "../../lib/blockClusters";
 
 interface GreenhouseLiveCanvasProps {
@@ -118,6 +118,9 @@ export function GreenhouseLiveCanvas({
   blocks,
 }: GreenhouseLiveCanvasProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
+  // The map area's own size (the same measurement the page fits the map
+  // to), used to place employee cards level with their rows.
+  const [mapSize, setMapSize] = useState({ width: 0, height: 0 });
   const svgRef = useRef<SVGSVGElement>(null);
   const gRef = useRef<SVGGElement>(null);
   const panRef = useRef<{
@@ -138,7 +141,9 @@ export function GreenhouseLiveCanvas({
     const el = viewportRef.current;
     if (!el) return;
     function report() {
-      onViewportSize({ width: el!.clientWidth, height: el!.clientHeight });
+      const size = { width: el!.clientWidth, height: el!.clientHeight };
+      setMapSize(size);
+      onViewportSize(size);
     }
     report();
     const observer = new ResizeObserver(report);
@@ -227,18 +232,12 @@ export function GreenhouseLiveCanvas({
   // EmployeeBlockFormModal.tsx/PlantDensityFormModal.tsx).
   const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
   // Block outlines only make sense outside row-selection mode, same
-  // reasoning as showEmployeeBubbles below. One per (block, phase), only for
+  // reasoning as showEmployeeCards below. One per (block, phase), only for
   // blocks this map knows about. Blocks get no floating name label — the
   // outline (and the legend below the map) is the whole block display.
   const showBlockOutlines = !selectable && (blocks ?? []).length > 0;
   const blockOutlines = showBlockOutlines ? computeBlockClusters(visiblePhases).filter((c) => blockById.has(c.blockId)) : [];
   const BLOCK_OUTLINE_PAD_FT = 1;
-  // Employee location bubbles only make sense outside row-selection mode —
-  // Employee Blocks' and Plant Density's Link Rows steps pass onRowClick
-  // with placeholder land/employees data that has no real live work status
-  // to show (see their buildSelectionLand() comments), so bubbles must never
-  // render there.
-  const showEmployeeBubbles = !onRowClick;
   // Rotation pivots around the land's own center, in world feet — the same
   // center computeFitTransform's rotation-aware scale calculation assumes.
   const rotateCx = land.eastWestFeet / 2;
@@ -265,7 +264,15 @@ export function GreenhouseLiveCanvas({
     onRowClick!(row, { shiftKey, rangeRows });
   }
 
-  return (
+  // Employee cards only make sense outside row-selection mode — Employee
+  // Blocks' and Plant Density's Link Rows steps pass onRowClick with
+  // placeholder land/employees data that has no real live work status to
+  // show (see their buildSelectionLand() comments), so those canvases are
+  // the bare map with no card columns.
+  const showEmployeeCards = !onRowClick;
+  const cards = showEmployeeCards ? computeEmployeeCards(visiblePhases, land, transform, rotationDegrees, mapSize) : [];
+
+  const map = (
     <div
       ref={viewportRef}
       className={`greenhouse-canvas-viewport${isPanning ? " greenhouse-canvas-viewport-panning" : ""}`}
@@ -368,14 +375,7 @@ export function GreenhouseLiveCanvas({
         </g>
       </svg>
 
-      {showEmployeeBubbles && (
-        <EmployeeLocationBubbles
-          phases={visiblePhases}
-          land={land}
-          transform={transform}
-          rotationDegrees={rotationDegrees}
-        />
-      )}
+      {showEmployeeCards && <EmployeeLocationCards cards={cards} />}
 
       {/* Compass/North indicator — the needle rotates with the map (same
           degrees, same clockwise direction) so it keeps pointing at true
@@ -391,6 +391,21 @@ export function GreenhouseLiveCanvas({
         />
         <span className="greenhouse-compass-label">N</span>
       </div>
+    </div>
+  );
+
+  if (!showEmployeeCards) return map;
+
+  // Cards sit in the free space around the drawing, never on it: above or
+  // below it when the map leaves room, and always beside it, where a column
+  // is reserved on each side (the map and its fit use only the space between
+  // them). The columns always take their space, whether or not anyone is
+  // working, so the map never resizes on a live update.
+  return (
+    <div className="greenhouse-live-stage">
+      <div className="greenhouse-card-column" />
+      {map}
+      <div className="greenhouse-card-column" />
     </div>
   );
 }
