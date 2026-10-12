@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { api, ApiError } from "../../lib/api";
-import { formatDateLong, formatTimeInAppTimezone } from "../../lib/timezone";
+import { formatDateLongInAppTimezone, formatTimeInAppTimezone } from "../../lib/timezone";
 
 interface SyncConflict {
   id: string;
@@ -141,10 +141,10 @@ export function SyncConflictsPage() {
                   <td>{c.deviceName ?? "—"}</td>
                   <td>{EVENT_TYPE_LABELS[c.eventType] ?? c.eventType}</td>
                   <td>
-                    {formatDateLong(c.occurredAtUtc)} {formatTimeInAppTimezone(c.occurredAtUtc)}
+                    {formatDateLongInAppTimezone(c.occurredAtUtc)} {formatTimeInAppTimezone(c.occurredAtUtc)}
                   </td>
                   <td>{c.conflictReason ?? "—"}</td>
-                  <td title={c.clientEventId}>{c.clientEventId.slice(0, 8)}</td>
+                  <td title={c.clientEventId}>{c.clientEventId?.slice(0, 8) ?? "—"}</td>
                   <td>
                     {c.resolvedAt ? (
                       <div>

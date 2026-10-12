@@ -3,7 +3,7 @@
 // an empty string, garbage text, a non-finite number) must degrade to a
 // safe, labeled fallback — never throw during render.
 import { describe, expect, it, vi } from "vitest";
-import { combineDateAndTimeToUtcIso, formatDurationHMS, formatTimeInAppTimezone, toTimeInputValue } from "./timezone";
+import { combineDateAndTimeToUtcIso, formatDateLong, formatDateLongInAppTimezone, formatDurationHMS, formatTimeInAppTimezone, toTimeInputValue } from "./timezone";
 
 describe("combineDateAndTimeToUtcIso", () => {
   // <input type="time"> always emits 24-hour "HH:MM:SS" regardless of the
@@ -72,5 +72,23 @@ describe("formatDurationHMS", () => {
 
   it("clamps a negative finite duration to zero (unchanged prior behavior)", () => {
     expect(formatDurationHMS(-5)).toBe("0:00:00");
+  });
+});
+
+describe("formatDateLongInAppTimezone / formatDateLong input safety", () => {
+  it("shows the calendar date an instant falls on in the app time zone", () => {
+    expect(formatDateLongInAppTimezone("2026-10-12T16:54:15.605Z")).toBe("Monday, October 12, 2026");
+    // 00:30 UTC Oct 9 is still the evening of Oct 8 in Toronto.
+    expect(formatDateLongInAppTimezone("2026-10-09T00:30:00.000Z")).toBe("Thursday, October 8, 2026");
+  });
+
+  it("returns a safe fallback instead of throwing on bad input", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(formatDateLongInAppTimezone("null")).toBe("Unknown date");
+    // formatDateLong takes a calendar date only; a timestamp used to throw
+    // "Invalid time value" and blank the page.
+    expect(formatDateLong("2026-10-12T16:54:15.605Z")).toBe("Unknown date");
+    expect(formatDateLong("2026-10-12")).toBe("Monday, October 12, 2026");
+    spy.mockRestore();
   });
 });
