@@ -94,7 +94,7 @@ interface PhaseBounds {
 // Same clockwise rotation the SVG `rotate(deg, cx, cy)` transform applies
 // to the phases/rows group (see GreenhouseLiveCanvas) — used here to find
 // where a phase's corners land in screen-facing space, and by
-// EmployeeLocationBubbles to place a bubble's anchor point, never to move
+// EmployeeLocationCards to find the row point a card connects to, never to move
 // any stored coordinate.
 export function rotatePoint(x: number, y: number, cx: number, cy: number, rotationDegrees: RotationDegrees) {
   switch (rotationDegrees) {
@@ -107,6 +107,35 @@ export function rotatePoint(x: number, y: number, cx: number, cy: number, rotati
     default:
       return { x, y };
   }
+}
+
+// The phases' combined bounding box, in world feet, as drawn: rotated with
+// the map (the same rotatePoint the SVG rotation matches). Screen px are
+// pan + feet * scale. Used to fit the map and to find the free space around
+// the drawing for the live map's employee cards.
+export function phasesBounds(land: LandSize, phases: PhaseBounds[], rotationDegrees: RotationDegrees = 0) {
+  const cx = land.eastWestFeet / 2;
+  const cy = land.northSouthFeet / 2;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const p of phases) {
+    const corners: [number, number][] = [
+      [p.xFeetFromWest, p.yFeetFromNorth],
+      [p.xFeetFromWest + p.eastWestFeet, p.yFeetFromNorth],
+      [p.xFeetFromWest, p.yFeetFromNorth + p.northSouthFeet],
+      [p.xFeetFromWest + p.eastWestFeet, p.yFeetFromNorth + p.northSouthFeet],
+    ];
+    for (const [x, y] of corners) {
+      const r = rotatePoint(x, y, cx, cy, rotationDegrees);
+      minX = Math.min(minX, r.x);
+      minY = Math.min(minY, r.y);
+      maxX = Math.max(maxX, r.x);
+      maxY = Math.max(maxY, r.y);
+    }
+  }
+  return { minX, minY, maxX, maxY };
 }
 
 // Same idea as computeFitTransform, but fits tightly to the phases'
@@ -128,28 +157,7 @@ export function computeFitTransformToPhases(
     return computeFitTransform(land, viewportWidth, viewportHeight, rotationDegrees, marginPx);
   }
 
-  const cx = land.eastWestFeet / 2;
-  const cy = land.northSouthFeet / 2;
-
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const p of phases) {
-    const corners: [number, number][] = [
-      [p.xFeetFromWest, p.yFeetFromNorth],
-      [p.xFeetFromWest + p.eastWestFeet, p.yFeetFromNorth],
-      [p.xFeetFromWest, p.yFeetFromNorth + p.northSouthFeet],
-      [p.xFeetFromWest + p.eastWestFeet, p.yFeetFromNorth + p.northSouthFeet],
-    ];
-    for (const [x, y] of corners) {
-      const r = rotatePoint(x, y, cx, cy, rotationDegrees);
-      minX = Math.min(minX, r.x);
-      minY = Math.min(minY, r.y);
-      maxX = Math.max(maxX, r.x);
-      maxY = Math.max(maxY, r.y);
-    }
-  }
+  const { minX, minY, maxX, maxY } = phasesBounds(land, phases, rotationDegrees);
 
   const boundsWidth = Math.max(1, maxX - minX);
   const boundsHeight = Math.max(1, maxY - minY);

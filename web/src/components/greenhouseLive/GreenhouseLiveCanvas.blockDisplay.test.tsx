@@ -4,8 +4,8 @@
 // legend): rows are coloured only by work state — idle rows are the same
 // uniform "no activity" style whichever Employee Block they belong to — and
 // each block is shown only by a dashed outline per phase: no floating
-// "Block — Employee" label and no recoloured rows. Live employee location
-// bubbles still show who is working where.
+// "Block — Employee" label and no recoloured rows. Live employee cards,
+// around the drawing (never on it), still show who is working where.
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -89,9 +89,82 @@ describe("Display → Map block display", () => {
     expect(visible.textContent).not.toMatch(/Mia Cruz|Larry B|Unassigned/);
   });
 
-  it("still shows the live employee location bubble for whoever is working", () => {
+  it("shows each working employee as a card in the card layer, with reserved columns beside the map", () => {
     const { container } = renderCanvas();
-    expect(container.textContent).toMatch(/Khen/);
+    const stage = container.querySelector(".greenhouse-live-stage")!;
+    expect(stage).not.toBeNull();
+    // Map area flanked by the two dedicated card columns.
+    expect([...stage.children].map((el) => el.className)).toEqual(["greenhouse-card-column", "greenhouse-canvas-viewport", "greenhouse-card-column"]);
+    const cards = [...container.querySelectorAll(".employee-card")];
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toHaveTextContent("Khen");
+    expect(cards[0]).toHaveTextContent("Row 201");
+    // An HTML overlay, not part of the map drawing (SVG).
+    expect(cards[0].closest(".employee-card-layer")).not.toBeNull();
+    expect(cards[0].closest("svg")).toBeNull();
+    // Connectors are drawn only to rows in view; jsdom measures the map as 0x0.
+    expect(container.querySelectorAll(".employee-card-connector")).toHaveLength(0);
+  });
+
+  it("gives every person on the same row their own card", () => {
+    const busy = phases.map((p) =>
+      p.id !== "p2"
+        ? p
+        : {
+            ...p,
+            rows: p.rows.map((r) =>
+              r.rowNumber !== 201
+                ? r
+                : {
+                    ...r,
+                    employees: ["Khen", "Ana", "Bo"].map((firstName, i) => ({ id: `e${i}`, firstName, lastName: "X", activityName: "Picking" })),
+                  }
+            ),
+          }
+    );
+    const busyLand = { ...land, phases: busy };
+    const { container } = render(
+      <GreenhouseLiveCanvas
+        land={busyLand}
+        phases={busy}
+        phaseFilterId={null}
+        transform={{ pan: { x: 0, y: 0 }, scale: 4 }}
+        onTransformChange={() => {}}
+        onViewportSize={() => {}}
+        minScale={0.1}
+        maxScale={20}
+        rotationDegrees={0}
+      />
+    );
+    const cards = [...container.querySelectorAll<HTMLElement>(".employee-card")];
+    expect(cards.map((c) => c.querySelector(".employee-card-name")!.textContent)).toEqual(["Khen", "Ana", "Bo"]);
+    const tops = cards.filter((c) => c.classList.contains("employee-card-left")).map((c) => parseFloat(c.style.top));
+    const tops2 = cards.filter((c) => c.classList.contains("employee-card-right")).map((c) => parseFloat(c.style.top));
+    expect(tops.length + tops2.length).toBe(3);
+    for (const col of [tops, tops2]) {
+      const sorted = [...col].sort((a, b) => a - b);
+      for (let i = 1; i < sorted.length; i++) expect(sorted[i] - sorted[i - 1]).toBeGreaterThanOrEqual(54 + 8);
+    }
+  });
+
+  it("selection-mode canvases have no card columns or cards", () => {
+    const { container } = render(
+      <GreenhouseLiveCanvas
+        land={land}
+        phases={phases}
+        phaseFilterId={null}
+        transform={{ pan: { x: 0, y: 0 }, scale: 4 }}
+        onTransformChange={() => {}}
+        onViewportSize={() => {}}
+        minScale={0.1}
+        maxScale={20}
+        onRowClick={() => {}}
+        selectedRowIds={new Set()}
+      />
+    );
+    expect(container.querySelector(".greenhouse-live-stage")).toBeNull();
+    expect(container.querySelector(".greenhouse-card-column")).toBeNull();
+    expect(container.querySelector(".employee-card")).toBeNull();
   });
 
   it("outlines follow the phase selection and rotation", () => {

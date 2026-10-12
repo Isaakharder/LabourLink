@@ -4192,67 +4192,119 @@ input {
   line-height: 1;
 }
 
-/* Employee location bubbles — a plain HTML overlay (not part of the SVG's
-   pan/zoom transform stack), same technique as the compass above: each
-   bubble's left/top is computed in screen px from the live row geometry
-   (see EmployeeLocationBubbles.tsx) and re-set on every pan/zoom/poll, but
-   the bubble's own size never scales with the map, so it stays readable at
-   any zoom level. */
-.greenhouse-bubble-layer {
+/* Live map stage: a reserved card column either side of the map. Employee
+   cards go in the free space around the greenhouse drawing — these columns,
+   or above/below the drawing when the map leaves room — never on it (see
+   employeeCardLayout.ts). The columns always take their space (whether or
+   not anyone is working) so the map never resizes on a live update; the map
+   is fitted into the space between them. The card layer lives in the map
+   area's coordinates and overflows into the columns, so the map area itself
+   doesn't clip (its SVG still clips the drawing). */
+.greenhouse-live-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  overflow: hidden;
+  background: #eef1f4;
+}
+
+.greenhouse-tv-canvas-wrapper .greenhouse-live-stage {
+  background: #f8fafc;
+}
+
+.greenhouse-live-stage > .greenhouse-canvas-viewport {
+  min-width: 0;
+  overflow: visible;
+  z-index: 1;
+}
+
+/* = CARD_COLUMN_PX in EmployeeLocationCards.tsx */
+.greenhouse-card-column {
+  flex: 0 0 168px;
+}
+
+.employee-card-layer {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  overflow: hidden;
   z-index: 2;
 }
 
-.employee-bubble-pointer {
+.employee-card-connectors {
   position: absolute;
-  width: 2px;
-  background: var(--color-primary);
-  transform-origin: top center;
-  pointer-events: none;
-}
-
-.employee-bubble {
-  position: absolute;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  pointer-events: none;
-}
-
-.employee-bubble-photo .avatar {
-  border: 2px solid #fff;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
-}
-
-.employee-bubble-band {
+  inset: 0;
   width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.employee-card-connector-halo {
+  stroke: #fff;
+  stroke-width: 5;
+  stroke-linecap: round;
+  opacity: 0.85;
+}
+
+.employee-card-connector-line {
+  stroke: var(--color-primary);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.employee-card-connector-dot {
+  fill: var(--color-primary);
+  stroke: #fff;
+  stroke-width: 1.5;
+}
+
+/* Sizes are multiplied by --card-scale (1 = full size), which the layout
+   lowers for every card at once only when there's no room otherwise. */
+.employee-card {
+  --s: var(--card-scale, 1);
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: calc(6px * var(--s));
+  padding: calc(4px * var(--s)) calc(8px * var(--s)) calc(4px * var(--s)) calc(5px * var(--s));
   background: var(--color-primary);
   color: #fff;
-  border-radius: 0 0 8px 8px;
-  padding: 3px 4px 4px;
+  border-radius: calc(8px * var(--s));
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+.employee-card .avatar {
+  flex: 0 0 auto;
+  width: calc(36px * var(--s));
+  height: calc(36px * var(--s));
+  border: calc(2px * var(--s)) solid #fff;
+}
+
+.employee-card .avatar-initials {
+  font-size: calc(0.8rem * var(--s));
+}
+
+.employee-card-text {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  line-height: 1.2;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  min-width: 0;
+  line-height: 1.15;
 }
 
-.employee-bubble-name {
-  font-size: 0.72rem;
+/* Never cut off: a long name wraps (up to two lines fit the card). */
+.employee-card-name {
+  font-size: calc(0.8rem * var(--s));
   font-weight: 700;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
-.employee-bubble-row {
-  font-size: 0.62rem;
+.employee-card-row {
+  font-size: calc(0.7rem * var(--s));
   font-weight: 500;
-  opacity: 0.9;
+  opacity: 0.92;
   white-space: nowrap;
 }
 
@@ -5957,7 +6009,7 @@ input {
    is untouched — same component, deliberately different contrast for a
    different viewing distance/environment.
    Status colors (.greenhouse-live-row-blue/-green) and the employee
-   bubbles (.employee-bubble*, a separate overlay entirely) are not
+   cards (.employee-card*, a separate overlay entirely) are not
    touched — they were already the most saturated things on the map and
    stay that way; only the neutral floor/idle-row/outside-area grays move
    further apart from each other and from blue/green. */

@@ -266,7 +266,7 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
 
       {/* Work-status legend only. The TV deliberately has no block-name /
           assigned-employee legend (or labels): blocks are shown by their
-          outlines, and who is working where by the live bubbles. */}
+          outlines, and who is working where by the live employee cards. */}
       {current?.kind === "map" && (
         <div className="greenhouse-tv-legend">
           <span>
