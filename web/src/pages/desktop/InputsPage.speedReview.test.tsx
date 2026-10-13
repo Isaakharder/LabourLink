@@ -204,6 +204,9 @@ describe("InputsPage bulk speed review buttons", () => {
     );
     expect(await within(reviewSpeeds).findByLabelText("0 pending speed reviews for this employee")).toBeInTheDocument();
     expect(within(screen.getByRole("button", { name: /Review all employees/ })).getByLabelText("1 pending speed reviews for all employees")).toBeInTheDocument();
+    // Everything saved: the pop-up closed itself and the page confirms it.
+    expect(screen.queryByRole("dialog", { name: /Review speeds — Khen/ })).not.toBeInTheDocument();
+    expect(screen.getByText("Speed review saved — 3 rows updated.")).toBeInTheDocument();
   });
 
   it("a Manager sees the review buttons (read-only review)", async () => {
