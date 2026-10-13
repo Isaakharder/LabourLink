@@ -1178,14 +1178,14 @@ export function InputsPage() {
           }
           canApply={canApplySpeedReview}
           onClose={() => setReviewModal(null)}
-          onApplied={() => {
+          onApplied={(savedCount) => {
             // Same refresh flow as the individual review's Combine
             // (onRowCompletionChanged): speeds and badges for the selected
             // employee, sidebar totals and review counts. A foreground
             // reload keeps the current employee, date and scroll position.
             loadDaily();
             loadEmployees();
-            setSuccessMessage("Speed review saved.");
+            setSuccessMessage(`Speed review saved — ${savedCount} row${savedCount === 1 ? "" : "s"} updated.`);
           }}
         />
       )}

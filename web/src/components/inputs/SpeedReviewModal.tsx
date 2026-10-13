@@ -36,9 +36,12 @@ interface SpeedReviewModalProps {
   // Administrator-only); a Manager can still open and read the review.
   canApply: boolean;
   onClose: () => void;
-  // Called after Apply saved at least one group, so the page can refresh
-  // speeds, badges and totals through its normal reload flow.
-  onApplied: () => void;
+  // Called after Apply saved at least one group (with how many), so the page
+  // can refresh speeds, badges and totals through its normal reload flow.
+  // When the server confirms every selected group saved, onClose follows
+  // straight away: the modal closes itself and the page's own success
+  // message is the confirmation.
+  onApplied: (savedCount: number) => void;
 }
 
 type BulkChoice = SpeedReviewChoice | "suggested";
@@ -180,10 +183,16 @@ export function SpeedReviewModal({ date, employeeId, employeeName, canApply, onC
     );
   }
 
-  function showSaved(res: BulkReviewResponse) {
+  // `confirmed`: the server itself answered. Only then, and only when every
+  // group saved, does the modal close on its own; anything else (a group not
+  // saved, or an outcome worked out after a lost answer) stays open so the
+  // per-group results and messages can be read.
+  function showSaved(res: BulkReviewResponse, confirmed: boolean) {
     setResults(new Map(res.results.map((r) => [r.groupId, r])));
     setGroupErrors(new Map());
-    if (res.results.some((r) => r.ok)) onApplied();
+    const savedCount = res.results.filter((r) => r.ok).length;
+    if (savedCount > 0) onApplied(savedCount);
+    if (confirmed && savedCount > 0 && savedCount === res.results.length) onClose();
   }
 
   // The server is all-or-nothing, but when its answer never arrives
@@ -198,7 +207,7 @@ export function SpeedReviewModal({ date, employeeId, employeeName, canApply, onC
       const stillPending = new Set(fresh.groups.map((g) => g.id));
       const pending = submittedIds.filter((id) => stillPending.has(id));
       if (pending.length === 0) {
-        showSaved({ saved: true, results: submittedIds.map((groupId) => ({ groupId, ok: true })) });
+        showSaved({ saved: true, results: submittedIds.map((groupId) => ({ groupId, ok: true })) }, false);
         setSubmitError(`${why}, but the review shows all ${submittedIds.length} selected groups were saved.`);
       } else if (pending.length === submittedIds.length) {
         setSubmitError(`${why}. Nothing was saved — all ${submittedIds.length} selected groups are still pending. Your selections are kept; applying again is safe.`);
@@ -234,7 +243,7 @@ export function SpeedReviewModal({ date, employeeId, employeeName, canApply, onC
           })),
         }),
       });
-      showSaved(res);
+      showSaved(res, true);
     } catch (err) {
       const body = err instanceof ApiError ? (err.body as Partial<BulkReviewResponse> & { code?: string } | undefined) : undefined;
       if (err instanceof ApiError && body && body.saved === false) {

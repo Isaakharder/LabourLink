@@ -275,7 +275,7 @@ describe("SpeedReviewModal", () => {
 
   it("submits once even on repeated clicks, then shows which groups saved and which stay pending", async () => {
     const user = userEvent.setup();
-    const { onApplied } = renderModal();
+    const { onApplied, onClose } = renderModal();
     await user.click(await screen.findByRole("button", { name: "Select all eligible (3)" }));
     await user.click(applyButton());
     await user.click(applyButton());
@@ -298,8 +298,32 @@ describe("SpeedReviewModal", () => {
     expect(within(failed).getByText("Not saved")).toBeInTheDocument();
     expect(within(failed).getByText("One or more entries already belong to a completed row")).toBeInTheDocument();
     expect(onApplied).toHaveBeenCalledTimes(1);
-    // The footer's own Close (the modal's × is also labelled "Close").
+    expect(onApplied).toHaveBeenCalledWith(2);
+    // A group wasn't saved: the modal stays open to show which, with its own Close
+    // (the modal's × is also labelled "Close").
+    expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByText("Close", { selector: "button" })).toBeInTheDocument();
+  });
+
+  it("closes itself once every selected group is saved", async () => {
+    const user = userEvent.setup();
+    const { onApplied, onClose } = renderModal();
+    await user.click(await screen.findByRole("button", { name: "Select all eligible (3)" }));
+    await user.click(applyButton());
+    expect(onClose).not.toHaveBeenCalled(); // not while the save is in flight
+    await act(async () => {
+      applyDeferred.resolve({
+        results: [
+          { groupId: "k570", ok: true, completionIds: ["c1"] },
+          { groupId: "k174", ok: true, completionIds: ["c2"] },
+          { groupId: "o174", ok: true, completionIds: ["c3"] },
+        ],
+      });
+    });
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    // The page refreshes and shows its own confirmation with the count.
+    expect(onApplied).toHaveBeenCalledWith(3);
+    expect(onApplied.mock.invocationCallOrder[0]).toBeLessThan(onClose.mock.invocationCallOrder[0]);
   });
 
   it("is read-only for a Manager: nothing selectable, Apply disabled, with the reason", async () => {

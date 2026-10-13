@@ -98,9 +98,10 @@ afterEach(() => {
 
 async function openAndSelectBoth(onApplied = vi.fn()) {
   const user = userEvent.setup();
-  render(<SpeedReviewModal date={DATE} employeeId={null} canApply onClose={() => {}} onApplied={onApplied} />);
+  const onClose = vi.fn();
+  render(<SpeedReviewModal date={DATE} employeeId={null} canApply onClose={onClose} onApplied={onApplied} />);
   await user.click(await screen.findByRole("button", { name: /Select all eligible/ }));
-  return { user, onApplied };
+  return { user, onApplied, onClose };
 }
 const checkbox = (g: SpeedReviewGroup) => screen.getByRole("checkbox", { name: `Select ${g.rowLabel} for ${g.employeeName}` });
 const card = (g: SpeedReviewGroup) => screen.getByRole("article", { name: `${g.employeeName} · ${g.rowLabel}` });
@@ -132,13 +133,16 @@ describe("SpeedReviewModal when Apply doesn't simply succeed", () => {
   it("lost answer but the batch was saved: reload shows it, cards say Saved and the page refreshes", async () => {
     applyOutcomes.push(() => Promise.reject(new ApiError(502, "Request failed", undefined, undefined, { status: "error" })));
     reviewResponses = [[mergeG, sepG], []];
-    const { user, onApplied } = await openAndSelectBoth();
+    const { user, onApplied, onClose } = await openAndSelectBoth();
     await user.click(screen.getByRole("button", { name: "Apply changes" }));
 
     expect(await screen.findByText(/but the review shows all 2 selected groups were saved/)).toBeInTheDocument();
     expect(within(card(mergeG)).getByText("Saved")).toBeInTheDocument();
     expect(within(card(sepG)).getByText("Saved")).toBeInTheDocument();
     expect(onApplied).toHaveBeenCalledTimes(1);
+    // Saved, but the server never confirmed it: stays open so the
+    // explanation can be read.
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it("timeout: says it took too long and whether anything was saved", async () => {
@@ -208,9 +212,10 @@ describe("SpeedReviewModal when Apply doesn't simply succeed", () => {
     applyOutcomes.push(() =>
       Promise.resolve({ saved: true, results: [{ groupId: "m1", ok: true, alreadySaved: true }, { groupId: "s1", ok: true, completionIds: ["c2"] }] })
     );
-    const { user, onApplied } = await openAndSelectBoth();
+    const { user, onApplied, onClose } = await openAndSelectBoth();
     await user.click(screen.getByRole("button", { name: "Apply changes" }));
     await waitFor(() => expect(onApplied).toHaveBeenCalledTimes(1));
+    expect(onClose).toHaveBeenCalledTimes(1); // all confirmed saved
     expect(within(card(mergeG)).getByText("Already saved")).toBeInTheDocument();
     expect(within(card(sepG)).getByText("Saved")).toBeInTheDocument();
   });
