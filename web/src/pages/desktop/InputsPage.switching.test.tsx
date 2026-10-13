@@ -156,6 +156,8 @@ function buildDaily(emp: InputsEmployee, date: string, activityName: string, bre
         rowCompletion: null,
         segmentIds: [`run-${emp.id}`],
         durationSeconds: 3600,
+        minimumDurationMinutes: 0,
+        isBelowMinimumDuration: false,
         startedAtOriginalTime: null,
         startedAtCorrectedFrom: null,
         endedAtOriginalTime: null,

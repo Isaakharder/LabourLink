@@ -25,6 +25,12 @@ function formatSpeed(speed: { value: number; unit: string | null }): string {
   return speed.unit ? `${speed.value.toFixed(1)} ${speed.unit}` : speed.value.toFixed(1);
 }
 
+// Row tooltip/screen-reader text for a run shorter than its activity's
+// Minimum duration — e.g. "Below 3-minute minimum".
+export function belowMinimumLabel(minutes: number): string {
+  return `Below ${minutes}-minute minimum`;
+}
+
 interface ActivityLogsCardEmployee {
   id: string;
   firstName: string;
@@ -227,11 +233,17 @@ export function ActivityLogsCard({
                   )}
                 >
                 <tr
-                  className={`inputs-log-row${selected.has(run.id) ? " inputs-log-row-selected" : ""}`}
+                  className={`inputs-log-row${selected.has(run.id) ? " inputs-log-row-selected" : ""}${
+                    run.isBelowMinimumDuration ? " inputs-log-row-below-minimum" : ""
+                  }`}
+                  title={run.isBelowMinimumDuration ? belowMinimumLabel(run.minimumDurationMinutes) : undefined}
                   onClick={(e) => onSelectRun(run.id, e.ctrlKey || e.metaKey)}
                 >
                   <td className="inputs-log-activity">
                     {run.activityName}
+                    {run.isBelowMinimumDuration && (
+                      <span className="sr-only">{` (${belowMinimumLabel(run.minimumDurationMinutes)})`}</span>
+                    )}
                     {run.manualEntry && <ManualBadge meta={run.manualEntry} />}
                   </td>
                   <td className="inputs-log-row-cell">{run.row?.label ?? "—"}</td>
