@@ -545,7 +545,7 @@ router.get(
               te.auto_closed_at, te.density_type, te.density_count_per_row, te.actual_started_at,
               te.actual_ended_at, te.created_by_employee_id, te.creation_reason, te.rollover_of_entry_id,
               cb.first_name as created_by_first_name, cb.last_name as created_by_last_name,
-              a.name as activity_name, a.normal_speed, a.speed_unit, a.density_source,
+              a.name as activity_name, a.normal_speed, a.speed_unit, a.density_source, a.minimum_duration_minutes,
               bpi.name as break_item_name,
               gr.row_number, gphase.name as row_phase_name,
               c.name as carrier_name
@@ -629,7 +629,13 @@ router.get(
 
     const activityMeta = new Map<
       string,
-      { name: string; normalSpeed: string | null; speedUnit: string | null; densitySource: "plants" | "stems" | null }
+      {
+        name: string;
+        normalSpeed: string | null;
+        speedUnit: string | null;
+        densitySource: "plants" | "stems" | null;
+        minimumDurationMinutes: number;
+      }
     >();
     const rowMeta = new Map<string, { rowNumber: number; phaseName: string }>();
     const carrierMeta = new Map<string, string>();
@@ -701,6 +707,7 @@ router.get(
           normalSpeed: r.normal_speed,
           speedUnit: r.speed_unit,
           densitySource: r.density_source,
+          minimumDurationMinutes: r.minimum_duration_minutes ?? 0,
         });
       }
       if (r.greenhouse_row_id && !rowMeta.has(r.greenhouse_row_id)) {
@@ -1148,6 +1155,23 @@ router.get(
           rowCompletion,
           segmentIds: r.segmentIds,
           durationSeconds: Math.round(r.durationSeconds),
+          // The activity's CURRENT configured minimum (read fresh on every
+          // load, so an Administrator's change applies on the next refresh)
+          // and whether this displayed run fell short of it. Visual review
+          // guidance for Inputs only — nothing else (paid time, speeds,
+          // reports, row completion, Productive TV) reads it. Judged per
+          // displayed run, never pooled with a neighbouring run on the same
+          // row (a carrier change is already its own run — see
+          // activityRuns.ts), against the UNROUNDED worked seconds (break
+          // interruptions excluded, the same "elapsed" the phone's own
+          // MINIMUM_DURATION_NOT_REACHED check uses), so 2:59.6 is still
+          // short of 3:00 even though durationSeconds above rounds it up.
+          // An open run is never flagged — it can still reach the minimum.
+          minimumDurationMinutes: meta?.minimumDurationMinutes ?? 0,
+          isBelowMinimumDuration:
+            !r.isOpen &&
+            (meta?.minimumDurationMinutes ?? 0) > 0 &&
+            r.durationSeconds < (meta?.minimumDurationMinutes ?? 0) * 60,
           startedAt: r.startedAt,
           currentSegmentStartedAt: r.currentSegmentStartedAt,
           endedAt: r.endedAt,

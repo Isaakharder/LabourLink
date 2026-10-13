@@ -39,6 +39,8 @@ function makeRun(overrides: Partial<ActivityRunDto> = {}): ActivityRunDto {
     rowCompletion: null,
     segmentIds: ["run-1"],
     durationSeconds: 7200,
+    minimumDurationMinutes: 0,
+    isBelowMinimumDuration: false,
     startedAt: "2026-08-15T14:00:00.000Z",
     currentSegmentStartedAt: "2026-08-15T14:00:00.000Z",
     endedAt: "2026-08-15T16:00:00.000Z",

@@ -3101,6 +3101,37 @@ input {
   background: color-mix(in srgb, var(--color-primary) 14%, transparent);
 }
 
+/* Below the activity's minimum duration — a review hint, not an error, so
+   the same translucent light orange as the "Needs review" pill/idle map
+   rows, never red. Hover deepens the orange instead of replacing it with
+   the usual blue; selection deepens it further and marks the row as
+   selected with a blue outline, since a blue tint mixed over orange reads
+   as a muddy grey that hides the warning. */
+.inputs-log-row-below-minimum td {
+  background-color: rgba(251, 146, 60, 0.16);
+}
+
+.inputs-log-row-below-minimum td:first-child {
+  box-shadow: inset 3px 0 0 rgba(234, 88, 12, 0.7);
+}
+
+.inputs-log-row-below-minimum:hover td {
+  background: rgba(251, 146, 60, 0.24);
+}
+
+.inputs-log-row-below-minimum.inputs-log-row-selected td {
+  background: rgba(251, 146, 60, 0.3);
+  box-shadow: inset 0 2px 0 var(--color-primary), inset 0 -2px 0 var(--color-primary);
+}
+
+.inputs-log-row-below-minimum.inputs-log-row-selected td:first-child {
+  box-shadow: inset 3px 0 0 rgba(234, 88, 12, 0.85), inset 0 2px 0 var(--color-primary), inset 0 -2px 0 var(--color-primary);
+}
+
+.inputs-log-row-below-minimum.inputs-log-row-selected td:last-child {
+  box-shadow: inset -2px 0 0 var(--color-primary), inset 0 2px 0 var(--color-primary), inset 0 -2px 0 var(--color-primary);
+}
+
 .inputs-th-duration,
 .inputs-log-duration,
 .inputs-th-starttime,

@@ -116,6 +116,12 @@ export interface ActivityRunDto {
   // opened from this run's warning.
   segmentIds: string[];
   durationSeconds: number;
+  // The activity's current Minimum duration (minutes, 0 = none) and whether
+  // this finished run's unrounded worked time fell strictly short of it —
+  // computed server-side (see inputs.ts) because durationSeconds above is
+  // rounded. Visual review guidance only; nothing else reads it.
+  minimumDurationMinutes: number;
+  isBelowMinimumDuration: boolean;
   startedAt: string;
   currentSegmentStartedAt: string;
   endedAt: string | null;

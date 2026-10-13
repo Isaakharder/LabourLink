@@ -105,6 +105,8 @@ function buildDaily(date: string): DailyInputsResponse {
         rowCompletion: null,
         segmentIds: ["run-1"],
         durationSeconds: 3600,
+        minimumDurationMinutes: 0,
+        isBelowMinimumDuration: false,
         startedAtOriginalTime: null,
         startedAtCorrectedFrom: null,
         endedAtOriginalTime: null,
