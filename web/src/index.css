@@ -8383,18 +8383,6 @@ input {
   font-variant-numeric: tabular-nums;
 }
 
-.tv-header-meta {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.2rem 1.1rem;
-}
-
-.tv-header-meta b {
-  color: var(--color-text);
-  font-weight: 700;
-}
-
 .tv-chart-caption {
   flex-shrink: 0;
   margin: 0 0 0.35rem;
@@ -8403,12 +8391,6 @@ input {
   font-weight: 800;
   letter-spacing: 0.03em;
   color: var(--color-text);
-}
-
-.tv-header-footnotes {
-  margin: 0.1rem 0 0;
-  font-size: 1rem;
-  color: var(--color-muted);
 }
 
 .tv-ranking-notice-only {
@@ -8443,25 +8425,75 @@ input {
   gap: 0.5rem;
 }
 
-/* On a ranking slide the activity is the slide's title: read across the
-   room, not the map's small caption. */
-.tv-header-activity {
-  padding-top: 0.35rem;
-  padding-bottom: 0.35rem;
+/* Compact two-row header shared by every activity ranking slide
+   (TvRankingHeader.tsx); the map slide keeps .greenhouse-tv-header's grid.
+   Nothing wraps: each row is one line, and only if a name could never fit
+   does it end in "…" (full text in its tooltip) rather than wrapping. */
+.greenhouse-tv-header.tv-ranking-header {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch; /* each row spans the full width */
+  gap: 0.15rem;
+  padding: 0.35rem 1.25rem 0.4rem;
 }
 
-.tv-header-activity .greenhouse-tv-title h1 {
-  font-size: 2rem;
+.tv-ranking-header-row {
+  display: flex;
+  align-items: baseline;
+  gap: 1.5rem;
+  min-width: 0;
+  white-space: nowrap;
 }
 
-.tv-header-activity .greenhouse-tv-activity {
-  font-size: 2.1rem;
+.tv-ranking-header-name,
+.tv-ranking-header-activity {
+  margin: 0;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 1.5rem;
   font-weight: 800;
-  line-height: 1.1;
+  line-height: 1.2;
+  color: var(--color-text);
 }
 
-.tv-header-activity .greenhouse-tv-daterange {
-  font-size: 1.15rem;
+.tv-ranking-header-activity {
+  margin-left: auto;
+  text-align: right;
+}
+
+.tv-ranking-header-meta {
+  align-items: center;
+  font-size: 1.05rem;
+  line-height: 1.3;
+  color: var(--color-muted);
+}
+
+.tv-ranking-header-meta b {
+  color: var(--color-text);
+  font-weight: 700;
+}
+
+.tv-ranking-header-status {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.tv-ranking-header .greenhouse-tv-updated {
+  font-size: 0.95rem;
+}
+
+.tv-ranking-header .greenhouse-tv-stale-badge {
+  font-size: 0.9rem;
+  padding: 0.05rem 0.6rem;
+}
+
+.tv-ranking-header .tv-slide-dot {
+  width: 0.55rem;
+  height: 0.55rem;
 }
 
 .display-setup-actions .employees-add-button {

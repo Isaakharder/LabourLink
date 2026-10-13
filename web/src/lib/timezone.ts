@@ -196,8 +196,9 @@ function isValidDateInput(iso: unknown): iso is string {
   return typeof iso === "string" && iso.length > 0 && !Number.isNaN(new Date(iso).getTime());
 }
 
-// "7:55:10 AM" display of an ISO instant in APP_TIMEZONE.
-export function formatTimeInAppTimezone(iso: string): string {
+// "7:55:10 AM" display of an ISO instant in APP_TIMEZONE ("7:55 AM" with
+// { seconds: false }).
+export function formatTimeInAppTimezone(iso: string, opts: { seconds?: boolean } = {}): string {
   if (!isValidDateInput(iso)) {
     console.error("[timezone] formatTimeInAppTimezone: invalid date input, showing a safe fallback instead", iso);
     return "Unknown time";
@@ -206,7 +207,7 @@ export function formatTimeInAppTimezone(iso: string): string {
     timeZone: APP_TIMEZONE,
     hour: "numeric",
     minute: "2-digit",
-    second: "2-digit",
+    second: opts.seconds === false ? undefined : "2-digit",
     hour12: true,
   }).format(new Date(iso));
 }

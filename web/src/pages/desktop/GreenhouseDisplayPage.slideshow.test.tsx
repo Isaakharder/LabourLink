@@ -131,7 +131,7 @@ describe("TV slideshow", () => {
     expect(document.querySelector(".greenhouse-live-block-legend")).toBeNull();
   });
 
-  it("rotates map -> ranking -> map using each slide's duration, with unit and dates", async () => {
+  it("rotates map -> ranking -> map using each slide's duration, with unit and the compact header", async () => {
     slidesReply = () => json(200, slidesResponse([activitySlide()]));
     render(<GreenhouseDisplayPage displayKey={KEY} />);
     await flush();
@@ -140,13 +140,18 @@ describe("TV slideshow", () => {
     expect(screen.getByText("Winding & Pruning")).toBeInTheDocument();
     // Graphs show stems/hour as stm/hr (the stored unit stays stems/hour).
     expect(screen.getByText("stm/hr", { selector: ".tv-chart-caption" })).toBeInTheDocument();
-    expect(screen.getByText("Date:").parentElement).toHaveTextContent(/This week, .*\(including today\)/);
     expect(screen.getByText("Ana A.")).toBeInTheDocument();
     expect(screen.getByText("812 stm/hr")).toBeInTheDocument();
-    expect(screen.getByText(/1 under the 0.5 h minimum not shown/)).toBeInTheDocument();
+    // Compact two-row header: name + activity; then period, target, the
+    // number of bars shown, and the updated time. Top N, minimum hours, the
+    // full dates and "including today" stay off the header.
+    const header = document.querySelector(".tv-ranking-header") as HTMLElement;
+    expect(header.querySelector(".tv-ranking-header-activity")).toHaveTextContent("Winding & Pruning");
+    expect(header).toHaveTextContent("This week");
     expect(screen.getByText("Target:").parentElement).toHaveTextContent("Target: 500 stm/hr");
-    expect(screen.getByText("Top:").parentElement).toHaveTextContent("Top: All");
-    expect(screen.getByText("Min hours:").parentElement).toHaveTextContent("Min hours: 0.5 h");
+    expect(screen.getByText("Employees:").parentElement).toHaveTextContent(`Employees: ${document.querySelectorAll(".tv-chart-row").length}`);
+    expect(header).toHaveTextContent(/Updated \d{1,2}:\d{2} [AP]M$/);
+    expect(header).not.toHaveTextContent(/Top:|Min hours|including today|minimum not shown|20\d\d/);
     await advance(15_000);
     expect(screen.queryByText("Ana A.")).not.toBeInTheDocument();
     expect(screen.getByText("Currently working")).toBeInTheDocument();

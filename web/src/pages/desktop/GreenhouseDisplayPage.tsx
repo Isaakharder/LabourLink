@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GreenhouseLiveCanvas } from "../../components/greenhouseLive/GreenhouseLiveCanvas";
 import { TvRankingSlide } from "../../components/greenhouseLive/TvRankingSlide";
+import { TvRankingHeader } from "../../components/greenhouseLive/TvRankingHeader";
 import { graphSpeedUnit } from "../../lib/speedUnitDisplay";
 import { api } from "../../lib/api";
 import { CanvasTransform, computeFitTransformToPhases } from "../../lib/canvasTransform";
@@ -159,78 +160,62 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
   const onActivity = current?.kind === "activity";
   const nothingScheduled = sequence.length === 0;
 
+  const dots =
+    sequence.length > 1 ? (
+      <div className="tv-slide-dots" aria-hidden="true">
+        {sequence.map((item, i) => (
+          <span key={item.key} className={`tv-slide-dot${i === index ? " active" : ""}`} />
+        ))}
+      </div>
+    ) : null;
+  const slidesStatus = slidesStale ? (
+    <span className="status-pill greenhouse-tv-stale-badge">
+      Reconnecting… Rankings from {formatTimeInAppTimezone(new Date(slidesLastOk!).toISOString(), { seconds: false })} ({formatAge(now - slidesLastOk!)} old)
+    </span>
+  ) : (
+    slidesData && <span className="greenhouse-tv-updated">Updated {formatTimeInAppTimezone(slidesData.generatedAt, { seconds: false })}</span>
+  );
+
   return (
     <div className="greenhouse-tv-page">
-      <div className={`greenhouse-tv-header${onActivity ? " tv-header-activity" : ""}`}>
-        <div className="greenhouse-tv-title">
-          <h1>{data?.name ?? "LabourLink"}</h1>
-        </div>
-        <div className="greenhouse-tv-header-center">
-          {onActivity ? (
-            <>
-              <p className="greenhouse-tv-activity">{current.slide.activityName}</p>
-              {/* Productive TV-style meta line: Date · Top · Target · Min hours. */}
-              <p className="greenhouse-tv-daterange tv-header-meta">
-                <span>
-                  <b>Date:</b> {periodLabel(slidesData)}
-                </span>
-                {current.slide.status === "ok" && (
-                  <>
-                    <span>
-                      <b>Top:</b> {current.slide.topN ?? "All"}
-                    </span>
-                    {current.slide.target != null && (
-                      <span>
-                        <b>Target:</b> {Math.round(current.slide.target)} {graphSpeedUnit(current.slide.speedUnit)}
-                      </span>
-                    )}
-                    <span>
-                      <b>Min hours:</b> {current.slide.minimumActivityHours} h
-                    </span>
-                  </>
-                )}
-              </p>
-              {current.slide.status === "ok" && slideFootnotes(current.slide) && (
-                <p className="tv-header-footnotes">{slideFootnotes(current.slide)}</p>
-              )}
-            </>
-          ) : nothingScheduled ? null : (
-            data && (
+      {onActivity ? (
+        // Every activity ranking slide shares this compact header.
+        <TvRankingHeader
+          displayName={data?.name ?? "LabourLink"}
+          slide={current.slide}
+          week={slidesData?.period.week ?? null}
+          status={slidesStatus}
+          dots={dots}
+        />
+      ) : (
+        <div className="greenhouse-tv-header">
+          <div className="greenhouse-tv-title">
+            <h1>{data?.name ?? "LabourLink"}</h1>
+          </div>
+          <div className="greenhouse-tv-header-center">
+            {!nothingScheduled && data && (
               <>
                 <p className="greenhouse-tv-activity">{data.activityName ?? "All activities"}</p>
                 <p className="greenhouse-tv-daterange">{rangeLabel}</p>
               </>
-            )
-          )}
-        </div>
-        <div className="greenhouse-tv-status">
-          {onActivity || nothingScheduled ? (
-            slidesStale ? (
+            )}
+          </div>
+          <div className="greenhouse-tv-status">
+            {nothingScheduled ? (
+              slidesStatus
+            ) : mapStale && mapLastOk !== null ? (
               <span className="status-pill greenhouse-tv-stale-badge">
-                Reconnecting… Rankings from {formatTimeInAppTimezone(new Date(slidesLastOk!).toISOString())} (
-                {formatAge(now - slidesLastOk!)} old)
+                Reconnecting… Map from {formatTimeInAppTimezone(new Date(mapLastOk).toISOString())} ({formatAge(now - mapLastOk)} old)
               </span>
+            ) : mapStale ? (
+              <span className="status-pill greenhouse-tv-stale-badge">Reconnecting…</span>
             ) : (
-              slidesData && <span className="greenhouse-tv-updated">Updated {formatTimeInAppTimezone(slidesData.generatedAt)}</span>
-            )
-          ) : mapStale && mapLastOk !== null ? (
-            <span className="status-pill greenhouse-tv-stale-badge">
-              Reconnecting… Map from {formatTimeInAppTimezone(new Date(mapLastOk).toISOString())} ({formatAge(now - mapLastOk)} old)
-            </span>
-          ) : mapStale ? (
-            <span className="status-pill greenhouse-tv-stale-badge">Reconnecting…</span>
-          ) : (
-            data && <span className="greenhouse-tv-updated">Updated {formatTimeInAppTimezone(data.generatedAt)}</span>
-          )}
-          {sequence.length > 1 && (
-            <div className="tv-slide-dots" aria-hidden="true">
-              {sequence.map((item, i) => (
-                <span key={item.key} className={`tv-slide-dot${i === index ? " active" : ""}`} />
-              ))}
-            </div>
-          )}
+              data && <span className="greenhouse-tv-updated">Updated {formatTimeInAppTimezone(data.generatedAt)}</span>
+            )}
+            {dots}
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="greenhouse-tv-canvas-wrapper">
         {/* The map stays mounted under the ranking slides so it never has
@@ -282,21 +267,4 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
       )}
     </div>
   );
-}
-
-function periodLabel(slides: DisplaySlidesResponse | null): string {
-  if (!slides) return "";
-  const { dateStart, dateEnd, week, includeToday } = slides.period;
-  const range = dateStart === dateEnd ? formatDateLong(dateStart) : `${formatDateLong(dateStart)} – ${formatDateLong(dateEnd)}`;
-  if (week === "last_week") return `Last week, ${range}`;
-  return `This week, ${range}${includeToday ? " (including today)" : ""}`;
-}
-
-// Who isn't on the chart, and why — kept to one compact header line so the
-// chart gets the screen.
-function slideFootnotes(slide: ActivitySlide): string {
-  const notes: string[] = [];
-  if (slide.belowMinimumHours > 0) notes.push(`${slide.belowMinimumHours} under the ${slide.minimumActivityHours} h minimum not shown`);
-  if (slide.employeesWithoutSpeed > 0) notes.push(`${slide.employeesWithoutSpeed} without a calculable speed yet`);
-  return notes.join(" · ");
 }
