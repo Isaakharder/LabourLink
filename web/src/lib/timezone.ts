@@ -164,7 +164,14 @@ export function endOfMonth(dateStr: string): string {
 // an instant, so this formats it directly rather than going through any
 // timezone conversion (there's no "instant" to convert; a calendar date
 // means the same day everywhere).
+// Takes a calendar date ("YYYY-MM-DD"), never a timestamp — for an instant,
+// use formatDateLongInAppTimezone. Anything else gets a safe fallback rather
+// than a throw (same convention as the formatters below).
 export function formatDateLong(dateStr: string): string {
+  if (typeof dateStr !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    console.error("[timezone] formatDateLong: expected YYYY-MM-DD, showing a safe fallback instead", dateStr);
+    return "Unknown date";
+  }
   const [y, m, d] = dateStr.split("-").map(Number);
   return new Intl.DateTimeFormat("en-US", {
     timeZone: "UTC",
@@ -201,6 +208,22 @@ export function formatTimeInAppTimezone(iso: string): string {
     minute: "2-digit",
     second: "2-digit",
     hour12: true,
+  }).format(new Date(iso));
+}
+
+// "Monday, October 12, 2026" — the calendar date an ISO instant falls on in
+// APP_TIMEZONE (an evening event stays on its own day, not the next UTC day).
+export function formatDateLongInAppTimezone(iso: string): string {
+  if (!isValidDateInput(iso)) {
+    console.error("[timezone] formatDateLongInAppTimezone: invalid date input, showing a safe fallback instead", iso);
+    return "Unknown date";
+  }
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: APP_TIMEZONE,
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
   }).format(new Date(iso));
 }
 
