@@ -1,5 +1,6 @@
 import { useDevicePairing } from "../../context/DevicePairingContext";
 import { DEACTIVATION_MESSAGES } from "../../lib/device";
+import { KioskMaintenanceHold } from "../../components/mobile/KioskMaintenanceHold";
 
 // Shown only after a confirmed DEACTIVATION_ERROR_CODES rejection — an
 // administrator genuinely deactivated this device, ended its assignment, or
@@ -19,7 +20,9 @@ export function DeviceDeactivatedScreen() {
 
   return (
     <div className="pairing-screen">
-      <h1>LabourLink</h1>
+      <KioskMaintenanceHold>
+        <h1>LabourLink</h1>
+      </KioskMaintenanceHold>
       <p className="device-deactivated-message">{message}</p>
       <p className="pairing-note">
         Once an administrator has re-approved this phone, tap below to request a new pairing code.

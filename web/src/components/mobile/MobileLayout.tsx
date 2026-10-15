@@ -7,6 +7,7 @@ import { ConfirmEndDayModal } from "./ConfirmEndDayModal";
 import { PendingMessageOverlay } from "./PendingMessageOverlay";
 import { ReassignmentOverlay } from "./ReassignmentOverlay";
 import { NativePushBridge } from "./NativePushBridge";
+import { KioskBridge } from "./KioskBridge";
 
 function navItemClass({ isActive }: { isActive: boolean }): string {
   return `mobile-nav-item${isActive ? " active" : ""}`;
@@ -109,6 +110,7 @@ export function MobileLayout() {
         <PendingMessageOverlay />
         <ReassignmentOverlay />
         <NativePushBridge />
+        <KioskBridge />
       </WorkSessionProvider>
     </MessagesProvider>
   );

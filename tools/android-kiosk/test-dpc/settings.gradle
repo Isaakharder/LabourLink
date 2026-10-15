@@ -1,0 +1,16 @@
+// TEST ONLY — emulator stand-in for the EMM. Never shipped, never installed
+// on a real phone. See ../README.md.
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "kiosk-test-dpc"

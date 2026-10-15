@@ -1,5 +1,9 @@
 package com.linklogictechnologies.labourlink;
 
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
@@ -7,6 +11,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.ViewGroup;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebView;
@@ -15,6 +20,9 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.WebViewListener;
+import com.linklogictechnologies.labourlink.kiosk.KioskController;
+import com.linklogictechnologies.labourlink.kiosk.KioskPlugin;
+import com.linklogictechnologies.labourlink.kiosk.MaintenanceActivity;
 
 public class MainActivity extends BridgeActivity {
 
@@ -78,9 +86,21 @@ public class MainActivity extends BridgeActivity {
     private final Handler watchdogHandler = new Handler(Looper.getMainLooper());
     private ColdStartWatchdog watchdog;
 
+    /** Set by MaintenanceActivity's "Restart LabourLink". */
+    public static final String EXTRA_RESTART = "com.linklogictechnologies.labourlink.RESTART";
+
+    // Kiosk mode (see kiosk/KioskController). Every kiosk hook below is a
+    // no-op unless the EMM has made this an enrolled kiosk device, so a
+    // personal install behaves exactly as before.
+    private final Handler kioskHandler = new Handler(Looper.getMainLooper());
+    private final Runnable kioskMaintenanceExpiry = this::endMaintenanceAndRelock;
+    private BroadcastReceiver kioskReceiver;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        registerPlugin(KioskPlugin.class);
         super.onCreate(savedInstanceState);
+        registerKioskReceiver();
 
         Log.i(TAG, "cold start beginning, recoveryAttempted=" + watchdogSession.recoveryAttempted);
 
@@ -142,6 +162,79 @@ public class MainActivity extends BridgeActivity {
         );
     }
 
+    @Override
+    public void onResume() {
+        super.onResume();
+        applyKiosk();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (intent != null && intent.getBooleanExtra(EXTRA_RESTART, false)) {
+            Log.i(TAG, "restart requested from maintenance — rebuilding the WebView");
+            watchdogSession.recoveryAttempted = false;
+            recreate();
+        }
+    }
+
+    private void applyKiosk() {
+        kioskHandler.removeCallbacks(kioskMaintenanceExpiry);
+        if (!KioskController.isKioskDevice(this)) return;
+        KioskController.enforce(this);
+        // Other apps' overlay windows can't draw over LabourLink (API 31+;
+        // the EMM's DISALLOW_CREATE_WINDOWS restriction covers older ones).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            getWindow().setHideOverlayWindows(true);
+        }
+        if (KioskController.isMaintenanceActive(this)) {
+            long remaining = KioskController.maintenanceUntil(this) - System.currentTimeMillis();
+            kioskHandler.postDelayed(kioskMaintenanceExpiry, Math.max(0L, remaining));
+        }
+    }
+
+    private void endMaintenanceAndRelock() {
+        if (!KioskController.isKioskDevice(this)) return;
+        if (KioskController.maintenanceUntil(this) != 0L) {
+            Log.i(TAG, "maintenance exit ended — re-entering kiosk");
+            KioskController.endMaintenance(this);
+        }
+        KioskController.enforce(this);
+    }
+
+    // Managed-configuration changes (the EMM turning kiosk on/off or
+    // rotating the credential) apply immediately; the screen turning off
+    // ends any maintenance exit so a phone can't be left unlocked.
+    // ACTION_APPLICATION_RESTRICTIONS_CHANGED is only ever delivered to
+    // dynamically registered receivers.
+    private void registerKioskReceiver() {
+        kioskReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (!KioskController.isKioskDevice(MainActivity.this)) return;
+                if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) {
+                    if (KioskController.maintenanceUntil(MainActivity.this) != 0L) {
+                        Log.i(TAG, "screen off — ending maintenance exit");
+                        KioskController.endMaintenance(MainActivity.this);
+                    }
+                    return;
+                }
+                Log.i(TAG, "managed configuration changed");
+                applyKiosk();
+            }
+        };
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_APPLICATION_RESTRICTIONS_CHANGED);
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        // Both are system broadcasts; RECEIVER_NOT_EXPORTED is still
+        // required to be stated on API 33+ for any dynamic receiver.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(kioskReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(kioskReceiver, filter);
+        }
+    }
+
     private void markPageStarted() {
         Log.i(TAG, "page started/loaded — cancelling the watchdog");
         watchdog.markReady();
@@ -155,6 +248,11 @@ public class MainActivity extends BridgeActivity {
         // fire afterward.
         watchdog.cancel();
         watchdogHandler.removeCallbacksAndMessages(null);
+        kioskHandler.removeCallbacksAndMessages(null);
+        if (kioskReceiver != null) {
+            unregisterReceiver(kioskReceiver);
+            kioskReceiver = null;
+        }
         super.onDestroy();
     }
 
@@ -175,6 +273,7 @@ public class MainActivity extends BridgeActivity {
         title.setTextSize(20);
         title.setGravity(Gravity.CENTER);
         title.setTextColor(Color.BLACK);
+        attachMaintenanceHold(title);
 
         TextView message = new TextView(this);
         message.setText(
@@ -210,5 +309,26 @@ public class MainActivity extends BridgeActivity {
         );
 
         setContentView(layout);
+    }
+
+    // Kiosk only: holding the title for five seconds opens the native
+    // maintenance screen, so an administrator can still reach Wi-Fi /
+    // restart / kiosk exit when the WebView itself won't start.
+    private void attachMaintenanceHold(TextView view) {
+        if (!KioskController.isKioskDevice(this)) return;
+        Runnable open = () -> startActivity(new Intent(this, MaintenanceActivity.class));
+        view.setOnTouchListener((v, event) -> {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    kioskHandler.postDelayed(open, 5000);
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    kioskHandler.removeCallbacks(open);
+                    return true;
+                default:
+                    return true;
+            }
+        });
     }
 }

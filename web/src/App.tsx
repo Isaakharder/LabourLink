@@ -34,6 +34,7 @@ import { WriteNewTagScreen } from "./pages/mobile/WriteNewTagScreen";
 import { StatsScreen } from "./pages/mobile/StatsScreen";
 import { useIsMobile } from "./lib/useIsMobile";
 import { isNativePlatform, shouldRenderMobileApp } from "./lib/platform";
+import { KioskMaintenanceHold } from "./components/mobile/KioskMaintenanceHold";
 
 function DesktopApp() {
   const { employee, loading } = useAuth();
@@ -148,7 +149,9 @@ function MobileApp() {
   if (status === "recoveryFailed") {
     return (
       <div className="boot-screen" role="alert">
-        <p className="boot-title">LabourLink couldn’t start</p>
+        <KioskMaintenanceHold>
+          <p className="boot-title">LabourLink couldn’t start</p>
+        </KioskMaintenanceHold>
         <p className="boot-text">Your saved work is safe on this phone. Tap Retry to try again.</p>
         <button type="button" className="boot-retry" onClick={() => window.location.reload()}>
           Retry

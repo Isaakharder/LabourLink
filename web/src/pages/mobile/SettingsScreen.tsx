@@ -8,6 +8,7 @@ import { isPushMarkedEnabled, initAndroidPush, subscribeWebPush } from "../../li
 import { isNativePlatform } from "../../lib/platform";
 import { privacyPolicyHref } from "../../lib/privacyPolicy";
 import { computeSyncIndicatorState } from "../../lib/syncIndicator";
+import { KioskMaintenanceHold } from "../../components/mobile/KioskMaintenanceHold";
 
 // No PIN gate, no on-device "Reset this device" — pairing a phone to a
 // different employee, or taking it out of service, is an administrator
@@ -81,7 +82,9 @@ export function SettingsScreen() {
         <Link to="/mobile/home" className="mobile-settings-back" aria-label="Back to Home">
           <ChevronLeft size={22} aria-hidden="true" />
         </Link>
-        <h1>Settings</h1>
+        <KioskMaintenanceHold>
+          <h1>Settings</h1>
+        </KioskMaintenanceHold>
       </div>
       {cachedEmployee && (
         <p className="mobile-settings-device-note">

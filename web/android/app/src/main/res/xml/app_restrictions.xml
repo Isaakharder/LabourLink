@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Managed configuration for EMM-enrolled kiosk phones. Keys must match
+     kiosk/KioskController. Nothing here has any effect on a personal
+     install: Android only ever delivers these values through a device
+     owner / EMM. -->
+<restrictions xmlns:android="http://schemas.android.com/apk/res/android">
+    <restriction
+        android:key="kiosk_mode_enabled"
+        android:title="@string/kiosk_restriction_enabled_title"
+        android:description="@string/kiosk_restriction_enabled_description"
+        android:restrictionType="bool"
+        android:defaultValue="false" />
+    <restriction
+        android:key="maintenance_credential"
+        android:title="@string/kiosk_restriction_credential_title"
+        android:description="@string/kiosk_restriction_credential_description"
+        android:restrictionType="string" />
+    <restriction
+        android:key="kiosk_device_label"
+        android:title="@string/kiosk_restriction_label_title"
+        android:description="@string/kiosk_restriction_label_description"
+        android:restrictionType="string" />
+</restrictions>
