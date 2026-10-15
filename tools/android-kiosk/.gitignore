@@ -1,0 +1,4 @@
+test-dpc/build/
+test-dpc/.gradle/
+test-dpc/local.properties
+evidence/

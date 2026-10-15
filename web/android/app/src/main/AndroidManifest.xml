@@ -36,6 +36,34 @@
 
         </activity>
 
+        <!-- Kiosk maintenance screen (kiosk/MaintenanceActivity). Not
+             exported: only LabourLink itself can open it, and it refuses to
+             show anything unless this is an EMM-enrolled kiosk device. -->
+        <activity
+            android:name=".kiosk.MaintenanceActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout"
+            android:theme="@style/AppTheme.NoActionBar" />
+
+        <!-- Kiosk only: relaunch after an app update (see the class). -->
+        <receiver
+            android:name=".kiosk.KioskRelaunchReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Managed configuration schema an EMM reads to show LabourLink's
+             kiosk settings (kiosk_mode_enabled, maintenance_credential,
+             kiosk_device_label). Inert metadata on a personal install —
+             nothing is ever delivered there, so kiosk mode never turns on.
+             See kiosk/KioskController. -->
+        <meta-data
+            android:name="android.content.APP_RESTRICTIONS"
+            android:resource="@xml/app_restrictions" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -81,4 +109,8 @@
          doesn't crash anything (vibrate() just silently no-ops), but
          WebView vibration is more reliably granted with it present. -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Kiosk mode only (MainActivity.applyKiosk): Window.setHideOverlayWindows
+         stops other apps' overlays drawing over LabourLink on API 31+.
+         Normal install-time permission, never prompts, unused elsewhere. -->
+    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
 </manifest>

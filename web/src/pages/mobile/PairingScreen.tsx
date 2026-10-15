@@ -6,6 +6,7 @@ import { isNativePlatform } from "../../lib/platform";
 import { privacyPolicyHref } from "../../lib/privacyPolicy";
 import { pairWithReviewerCode } from "../../lib/reviewerAccess";
 import { singleFlight } from "../../lib/singleFlight";
+import { KioskMaintenanceHold } from "../../components/mobile/KioskMaintenanceHold";
 
 // A short, stable code appended to the (deliberately simple, non-scary)
 // employee-facing message — real production incident: every affected
@@ -158,7 +159,9 @@ export function PairingScreen() {
 
   return (
     <div className="pairing-screen">
-      <h1>LabourLink</h1>
+      <KioskMaintenanceHold>
+        <h1>LabourLink</h1>
+      </KioskMaintenanceHold>
       <p>Pair this device</p>
       {reviewerLocked ? (
         <p className="pairing-note">

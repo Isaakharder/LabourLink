@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TEST ONLY: emulator stand-in for the EMM's device-owner agent. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries>
+        <package android:name="com.linklogictechnologies.labourlink" />
+    </queries>
+    <application android:label="Kiosk Test DPC" android:allowBackup="false">
+        <receiver
+            android:name=".AdminReceiver"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data android:name="android.app.device_admin" android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Driven by `adb shell am broadcast -n ...` from run-emulator-tests.sh. -->
+        <receiver android:name=".CommandReceiver" android:exported="true" />
+
+        <!-- The kiosk "home": like an EMM's kiosk launcher, it (re)launches
+             LabourLink whenever nothing else is in front — after boot,
+             after a crash, after an app update. -->
+        <activity
+            android:name=".KioskHomeActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

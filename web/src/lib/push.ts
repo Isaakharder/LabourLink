@@ -158,8 +158,31 @@ async function doInitAndroidPush(
     PushNotifications.addListener("pushNotificationActionPerformed", () => {
       onNotificationTapped();
     });
+    if (foregroundPushHandler) {
+      const handler = foregroundPushHandler;
+      PushNotifications.addListener("pushNotificationReceived", () => {
+        handler();
+      });
+    }
     PushNotifications.register();
   });
+}
+
+// Kiosk phones only (components/mobile/KioskBridge sets this when lib/kiosk.ts reports
+// an enrolled kiosk device): Android delivers an FCM message that arrives
+// while LabourLink is in the foreground to the app as
+// pushNotificationReceived and shows NO system notification — and a kiosk
+// phone never leaves the foreground, nor could anyone open the hidden
+// notification shade there. This handler is how such a message still gets
+// seen: it triggers the same outstanding-messages refresh a tap would.
+// Module-level rather than a parameter so every (re-)registration, including
+// SettingsScreen's, keeps it — doInitAndroidPush's removeAllListeners()
+// would otherwise silently drop it. Never set on a personal phone, so
+// regular behaviour is unchanged there.
+let foregroundPushHandler: (() => void) | null = null;
+
+export function setForegroundPushHandler(handler: (() => void) | null): void {
+  foregroundPushHandler = handler;
 }
 
 // Wrapped in singleFlight so overlapping calls — NativePushBridge's mount

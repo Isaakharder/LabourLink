@@ -4,4 +4,10 @@
     <string name="title_activity_main">LabourLink</string>
     <string name="package_name">com.linklogictechnologies.labourlink</string>
     <string name="custom_url_scheme">com.linklogictechnologies.labourlink</string>
+    <string name="kiosk_restriction_enabled_title">Kiosk mode</string>
+    <string name="kiosk_restriction_enabled_description">Lock this company phone to LabourLink. Requires LabourLink to be allowlisted for lock task by this policy.</string>
+    <string name="kiosk_restriction_credential_title">Maintenance credential</string>
+    <string name="kiosk_restriction_credential_description">pbkdf2-sha256 hash of the administrator maintenance PIN, generated with tools/android-kiosk/kiosk-credential-hash.mjs. Never the PIN itself.</string>
+    <string name="kiosk_restriction_label_title">Device label</string>
+    <string name="kiosk_restriction_label_description">Optional name shown on the maintenance screen, e.g. Pilot Ulefone 1.</string>
 </resources>
