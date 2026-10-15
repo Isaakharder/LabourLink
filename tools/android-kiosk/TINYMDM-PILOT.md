@@ -10,7 +10,7 @@ Pilot phone: Ulefone Armor X12, serial `3112SH2010133658`, Android 13 (API 33,
 debug pointing at a local test server. Evidence of that phase:
 `evidence/2026-10-12_13-ulefone-armor-x12/FINDINGS.md`, archived at
 `~/Projects/LabourLink-kiosk-evidence-2026-10-12_15.tgz`
-(sha256 `db74afae…7445`).
+(sha256 `aca17d4e…b2b0`, 2026-10-15).
 
 Sources were TinyMDM's help centre, release notes and pricing page, Google's
 managed Play documentation, and bayton.org. All were read on 2026-10-15.
