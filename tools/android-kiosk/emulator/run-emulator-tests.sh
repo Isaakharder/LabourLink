@@ -165,6 +165,24 @@ log "0. Preconditions"
 # Pixel emulator images map long-press power to the Assistant by default;
 # the Ulefone (and the kiosk policy's intent) is the power/restart menu.
 e shell settings put global power_button_long_press 1
+# Start every run from the same maintenance state. A previous run leaves
+# the console credential rotated (2f), maybe a local PIN, and, if it failed,
+# an escalated brute-force lockout, all in LabourLink's kiosk prefs. Clear
+# those prefs (debug build: run-as), push $PIN's credential, and restart
+# LabourLink so it re-reads both. Identity and the event queue live
+# elsewhere and are untouched.
+e shell run-as "$PKG" rm -f shared_prefs/labourlink_kiosk.xml
+dpc SET_CONFIG --es credential "'$(echo "$PIN" | node "$TOOLS/kiosk-credential-hash.mjs" 2>/dev/null)'" >/dev/null
+e shell am force-stop "$PKG"; e shell input keyevent KEYCODE_HOME
+wait_for 30 in_kiosk || { echo "precondition: LabourLink did not come back locked after the reset" >&2; exit 2; }
+sleep 6
+# Section 4 needs a running shift to queue a break and switch against. A
+# shift left over from an earlier day is closed at local midnight, so stop
+# here with a clear message rather than failing halfway through.
+if ! wait_for 20 web_has "Working"; then
+  echo "precondition: start a job on the emulator first (the app shows 'Not working')" >&2
+  exit 2
+fi
 check "LabourLink in front and in true lock task mode (not pinning)" in_kiosk
 check "native plugin reports an enrolled kiosk device" kiosk_device_reported true
 DEVICE_ID="$(device_id)"
@@ -352,5 +370,5 @@ check "still locked after sync" in_kiosk
 # ============================================================================
 echo
 echo "Passed: $PASSED  Failed: $FAILED"
-for f in "${FAILS[@]}"; do echo "  - $f"; done
+for f in ${FAILS[@]+"${FAILS[@]}"}; do echo "  - $f"; done  # bash 3.2: empty array + set -u
 [[ $FAILED -eq 0 ]]
