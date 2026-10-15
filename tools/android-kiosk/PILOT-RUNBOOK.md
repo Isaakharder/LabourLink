@@ -15,7 +15,7 @@ Pilot phone (read-only inspection, 2026-10-12):
 
 ## 0. Decisions needed before anything else
 
-1. **Which EMM.** It needs: QR enrolment of fully managed devices; single-app kiosk using real lock task, with the power menu allowed; managed Google Play; per-app managed configuration; a Wi-Fi policy; remote lock/wipe; and preferably an offline admin exit. ManageEngine MDM's free tier (up to 25 devices) is the first candidate to trial. Intune works if Microsoft 365 Business Premium is already licensed.
+1. **Which EMM.** It needs: QR enrolment of fully managed devices; single-app kiosk using real lock task, with the power menu allowed; managed Google Play; per-app managed configuration; a Wi-Fi policy; remote lock/wipe; and preferably an offline admin exit. **Chosen for the one-phone trial: TinyMDM** (owner-approved 2026-10-13). The exact policy, enrolment steps, capability status and acceptance tests are in `TINYMDM-PILOT.md`. ManageEngine MDM (free up to 25 devices) is the fallback if TinyMDM can't meet a hard requirement.
 2. **How LabourLink reaches managed Google Play.** Either the closed-testing track is made available to the EMM's organisation (Play Console → the track → Managed Google Play / organisations), or the app is published privately to that organisation. Confirm in Play Console which option the current listing allows.
 3. **Build to pilot.** The kiosk build is versionCode 15 / 1.9.0 (branch `feat/android-kiosk-pilot`). It has to be built and signed with the existing upload key on the signing machine (`npm run android:aab`) and uploaded to the track in decision 2. A locally signed APK can't update the Play-installed app: its signature won't match Play's app-signing key.
 
@@ -63,6 +63,8 @@ Pilot phone (read-only inspection, 2026-10-12):
 If enrolment stops part-way, there are two ways back: the EMM's "retry" screen, or a recovery-mode reset (step 3.1). Neither depends on LabourLink.
 
 ## 4. Pilot validation on the phone (several days, including overnight)
+
+The TinyMDM pilot uses the fuller acceptance table in `TINYMDM-PILOT.md` section 6, which adds the required WebView-update recovery test.
 
 Use the phone for real work for several days. Tick off each item:
 
