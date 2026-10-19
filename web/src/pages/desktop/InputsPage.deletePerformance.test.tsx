@@ -73,7 +73,7 @@ vi.mock("../../lib/api", () => {
         dailyCalls.push({ date, deferred });
         return deferred.promise;
       }
-      if (path.startsWith("/api/inputs/activity-runs/") && path.endsWith("/delete") && options?.method === "POST") {
+      if (path === "/api/inputs/activity-runs/bulk-delete" && options?.method === "POST") {
         const deferred = createDeferred<{ ok: true }>();
         deleteCalls.push({ path, deferred });
         return deferred.promise;
@@ -161,16 +161,16 @@ async function loadAndOpenDeleteModal() {
   await screen.findByText("Picking Peppers");
 
   const user = userEvent.setup();
-  await user.click(screen.getByText("Picking Peppers")); // selects the run — reveals its row Delete button
-  await user.click(screen.getByRole("button", { name: "Delete" }));
-  await screen.findByText("Delete activity log?");
+  await user.click(screen.getByText("Picking Peppers")); // selects the run — enables the header Delete (1)
+  await user.click(screen.getByRole("button", { name: "Delete (1)" }));
+  await screen.findByText("Delete 1 activity entry?");
   return user;
 }
 
 describe("InputsPage — activity-log delete performance/UX", () => {
   it("disables the Delete button and shows 'Deleting…' immediately, before the network call resolves", async () => {
     const user = await loadAndOpenDeleteModal();
-    const confirmButton = screen.getByRole("button", { name: "Delete Log" });
+    const confirmButton = screen.getByRole("button", { name: "Delete 1 entry" });
     expect(confirmButton).toBeEnabled();
 
     await user.click(confirmButton);
@@ -186,7 +186,7 @@ describe("InputsPage — activity-log delete performance/UX", () => {
     const user = await loadAndOpenDeleteModal();
     const dailyCallsBeforeDelete = dailyCalls.length;
 
-    await user.click(screen.getByRole("button", { name: "Delete Log" }));
+    await user.click(screen.getByRole("button", { name: "Delete 1 entry" }));
     expect(deleteCalls.length).toBe(1);
 
     await act(async () => {
@@ -202,7 +202,7 @@ describe("InputsPage — activity-log delete performance/UX", () => {
     await act(async () => {
       dailyCalls[dailyCalls.length - 1].deferred.resolve(buildDaily("2026-08-24"));
     });
-    await screen.findByText("Activity log deleted.");
+    await screen.findByText("1 activity entry deleted.");
 
     // Give any stray extra effect/timer a chance to fire before asserting
     // the call count is still exactly right — a real duplicate-refresh bug
@@ -215,16 +215,16 @@ describe("InputsPage — activity-log delete performance/UX", () => {
   it("never removes the row, and shows the server's real error, when the delete request fails — nothing to roll back because nothing was optimistically changed", async () => {
     const user = await loadAndOpenDeleteModal();
 
-    await user.click(screen.getByRole("button", { name: "Delete Log" }));
+    await user.click(screen.getByRole("button", { name: "Delete 1 entry" }));
     await act(async () => {
       deleteCalls[0].deferred.reject(new ApiError(500, "Could not delete this activity log"));
     });
 
-    await screen.findByText("Could not delete this activity log");
-    // The modal stays open (still showing Delete Log, not gone) and the
+    await screen.findByText(/Nothing was deleted\. Could not delete this activity log/);
+    // The modal stays open (still showing its confirm button, not gone) and the
     // original row is still fully present underneath it — no premature
     // removal ever happened, so there's nothing to undo.
-    expect(screen.getByRole("button", { name: "Delete Log" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Delete 1 entry" })).toBeEnabled();
     expect(screen.getByText("Picking Peppers")).toBeInTheDocument();
     // No extra daily refresh was triggered by the failure either.
     expect(dailyCalls.length).toBe(1);

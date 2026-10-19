@@ -197,8 +197,20 @@ async function main() {
       check((await entry(a)).deleted_at === null, "3) ...and nothing else in the request was deleted");
       const whole = await bulkDelete([[a], [c1, c2]]);
       check(whole.status === 200, "3) the whole break-split log (both segments) can be deleted", whole);
+      // Repeating a request that already committed (double submit, or a
+      // retry after a lost response) is a safe no-op, never an error.
       const again = await bulkDelete([[a]]);
-      check(again.status === 409, "3) an already-deleted log is refused (stale page / double submit)", again);
+      check(
+        again.status === 200 && again.body?.deleted === 0 && again.body?.alreadyDeleted === true,
+        "3) re-sending an already-deleted log is a safe no-op (double submit / retry)",
+        again
+      );
+      // ...but a selection mixing an already-deleted log with a live one is
+      // still refused as a whole.
+      const live = await work(target.id, picking, D, [10, 0], [10, 30]);
+      const mixed = await bulkDelete([[a], [live]]);
+      check(mixed.status === 409, "3) mixing an already-deleted log with a live one is refused", mixed);
+      check((await entry(live)).deleted_at === null, "3) ...and the live log is untouched");
     }
 
     // ---- 4) Validation and permissions -------------------------------------
@@ -219,6 +231,120 @@ async function main() {
       const sup = await bulkDelete([[t1], [t2]], supervisor.token);
       check(sup.status === 200, "4) a Supervisor (Inputs editor) can", sup);
       check((await entry(o1)).deleted_at === null, "4) the other employee's log was never touched");
+    }
+
+    // ---- 5) Ownership: employeeId (sent by the Inputs page) must match -----
+    {
+      const D = "2019-11-11";
+      const t1 = await work(target.id, picking, D, [8, 0], [8, 30]);
+      await work(target.id, bags, D, [8, 30], [8, 40]);
+      const wrong = await call("POST", "/api/inputs/activity-runs/bulk-delete", admin.token, { employeeId: other.id, runs: [[t1]] });
+      check(wrong.status === 409, "5) a log that isn't the shown employee's is refused", wrong);
+      check((await entry(t1)).deleted_at === null, "5) ...and nothing was deleted");
+      const right = await call("POST", "/api/inputs/activity-runs/bulk-delete", admin.token, { employeeId: target.id, runs: [[t1]] });
+      check(right.status === 200 && right.body?.deleted === 1, "5) the shown employee's own log deletes", right);
+      const bad = await call("POST", "/api/inputs/activity-runs/bulk-delete", admin.token, { employeeId: "nope", runs: [[t1]] });
+      check(bad.status === 400, "5) a malformed employeeId is refused", bad);
+    }
+
+    // ---- 6) Manager role, like Administrator and Supervisor, can delete ----
+    {
+      const manager = await insertEmployee("Manager", "Manager");
+      const D = "2019-11-12";
+      const t1 = await work(target.id, picking, D, [8, 0], [8, 30]);
+      await work(target.id, bags, D, [8, 30], [8, 40]);
+      const res = await bulkDelete([[t1]], manager.token);
+      check(res.status === 200, "6) a Manager can bulk-delete", res);
+    }
+
+    // ---- 7) A failure midway leaves every selected log intact --------------
+    {
+      const D = "2019-11-13";
+      const x1 = await work(target.id, picking, D, [8, 0], [8, 30]);
+      await work(target.id, bags, D, [8, 30], [8, 40]);
+      const x2 = await work(target.id, picking, D, [8, 40], [9, 0]);
+      await work(target.id, bags, D, [9, 0], [9, 10]);
+      // Injected fault: soft-deleting the SECOND selected log raises, after
+      // the first one has already been soft-deleted inside the transaction.
+      const fn = `qa_bulkdel_fail_${RUN_ID}`;
+      await pool.query(`create function ${fn}() returns trigger language plpgsql as $$
+        begin
+          if new.id = '${x2}'::uuid and new.deleted_at is not null then raise exception 'injected failure'; end if;
+          return new;
+        end $$`);
+      await pool.query(`create trigger ${fn} before update on time_entries for each row execute function ${fn}()`);
+      try {
+        const res = await bulkDelete([[x1], [x2]]);
+        check(res.status === 500, "7) the injected failure surfaces as an error", res);
+        check((await entry(x1)).deleted_at === null, "7) the log deleted before the failure was rolled back");
+        check((await entry(x2)).deleted_at === null, "7) the failing log is intact");
+        const audit = await pool.query(`select 1 from time_entry_deletions where $1 = any(affected_time_entry_ids)`, [x1]);
+        check(audit.rowCount === 0, "7) no audit row survived the rollback");
+      } finally {
+        await pool.query(`drop trigger if exists ${fn} on time_entries`);
+        await pool.query(`drop function if exists ${fn}()`);
+      }
+      const retry = await bulkDelete([[x1], [x2]]);
+      check(retry.status === 200 && retry.body?.deleted === 2, "7) once the fault is gone the same request succeeds", retry);
+    }
+
+    // ---- 8) A concurrent edit / phone sync can't produce a partial delete --
+    {
+      const D = "2019-11-14";
+      const y1 = await work(target.id, picking, D, [8, 0], [8, 30]);
+      await work(target.id, bags, D, [8, 30], [8, 40]);
+      const y2 = await work(target.id, picking, D, [8, 40], [9, 0]);
+      await work(target.id, bags, D, [9, 0], [9, 10]);
+      // Another writer (an Inputs edit or phone sync) holds the employee
+      // lock and, before releasing it, splits y2 into a different run.
+      const other = await pool.connect();
+      try {
+        await other.query("begin");
+        await other.query("select pg_advisory_xact_lock(hashtext($1::text))", [target.id]);
+        const pending = bulkDelete([[y1], [y2]]);
+        await new Promise((r) => setTimeout(r, 300));
+        await other.query(`update time_entries set ended_at = $1 where id = $2`, [at(D, 8, 50), y2]);
+        await other.query(
+          `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
+           values ($1, null, 'work', $2, gen_random_uuid(), $3, $4, 'manual')`,
+          [target.id, bags, at(D, 8, 50), at(D, 9, 0)]
+        );
+        await other.query("commit");
+        const res = await pending;
+        // y2 alone is still one whole run here, so the request may delete
+        // both or neither — never just one of them.
+        const d1 = (await entry(y1)).deleted_at !== null;
+        const d2 = (await entry(y2)).deleted_at !== null;
+        check(d1 === d2, "8) both selected logs share one fate under a concurrent change", { res, d1, d2 });
+        check(res.status === 200 || res.status === 409, "8) the request completes cleanly (no 500)", res);
+      } finally {
+        other.release();
+      }
+      // A concurrent change that makes a selection stale refuses it whole.
+      const z1 = await work(target.id, picking, "2019-11-15", [8, 0], [8, 30]);
+      await work(target.id, bags, "2019-11-15", [8, 30], [8, 40]);
+      const z2 = await work(target.id, picking, "2019-11-15", [8, 40], [9, 0]);
+      const z3 = await work(target.id, picking, "2019-11-15", [9, 0], [9, 20]);
+      const holder = await pool.connect();
+      try {
+        await holder.query("begin");
+        await holder.query("select pg_advisory_xact_lock(hashtext($1::text))", [target.id]);
+        // The page loaded [z2,z3] as one two-segment run...
+        const pending = bulkDelete([[z1], [z2, z3]]);
+        await new Promise((r) => setTimeout(r, 300));
+        // ...but a sync re-points z3 at another activity, so z2 and z3 are
+        // no longer the same log by the time the delete gets the lock.
+        await holder.query(`update time_entries set activity_id = $1 where id = $2`, [bags, z3]);
+        await holder.query("commit");
+        const res = await pending;
+        check(res.status === 409, "8) a selection made stale while waiting for the lock is refused", res);
+        check(
+          (await entry(z1)).deleted_at === null && (await entry(z2)).deleted_at === null && (await entry(z3)).deleted_at === null,
+          "8) ...and none of it was deleted"
+        );
+      } finally {
+        holder.release();
+      }
     }
   } finally {
     async function tryDelete(label: string, fn: () => Promise<unknown>) {

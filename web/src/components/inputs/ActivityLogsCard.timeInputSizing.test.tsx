@@ -77,7 +77,6 @@ function renderCard(run: ActivityRunDto, editingRunId: string | null) {
       onEditEndTimeChange={vi.fn()}
       onSaveEdit={vi.fn()}
       onCancelEdit={vi.fn()}
-      onDeleteRun={vi.fn()}
       onRowCompletionChanged={vi.fn()}
       saving={false}
     />
@@ -132,7 +131,6 @@ describe("ActivityLogsCard — inline time editor sizing", () => {
         onEditEndTimeChange={vi.fn()}
         onSaveEdit={vi.fn()}
         onCancelEdit={vi.fn()}
-        onDeleteRun={vi.fn()}
         onRowCompletionChanged={vi.fn()}
         saving={false}
       />

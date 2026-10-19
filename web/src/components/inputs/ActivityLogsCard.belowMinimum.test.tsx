@@ -11,7 +11,7 @@
 import "@testing-library/jest-dom/vitest";
 import { readFileSync } from "fs";
 import { resolve } from "path";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ActivityLogsCard } from "./ActivityLogsCard";
 import { ActivityRunDto } from "../../lib/inputsTypes";
@@ -56,7 +56,7 @@ const employee = { id: "emp-1", firstName: "Isaak", lastName: "Harder", photoUrl
 
 function renderCard(
   runs: ActivityRunDto[],
-  opts: { selectedRunId?: string | null; onSelectRun?: () => void; onStartEdit?: () => void; onDeleteRun?: () => void } = {}
+  opts: { selectedRunId?: string | null; onSelectRun?: () => void; onStartEdit?: () => void } = {}
 ) {
   const props = {
     employee,
@@ -73,7 +73,6 @@ function renderCard(
     onEditEndTimeChange: vi.fn(),
     onSaveEdit: vi.fn(),
     onCancelEdit: vi.fn(),
-    onDeleteRun: opts.onDeleteRun ?? vi.fn(),
     onRowCompletionChanged: vi.fn(),
     saving: false,
   };
@@ -128,14 +127,16 @@ describe("ActivityLogsCard — below-minimum warning", () => {
     expect(screen.getByText("Manually added")).toBeInTheDocument();
   });
 
-  it("keeps the warning on a selected row alongside the selected styling, with Delete and Edit still working", () => {
-    const onDeleteRun = vi.fn();
+  it("keeps the warning on a selected row alongside the selected styling, with its delete checkbox and Edit still working", () => {
+    const onSelectRun = vi.fn();
     const onStartEdit = vi.fn();
-    renderCard([makeRun()], { selectedRunId: "run-1", onDeleteRun, onStartEdit });
+    renderCard([makeRun()], { selectedRunId: "run-1", onSelectRun, onStartEdit });
     const row = rowFor(0);
     expect(row).toHaveClass("inputs-log-row-selected", "inputs-log-row-below-minimum");
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-    expect(onDeleteRun).toHaveBeenCalledWith(expect.objectContaining({ id: "run-1" }));
+    const checkbox = within(row).getByRole("checkbox");
+    expect(checkbox).toBeChecked();
+    fireEvent.click(checkbox);
+    expect(onSelectRun).toHaveBeenCalledWith("run-1", true);
     fireEvent.click(row.querySelector(".inputs-log-starttime")!);
     expect(onStartEdit).toHaveBeenCalledWith(expect.objectContaining({ id: "run-1" }));
   });

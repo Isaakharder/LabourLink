@@ -61,7 +61,6 @@ function renderCard(breaks: BreakDto[]) {
       onEditBreakTimeChange={vi.fn()}
       onSaveEditBreak={vi.fn()}
       onCancelEditBreak={vi.fn()}
-      onDeleteBreak={vi.fn()}
       editingWorkStart={false}
       editWorkStartTimeValue=""
       onStartEditWorkStart={vi.fn()}
