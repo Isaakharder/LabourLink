@@ -1952,9 +1952,32 @@ input {
    below) so opening it never reflows anything on the page. */
 .report-employee-select-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.65rem;
   margin: 0.75rem 0 1rem;
+}
+
+/* "Sort employees" — sits on the same row as the Employees control and
+   wraps beneath it when the report is too narrow for both. Hidden in print
+   along with the rest of .report-employee-select-row; the printed table
+   itself still follows the chosen order. */
+.report-employee-sort {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: 0.75rem;
+}
+
+.report-employee-sort select {
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: inherit;
+  font-size: 0.85rem;
+  font-family: inherit;
+  max-width: 100%;
 }
 
 .report-employee-select-label {
@@ -2389,6 +2412,10 @@ input {
 
   .report-employee-select-panel {
     width: calc(100vw - 2rem);
+  }
+
+  .report-employee-sort {
+    margin-left: 0;
   }
 }
 
