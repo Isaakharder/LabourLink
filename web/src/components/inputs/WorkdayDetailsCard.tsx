@@ -16,7 +16,7 @@ export interface EditingBreakField {
 
 // "Manually added" badge shared by the work-start row and every break row
 // below — one tooltip format (who/when/why) for every manually-created
-// entry on this card, matching the existing Auto-added/Auto-closed/Rounded
+// entry on this card, matching the existing Auto-added/Auto-closed
 // badge conventions already used here.
 function ManualBadge({ meta }: { meta: ManualEntryMeta }) {
   return (
@@ -30,14 +30,12 @@ function ManualBadge({ meta }: { meta: ManualEntryMeta }) {
 }
 
 interface WorkdayDetailsCardProps {
+  // The effective (possibly rounded) time is all this table shows — there
+  // is deliberately no "Rounded" badge; the original tap time stays in the
+  // API data (DailyInputsResponse.workStartOriginalTime) and audit history.
   workStartTime: string | null;
-  // Present only when work-start rounding was active for this entry (see
-  // inputsTypes.ts) — used only to decide whether to show the "Rounded"
-  // badge/tooltip, never rendered as the primary time itself.
-  workStartOriginalTime: string | null;
   // Present only when the work-start entry's started_at was set by an
-  // administrator/system correction — used only to decide whether to show
-  // the "Corrected" badge, same convention as workStartOriginalTime above.
+  // administrator/system correction.
   workStartCorrectedFrom: string | null;
   workStartManualEntry: ManualEntryMeta | null;
   breaks: BreakDto[];
@@ -81,7 +79,6 @@ interface WorkdayDetailsCardProps {
 
 export function WorkdayDetailsCard({
   workStartTime,
-  workStartOriginalTime,
   workStartCorrectedFrom,
   workStartManualEntry,
   breaks,
@@ -235,14 +232,6 @@ export function WorkdayDetailsCard({
                 ) : workStartTime ? (
                   <span className="inputs-cell-stack">
                     <span className="inputs-cell-time">{formatTimeInAppTimezone(workStartTime)}</span>
-                    {workStartOriginalTime && workStartOriginalTime !== workStartTime && (
-                      <span
-                        className="inputs-rounded-badge"
-                        title={`Actual tap time: ${formatTimeInAppTimezone(workStartOriginalTime)} — adjusted by this employee's break profile's work-start rounding setting.`}
-                      >
-                        Rounded
-                      </span>
-                    )}
                     {workStartManualEntry && <ManualBadge meta={workStartManualEntry} />}
                   </span>
                 ) : (
@@ -314,14 +303,6 @@ export function WorkdayDetailsCard({
                     ) : (
                       <span className="inputs-cell-stack">
                         <span className="inputs-cell-time">{formatTimeInAppTimezone(b.startedAt)}</span>
-                        {b.startedAtOriginalTime && b.startedAtOriginalTime !== b.startedAt && (
-                          <span
-                            className="inputs-rounded-badge"
-                            title={`Actual tap time: ${formatTimeInAppTimezone(b.startedAtOriginalTime)} — adjusted by this employee's break profile's break rounding setting or a scheduled break match.`}
-                          >
-                            Rounded
-                          </span>
-                        )}
                       </span>
                     )}
                   </td>
@@ -357,14 +338,6 @@ export function WorkdayDetailsCard({
                     ) : b.endedAt ? (
                       <span className="inputs-cell-stack">
                         <span className="inputs-cell-time">{formatTimeInAppTimezone(b.endedAt)}</span>
-                        {b.endedAtOriginalTime && b.endedAtOriginalTime !== b.endedAt && (
-                          <span
-                            className="inputs-rounded-badge"
-                            title={`Actual tap time: ${formatTimeInAppTimezone(b.endedAtOriginalTime)} — adjusted by this employee's break profile's break rounding setting or a scheduled break match.`}
-                          >
-                            Rounded
-                          </span>
-                        )}
                         {b.autoClosed && <span className="inputs-autoclosed-badge">Auto-closed</span>}
                       </span>
                     ) : (

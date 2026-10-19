@@ -43,7 +43,6 @@ describe("WorkdayDetailsCard — inline time editor sizing", () => {
     render(
       <WorkdayDetailsCard
         workStartTime="2026-08-15T14:00:00.000Z"
-        workStartOriginalTime={null}
         workStartCorrectedFrom={null}
         workStartManualEntry={null}
         breaks={[]}
@@ -76,7 +75,6 @@ describe("WorkdayDetailsCard — inline time editor sizing", () => {
     const { unmount } = render(
       <WorkdayDetailsCard
         workStartTime="2026-08-15T14:00:00.000Z"
-        workStartOriginalTime={null}
         workStartCorrectedFrom={null}
         workStartManualEntry={null}
         breaks={[brk]}
@@ -111,7 +109,6 @@ describe("WorkdayDetailsCard — inline time editor sizing", () => {
     render(
       <WorkdayDetailsCard
         workStartTime="2026-08-15T14:00:00.000Z"
-        workStartOriginalTime={null}
         workStartCorrectedFrom={null}
         workStartManualEntry={null}
         breaks={[brk]}
@@ -142,7 +139,6 @@ describe("WorkdayDetailsCard — inline time editor sizing", () => {
     render(
       <WorkdayDetailsCard
         workStartTime="2026-08-15T14:00:00.000Z"
-        workStartOriginalTime={null}
         workStartCorrectedFrom={null}
         workStartManualEntry={null}
         breaks={[makeBreak()]}

@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InputsPage } from "./InputsPage";
 import { api, ApiError } from "../../lib/api";
 import { ActivityRunDto, BreakDto, DailyInputsResponse } from "../../lib/inputsTypes";
-import { formatDurationHMS } from "../../lib/timezone";
+import { formatDurationHMS, formatTimeInAppTimezone } from "../../lib/timezone";
 
 const DATE = "2026-10-05";
 const PREV_DATE = "2026-10-04";
@@ -228,7 +228,7 @@ describe("table layout without an Actions column", () => {
     for (const row of activityTable().querySelectorAll("tbody tr")) expect(row.querySelectorAll("td")).toHaveLength(8);
   });
 
-  it("Speed and Start Time sit in separate cells, with the Rounded badge inside Start Time's own cell", async () => {
+  it("Speed and Start Time sit in separate cells; a rounded Start Time shows just the time, no Rounded badge", async () => {
     await renderPage();
     const row = runRow("Picking Peppers");
     const speedCell = row.querySelector("td.inputs-log-speed") as HTMLElement;
@@ -237,7 +237,10 @@ describe("table layout without an Actions column", () => {
     expect(speedCell).toHaveTextContent("1302.4 stems/hour");
     expect(speedCell).not.toHaveTextContent(/AM|PM/);
     expect(startCell).not.toHaveTextContent("stems/hour");
-    expect(within(startCell).getByText("Rounded")).toBeInTheDocument();
+    expect(within(startCell).queryByText("Rounded")).toBeNull();
+    expect(document.querySelector(".inputs-rounded-badge")).toBeNull();
+    expect(startCell).toHaveTextContent(formatTimeInAppTimezone(`${DATE}T12:00:00.000Z`));
+    expect(startCell).not.toHaveTextContent(formatTimeInAppTimezone(`${DATE}T11:58:00.000Z`));
     // Columns line up 1:1 with their headers.
     const headers = within(activityTable()).getAllByRole("columnheader").map((h) => h.textContent);
     const cells = [...row.querySelectorAll("td")];
@@ -246,6 +249,30 @@ describe("table layout without an Actions column", () => {
     // Long values keep their full text in a tooltip even if visually truncated.
     expect(within(speedCell).getByTitle(/^1302\.4 stems\/hour/)).toBeInTheDocument();
     expect(within(row).getByTitle("Picking Peppers")).toBeInTheDocument();
+  });
+});
+
+describe("badges kept after removing Rounded", () => {
+  it("Activity details still shows Manually added, In progress and the below-minimum warning, with no Rounded anywhere", async () => {
+    day = {
+      ...freshDay(),
+      runs: [
+        run("r-man", "Hand Weeding", "09:00", "09:30", {
+          manualEntry: { createdByEmployeeId: "admin", createdByName: "Ada Admin", creationReason: "Forgot phone" },
+          endedAtOriginalTime: `${DATE}T09:32:00.000Z`,
+          startedAtOriginalTime: `${DATE}T08:58:00.000Z`,
+        } as Partial<ActivityRunDto>),
+        run("r-short", "Packing Bags", "10:00", "10:01", { isBelowMinimumDuration: true, minimumDurationMinutes: 3 } as Partial<ActivityRunDto>),
+        run("r-open", "Picking Peppers", "14:00", null, { startedAtOriginalTime: `${DATE}T13:57:00.000Z` }),
+      ],
+    };
+    await renderPage();
+    expect(within(activityTable()).getByText("Manually added")).toBeInTheDocument();
+    expect(within(runRow("Picking Peppers")).getAllByText("In progress").length).toBeGreaterThan(0);
+    expect(runRow("Packing Bags")).toHaveClass("inputs-log-row-below-minimum");
+    expect(within(runRow("Packing Bags")).getByText(/Below 3-minute minimum/)).toBeInTheDocument();
+    expect(within(activityTable()).queryByText("Rounded")).toBeNull();
+    expect(within(workdayTable()).queryByText("Rounded")).toBeNull();
   });
 });
 

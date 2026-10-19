@@ -2968,7 +2968,7 @@ input {
   color: white;
 }
 
-/* Same pill shape as inputs-break-source-badge/inputs-rounded-badge —
+/* Same pill shape as inputs-break-source-badge —
    tinted distinctly so "created directly on Inputs, not from a phone" reads
    at a glance next to those other provenance badges. */
 .inputs-manual-badge {
@@ -3074,9 +3074,13 @@ input {
   overflow: visible;
 }
 
+/* Compact rows: a single-line row is ~28px (was ~34px), since no Rounded
+   badge stacks under the times any more — only Manually added,
+   Auto-closed and In progress can still add a second line. */
 .inputs-logs-table th,
 .inputs-logs-table td {
-  padding: 0.5rem 0.4rem;
+  padding: 0.3rem 0.4rem;
+  line-height: 1.3;
   /* Nothing in one cell may ever paint into the next: long text truncates
      (.inputs-cell-truncate, with the full value in a title tooltip and in
      the DOM for screen readers) and badges wrap under the time
@@ -3137,8 +3141,8 @@ input {
 }
 
 /* Fits .inputs-time-input (140px) plus the cell's own horizontal padding.
-   The Rounded badge stacks under the time (.inputs-cell-stack) rather than
-   widening the column. */
+   Any badge (e.g. Manually added) stacks under the time
+   (.inputs-cell-stack) rather than widening the column. */
 .inputs-col-starttime {
   width: 155px;
 }
@@ -3182,12 +3186,15 @@ input {
 
 /* A time (or duration) with its badges: the time itself never wraps, and
    any badge that doesn't fit beside it drops onto the next line inside the
-   same cell instead of covering the neighbouring column. */
+   same cell instead of covering the neighbouring column. Left-aligned like
+   every plain time and header in these tables (.employees-table td's
+   text-align: left wins over the per-column right-align rules), so a time
+   with a badge under it lines up with the times above and below it. */
 .inputs-cell-stack {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 0.2rem 0.35rem;
   max-width: 100%;
   vertical-align: middle;
@@ -3198,7 +3205,6 @@ input {
   font-variant-numeric: tabular-nums;
 }
 
-.inputs-cell-stack > .inputs-rounded-badge,
 .inputs-cell-stack > .inputs-manual-badge,
 .inputs-cell-stack > .inputs-autoclosed-badge,
 .inputs-cell-stack > .status-pill {
@@ -3206,11 +3212,6 @@ input {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* Workday details' first column is left-aligned, so its stacks are too. */
-.inputs-workday-table td:not(.inputs-time-cell) .inputs-cell-stack {
-  justify-content: flex-start;
 }
 
 .inputs-log-activity .inputs-manual-badge {
@@ -3431,9 +3432,11 @@ input {
   overflow: visible;
 }
 
+/* Same compact rows as .inputs-logs-table. */
 .inputs-workday-table th,
 .inputs-workday-table td {
-  padding: 0.45rem 0.5rem;
+  padding: 0.3rem 0.5rem;
+  line-height: 1.3;
   /* Same no-spill backstop as .inputs-logs-table. */
   overflow: hidden;
 }
@@ -3904,20 +3907,6 @@ input {
   color: var(--color-muted);
   font-size: 0.7rem;
   font-weight: 600;
-}
-
-/* Same pill shape as inputs-break-source-badge, tinted to hint "adjusted"
-   rather than just "categorized" — the title attribute (native tooltip)
-   carries the actual original tap time, see WorkdayDetailsCard. */
-.inputs-rounded-badge {
-  margin-left: 0.5rem;
-  padding: 0.1rem 0.45rem;
-  border-radius: 999px;
-  background: #fef3c7;
-  color: #92400e;
-  font-size: 0.7rem;
-  font-weight: 600;
-  cursor: help;
 }
 
 /* ---------- InputsErrorBoundary "Needs review" fallbacks ---------- */

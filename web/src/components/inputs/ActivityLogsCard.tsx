@@ -348,16 +348,6 @@ export function ActivityLogsCard({
                     ) : (
                       <span className="inputs-cell-stack">
                         <span className="inputs-cell-time">{formatTimeInAppTimezone(run.startedAt)}</span>
-                        {run.startedAtOriginalTime && run.startedAtOriginalTime !== run.startedAt && (
-                          <span
-                            className="inputs-rounded-badge"
-                            title={`Actual tap time: ${formatTimeInAppTimezone(
-                              run.startedAtOriginalTime
-                            )} — adjusted by this employee's break profile's work-start rounding setting.`}
-                          >
-                            Rounded
-                          </span>
-                        )}
                       </span>
                     )}
                   </td>
@@ -409,16 +399,6 @@ export function ActivityLogsCard({
                     ) : run.endedAt ? (
                       <span className="inputs-cell-stack">
                         <span className="inputs-cell-time">{formatTimeInAppTimezone(run.endedAt)}</span>
-                        {run.endedAtOriginalTime && run.endedAtOriginalTime !== run.endedAt && (
-                          <span
-                            className="inputs-rounded-badge"
-                            title={`Actual tap time: ${formatTimeInAppTimezone(
-                              run.endedAtOriginalTime
-                            )} — adjusted by this employee's break profile's work-end rounding setting.`}
-                          >
-                            Rounded
-                          </span>
-                        )}
                         {run.autoClosed && <span className="inputs-autoclosed-badge">Auto-closed</span>}
                       </span>
                     ) : (

@@ -1,18 +1,20 @@
 // @vitest-environment jsdom
 //
-// Tests the "Rounded" badge on break rows: it must appear exactly when a
-// break's startedAtOriginalTime/endedAtOriginalTime (the employee's raw
-// tap, kept alongside the possibly-rounded effective value — see
-// server/src/routes/inputs.ts and mobileTime.ts's break/start and
-// break/end routes) differs from the displayed startedAt/endedAt, and must
-// never appear when they match or are null. Renders WorkdayDetailsCard
-// directly with fabricated BreakDtos, same convention as
-// InputsPage.switching.test.tsx.
+// Workday details shows each break's effective (possibly rounded) times
+// only — there is deliberately no "Rounded" badge, even when a break's
+// startedAtOriginalTime/endedAtOriginalTime (the employee's raw tap, kept
+// alongside the effective value — see server/src/routes/inputs.ts and
+// mobileTime.ts's break/start and break/end routes) differs. That raw tap
+// stays in the API data and audit history; this is display-only. The other
+// provenance/status badges (Auto-added, Manually added, Auto-closed, In
+// progress) are unaffected. Renders WorkdayDetailsCard directly with
+// fabricated BreakDtos, same convention as InputsPage.switching.test.tsx.
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkdayDetailsCard } from "./WorkdayDetailsCard";
 import { BreakDto } from "../../lib/inputsTypes";
+import { formatTimeInAppTimezone } from "../../lib/timezone";
 
 // This project's vitest config doesn't set testing-library's auto-cleanup
 // globals, so each render must be explicitly unmounted — otherwise a later
@@ -47,7 +49,6 @@ function renderCard(breaks: BreakDto[]) {
   return render(
     <WorkdayDetailsCard
       workStartTime="2026-08-15T14:00:00.000Z"
-      workStartOriginalTime={null}
       workStartCorrectedFrom={null}
       workStartManualEntry={null}
       breaks={breaks}
@@ -71,30 +72,8 @@ function renderCard(breaks: BreakDto[]) {
   );
 }
 
-describe("WorkdayDetailsCard break rounding badge", () => {
-  it("shows the Rounded badge on the start cell when startedAtOriginalTime differs from startedAt", () => {
-    renderCard([
-      makeBreak({
-        id: "b1",
-        startedAt: "2026-08-15T16:00:00.000Z",
-        startedAtOriginalTime: "2026-08-15T15:55:42.000Z",
-      }),
-    ]);
-    expect(screen.getAllByText("Rounded")).toHaveLength(1);
-  });
-
-  it("shows the Rounded badge on the end cell when endedAtOriginalTime differs from endedAt", () => {
-    renderCard([
-      makeBreak({
-        id: "b1",
-        endedAt: "2026-08-15T16:15:00.000Z",
-        endedAtOriginalTime: "2026-08-15T16:13:53.000Z",
-      }),
-    ]);
-    expect(screen.getAllByText("Rounded")).toHaveLength(1);
-  });
-
-  it("shows both badges when both start and end were rounded", () => {
+describe("WorkdayDetailsCard — no Rounded badge", () => {
+  it("never shows a Rounded badge, even when a break's start and end were both rounded", () => {
     renderCard([
       makeBreak({
         id: "b1",
@@ -104,67 +83,63 @@ describe("WorkdayDetailsCard break rounding badge", () => {
         endedAtOriginalTime: "2026-08-15T16:13:53.000Z",
       }),
     ]);
-    expect(screen.getAllByText("Rounded")).toHaveLength(2);
-  });
-
-  it("shows no badge when startedAtOriginalTime/endedAtOriginalTime are null (never rounded)", () => {
-    renderCard([makeBreak({ id: "b1", startedAtOriginalTime: null, endedAtOriginalTime: null })]);
     expect(screen.queryByText("Rounded")).toBeNull();
+    expect(document.querySelector(".inputs-rounded-badge")).toBeNull();
   });
 
-  it("shows no badge when startedAtOriginalTime/endedAtOriginalTime equal the effective values (rounding landed exactly on a boundary)", () => {
-    renderCard([
-      makeBreak({
-        id: "b1",
-        startedAt: "2026-08-15T16:00:00.000Z",
-        startedAtOriginalTime: "2026-08-15T16:00:00.000Z",
-        endedAt: "2026-08-15T16:15:00.000Z",
-        endedAtOriginalTime: "2026-08-15T16:15:00.000Z",
-      }),
-    ]);
-    expect(screen.queryByText("Rounded")).toBeNull();
-  });
-
-  it("shows no badge on an in-progress break's end cell (no endedAt yet)", () => {
-    renderCard([
-      makeBreak({
-        id: "b1",
-        endedAt: null,
-        endedAtOriginalTime: null,
-        durationSeconds: 0,
-      }),
-    ]);
-    expect(screen.queryByText("Rounded")).toBeNull();
-    // "In progress" legitimately appears twice for an open, unpaid break —
-    // once in the End Time cell, once in the Unpaid Time cell.
-    expect(screen.getAllByText("In progress")).toHaveLength(2);
-  });
-
-  it("scopes each break's badge to its own row across multiple breaks", () => {
+  it("shows the effective (rounded) times, never the raw tap times", () => {
     renderCard([
       makeBreak({
         id: "b1",
         name: "Morning break",
-        startedAt: "2026-08-15T13:00:00.000Z",
-        startedAtOriginalTime: "2026-08-15T12:55:42.000Z",
-        endedAt: "2026-08-15T13:15:00.000Z",
-        endedAtOriginalTime: "2026-08-15T13:15:00.000Z",
+        startedAt: "2026-08-15T16:00:00.000Z",
+        startedAtOriginalTime: "2026-08-15T15:55:42.000Z",
+        endedAt: "2026-08-15T16:15:00.000Z",
+        endedAtOriginalTime: "2026-08-15T16:13:53.000Z",
+      }),
+    ]);
+    const row = screen.getByText("Morning break").closest("tr") as HTMLElement;
+    expect(within(row).getByText(formatTimeInAppTimezone("2026-08-15T16:00:00.000Z"))).toBeInTheDocument();
+    expect(within(row).getByText(formatTimeInAppTimezone("2026-08-15T16:15:00.000Z"))).toBeInTheDocument();
+    expect(row).not.toHaveTextContent(formatTimeInAppTimezone("2026-08-15T15:55:42.000Z"));
+    expect(row).not.toHaveTextContent(formatTimeInAppTimezone("2026-08-15T16:13:53.000Z"));
+    // Not even as a tooltip — the raw tap lives in the data/audit history only.
+    expect(row.querySelector("[title*='Actual tap time']")).toBeNull();
+  });
+
+  it("keeps the other badges: Auto-added, Manually added and Auto-closed", () => {
+    renderCard([
+      makeBreak({
+        id: "b1",
+        name: "Coffee",
+        source: "auto",
+        autoClosed: true,
+        startedAtOriginalTime: "2026-08-15T15:55:42.000Z",
       }),
       makeBreak({
         id: "b2",
-        name: "Afternoon break",
-        startedAt: "2026-08-15T15:00:00.000Z",
-        startedAtOriginalTime: "2026-08-15T15:00:00.000Z",
-        endedAt: "2026-08-15T15:15:00.000Z",
-        endedAtOriginalTime: "2026-08-15T15:15:00.000Z",
+        name: "Lunch",
+        startedAt: "2026-08-15T18:00:00.000Z",
+        endedAt: "2026-08-15T18:30:00.000Z",
+        manualEntry: { createdByEmployeeId: "admin", createdByName: "Ada Admin", creationReason: "Missed tap" },
       }),
     ]);
-    // Only b1's start was actually rounded — exactly one badge overall,
-    // and it lives in b1's row, not b2's.
-    expect(screen.getAllByText("Rounded")).toHaveLength(1);
-    const b1Row = screen.getByText("Morning break").closest("tr") as HTMLElement;
-    const b2Row = screen.getByText("Afternoon break").closest("tr") as HTMLElement;
-    expect(within(b1Row).getByText("Rounded")).toBeInTheDocument();
-    expect(within(b2Row).queryByText("Rounded")).toBeNull();
+    expect(screen.getByText("Auto-added")).toBeInTheDocument();
+    expect(screen.getByText("Auto-closed")).toBeInTheDocument();
+    expect(screen.getByText("Manually added")).toBeInTheDocument();
+    expect(screen.queryByText("Rounded")).toBeNull();
+  });
+
+  it("still shows In progress for an open break", () => {
+    renderCard([makeBreak({ id: "b1", endedAt: null, endedAtOriginalTime: null, durationSeconds: 0 })]);
+    // Once in the End Time cell, once in the Unpaid Time cell.
+    expect(screen.getAllByText("In progress")).toHaveLength(2);
+  });
+
+  it("shows the Work start time without a Rounded badge", () => {
+    renderCard([]);
+    const row = screen.getByText("Work start time").closest("tr") as HTMLElement;
+    expect(within(row).getByText(formatTimeInAppTimezone("2026-08-15T14:00:00.000Z"))).toBeInTheDocument();
+    expect(within(row).queryByText("Rounded")).toBeNull();
   });
 });

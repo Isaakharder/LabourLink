@@ -1150,7 +1150,6 @@ export function InputsPage() {
               />
               <WorkdayDetailsCard
                 workStartTime={daily.workStartTime}
-                workStartOriginalTime={daily.workStartOriginalTime}
                 workStartCorrectedFrom={daily.workStartCorrectedFrom}
                 workStartManualEntry={daily.workStartManualEntry}
                 breaks={daily.breaks}
