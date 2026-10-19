@@ -63,25 +63,27 @@ describe("Start Time / End Time columns — room for the non-collapsing input", 
     expect(colWidth).toBeGreaterThanOrEqual(inputWidth);
   });
 
-  it("gives .inputs-col-endtime enough width for the input plus Save/Cancel — not just the input alone", () => {
+  it("gives .inputs-col-endtime enough width for the input, with Save/Cancel wrapping under it instead of beside it", () => {
     const inputWidth = pxValue(ruleBody(".inputs-time-input"), "width");
     const colWidth = pxValue(ruleBody(".inputs-col-endtime"), "width");
-    // The End Time cell holds the input AND two buttons AND their gaps —
-    // meaningfully more than the bare input width, which is what
-    // previously let the (now non-collapsing) editor overflow left and
-    // visually cover Duration/Start Time on a narrower table.
-    expect(colWidth).toBeGreaterThan(inputWidth + 100);
+    expect(colWidth).toBeGreaterThanOrEqual(inputWidth);
+    // The End Time cell holds the input AND two buttons. Rather than a
+    // ~305px column, the editor wraps the buttons onto their own line, so
+    // it never overflows left and covers Duration/Start Time.
+    const editorBody = ruleBody(".inputs-endtime-editor,\n.inputs-time-editor");
+    expect(editorBody).toMatch(/flex-wrap\s*:\s*wrap/);
   });
 
-  it("never lets the Actions column's own width vary with the time columns (it stays independently fixed)", () => {
-    const actionsWidth = pxValue(ruleBody(".inputs-col-actions"), "width");
-    expect(actionsWidth).toBe(90);
+  it("has no Actions column any more — deleting moved to the section headers", () => {
+    expect(css).not.toMatch(/\.inputs-col-actions\b/);
+    expect(css).not.toMatch(/\.inputs-th-actions\b/);
   });
 });
 
 describe(".inputs-logs-table — floor wide enough to avoid crushing, scrolls instead below it", () => {
   it("sets min-width to at least the sum of every column's own width", () => {
     const columns = [
+      ".inputs-col-select",
       ".inputs-col-activity",
       ".inputs-col-row",
       ".inputs-col-carrier",
@@ -89,7 +91,6 @@ describe(".inputs-logs-table — floor wide enough to avoid crushing, scrolls in
       ".inputs-col-starttime",
       ".inputs-col-duration",
       ".inputs-col-endtime",
-      ".inputs-col-actions",
     ];
     const sum = columns.reduce((total, selector) => total + pxValue(ruleBody(selector), "width"), 0);
     const tableMinWidth = pxValue(ruleBody(".inputs-logs-table"), "min-width");

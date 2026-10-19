@@ -6,8 +6,10 @@ import { formatDateLong, formatDurationHMS, formatTimeInAppTimezone } from "../.
 import { RowCompletionReviewModal } from "./RowCompletionReviewModal";
 import { InputsErrorBoundary } from "./InputsErrorBoundary";
 
-// One row's worth of columns — 8 <th>s in the header above (Activity, Row,
-// Carrier, Speed, Start Time, Duration, End Time, Actions). Kept as a plain
+// One row's worth of columns — 8 <th>s in the header above (select
+// checkbox, Activity, Row, Carrier, Speed, Start Time, Duration, End Time).
+// Deleting happens from the section header's Delete button (InputsPage),
+// so there is no Actions column. Kept as a plain
 // constant (not derived) since the fallback row below needs the same span
 // whether or not a real render ever gets far enough to count columns
 // dynamically.
@@ -31,6 +33,13 @@ export function belowMinimumLabel(minutes: number): string {
   return `Below ${minutes}-minute minimum`;
 }
 
+// Checkbox-selectable for deletion: the same rule the server enforces (a
+// finished log, by someone allowed to edit Inputs). An in-progress log is
+// never selectable.
+export function isRunDeletable(run: ActivityRunDto): boolean {
+  return run.canEdit && !run.isOpen;
+}
+
 interface ActivityLogsCardEmployee {
   id: string;
   firstName: string;
@@ -47,11 +56,12 @@ interface ActivityLogsCardProps {
   // Every selected row (Ctrl/Cmd+click adds/removes rows). Defaults to just
   // selectedRunId.
   selectedRunIds?: ReadonlySet<string>;
-  // additive = Ctrl/Cmd was held: toggle the row in/out of the selection.
+  // additive = Ctrl/Cmd was held (or the row's checkbox was used): toggle
+  // the row in/out of the selection.
   onSelectRun: (id: string, additive?: boolean) => void;
-  // Deletes several selected rows at once (shown instead of the single
-  // Delete when 2+ rows are selected).
-  onDeleteRuns?: (runs: ActivityRunDto[]) => void;
+  // Header checkbox: replaces the selection with exactly these rows (every
+  // visible deletable row, or none).
+  onSetSelectedRuns?: (ids: string[]) => void;
   // Both Start Time and End Time are editable now (the general Activity
   // Time Correction workflow — see InputsPage.tsx's handleSaveEdit),
   // entered together as one combined edit mode on the run regardless of
@@ -65,7 +75,6 @@ interface ActivityLogsCardProps {
   onEditEndTimeChange: (value: string) => void;
   onSaveEdit: () => void;
   onCancelEdit: () => void;
-  onDeleteRun: (run: ActivityRunDto) => void;
   // Called after the admin combines segments in the row-completion review
   // modal — the parent reloads the day so the newly-resolved speed shows up.
   onRowCompletionChanged: () => void;
@@ -94,7 +103,7 @@ export function ActivityLogsCard({
   selectedRunId,
   selectedRunIds,
   onSelectRun,
-  onDeleteRuns,
+  onSetSelectedRuns,
   editingRunId,
   editStartTimeValue,
   editEndTimeValue,
@@ -103,13 +112,13 @@ export function ActivityLogsCard({
   onEditEndTimeChange,
   onSaveEdit,
   onCancelEdit,
-  onDeleteRun,
   onRowCompletionChanged,
   saving,
 }: ActivityLogsCardProps) {
   const selected: ReadonlySet<string> = selectedRunIds ?? new Set(selectedRunId ? [selectedRunId] : []);
-  const selectedRuns = runs.filter((r) => selected.has(r.id));
-  const multiDeletable = onDeleteRuns ? selectedRuns.filter((r) => r.canEdit) : [];
+  const deletableRuns = runs.filter(isRunDeletable);
+  const checkedDeletableCount = deletableRuns.filter((r) => selected.has(r.id)).length;
+  const allDeletableChecked = deletableRuns.length > 0 && checkedDeletableCount === deletableRuns.length;
 
   const [reviewTarget, setReviewTarget] = useState<{
     greenhouseRowId: string;
@@ -196,6 +205,7 @@ export function ActivityLogsCard({
         <div className="inputs-logs-table-scroll">
           <table className="employees-table inputs-logs-table">
             <colgroup>
+              <col className="inputs-col-select" />
               <col className="inputs-col-activity" />
               <col className="inputs-col-row" />
               <col className="inputs-col-carrier" />
@@ -203,10 +213,23 @@ export function ActivityLogsCard({
               <col className="inputs-col-starttime" />
               <col className="inputs-col-duration" />
               <col className="inputs-col-endtime" />
-              <col className="inputs-col-actions" />
             </colgroup>
             <thead>
               <tr>
+                <th className="inputs-select-cell">
+                  {onSetSelectedRuns && deletableRuns.length > 0 && (
+                    <input
+                      type="checkbox"
+                      className="inputs-select-checkbox"
+                      aria-label="Select all deletable activity entries"
+                      checked={allDeletableChecked}
+                      ref={(el) => {
+                        if (el) el.indeterminate = checkedDeletableCount > 0 && !allDeletableChecked;
+                      }}
+                      onChange={() => onSetSelectedRuns(allDeletableChecked ? [] : deletableRuns.map((r) => r.id))}
+                    />
+                  )}
+                </th>
                 <th>Activity</th>
                 <th>Row</th>
                 <th>Carrier</th>
@@ -214,7 +237,6 @@ export function ActivityLogsCard({
                 <th className="inputs-th-starttime">Start Time</th>
                 <th className="inputs-th-duration">Duration</th>
                 <th className="inputs-th-endtime">End Time</th>
-                <th className="inputs-th-actions">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -239,15 +261,36 @@ export function ActivityLogsCard({
                   title={run.isBelowMinimumDuration ? belowMinimumLabel(run.minimumDurationMinutes) : undefined}
                   onClick={(e) => onSelectRun(run.id, e.ctrlKey || e.metaKey)}
                 >
+                  <td className="inputs-select-cell" onClick={(e) => e.stopPropagation()}>
+                    {isRunDeletable(run) && (
+                      <input
+                        type="checkbox"
+                        className="inputs-select-checkbox"
+                        aria-label={`Select ${run.activityName} at ${formatTimeInAppTimezone(run.startedAt)}`}
+                        checked={selected.has(run.id)}
+                        onChange={() => onSelectRun(run.id, true)}
+                      />
+                    )}
+                  </td>
                   <td className="inputs-log-activity">
-                    {run.activityName}
+                    <span className="inputs-cell-truncate" title={run.activityName}>
+                      {run.activityName}
+                    </span>
                     {run.isBelowMinimumDuration && (
                       <span className="sr-only">{` (${belowMinimumLabel(run.minimumDurationMinutes)})`}</span>
                     )}
                     {run.manualEntry && <ManualBadge meta={run.manualEntry} />}
                   </td>
-                  <td className="inputs-log-row-cell">{run.row?.label ?? "—"}</td>
-                  <td className="inputs-log-carrier-cell">{run.carrier?.name ?? "—"}</td>
+                  <td className="inputs-log-row-cell">
+                    <span className="inputs-cell-truncate" title={run.row?.label ?? undefined}>
+                      {run.row?.label ?? "—"}
+                    </span>
+                  </td>
+                  <td className="inputs-log-carrier-cell">
+                    <span className="inputs-cell-truncate" title={run.carrier?.name ?? undefined}>
+                      {run.carrier?.name ?? "—"}
+                    </span>
+                  </td>
                   <td className="inputs-log-speed">
                     {run.activityDensitySource ? (
                       run.isUnresolvedRowCompletion ? (
@@ -260,14 +303,20 @@ export function ActivityLogsCard({
                           Needs review
                         </button>
                       ) : run.calculatedSpeedPerHour ? (
-                        <span title="Calculated actual speed for this activity, based on row density and hours worked">
+                        <span
+                          className="inputs-cell-truncate"
+                          title={`${formatSpeed(run.calculatedSpeedPerHour)} — calculated actual speed for this activity, based on row density and hours worked`}
+                        >
                           {formatSpeed(run.calculatedSpeedPerHour)}
                         </span>
                       ) : (
                         "—"
                       )
                     ) : run.normalSpeedPerHour ? (
-                      <span title="Configured normal speed for this activity — not measured actual output">
+                      <span
+                        className="inputs-cell-truncate"
+                        title={`${formatSpeed(run.normalSpeedPerHour)} — configured normal speed for this activity, not measured actual output`}
+                      >
                         {formatSpeed(run.normalSpeedPerHour)}
                       </span>
                     ) : (
@@ -297,8 +346,8 @@ export function ActivityLogsCard({
                         autoFocus
                       />
                     ) : (
-                      <>
-                        {formatTimeInAppTimezone(run.startedAt)}
+                      <span className="inputs-cell-stack">
+                        <span className="inputs-cell-time">{formatTimeInAppTimezone(run.startedAt)}</span>
                         {run.startedAtOriginalTime && run.startedAtOriginalTime !== run.startedAt && (
                           <span
                             className="inputs-rounded-badge"
@@ -309,19 +358,19 @@ export function ActivityLogsCard({
                             Rounded
                           </span>
                         )}
-                      </>
+                      </span>
                     )}
                   </td>
                   <td className="inputs-log-duration">
                     {run.isOpen ? (
-                      <>
+                      <span className="inputs-cell-stack">
                         <ActivityTimer
                           startedAt={run.currentSegmentStartedAt}
                           offsetSeconds={run.durationSeconds}
-                          className="inputs-log-duration-live"
-                        />{" "}
+                          className="inputs-log-duration-live inputs-cell-time"
+                        />
                         <span className="status-pill status-active">In progress</span>
-                      </>
+                      </span>
                     ) : (
                       formatDurationHMS(run.durationSeconds)
                     )}
@@ -358,8 +407,8 @@ export function ActivityLogsCard({
                     ) : run.isOpen ? (
                       "In progress"
                     ) : run.endedAt ? (
-                      <>
-                        {formatTimeInAppTimezone(run.endedAt)}
+                      <span className="inputs-cell-stack">
+                        <span className="inputs-cell-time">{formatTimeInAppTimezone(run.endedAt)}</span>
                         {run.endedAtOriginalTime && run.endedAtOriginalTime !== run.endedAt && (
                           <span
                             className="inputs-rounded-badge"
@@ -371,24 +420,9 @@ export function ActivityLogsCard({
                           </span>
                         )}
                         {run.autoClosed && <span className="inputs-autoclosed-badge">Auto-closed</span>}
-                      </>
+                      </span>
                     ) : (
                       "—"
-                    )}
-                  </td>
-                  <td className="inputs-row-actions">
-                    {selected.has(run.id) && run.canEdit && (
-                      <button
-                        type="button"
-                        className="inputs-delete-btn"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (multiDeletable.length > 1 && onDeleteRuns) onDeleteRuns(selectedRuns);
-                          else onDeleteRun(run);
-                        }}
-                      >
-                        {multiDeletable.length > 1 ? `Delete ${multiDeletable.length} selected` : "Delete"}
-                      </button>
                     )}
                   </td>
                 </tr>

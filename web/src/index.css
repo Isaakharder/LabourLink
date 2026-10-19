@@ -2955,6 +2955,19 @@ input {
   cursor: not-allowed;
 }
 
+/* Header Delete (Activity details / Workday details) — destructive, so the
+   danger colour instead of the primary one; disabled until a deletable row
+   is selected. */
+.inputs-section-header-button-danger {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.inputs-section-header-button-danger:hover:not(:disabled) {
+  background: var(--color-danger);
+  color: white;
+}
+
 /* Same pill shape as inputs-break-source-badge/inputs-rounded-badge —
    tinted distinctly so "created directly on Inputs, not from a phone" reads
    at a glance next to those other provenance badges. */
@@ -3030,7 +3043,7 @@ input {
   display: table;
   table-layout: fixed;
   width: 100%;
-  /* Sum of every .inputs-col-* below (1190px) — see those rules for how
+  /* Sum of every .inputs-col-* below (865px) — see those rules for how
      each figure was chosen. This is the floor at which every column still
      gets its full explicit width; below it the columns would otherwise be
      squeezed proportionally to fit, which is exactly the "crushing"
@@ -3041,9 +3054,15 @@ input {
      overflow visually painting over the Duration and Start Time cells
      instead, confirmed against real Safari at a ~1040px window). Below
      this floor, .inputs-logs-table-scroll's overflow-x: auto takes over —
-     the table stays pinned at 1190px and scrolls horizontally rather than
-     any column or input shrinking further. */
-  min-width: 1190px;
+     the table stays pinned at 865px and scrolls horizontally rather than
+     any column or input shrinking further.
+
+     865px (down from 1190px) is what removing the Actions column freed up
+     plus stacking badges/editor buttons under the time instead of beside
+     it: the whole table now fits the main column at a 1440px-wide window
+     (~878px available beside the sidebar and employee list) with no
+     horizontal scroll. */
+  min-width: 865px;
   /* Flattens .employees-table's own background/border/radius — the table
      now sits flush inside .inputs-workspace's single shared border instead
      of drawing a nested card of its own. Also overrides its overflow:
@@ -3057,7 +3076,24 @@ input {
 
 .inputs-logs-table th,
 .inputs-logs-table td {
-  padding: 0.5rem 1rem;
+  padding: 0.5rem 0.4rem;
+  /* Nothing in one cell may ever paint into the next: long text truncates
+     (.inputs-cell-truncate, with the full value in a title tooltip and in
+     the DOM for screen readers) and badges wrap under the time
+     (.inputs-cell-stack) — this clip is the backstop if anything is still
+     wider than its column. Clipped at the padding edge, so the time
+     editor's focus ring (inside the padding) still shows. */
+  overflow: hidden;
+}
+
+.inputs-logs-table th:first-child,
+.inputs-logs-table td:first-child {
+  padding-left: 0.75rem;
+}
+
+.inputs-logs-table th:last-child,
+.inputs-logs-table td:last-child {
+  padding-right: 0.75rem;
 }
 
 /* Every .inputs-col-* below is an explicit pixel width, not a percentage —
@@ -3072,48 +3108,117 @@ input {
    as today) scales them up proportionally to fill it, exactly like the
    percentages did before — so normal desktop Chrome/Edge appearance is
    unchanged, only the narrow/Safari failure mode is. */
+/* Row-selection checkbox — the only per-row control; deleting is done from
+   each section header, so neither table has an Actions column. Shared with
+   .inputs-workday-table. */
+.inputs-col-select {
+  width: 40px;
+}
+
+/* Activity/Row/Carrier truncate (see .inputs-cell-truncate), so they can
+   stay compact and give their width to the numeric columns. */
 .inputs-col-activity {
-  width: 190px;
+  width: 140px;
 }
 
 .inputs-col-row {
-  width: 100px;
+  width: 65px;
 }
 
 .inputs-col-carrier {
-  width: 110px;
+  width: 65px;
 }
 
+/* Fits a long speed on one line — e.g. "12345.6 plants/hour" — plus the
+   cell padding. Anything longer still can't spill into Start Time: it
+   truncates with the full value in its tooltip. */
 .inputs-col-speed {
+  width: 145px;
+}
+
+/* Fits .inputs-time-input (140px) plus the cell's own horizontal padding.
+   The Rounded badge stacks under the time (.inputs-cell-stack) rather than
+   widening the column. */
+.inputs-col-starttime {
+  width: 155px;
+}
+
+/* A duration, or the live timer with the "In progress" pill stacked
+   under it. */
+.inputs-col-duration {
   width: 100px;
 }
 
-/* Fits .inputs-time-input (140px) plus the cell's own 2rem horizontal
-   padding, with a few px to spare — confirmed against real Safari. */
-.inputs-col-starttime {
-  width: 175px;
-}
-
-.inputs-col-duration {
-  width: 110px;
-}
-
-/* Fits .inputs-time-input (140px) + Save + Cancel + their gaps + the
-   cell's own 2rem horizontal padding, so the editor never needs to spill
-   onto Duration/Start Time the way it did before this column was widened
-   and switched from a percentage to an explicit px value (see
-   .inputs-logs-table's own comment). */
+/* Same as Start Time: fits the 140px input. The editor's Save/Cancel
+   buttons wrap onto their own line under the input (see
+   .inputs-endtime-editor) instead of needing a ~305px column beside it. */
 .inputs-col-endtime {
-  width: 305px;
+  width: 155px;
 }
 
-.inputs-col-actions {
-  width: 90px;
+.inputs-select-cell {
+  text-align: center !important;
+  cursor: default;
 }
 
-.inputs-log-activity {
-  white-space: normal;
-  word-break: break-word;
+.inputs-select-checkbox {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  vertical-align: middle;
+  cursor: pointer;
+  accent-color: var(--color-primary);
+}
+
+/* Long Activity/Row/Carrier/Speed/break-name text: one line, ellipsis, the
+   full value in the element's title (and in the DOM for screen readers). */
+.inputs-cell-truncate {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A time (or duration) with its badges: the time itself never wraps, and
+   any badge that doesn't fit beside it drops onto the next line inside the
+   same cell instead of covering the neighbouring column. */
+.inputs-cell-stack {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.2rem 0.35rem;
+  max-width: 100%;
+  vertical-align: middle;
+}
+
+.inputs-cell-time {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.inputs-cell-stack > .inputs-rounded-badge,
+.inputs-cell-stack > .inputs-manual-badge,
+.inputs-cell-stack > .inputs-autoclosed-badge,
+.inputs-cell-stack > .status-pill {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Workday details' first column is left-aligned, so its stacks are too. */
+.inputs-workday-table td:not(.inputs-time-cell) .inputs-cell-stack {
+  justify-content: flex-start;
+}
+
+.inputs-log-activity .inputs-manual-badge {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 0.15rem;
 }
 
 .inputs-log-row {
@@ -3241,12 +3346,16 @@ input {
   text-decoration: underline dotted;
 }
 
+/* Wraps: the 140px input on the first line, Save/Cancel right-aligned on
+   the next, so the editor fits the same ~155px column as the time it
+   replaces and never paints over Duration/Start Time. */
 .inputs-endtime-editor,
 .inputs-time-editor {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 0.4rem;
+  gap: 0.3rem 0.4rem;
 }
 
 .inputs-endtime-editor button,
@@ -3257,12 +3366,6 @@ input {
   border: 1px solid var(--color-border);
   background: var(--color-surface);
   flex-shrink: 0;
-}
-
-.inputs-th-actions,
-.inputs-row-actions {
-  text-align: right;
-  white-space: nowrap;
 }
 
 .inputs-delete-btn {
@@ -3306,20 +3409,48 @@ input {
   margin: 0 0 0.75rem;
 }
 
+/* Scrolls sideways only if the main column is genuinely narrower than the
+   table's floor below — the columns themselves never squeeze or overlap. */
+.inputs-workday-table-scroll {
+  overflow-x: auto;
+}
+
 .inputs-workday-table {
   /* Same reasoning as .inputs-logs-table above: must not inherit the
      Employees page's `.employees-table { display: none }` fallback at
      <=900px, since this page has no card-list alternative. */
   display: table;
+  table-layout: fixed;
   width: 100%;
+  /* Sum of the .inputs-workday-col-* widths below plus a 120px floor for
+     the flexible name column. */
+  min-width: 660px;
   background: transparent;
   border: none;
   border-radius: 0;
+  overflow: visible;
 }
 
 .inputs-workday-table th,
 .inputs-workday-table td {
   padding: 0.45rem 0.5rem;
+  /* Same no-spill backstop as .inputs-logs-table. */
+  overflow: hidden;
+}
+
+/* Fits .inputs-time-input (140px) plus padding; badges stack under the
+   time, editor buttons wrap under the input. */
+.inputs-workday-col-time {
+  width: 160px;
+}
+
+.inputs-workday-col-duration {
+  width: 90px;
+}
+
+.inputs-workday-duration {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .inputs-break-row {

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 //
-// Inputs activity table: Ctrl/Cmd+click multi-select and deleting several
-// activity logs at once — one all-or-nothing request carrying each log's
+// Inputs activity table: Ctrl/Cmd+click multi-select (still supported
+// alongside the row checkboxes) and deleting several activity logs at once
+// from the header Delete — one all-or-nothing request carrying each log's
 // own segment ids (server behaviour: server/src/routes/inputs.bulkDelete.test.ts).
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
@@ -134,11 +135,11 @@ describe("Inputs multi-row select and delete", () => {
     await user.keyboard("{/Control}");
     const selected = document.querySelectorAll("tr.inputs-log-row-selected");
     expect(selected).toHaveLength(3);
-    expect(screen.getAllByRole("button", { name: "Delete 3 selected" }).length).toBe(3);
+    expect(screen.getByRole("button", { name: "Delete (3)" })).toBeEnabled();
 
     await user.click(rowOf("Packing Bags", 1));
     expect(document.querySelectorAll("tr.inputs-log-row-selected")).toHaveLength(1);
-    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete (1)" })).toBeEnabled();
   });
 
   it("Ctrl+click on a selected row removes it; Cmd works like Ctrl", async () => {
@@ -177,18 +178,21 @@ describe("Inputs multi-row select and delete", () => {
     await user.click(rowOf("Packing Bags", 2));
     await user.keyboard("{/Control}");
 
-    await user.click(screen.getAllByRole("button", { name: "Delete 3 selected" })[0]);
-    const dialog = screen.getByRole("dialog", { name: "Delete 3 activity logs?" });
+    await user.click(screen.getByRole("button", { name: "Delete (3)" }));
+    const dialog = screen.getByRole("dialog", { name: "Delete 3 activity entries?" });
     expect(within(dialog).getAllByRole("listitem")).toHaveLength(3);
     expect(within(dialog).getByText(/1 selected in-progress activity is not included/)).toBeInTheDocument();
     expect(deleteCalls()).toHaveLength(0); // nothing deleted before confirming
 
     await act(async () => {
-      await user.click(within(dialog).getByRole("button", { name: "Delete 3 Logs" }));
+      await user.click(within(dialog).getByRole("button", { name: "Delete 3 entries" }));
     });
-    await waitFor(() => expect(screen.getByText("3 activity logs deleted.")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("3 activity entries deleted.")).toBeInTheDocument());
     expect(deleteCalls()).toEqual([
-      { path: "/api/inputs/activity-runs/bulk-delete", body: { runs: [["r-pick-619"], ["r-bags-1"], ["r-pick-617"]] } },
+      {
+        path: "/api/inputs/activity-runs/bulk-delete",
+        body: { employeeId: "emp-n", runs: [["r-pick-619"], ["r-bags-1"], ["r-pick-617"]] },
+      },
     ]);
   });
 
@@ -200,13 +204,13 @@ describe("Inputs multi-row select and delete", () => {
     await user.keyboard("{Control>}");
     await user.click(rowOf("Packing Bags", 0));
     await user.keyboard("{/Control}");
-    await user.click(screen.getAllByRole("button", { name: "Delete 2 selected" })[0]);
+    await user.click(screen.getByRole("button", { name: "Delete (2)" }));
     await act(async () => {
-      await user.click(screen.getByRole("button", { name: "Delete 2 Logs" }));
+      await user.click(screen.getByRole("button", { name: "Delete 2 entries" }));
     });
-    const dialog = screen.getByRole("dialog", { name: "Delete 2 activity logs?" });
+    const dialog = screen.getByRole("dialog", { name: "Delete 2 activity entries?" });
     expect(await within(dialog).findByText(/Nothing was deleted\. One or more of the selected activity logs changed/)).toBeInTheDocument();
-    expect(screen.queryByText(/activity logs deleted\./)).not.toBeInTheDocument();
+    expect(screen.queryByText(/activity entries deleted\./)).not.toBeInTheDocument();
     expect(deleteCalls()).toHaveLength(1);
   });
 });

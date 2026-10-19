@@ -101,7 +101,7 @@ vi.mock("../../lib/api", () => {
         dailyCalls.push({ date, deferred });
         return deferred.promise;
       }
-      if (path.startsWith("/api/inputs/activity-runs/") && path.endsWith("/delete") && options?.method === "POST") {
+      if (path === "/api/inputs/activity-runs/bulk-delete" && options?.method === "POST") {
         const deferred = createDeferred<{ ok: true }>();
         deleteCalls.push({ deferred });
         return deferred.promise;
@@ -322,9 +322,9 @@ describe("InputsPage — employee sidebar paid-hours totals", () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByText("Picking Peppers"));
-    await user.click(screen.getByRole("button", { name: "Delete" }));
-    await screen.findByText("Delete activity log?");
-    await user.click(screen.getByRole("button", { name: "Delete Log" }));
+    await user.click(screen.getByRole("button", { name: "Delete (1)" }));
+    await screen.findByText("Delete 1 activity entry?");
+    await user.click(screen.getByRole("button", { name: "Delete 1 entry" }));
 
     await act(async () => {
       deleteCalls[0].deferred.resolve({ ok: true });

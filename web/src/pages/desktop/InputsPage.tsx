@@ -4,8 +4,8 @@ import { PageHeader } from "../../components/layout/PageHeader";
 import { DateNav } from "../../components/inputs/DateNav";
 import { EmployeeListPanel } from "../../components/inputs/EmployeeListPanel";
 import { InputsSkeleton } from "../../components/inputs/InputsSkeleton";
-import { ActivityLogsCard } from "../../components/inputs/ActivityLogsCard";
-import { WorkdayDetailsCard, EditingBreakField } from "../../components/inputs/WorkdayDetailsCard";
+import { ActivityLogsCard, isRunDeletable } from "../../components/inputs/ActivityLogsCard";
+import { WorkdayDetailsCard, EditingBreakField, isBreakDeletable } from "../../components/inputs/WorkdayDetailsCard";
 import { InputsErrorBoundary } from "../../components/inputs/InputsErrorBoundary";
 import { InputsDayTotals } from "../../components/inputs/InputsDayTotals";
 import { DeleteTimeEntryModal } from "../../components/inputs/DeleteTimeEntryModal";
@@ -22,6 +22,7 @@ import { ActivityRunDto, BreakDto, DailyInputsResponse, InputsEmployee, InputsWo
 import {
   APP_TIMEZONE,
   combineDateAndTimeToUtcIso,
+  formatDateLong,
   formatTimeInAppTimezone,
   todayInAppTimezone,
   toTimeInputValue,
@@ -51,15 +52,29 @@ type InputsHeaderStatus = {
   message: string;
 };
 
+// Every deletion on Inputs goes through one all-or-nothing request, even a
+// single row: POST .../activity-runs/bulk-delete or .../breaks/bulk-delete.
 interface PendingDeletion {
-  kind: "activity-run" | "activity-runs" | "break";
-  id: string;
-  // "activity-runs" only: every run to delete, earliest first.
+  kind: "activity-runs" | "breaks";
+  employeeId: string;
+  // "activity-runs": every run to delete, earliest first.
   runs?: ActivityRunDto[];
+  // "breaks": every break to delete, earliest first.
+  breaks?: BreakDto[];
   title: string;
   message: string;
   details?: string[];
   confirmLabel: string;
+}
+
+function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+function describeBreak(brk: BreakDto): string {
+  const end = brk.endedAt ? formatTimeInAppTimezone(brk.endedAt) : "in progress";
+  const paid = brk.isPaid === null ? "" : brk.isPaid ? " (paid)" : " (unpaid)";
+  return `${brk.name ?? "Break"} — ${formatTimeInAppTimezone(brk.startedAt)} to ${end}${paid}`;
 }
 
 function describeRun(run: ActivityRunDto): string {
@@ -126,6 +141,10 @@ export function InputsPage() {
   const [editOriginalEndIso, setEditOriginalEndIso] = useState<string | null>(null);
 
   const [selectedBreakId, setSelectedBreakId] = useState<string | null>(null);
+  // Every selected break — same model as selectedRunIds: a plain click
+  // selects just that row (and makes it selectedBreakId, the row a second
+  // click edits); its checkbox or Ctrl/Cmd+click adds/removes rows.
+  const [selectedBreakIds, setSelectedBreakIds] = useState<Set<string>>(new Set());
   const [editingBreak, setEditingBreak] = useState<EditingBreakField | null>(null);
   const [editBreakTimeValue, setEditBreakTimeValue] = useState("");
   // The general Activity Time Correction workflow's own preview — this is
@@ -401,6 +420,10 @@ export function InputsPage() {
               return still.length === prev.size ? prev : new Set(still);
             });
             setSelectedBreakId((prev) => (prev && res.breaks.some((b) => b.id === prev) ? prev : null));
+            setSelectedBreakIds((prev) => {
+              const still = [...prev].filter((id) => res.breaks.some((b) => b.id === id));
+              return still.length === prev.size ? prev : new Set(still);
+            });
           } else {
             // This explicit reload landed while the page was still paused
             // (mid-delete/mid-correction) — the falling-edge effect below is
@@ -416,6 +439,7 @@ export function InputsPage() {
             setSelectedRunIds(new Set());
             setEditingRunId(null);
             setSelectedBreakId(null);
+            setSelectedBreakIds(new Set());
             setEditingBreak(null);
             setEditingWorkStart(false);
           }
@@ -512,6 +536,7 @@ export function InputsPage() {
     setSelectedRunIds(new Set());
     setEditingRunId(null);
     setSelectedBreakId(null);
+    setSelectedBreakIds(new Set());
     setEditingBreak(null);
     setEditingWorkStart(false);
     setAddModal(null);
@@ -588,6 +613,14 @@ export function InputsPage() {
       setSelectedRunId(id);
     }
     setSelectedRunIds(next);
+  }
+
+  // Header "select all" checkbox: exactly these rows (all visible deletable
+  // ones, or none). Editing is a single-row action, so any open editor closes.
+  function handleSetSelectedRuns(ids: string[]) {
+    setEditingRunId(null);
+    setSelectedRunIds(new Set(ids));
+    setSelectedRunId(ids.length > 0 ? ids[ids.length - 1] : null);
   }
 
   // Enters ONE combined edit mode covering both Start Time and End Time —
@@ -674,9 +707,31 @@ export function InputsPage() {
     }
   }
 
-  function handleSelectBreak(id: string) {
-    setSelectedBreakId(id);
-    if (editingBreak && editingBreak.id !== id) setEditingBreak(null);
+  // Same additive model as handleSelectRun above.
+  function handleSelectBreak(id: string, additive = false) {
+    if (!additive) {
+      setSelectedBreakId(id);
+      setSelectedBreakIds(new Set([id]));
+      if (editingBreak && editingBreak.id !== id) setEditingBreak(null);
+      return;
+    }
+    setEditingBreak(null);
+    const next = new Set(selectedBreakIds);
+    if (selectedBreakId) next.add(selectedBreakId);
+    if (next.has(id)) {
+      next.delete(id);
+      if (selectedBreakId === id) setSelectedBreakId(next.size > 0 ? [...next][next.size - 1] : null);
+    } else {
+      next.add(id);
+      setSelectedBreakId(id);
+    }
+    setSelectedBreakIds(next);
+  }
+
+  function handleSetSelectedBreaks(ids: string[]) {
+    setEditingBreak(null);
+    setSelectedBreakIds(new Set(ids));
+    setSelectedBreakId(ids.length > 0 ? ids[ids.length - 1] : null);
   }
 
   function handleStartEditBreak(brk: BreakDto, field: "start" | "end") {
@@ -762,54 +817,58 @@ export function InputsPage() {
     }
   }
 
-  function handleDeleteRun(run: ActivityRunDto) {
-    setDeletionError(null);
-    setPendingDeletion({
-      kind: "activity-run",
-      id: run.id,
-      title: "Delete activity log?",
-      message:
-        "This will remove this recorded activity from the employee's day. The deletion will remain in the audit history.",
-      confirmLabel: "Delete Log",
-    });
-  }
-
-  // Several Ctrl/Cmd-selected activity logs at once — the server deletes
-  // them together, each exactly like the single Delete (following work
-  // entry fills its gap, own audit record), earliest first. In-progress
-  // logs can't be deleted here and are left out.
-  function handleDeleteRuns(runs: ActivityRunDto[]) {
-    const deletable = runs.filter((r) => r.canEdit).sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  // Header Delete (Activity details): every selected finished log, earliest
+  // first, in one confirmation and one all-or-nothing request. Selected
+  // in-progress logs (only reachable via a plain row click — they have no
+  // checkbox) are left out and called out in the dialog.
+  function handleDeleteSelectedRuns() {
+    if (!daily) return;
+    const chosen = daily.runs.filter((r) => selectedRunIds.has(r.id));
+    const deletable = chosen.filter(isRunDeletable).sort((a, b) => a.startedAt.localeCompare(b.startedAt));
     if (deletable.length === 0) return;
-    if (deletable.length === 1) {
-      handleDeleteRun(deletable[0]);
-      return;
-    }
-    const skipped = runs.length - deletable.length;
+    const skipped = chosen.length - deletable.length;
+    const n = deletable.length;
+    const name = `${daily.employee.firstName} ${daily.employee.lastName}`;
     setDeletionError(null);
     setPendingDeletion({
       kind: "activity-runs",
-      id: deletable.map((r) => r.id).join(","),
+      employeeId: daily.employee.id,
       runs: deletable,
-      title: `Delete ${deletable.length} activity logs?`,
+      title: `Delete ${plural(n, "activity entry", "activity entries")}?`,
       message:
-        `This will remove these ${deletable.length} recorded activities from the employee's day, all together or not at all. ` +
-        "Each is deleted the same way as deleting it on its own, and every deletion remains in the audit history." +
+        `This changes ${name}'s Inputs record for ${formatDateLong(daily.date)}: ` +
+        `${n === 1 ? "this activity is" : `these ${n} activities are`} removed from the day` +
+        `${n === 1 ? "" : ", all together or not at all"}. The work that follows fills each gap, ` +
+        "worked time and speeds are recalculated, and every deletion stays in the audit history." +
         (skipped > 0 ? ` ${skipped} selected in-progress ${skipped === 1 ? "activity is" : "activities are"} not included.` : ""),
       details: deletable.map(describeRun),
-      confirmLabel: `Delete ${deletable.length} Logs`,
+      confirmLabel: `Delete ${plural(n, "entry", "entries")}`,
     });
   }
 
-  function handleDeleteBreak(brk: BreakDto) {
+  // Header Delete (Workday details): every selected finished break. Work
+  // start and the Total break time row are never part of the selection.
+  function handleDeleteSelectedBreaks() {
+    if (!daily) return;
+    const deletable = daily.breaks
+      .filter((b) => selectedBreakIds.has(b.id) && isBreakDeletable(b))
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    if (deletable.length === 0) return;
+    const n = deletable.length;
+    const name = `${daily.employee.firstName} ${daily.employee.lastName}`;
     setDeletionError(null);
     setPendingDeletion({
-      kind: "break",
-      id: brk.id,
-      title: "Delete break?",
+      kind: "breaks",
+      employeeId: daily.employee.id,
+      breaks: deletable,
+      title: `Delete ${plural(n, "break", "breaks")}?`,
       message:
-        "This will remove this break from the employee's day and reconnect the surrounding work time. The deletion will remain in the audit history.",
-      confirmLabel: "Delete Break",
+        `This changes ${name}'s Inputs record for ${formatDateLong(daily.date)}: ` +
+        `${n === 1 ? "this break is" : `these ${n} breaks are`} removed` +
+        `${n === 1 ? "" : ", all together or not at all"}, and the surrounding work time is reconnected. ` +
+        "Paid and unpaid break totals update straight away, and every deletion stays in the audit history.",
+      details: deletable.map(describeBreak),
+      confirmLabel: `Delete ${plural(n, "break", "breaks")}`,
     });
   }
 
@@ -820,48 +879,46 @@ export function InputsPage() {
     if (!pendingDeletion || deletionSubmitting) return;
     setDeletionSubmitting(true);
     setDeletionError(null);
-    if (pendingDeletion.kind === "activity-runs") {
-      // One all-or-nothing request (POST .../activity-runs/bulk-delete):
-      // each log is sent exactly as loaded (its own segment ids), so the
-      // server deletes precisely what was selected — never an unselected
-      // neighbour that an earlier deletion made join the same run — or, if
-      // anything changed, nothing at all.
-      const runs = pendingDeletion.runs ?? [];
-      try {
+    const pending = pendingDeletion;
+    try {
+      let successMessage: string;
+      if (pending.kind === "activity-runs") {
+        // Each log is sent exactly as loaded (its own segment ids), so the
+        // server deletes precisely what was selected — never an unselected
+        // neighbour that an earlier deletion made join the same run — or,
+        // if anything changed, nothing at all.
+        const runs = pending.runs ?? [];
         await api("/api/inputs/activity-runs/bulk-delete", {
           method: "POST",
-          body: JSON.stringify({ runs: runs.map((r) => r.segmentIds) }),
+          body: JSON.stringify({ employeeId: pending.employeeId, runs: runs.map((r) => r.segmentIds) }),
         });
-        setPendingDeletion(null);
-        // Same order as the single delete below: reload while still marked
-        // as submitting, so the page's pause logic doesn't fire a second,
-        // redundant background reload right after.
-        await loadDaily();
-        loadEmployees();
-        setSuccessMessage(`${runs.length} activity logs deleted.`);
-      } catch (err) {
-        setDeletionError(
-          `Nothing was deleted. ${err instanceof ApiError ? err.message : "Could not delete the selected activity logs"}`
-        );
-      } finally {
-        setDeletionSubmitting(false);
+        successMessage = `${plural(runs.length, "activity entry", "activity entries")} deleted.`;
+      } else {
+        // Each break is sent with the times shown on screen, so a break
+        // re-timed elsewhere since this page loaded refuses the request.
+        const breaks = pending.breaks ?? [];
+        await api("/api/inputs/breaks/bulk-delete", {
+          method: "POST",
+          body: JSON.stringify({
+            employeeId: pending.employeeId,
+            breaks: breaks.map((b) => ({ id: b.id, startedAt: b.startedAt, endedAt: b.endedAt })),
+          }),
+        });
+        successMessage = `${plural(breaks.length, "break", "breaks")} deleted.`;
       }
-      return;
-    }
-    try {
-      const path =
-        pendingDeletion.kind === "activity-run"
-          ? `/api/inputs/activity-runs/${pendingDeletion.id}/delete`
-          : `/api/inputs/breaks/${pendingDeletion.id}/delete`;
-      await api(path, { method: "POST" });
-      const deletedKind = pendingDeletion.kind;
       setPendingDeletion(null);
+      // Reload while still marked as submitting, so the page's pause logic
+      // doesn't fire a second, redundant background reload right after.
+      // This non-background reload also clears every selection.
       await loadDaily();
-      // See applyActivityRunCorrection's own comment.
+      // See applyActivityRunCorrection's own comment — refreshes the
+      // sidebar's paid hours, the working totals and review badges too.
       loadEmployees();
-      setSuccessMessage(deletedKind === "activity-run" ? "Activity log deleted." : "Break deleted.");
+      setSuccessMessage(successMessage);
     } catch (err) {
-      setDeletionError(err instanceof ApiError ? err.message : "Could not delete");
+      const fallback = pending.kind === "activity-runs" ? "Could not delete the selected activity entries" : "Could not delete the selected breaks";
+      const message = err instanceof ApiError ? err.message : fallback;
+      setDeletionError(/nothing was deleted/i.test(message) ? message : `Nothing was deleted. ${message}`);
     } finally {
       setDeletionSubmitting(false);
     }
@@ -917,6 +974,11 @@ export function InputsPage() {
       ? "warning-text"
       : "success-text"
     : null;
+
+  // Header Delete count for Activity details — only selected rows the
+  // server will actually accept count (an in-progress row selected by a
+  // plain click is ignored).
+  const selectedDeletableRunCount = daily ? daily.runs.filter((r) => selectedRunIds.has(r.id) && isRunDeletable(r)).length : 0;
 
   return (
     <div className="inputs-page">
@@ -1014,6 +1076,17 @@ export function InputsPage() {
                     Add activity
                   </button>
                 )}
+                {daily?.canEdit && (
+                  <button
+                    type="button"
+                    className="inputs-section-header-button inputs-section-header-button-danger"
+                    disabled={selectedDeletableRunCount === 0}
+                    title={selectedDeletableRunCount === 0 ? "Select one or more activity entries to delete" : undefined}
+                    onClick={handleDeleteSelectedRuns}
+                  >
+                    {selectedDeletableRunCount === 0 ? "Delete" : `Delete (${selectedDeletableRunCount})`}
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -1056,7 +1129,7 @@ export function InputsPage() {
                 selectedRunId={selectedRunId}
                 selectedRunIds={selectedRunIds}
                 onSelectRun={handleSelectRun}
-                onDeleteRuns={handleDeleteRuns}
+                onSetSelectedRuns={daily.canEdit ? handleSetSelectedRuns : undefined}
                 editingRunId={editingRunId}
                 editStartTimeValue={editStartTimeValue}
                 editEndTimeValue={editEndTimeValue}
@@ -1065,7 +1138,6 @@ export function InputsPage() {
                 onEditEndTimeChange={setEditEndTimeValue}
                 onSaveEdit={handleSaveEdit}
                 onCancelEdit={handleCancelEdit}
-                onDeleteRun={handleDeleteRun}
                 onRowCompletionChanged={() => {
                   loadDaily();
                   // Combining segments doesn't itself move any boundary,
@@ -1085,14 +1157,16 @@ export function InputsPage() {
                 paidBreakSeconds={daily.totals.paidBreakSeconds}
                 unpaidBreakSeconds={daily.totals.unpaidBreakSeconds}
                 selectedBreakId={selectedBreakId}
+                selectedBreakIds={selectedBreakIds}
                 onSelectBreak={handleSelectBreak}
+                onSetSelectedBreaks={daily.canEdit ? handleSetSelectedBreaks : undefined}
+                onDeleteSelectedBreaks={daily.canEdit ? handleDeleteSelectedBreaks : undefined}
                 editingBreak={editingBreak}
                 editBreakTimeValue={editBreakTimeValue}
                 onStartEditBreak={handleStartEditBreak}
                 onEditBreakTimeChange={setEditBreakTimeValue}
                 onSaveEditBreak={handleSaveEditBreak}
                 onCancelEditBreak={handleCancelEditBreak}
-                onDeleteBreak={handleDeleteBreak}
                 editingWorkStart={editingWorkStart}
                 editWorkStartTimeValue={editWorkStartTimeValue}
                 onStartEditWorkStart={handleStartEditWorkStart}
