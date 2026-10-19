@@ -42,6 +42,11 @@ export interface PivotEmployeeRow {
   // list of weekly totals (each activity-scoped except "employeePaidTime",
   // which is deliberately whole-shift — see weeklyValue below).
   weeklyTotals?: string[];
+  // Activity only — the employee's raw whole-range Average Speed (the
+  // number behind "Weekly Average Speed"), null when it couldn't be
+  // calculated. Never displayed; only used to order rows numerically (see
+  // reportEmployeeSort.ts) rather than by formatted text.
+  speedValue?: number | null;
 }
 
 export interface PivotGrid {
@@ -57,6 +62,10 @@ export interface PivotGrid {
   // Bottom-row combined value per weeklyTotalColumns, across every
   // DISPLAYED employee (a total, not a per-employee average).
   weeklyTotalColumnTotals?: string[];
+  // True only when the report's activity has a speed metric (a speed unit,
+  // or any calculated employee speed) — gates the "Speed: highest first"
+  // employee sort. Undefined for Payroll.
+  hasSpeedMetric?: boolean;
 }
 
 // employeePaidTime is whole-shift (every activity combined) and lives on
@@ -106,6 +115,7 @@ export function buildActivityPivotGrid(
       // reportQueries.ts's employeeSeconds accumulation) — formatted once
       // here, never built from this grid's own already-rounded daily cells.
       weeklyTotals: weeklyTotals.map((key) => weeklyValue(key, et, speedUnit)),
+      speedValue: et.averageSpeed,
     }));
 
   const dateTotalByDate = new Map(data.dateTotals.map((dt) => [dt.date, dt]));
@@ -116,7 +126,9 @@ export function buildActivityPivotGrid(
 
   const weeklyTotalColumnTotals = weeklyTotals.map((key) => weeklyValue(key, data.totals, speedUnit));
 
-  return { dates, employees, columnTotals, weeklyTotalColumns, weeklyTotalColumnTotals };
+  const hasSpeedMetric = speedUnit != null || data.employeeTotals.some((et) => et.averageSpeed != null);
+
+  return { dates, employees, columnTotals, weeklyTotalColumns, weeklyTotalColumnTotals, hasSpeedMetric };
 }
 
 // Same PivotGrid shape as buildActivityPivotGrid, built from

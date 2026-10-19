@@ -23,6 +23,15 @@ import { ReportPreviewModal } from "../../components/reports/ReportPreviewModal"
 import { ReportEmployeeSelectDropdown } from "../../components/reports/ReportEmployeeSelectDropdown";
 import { buildActivityPivotGrid, buildPayrollPivotGrid, PivotGrid } from "../../lib/reportPivot";
 import { exportPivotCsv, exportPivotPdf, printReport, ReportOrientation } from "../../lib/reportExport";
+import {
+  EMPLOYEE_SORT_LABELS,
+  EmployeeSortMode,
+  effectiveEmployeeSort,
+  getSessionEmployeeSort,
+  gridSupportsSpeedSort,
+  setSessionEmployeeSort,
+  sortPivotEmployees,
+} from "../../lib/reportEmployeeSort";
 import { startOfWeekMonday, addCalendarDays, todayInAppTimezone } from "../../lib/timezone";
 
 // Payroll's extra sub-table metrics — a different grain than the matrix
@@ -73,6 +82,7 @@ export function ReportViewPage() {
   const [pivotMetric, setPivotMetric] = useState<string | null>(null);
   const [previewMode, setPreviewMode] = useState<"print" | "pdf" | null>(null);
   const [employees, setEmployees] = useState<ReportEmployeeOption[] | null>(null);
+  const [employeeSort, setEmployeeSort] = useState<EmployeeSortMode>(getSessionEmployeeSort);
 
   useEffect(() => {
     if (!id) return;
@@ -188,7 +198,7 @@ export function ReportViewPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectivePivotMetrics.join(","), isActivity]);
 
-  const pivotGrid: PivotGrid | null = useMemo(() => {
+  const unsortedPivotGrid: PivotGrid | null = useMemo(() => {
     if (!report || !data) return null;
     if (isActivity) {
       const effectiveWeeklyTotals = weeklyTotals.length > 0 ? weeklyTotals : DEFAULT_WEEKLY_TOTALS;
@@ -198,6 +208,20 @@ export function ReportViewPage() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return buildPayrollPivotGrid(data as PayrollReportData, dateRange, pivotMetric as any);
   }, [report, data, pivotMetric, dateRange, isActivity, dailyMetric, weeklyTotals]);
+
+  // Re-orders the already-built grid only — no refetch or recalculation —
+  // and is what every output (screen, Print, preview, CSV, PDF) reads.
+  const speedSortAvailable = gridSupportsSpeedSort(unsortedPivotGrid);
+  const activeEmployeeSort = effectiveEmployeeSort(employeeSort, unsortedPivotGrid);
+  const pivotGrid: PivotGrid | null = useMemo(
+    () => (unsortedPivotGrid ? sortPivotEmployees(unsortedPivotGrid, employeeSort) : null),
+    [unsortedPivotGrid, employeeSort]
+  );
+
+  function handleEmployeeSortChange(mode: EmployeeSortMode) {
+    setEmployeeSort(mode);
+    setSessionEmployeeSort(mode);
+  }
 
   if (loadError) return <p className="error-text">{loadError}</p>;
   if (!report) return <p>Loading...</p>;
@@ -283,6 +307,19 @@ export function ReportViewPage() {
           committedIds={report.employeeIds}
           onSave={saveEmployeeSelection}
         />
+        <label className="report-employee-sort">
+          <span className="report-employee-select-label">Sort employees</span>
+          <select
+            value={activeEmployeeSort}
+            onChange={(e) => handleEmployeeSortChange(e.target.value as EmployeeSortMode)}
+          >
+            <option value="alphabetical">{EMPLOYEE_SORT_LABELS.alphabetical}</option>
+            <option value="speedDesc" disabled={!speedSortAvailable}>
+              {EMPLOYEE_SORT_LABELS.speedDesc}
+              {speedSortAvailable ? "" : " (no speed in this report)"}
+            </option>
+          </select>
+        </label>
       </div>
 
       {editingMetrics && isActivity && (
