@@ -24,7 +24,7 @@ import {
   resolveDensitySnapshot,
   validateActivityAndAnswers,
 } from "../lib/activitySelection";
-import { completeRowVisitIfApplicable } from "../lib/rowCompletionAutomation";
+import { completeRowVisitIfApplicable, markRowReopenedIfApplicable } from "../lib/rowCompletionAutomation";
 
 const router = Router();
 router.use(asyncHandler(requireDevice));
@@ -383,6 +383,21 @@ async function openEntry(
         [idempotencyKey]
       );
       row = existing.rows[0];
+    } else if (entryType === "work" && overrides.greenhouseRowId && densityType) {
+      // Automatic reopen detection (server/src/lib/rowCompletionAutomation.ts):
+      // this genuinely NEW segment (never a retry — insert.rows[0] only
+      // exists on a fresh row) just started on a row-based work activity.
+      // If that row already has an 'active' completion in the same ~7-day
+      // cycle, flip it to 'reopened' right now — see completeRowVisitIfApplicable's
+      // and this row's own file-level comment for why that must happen at
+      // entry time, not deferred to the next exit. A cheap no-op for the
+      // overwhelmingly common case (no completion exists yet for this row).
+      await markRowReopenedIfApplicable(client, {
+        activityId: activityId!,
+        greenhouseRowId: overrides.greenhouseRowId,
+        densityType,
+        startedAt: new Date(row.started_at),
+      });
     }
 
     await client.query("commit");

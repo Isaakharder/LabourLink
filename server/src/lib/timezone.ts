@@ -7,12 +7,23 @@
 
 export const APP_TIMEZONE = process.env.APP_TIMEZONE || "America/Toronto";
 
+// One Intl.DateTimeFormat per timezone for each of the two hot helpers
+// below, built once and then reused. Constructing a formatter is far more
+// expensive than formatting with one. Report attribution calls these
+// thousands of times per request, and a CPU profile showed formatter
+// construction as most of the time a Productive TV request spent outside the
+// database. A formatter is immutable, so a cached one returns exactly what a
+// freshly built one would.
+const wallClockFormatters = new Map<string, Intl.DateTimeFormat>();
+const calendarDateFormatters = new Map<string, Intl.DateTimeFormat>();
+
 // Reads the wall-clock date/time Intl renders `instant` as inside `tz`, and
 // returns that same wall-clock reading reinterpreted as a UTC instant. This
 // is a helper for the convergence loop below, not a real conversion.
 function wallClockAsUtcMs(instant: Date, tz: string): number {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-US", {
+  let formatter = wallClockFormatters.get(tz);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
       timeZone: tz,
       hourCycle: "h23",
       year: "numeric",
@@ -21,7 +32,11 @@ function wallClockAsUtcMs(instant: Date, tz: string): number {
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
-    })
+    });
+    wallClockFormatters.set(tz, formatter);
+  }
+  const parts = Object.fromEntries(
+    formatter
       .formatToParts(instant)
       .filter((p) => p.type !== "literal")
       .map((p) => [p.type, p.value])
@@ -123,8 +138,13 @@ export function addDaysToDateStr(dateStr: string, days: number): string {
 // APP_TIMEZONE — used to confirm a correction's new end time stays on the
 // same calendar day as the run it belongs to.
 export function calendarDateInAppTimezone(instant: Date, tz: string = APP_TIMEZONE): string {
+  let formatter = calendarDateFormatters.get(tz);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+    calendarDateFormatters.set(tz, formatter);
+  }
   const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" })
+    formatter
       .formatToParts(instant)
       .filter((p) => p.type !== "literal")
       .map((p) => [p.type, p.value])

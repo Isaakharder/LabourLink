@@ -7,19 +7,21 @@
 // which still works exactly as before for anything this automation didn't
 // already resolve.
 //
-// Re-entry handling ("was this row really finished?"): if the same or a
-// different employee later re-enters a row that already has an ACTIVE
+// Re-entry handling ("was this row really finished?"): the moment the same
+// or a different employee re-enters a row that already has an ACTIVE
 // completion, within the same ~7-day row-work cycle
-// (rowCompletionCandidates.ts's CYCLE_GAP_DAYS), that is NOT detected at
-// entry time — there is no separate "reopened" state to observe mid-visit.
-// Instead, the NEXT time that row is genuinely left again, this function
-// gathers the old completion's segments plus every newly-unlinked matching
-// segment in the same cycle, writes ONE new 'active' completion covering
-// all of them, and marks the old one 'superseded' (never deleted — see
-// migration 055). The physical row is counted exactly once per cycle
-// either way; a report run in the narrow window between re-entry and the
-// next exit simply still shows the old completion's own (still-accurate,
-// just not-yet-combined) totals, which the next exit reconciles.
+// (rowCompletionCandidates.ts's CYCLE_GAP_DAYS), markRowReopenedIfApplicable
+// (called from openEntry()'s own insert step) flips that completion to
+// 'reopened' — a status the report attribution query's `status = 'active'`
+// filter does not match, so the row immediately stops counting as completed
+// for the entire window the worker is back on it, exactly as if it had
+// never been finished. The NEXT time that row is genuinely left again,
+// completeRowVisitIfApplicable (below) finds it (its own lookup matches
+// both 'active' and 'reopened'), gathers its segments plus every
+// newly-unlinked matching segment in the same cycle, writes ONE new
+// 'active' completion covering all of them, and marks the old one
+// 'superseded' (never deleted — see migration 055). The physical row is
+// counted exactly once per cycle either way.
 //
 // A visit in a NEW cycle (>7 calendar days after the active completion's
 // own most recent segment) is left alone entirely — that completion stays
@@ -44,6 +46,64 @@ interface UnlinkedSegment {
   id: string;
   date: string;
   densityCountPerRow: number;
+}
+
+export interface OpenedRowVisit {
+  activityId: string;
+  greenhouseRowId: string;
+  densityType: "plants" | "stems";
+  // The instant this new segment was opened — used only to anchor which
+  // row-work cycle it belongs to (APP_TIMEZONE calendar date), same as
+  // ClosedRowVisit.endedAt above.
+  startedAt: Date;
+}
+
+// Called from openEntry()'s own insert step, inside the SAME transaction,
+// the moment a new work segment on a row is created — including the very
+// first segment ever worked on it (a cheap no-op then: no 'active'
+// completion exists yet to reopen). Flips an existing 'active' completion
+// for this exact row+activity+density to 'reopened' if this new segment
+// falls within the same ~7-day cycle as that completion's own latest
+// segment — see the file-level comment above for why this must happen at
+// ENTRY time rather than being deferred to the next exit like the combine
+// step below.
+export async function markRowReopenedIfApplicable(client: PoolClient, visit: OpenedRowVisit): Promise<void> {
+  const anchorDate = calendarDateInAppTimezone(visit.startedAt, APP_TIMEZONE);
+
+  // Locked for the same reason completeRowVisitIfApplicable locks its own
+  // active-completion lookup: a concurrent exit on the same row (combining
+  // and superseding this very completion) must not race with this reopen
+  // flip. Whichever transaction gets here first wins; the other simply
+  // observes the already-updated status once it proceeds.
+  const { rows: activeRows } = await client.query(
+    `select id from row_completions
+     where greenhouse_row_id = $1 and activity_id = $2 and density_type = $3 and status = 'active'
+     for update`,
+    [visit.greenhouseRowId, visit.activityId, visit.densityType]
+  );
+  const active = activeRows[0] as { id: string } | undefined;
+  if (!active) return;
+
+  const { rows: latestRows } = await client.query(
+    `select max(te.started_at) as latest_segment_started_at
+     from row_completion_segments rcs
+     join time_entries te on te.id = rcs.time_entry_id
+     where rcs.row_completion_id = $1`,
+    [active.id]
+  );
+  const latestSegmentStartedAt = latestRows[0]?.latest_segment_started_at;
+  // No linked segments at all is not expected in practice (a completion is
+  // never created without at least one), but guards against reopening on
+  // no evidence rather than throwing.
+  if (!latestSegmentStartedAt) return;
+  const activeDate = calendarDateInAppTimezone(latestSegmentStartedAt, APP_TIMEZONE);
+  // Beyond CYCLE_GAP_DAYS: this is a genuinely new, separate cycle for the
+  // same physical row — the old completion stays exactly as it is (settled,
+  // 'active'), and this new visit gets its own fresh completion once it is
+  // eventually left, same as completeRowVisitIfApplicable's own cycle check.
+  if (inclusiveDayCount(activeDate, anchorDate) > CYCLE_GAP_DAYS) return;
+
+  await client.query(`update row_completions set status = 'reopened' where id = $1`, [active.id]);
 }
 
 // Called with the SAME client/transaction the caller used to close the
@@ -99,7 +159,10 @@ export async function completeRowVisitIfApplicable(client: PoolClient, visit: Cl
     .map((s) => s.id);
   if (consistentSegmentIds.length === 0) return;
 
-  // Is there already an ACTIVE completion for this exact row+activity+type?
+  // Is there already an ACTIVE (or REOPENED — see markRowReopenedIfApplicable
+  // above) completion for this exact row+activity+type? Both are treated
+  // identically here: whichever one exists is this row's current, not-yet-
+  // finalized completion, and gets combined/superseded exactly the same way.
   // Locked so a concurrent exit on the same row (a genuine race between two
   // employees, or a retried event) can't both try to supersede it at once.
   // Postgres rejects FOR UPDATE combined with GROUP BY, so the lock (a
@@ -108,7 +171,7 @@ export async function completeRowVisitIfApplicable(client: PoolClient, visit: Cl
   // the time the second one runs, so no race is introduced between them.
   const { rows: activeRows } = await client.query(
     `select id from row_completions
-     where greenhouse_row_id = $1 and activity_id = $2 and density_type = $3 and status = 'active'
+     where greenhouse_row_id = $1 and activity_id = $2 and density_type = $3 and status in ('active', 'reopened')
      for update`,
     [visit.greenhouseRowId, visit.activityId, visit.densityType]
   );

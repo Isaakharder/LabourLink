@@ -1406,6 +1406,15 @@ interface ActivityCorrectionContinuation {
   startedAt: Date;
   endedAt: Date;
   reason: string;
+  // The existing time_entries row this continuation extends/splits from —
+  // the corrected run's own id for a same-identity gap-fill continuation,
+  // or the foreign run's own id for a foreign-split continuation. Lets the
+  // PATCH handler below relink this brand-new row into whatever
+  // row_completions record that origin row already belongs to (see
+  // "reconcileContinuationCompletionMembership" there) — without this, a
+  // completed row's own duration/quantity/speed attribution would silently
+  // stop covering time this correction just added to it.
+  originEntryId: string;
 }
 interface ActivityCorrectionPlanOk {
   ok: true;
@@ -1629,6 +1638,7 @@ async function computeActivityRunCorrectionPlan(
           startedAt: sub.end,
           endedAt: f.endedAt as Date,
           reason: ACTIVITY_CORRECTION_FOREIGN_SPLIT_REASON,
+          originEntryId: f.id,
         });
       } else if (startsBefore && !endsAfter) {
         trims.push({ id: f.id, field: "ended_at", oldValue: f.endedAt as Date, newValue: sub.start });
@@ -1665,6 +1675,7 @@ async function computeActivityRunCorrectionPlan(
           startedAt: new Date(coverCursor),
           endedAt: new Date(cStart),
           reason: ACTIVITY_CORRECTION_GAP_FILL_REASON,
+          originEntryId: runId,
         });
       }
       coverCursor = Math.max(coverCursor, cEnd);
@@ -1676,6 +1687,7 @@ async function computeActivityRunCorrectionPlan(
         startedAt: new Date(coverCursor),
         endedAt: sub.end,
         reason: ACTIVITY_CORRECTION_GAP_FILL_REASON,
+        originEntryId: runId,
       });
     }
   }
@@ -1859,12 +1871,13 @@ router.patch(
       }
 
       for (const cont of plan.continuations) {
-        await client.query(
+        const inserted = await client.query(
           `insert into time_entries
              (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source,
               greenhouse_row_id, carrier_id, density_type, density_count_per_row,
               created_by_employee_id, creation_reason)
-           values ($1, $2, 'work', $3, gen_random_uuid(), $4, $5, 'manual', $6, $7, $8, $9, $10, $11)`,
+           values ($1, $2, 'work', $3, gen_random_uuid(), $4, $5, 'manual', $6, $7, $8, $9, $10, $11)
+           returning id`,
           [
             plan.employeeId,
             cont.deviceId,
@@ -1879,6 +1892,31 @@ router.patch(
             cont.reason,
           ]
         );
+        // Row-completion membership reconciliation: this continuation is a
+        // brand-new time_entries row extending/splitting an EXISTING one
+        // (cont.originEntryId — see ActivityCorrectionContinuation's own
+        // comment). If that origin row is already linked into a
+        // row_completions record (automatic or manually confirmed), the
+        // extra time this correction just carved out for it belongs to that
+        // same completion too — otherwise it would silently vanish from the
+        // completion's own duration/quantity/speed attribution (every
+        // report/attribution query joins through row_completion_segments,
+        // never a bare row/activity/density match). A trim never needs this
+        // (same time_entries id, membership untouched) and a deletion never
+        // needs this (already-linked segments stay linked; live
+        // `deleted_at is null` filters exclude them automatically) — only a
+        // brand-new row can be born with no membership at all.
+        const { rows: originCompletion } = await client.query(
+          `select row_completion_id from row_completion_segments where time_entry_id = $1`,
+          [cont.originEntryId]
+        );
+        if (originCompletion[0]) {
+          await client.query(
+            `insert into row_completion_segments (time_entry_id, row_completion_id) values ($1, $2)
+             on conflict (time_entry_id) do nothing`,
+            [inserted.rows[0].id, originCompletion[0].row_completion_id]
+          );
+        }
       }
 
       await client.query("commit");
