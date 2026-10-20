@@ -102,3 +102,18 @@ describe(".inputs-logs-table — floor wide enough to avoid crushing, scrolls in
     expect(scrollBody).toMatch(/overflow-x\s*:\s*auto/);
   });
 });
+
+describe(".inputs-workday-table — every column sized, so spare width is spread across all of them", () => {
+  it("gives the name column an explicit width (a width-less one absorbed all the spare room and bunched the times on the right)", () => {
+    expect(pxValue(ruleBody(".inputs-workday-col-name"), "width")).toBeGreaterThan(0);
+  });
+
+  it("sets min-width to at least the sum of every column's own width", () => {
+    const sum =
+      pxValue(ruleBody(".inputs-col-select"), "width") +
+      pxValue(ruleBody(".inputs-workday-col-name"), "width") +
+      2 * pxValue(ruleBody(".inputs-workday-col-time"), "width") +
+      2 * pxValue(ruleBody(".inputs-workday-col-duration"), "width");
+    expect(pxValue(ruleBody(".inputs-workday-table"), "min-width")).toBeGreaterThanOrEqual(sum);
+  });
+});

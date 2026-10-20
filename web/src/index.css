@@ -3120,24 +3120,28 @@ input {
 }
 
 /* Activity/Row/Carrier truncate (see .inputs-cell-truncate), so they can
-   stay compact and give their width to the numeric columns. */
+   stay compact and give their width to the numeric columns. Row and
+   Carrier get enough that their headers and typical values ("Cart 3")
+   don't butt up against the next column — the widths are weights too:
+   wider tables scale every column proportionally, so a too-small Row/
+   Carrier next to an oversized Speed left the table looking lopsided. */
 .inputs-col-activity {
   width: 140px;
 }
 
 .inputs-col-row {
-  width: 65px;
+  width: 70px;
 }
 
 .inputs-col-carrier {
-  width: 65px;
+  width: 85px;
 }
 
-/* Fits a long speed on one line — e.g. "12345.6 plants/hour" — plus the
-   cell padding. Anything longer still can't spill into Start Time: it
+/* Fits a long speed on one line — e.g. "12345.6 plants" — plus the cell
+   padding. Anything longer still can't spill into Start Time: it
    truncates with the full value in its tooltip. */
 .inputs-col-speed {
-  width: 145px;
+  width: 120px;
 }
 
 /* Fits .inputs-time-input (140px) plus the cell's own horizontal padding.
@@ -3423,9 +3427,8 @@ input {
   display: table;
   table-layout: fixed;
   width: 100%;
-  /* Sum of the .inputs-workday-col-* widths below plus a 120px floor for
-     the flexible name column. */
-  min-width: 660px;
+  /* Sum of .inputs-col-select and the .inputs-workday-col-* widths below. */
+  min-width: 680px;
   background: transparent;
   border: none;
   border-radius: 0;
@@ -3441,14 +3444,23 @@ input {
   overflow: hidden;
 }
 
+/* Every column has an explicit width, the name column included — same as
+   .inputs-logs-table — so a wider table scales all of them proportionally.
+   (A width-less name column used to absorb all the spare room, leaving the
+   four time columns bunched against the right edge.) */
+.inputs-workday-col-name {
+  width: 120px;
+}
+
 /* Fits .inputs-time-input (140px) plus padding; badges stack under the
    time, editor buttons wrap under the input. */
 .inputs-workday-col-time {
   width: 160px;
 }
 
+/* Fits the "Unpaid Time" header (~95px with padding) on one line. */
 .inputs-workday-col-duration {
-  width: 90px;
+  width: 100px;
 }
 
 .inputs-workday-duration {
