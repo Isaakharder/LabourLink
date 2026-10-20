@@ -20,12 +20,31 @@ const ACTIVITY_LOG_COLUMN_COUNT = 8;
 // throws a TypeError outright on null/undefined (not just a bad-looking
 // result, an actual crash), same class of risk the Inputs blank-screen
 // investigation flagged for every duration/total display here.
+// An empty string means "no usable speed": the cell is left blank, like every
+// other cell with no data on this page.
 function formatSpeed(speed: { value: number; unit: string | null }): string {
   if (typeof speed.value !== "number" || !Number.isFinite(speed.value)) {
-    console.error("[ActivityLogsCard] formatSpeed: non-finite speed value, showing a safe fallback instead", speed);
-    return "—";
+    console.error("[ActivityLogsCard] formatSpeed: non-finite speed value, leaving the cell blank instead", speed);
+    return "";
   }
   return speed.unit ? `${speed.value.toFixed(1)} ${speed.unit}` : speed.value.toFixed(1);
+}
+
+// The Row column shows just "Row 102". The server's label is
+// "<phase> · Row <n>" (see server/src/routes/inputs.ts); the phase stays in
+// the cell's tooltip. Any other label shape is shown unchanged.
+export function rowNumberLabel(label: string): string {
+  return /Row \d+$/.exec(label)?.[0] ?? label;
+}
+
+function SpeedText({ speed, description }: { speed: { value: number; unit: string | null }; description: string }) {
+  const text = formatSpeed(speed);
+  if (!text) return null;
+  return (
+    <span className="inputs-cell-truncate" title={`${text} — ${description}`}>
+      {text}
+    </span>
+  );
 }
 
 // Row tooltip/screen-reader text for a run shorter than its activity's
@@ -287,15 +306,20 @@ export function ActivityLogsCard({
                       <span className="sr-only">{` (${belowMinimumLabel(run.minimumDurationMinutes)})`}</span>
                     )}
                   </td>
+                  {/* No data → an empty cell (no "—" placeholder), here and below. */}
                   <td className="inputs-log-row-cell">
-                    <span className="inputs-cell-truncate" title={run.row?.label ?? undefined}>
-                      {run.row?.label ?? "—"}
-                    </span>
+                    {run.row && (
+                      <span className="inputs-cell-truncate" title={run.row.label}>
+                        {rowNumberLabel(run.row.label)}
+                      </span>
+                    )}
                   </td>
                   <td className="inputs-log-carrier-cell">
-                    <span className="inputs-cell-truncate" title={run.carrier?.name ?? undefined}>
-                      {run.carrier?.name ?? "—"}
-                    </span>
+                    {run.carrier && (
+                      <span className="inputs-cell-truncate" title={run.carrier.name}>
+                        {run.carrier.name}
+                      </span>
+                    )}
                   </td>
                   <td className="inputs-log-speed">
                     {run.activityDensitySource ? (
@@ -309,25 +333,17 @@ export function ActivityLogsCard({
                           Needs review
                         </button>
                       ) : run.calculatedSpeedPerHour ? (
-                        <span
-                          className="inputs-cell-truncate"
-                          title={`${formatSpeed(run.calculatedSpeedPerHour)} — calculated actual speed for this activity, based on row density and hours worked`}
-                        >
-                          {formatSpeed(run.calculatedSpeedPerHour)}
-                        </span>
-                      ) : (
-                        "—"
-                      )
+                        <SpeedText
+                          speed={run.calculatedSpeedPerHour}
+                          description="calculated actual speed for this activity, based on row density and hours worked"
+                        />
+                      ) : null
                     ) : run.normalSpeedPerHour ? (
-                      <span
-                        className="inputs-cell-truncate"
-                        title={`${formatSpeed(run.normalSpeedPerHour)} — configured normal speed for this activity, not measured actual output`}
-                      >
-                        {formatSpeed(run.normalSpeedPerHour)}
-                      </span>
-                    ) : (
-                      "—"
-                    )}
+                      <SpeedText
+                        speed={run.normalSpeedPerHour}
+                        description="configured normal speed for this activity, not measured actual output"
+                      />
+                    ) : null}
                   </td>
                   <td
                     className={`inputs-log-starttime${run.canEdit ? " inputs-log-starttime-editable" : ""}`}
@@ -409,9 +425,7 @@ export function ActivityLogsCard({
                         <span className="inputs-cell-time">{formatTimeInAppTimezone(run.endedAt)}</span>
                         {run.autoClosed && <span className="inputs-autoclosed-badge">Auto-closed</span>}
                       </span>
-                    ) : (
-                      "—"
-                    )}
+                    ) : null}
                   </td>
                 </tr>
                 </InputsErrorBoundary>
