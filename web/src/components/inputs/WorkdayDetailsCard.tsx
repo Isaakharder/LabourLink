@@ -274,11 +274,13 @@ export function WorkdayDetailsCard({
                     )}
                   </td>
                   <td className="inputs-workday-name">
-                    <span className="inputs-cell-truncate" title={b.name ?? "Break"}>
-                      {b.name ?? "Break"}
+                    <span className="inputs-activity-line">
+                      <span className="inputs-cell-truncate" title={b.name ?? "Break"}>
+                        {b.name ?? "Break"}
+                      </span>
+                      {b.source === "auto" && <span className="inputs-break-source-badge">Auto-added</span>}
+                      {b.manualEntry && <ManualBadge meta={b.manualEntry} />}
                     </span>
-                    {b.source === "auto" && <span className="inputs-break-source-badge">Auto-added</span>}
-                    {b.manualEntry && <ManualBadge meta={b.manualEntry} />}
                   </td>
                   <td
                     className={`inputs-time-cell${b.canEdit ? " inputs-time-cell-editable" : ""}`}
