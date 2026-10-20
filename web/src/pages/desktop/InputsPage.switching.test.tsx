@@ -58,6 +58,9 @@ let activityRunPreviewDeferred: Deferred<{ messages: string[]; fingerprint: stri
 let activityRunEndTimePatchCalls = 0;
 let lastActivityRunPreviewBody: { startTime?: string; endTime?: string } | null = null;
 let lastActivityRunCorrectionBody: { startTime?: string; endTime?: string; fingerprint?: string } | null = null;
+// When set, POST .../correction-preview rejects with this (the server's own
+// validation of an activity correction).
+let activityRunPreviewFailure: { status: number; message: string } | null = null;
 
 vi.mock("../../lib/api", () => {
   class ApiError extends Error {
@@ -114,6 +117,9 @@ vi.mock("../../lib/api", () => {
       }
       if (path.includes("/activity-runs/") && path.endsWith("/correction-preview") && options?.method === "POST") {
         lastActivityRunPreviewBody = options?.body ? JSON.parse(options.body as string) : null;
+        if (activityRunPreviewFailure) {
+          return Promise.reject(new ApiError(activityRunPreviewFailure.status, activityRunPreviewFailure.message));
+        }
         if (activityRunPreviewDeferred) return activityRunPreviewDeferred.promise;
         return Promise.resolve({ messages: activityRunPreviewMessages ?? [], fingerprint: "qa-fingerprint" });
       }
@@ -227,6 +233,7 @@ beforeEach(() => {
   activityRunEndTimePatchCalls = 0;
   lastActivityRunPreviewBody = null;
   lastActivityRunCorrectionBody = null;
+  activityRunPreviewFailure = null;
 });
 
 afterEach(() => {
@@ -493,56 +500,145 @@ describe("InputsPage employee switching", () => {
     expect(screen.queryByRole("dialog", { name: "Confirm break correction" })).not.toBeInTheDocument();
   });
 
-  it("pauses on Save for a confirmation preview when the correction would remove hidden grouped segments, and only applies it after confirming", async () => {
-    activityRunPreviewMessages = ["This will end Alice's Activity at 5:00 PM and remove one later 1-second segment."];
-    const { container } = renderInputsPage();
+  // --- Activity/break time edits save on Enter or a click elsewhere, with
+  // no "Confirm activity correction" popup. ---
 
+  async function loadAlice(breaks: BreakDto[] = []) {
+    const utils = renderInputsPage("/inputs?date=2026-08-11");
     await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
     await act(async () => {
-      findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity"));
+      findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity", breaks));
     });
     await screen.findByText("Alice's Activity");
+    return utils;
+  }
 
+  // Selects the run, then opens its combined Start/End editor.
+  async function openRunEditor(user: ReturnType<typeof userEvent.setup>, container: HTMLElement) {
     const endTimeText = formatTimeInAppTimezone("2026-08-11T14:00:00.000Z");
+    await user.click(screen.getByText(endTimeText));
+    await user.click(screen.getByText(endTimeText));
+    return {
+      start: container.querySelector('.inputs-log-starttime input[type="time"]') as HTMLInputElement,
+      end: container.querySelector('.inputs-log-endtime input[type="time"]') as HTMLInputElement,
+    };
+  }
+
+  // The reload every successful save ends with.
+  async function resolveReload(breaks: BreakDto[] = []) {
+    const before = dailyCalls.length;
+    await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(before - 1));
+    await act(async () => {
+      dailyCalls[dailyCalls.length - 1].deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity", breaks));
+    });
+  }
+
+  const requestPaths = () =>
+    vi.mocked(api).mock.calls.map(([p, o]) => `${(o as RequestInit | undefined)?.method ?? "GET"} ${p}`);
+
+  it("saves an activity correction on Enter, with no confirmation popup", async () => {
+    activityRunPreviewMessages = ["This will end Alice's Activity at 5:00 PM and remove one later 1-second segment."];
+    const { container } = await loadAlice();
     const user = userEvent.setup();
-    await user.click(screen.getByText(endTimeText)); // select the run
-    await user.click(screen.getByText(endTimeText)); // enter combined edit mode
-    const endTimeInput = container.querySelector('.inputs-log-endtime input[type="time"]') as HTMLInputElement;
-    expect(endTimeInput).not.toBeNull();
-    fireEvent.change(endTimeInput, { target: { value: "17:00:00" } });
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    const { end } = await openRunEditor(user, container);
+    fireEvent.change(end, { target: { value: "17:00:00" } });
+    end.focus();
+    await user.keyboard("{Enter}");
 
-    // The confirmation modal appears with the server's exact preview
-    // message — and the real PATCH must NOT have fired yet.
-    await screen.findByText(activityRunPreviewMessages[0]);
-    expect(activityRunEndTimePatchCalls).toBe(0);
-
-    await user.click(screen.getByRole("button", { name: "Save correction" }));
     await waitFor(() => expect(activityRunEndTimePatchCalls).toBe(1));
+    expect(lastActivityRunCorrectionBody?.fingerprint).toBe("qa-fingerprint");
+    await resolveReload();
+    expect(await screen.findByText("Activity time updated.")).toBeInTheDocument();
+    expect(screen.queryByText("Confirm activity correction")).not.toBeInTheDocument();
+    expect(screen.queryByText(activityRunPreviewMessages[0])).not.toBeInTheDocument();
+    expect(container.querySelector('input[type="time"]')).toBeNull();
   });
 
-  it("disables Save while the correction preview is in flight, and still shows a confirmation even when nothing hidden would be removed", async () => {
+  it("saves an activity correction once when clicking elsewhere on the page", async () => {
+    const { container } = await loadAlice();
+    const user = userEvent.setup();
+    const { end } = await openRunEditor(user, container);
+    fireEvent.change(end, { target: { value: "16:00:00" } });
+    await user.click(screen.getByText("Activity details"));
+
+    await waitFor(() => expect(activityRunEndTimePatchCalls).toBe(1));
+    expect(lastActivityRunCorrectionBody?.endTime).toBeDefined();
+    expect(lastActivityRunCorrectionBody?.startTime).toBeUndefined();
+    await resolveReload();
+    expect(await screen.findByText("Activity time updated.")).toBeInTheDocument();
+    expect(screen.queryByText("Confirm activity correction")).not.toBeInTheDocument();
+
+    // Further clicks once the editor has closed save nothing more.
+    await user.click(screen.getByText("Workday details"));
+    expect(activityRunEndTimePatchCalls).toBe(1);
+    expect(requestPaths().filter((p) => p.endsWith("/correction-preview"))).toHaveLength(1);
+  });
+
+  it("does not save when moving between the run's own Start and End inputs", async () => {
+    const { container } = await loadAlice();
+    const user = userEvent.setup();
+    const { start, end } = await openRunEditor(user, container);
+    fireEvent.change(start, { target: { value: "12:00:00" } });
+    await user.click(end);
+    fireEvent.change(end, { target: { value: "16:00:00" } });
+    expect(lastActivityRunPreviewBody).toBeNull();
+
+    // Enter commits both changes together, exactly once — the click-away
+    // listener is gone with the editor, so a later click adds nothing.
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(activityRunEndTimePatchCalls).toBe(1));
+    expect(lastActivityRunCorrectionBody?.startTime).toBeDefined();
+    expect(lastActivityRunCorrectionBody?.endTime).toBeDefined();
+    await user.click(screen.getByText("Activity details"));
+    expect(activityRunEndTimePatchCalls).toBe(1);
+  });
+
+  it("clicking elsewhere without changing anything just closes the editor", async () => {
+    const { container } = await loadAlice();
+    const user = userEvent.setup();
+    await openRunEditor(user, container);
+    await user.click(screen.getByText("Activity details"));
+    expect(container.querySelector('input[type="time"]')).toBeNull();
+    expect(lastActivityRunPreviewBody).toBeNull();
+    expect(activityRunEndTimePatchCalls).toBe(0);
+  });
+
+  it("shows the server's validation error and saves nothing when an activity correction is rejected", async () => {
+    activityRunPreviewFailure = { status: 400, message: "End time must be after the start time" };
+    const { container } = await loadAlice();
+    const user = userEvent.setup();
+    const { end } = await openRunEditor(user, container);
+    fireEvent.change(end, { target: { value: "12:30:00" } });
+    await user.click(screen.getByText("Activity details"));
+
+    const header = screen.getByText("Activity details").closest(".inputs-section-header") as HTMLElement;
+    expect(await within(header).findByText("End time must be after the start time")).toBeInTheDocument();
+    expect(activityRunEndTimePatchCalls).toBe(0);
+  });
+
+  it("keeps the editor open with an explanation when a time is cleared", async () => {
+    const { container } = await loadAlice();
+    const user = userEvent.setup();
+    const { end } = await openRunEditor(user, container);
+    fireEvent.change(end, { target: { value: "" } });
+    await user.click(screen.getByText("Activity details"));
+
+    expect(await screen.findByText("Enter a complete start and end time, or press Esc to cancel.")).toBeInTheDocument();
+    expect(container.querySelector('.inputs-log-endtime input[type="time"]')).not.toBeNull();
+    expect(lastActivityRunPreviewBody).toBeNull();
+  });
+
+  it("disables Save while the correction is in flight, then applies it without a confirmation", async () => {
     activityRunPreviewDeferred = createDeferred<{ messages: string[]; fingerprint: string }>();
-    const { container } = renderInputsPage();
-
-    await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
-    await act(async () => {
-      findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity"));
-    });
-    await screen.findByText("Alice's Activity");
-
+    const { container } = await loadAlice();
     const endTimeText = formatTimeInAppTimezone("2026-08-11T14:00:00.000Z");
     const user = userEvent.setup();
-    await user.click(screen.getByText(endTimeText));
-    await user.click(screen.getByText(endTimeText));
-    const endTimeInput = container.querySelector('.inputs-log-endtime input[type="time"]') as HTMLInputElement;
-    fireEvent.change(endTimeInput, { target: { value: "13:30:00" } });
+    const { end } = await openRunEditor(user, container);
+    fireEvent.change(end, { target: { value: "13:30:00" } });
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    // Still waiting on the preview response — no PATCH has fired yet.
     expect(activityRunEndTimePatchCalls).toBe(0);
     expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
-
     // A quick second click on the same cell while still processing must
     // NOT reopen the editor on the stale pre-correction value (ActivityLogsCard's
     // `saving` guard on handleTimeCellClick) — it stays a plain display.
@@ -552,44 +648,67 @@ describe("InputsPage employee switching", () => {
     await act(async () => {
       activityRunPreviewDeferred!.resolve({ messages: [], fingerprint: "qa-fingerprint" });
     });
-
-    // Every correction is confirmed explicitly now, even one with no extra
-    // effects to call out — the modal still appears, and Save is required.
-    await screen.findByText("Confirm activity correction");
-    expect(activityRunEndTimePatchCalls).toBe(0);
-    await user.click(screen.getByRole("button", { name: "Save correction" }));
     await waitFor(() => expect(activityRunEndTimePatchCalls).toBe(1));
+    expect(screen.queryByText("Confirm activity correction")).not.toBeInTheDocument();
   });
 
   it("editing only the Start Time cell sends startTime and omits endTime entirely", async () => {
-    const { container } = renderInputsPage("/inputs?date=2026-08-11");
-    await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
-    await act(async () => {
-      findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity"));
-    });
-    await screen.findByText("Alice's Activity");
-
-    // buildDaily's run is 2026-08-11T13:00:00Z-14:00:00Z — the Start Time
-    // column shows the run's own startedAt.
-    const startTimeText = formatTimeInAppTimezone("2026-08-11T13:00:00.000Z");
+    const { container } = await loadAlice();
     const user = userEvent.setup();
-    await user.click(screen.getByText(startTimeText)); // select
-    await user.click(screen.getByText(startTimeText)); // enter combined edit mode
-    const startTimeInput = container.querySelector('.inputs-log-starttime input[type="time"]') as HTMLInputElement;
-    expect(startTimeInput).not.toBeNull();
-    fireEvent.change(startTimeInput, { target: { value: "12:00:00" } });
+    const { start } = await openRunEditor(user, container);
+    fireEvent.change(start, { target: { value: "12:00:00" } });
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    await waitFor(() => expect(lastActivityRunPreviewBody).not.toBeNull());
+    await waitFor(() => expect(activityRunEndTimePatchCalls).toBe(1));
     expect(lastActivityRunPreviewBody?.startTime).toBeDefined();
     expect(lastActivityRunPreviewBody?.endTime).toBeUndefined();
-
-    await screen.findByText("Confirm activity correction");
-    await user.click(screen.getByRole("button", { name: "Save correction" }));
-    await waitFor(() => expect(activityRunEndTimePatchCalls).toBe(1));
     expect(lastActivityRunCorrectionBody?.startTime).toBeDefined();
     expect(lastActivityRunCorrectionBody?.endTime).toBeUndefined();
     expect(lastActivityRunCorrectionBody?.fingerprint).toBe("qa-fingerprint");
+  });
+
+  it("saves a break correction once when clicking elsewhere on the page", async () => {
+    const teaBreak = buildBreak("break-1", "Tea break", "2026-08-11T14:00:00.000Z", "2026-08-11T14:15:00.000Z");
+    const { container } = await loadAlice([teaBreak]);
+    const user = userEvent.setup();
+    await user.click(screen.getByText("Tea break"));
+    await user.click(screen.getByText(formatTimeInAppTimezone(teaBreak.endedAt!)));
+    const input = container.querySelector('.inputs-workday-table input[type="time"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "10:20:00" } });
+    await user.click(screen.getByText("Workday details"));
+
+    await resolveReload([teaBreak]);
+    expect(await screen.findByText("Break updated.")).toBeInTheDocument();
+    await user.click(screen.getByText("Activity details"));
+    expect(requestPaths().filter((p) => p === "PATCH /api/inputs/breaks/break-1")).toHaveLength(1);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("saves a break correction once on Enter, even with a click elsewhere right after", async () => {
+    const teaBreak = buildBreak("break-1", "Tea break", "2026-08-11T14:00:00.000Z", "2026-08-11T14:15:00.000Z");
+    await loadAlice([teaBreak]);
+    const user = userEvent.setup();
+    await user.click(screen.getByText("Tea break"));
+    const breakRow = screen.getByText("Tea break").closest("tr") as HTMLElement;
+    await user.click(within(breakRow).getByText(formatTimeInAppTimezone(teaBreak.startedAt)));
+    await user.keyboard("{Enter}");
+    await user.click(screen.getByText("Workday details"));
+
+    await resolveReload([teaBreak]);
+    expect(await screen.findByText("Break updated.")).toBeInTheDocument();
+    expect(requestPaths().filter((p) => p === "PATCH /api/inputs/breaks/break-1")).toHaveLength(1);
+  });
+
+  it("shows the server's error when a break correction clicked away from fails", async () => {
+    breakPatchFailure = { status: 409, message: "Corrected break overlaps a work entry" };
+    const teaBreak = buildBreak("break-1", "Tea break", "2026-08-11T14:00:00.000Z", "2026-08-11T14:15:00.000Z");
+    await loadAlice([teaBreak]);
+    const user = userEvent.setup();
+    await user.click(screen.getByText("Tea break"));
+    await user.click(screen.getByText(formatTimeInAppTimezone(teaBreak.endedAt!)));
+    await user.click(screen.getByText("Workday details"));
+
+    expect(await screen.findByText("Corrected break overlaps a work entry")).toBeInTheDocument();
   });
 
   it("editing only the End Time cell sends endTime and omits startTime entirely", async () => {

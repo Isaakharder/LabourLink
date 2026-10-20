@@ -13,7 +13,6 @@ import { AddWorkStartModal } from "../../components/inputs/AddWorkStartModal";
 import { AddBreakModal } from "../../components/inputs/AddBreakModal";
 import { AddActivityModal } from "../../components/inputs/AddActivityModal";
 import { AddEmployeeToDayModal } from "../../components/inputs/AddEmployeeToDayModal";
-import { BreakCorrectionPreviewModal } from "../../components/inputs/BreakCorrectionPreviewModal";
 import { SpeedReviewModal } from "../../components/inputs/SpeedReviewModal";
 import { SpeedReviewGroupsResponse } from "../../lib/speedReviewTypes";
 import { api, ApiError } from "../../lib/api";
@@ -147,27 +146,13 @@ export function InputsPage() {
   const [selectedBreakIds, setSelectedBreakIds] = useState<Set<string>>(new Set());
   const [editingBreak, setEditingBreak] = useState<EditingBreakField | null>(null);
   const [editBreakTimeValue, setEditBreakTimeValue] = useState("");
-  // The general Activity Time Correction workflow's own preview — this is
-  // shown on EVERY activity start/end
-  // correction, not just ones with a side effect: computed by the server
-  // (POST .../correction-preview, the exact same plan PATCH .../correction
-  // would apply) so the confirmation an admin sees can never disagree with
-  // what Save actually does. Carries the server's `fingerprint`, which Save
-  // must echo back — the server recomputes the plan under lock and rejects
-  // if it no longer matches (the timeline changed since this was previewed).
-  const [activityRunCorrectionPreview, setActivityRunCorrectionPreview] = useState<{
-    runId: string;
-    startTimeIso: string | undefined;
-    endTimeIso: string | undefined;
-    messages: string[];
-    fingerprint: string;
-  } | null>(null);
 
   const [editingWorkStart, setEditingWorkStart] = useState(false);
   const [editWorkStartTimeValue, setEditWorkStartTimeValue] = useState("");
 
-  // Corrections (end time, break start/end, work start) now save directly
-  // on Save/Enter — no reason prompt, no confirmation modal (see the
+  // Corrections (activity start/end, break start/end, work start) save
+  // directly on Save, Enter, or a click outside the editor — no reason
+  // prompt, no confirmation modal (see the
   // removed TimeCorrectionModal). This just covers the brief window a
   // direct save's own request is in flight, for the pause-gate effect
   // below; per-field errors surface through the page's existing `error`
@@ -639,10 +624,19 @@ export function InputsPage() {
     setEditingRunId(null);
   }
 
+  // Saves on Enter, Save, or a click anywhere outside the editor — directly,
+  // with no confirmation popup.
   async function handleSaveEdit() {
-    if (!editingRunId || !daily || !editStartTimeValue || !editEndTimeValue) return;
+    if (!editingRunId || !daily) return;
     const run = daily.runs.find((r) => r.id === editingRunId);
     if (!run) return;
+    // A cleared or partly typed time leaves the editor open with an
+    // explanation rather than silently dropping the edit.
+    if (!editStartTimeValue || !editEndTimeValue) {
+      setSuccessMessage(null);
+      setActionError("Enter a complete start and end time, or press Esc to cancel.");
+      return;
+    }
     const newStartIso = combineDateAndTimeToUtcIso(date, editStartTimeValue);
     const newEndIso = combineDateAndTimeToUtcIso(date, editEndTimeValue);
     // Only the field(s) that actually changed are sent — matching the
@@ -652,44 +646,23 @@ export function InputsPage() {
     const startTime = newStartIso !== editOriginalStartIso ? newStartIso : undefined;
     const endTime = newEndIso !== editOriginalEndIso ? newEndIso : undefined;
     setEditingRunId(null);
+    setActionError(null);
     if (startTime === undefined && endTime === undefined) return;
     setActionInFlight(true);
-    setActionError(null);
     try {
-      const preview = await api<{ messages: string[]; fingerprint: string }>(
+      // The server validates the correction and computes its plan (which
+      // may trim, split or remove neighbouring entries) in the preview; the
+      // PATCH must echo the plan's fingerprint and is rejected if the day
+      // changed in between. Previously the plan was shown in a "Confirm
+      // activity correction" popup first — it's now applied straight away,
+      // the same way break corrections already were.
+      const { fingerprint } = await api<{ messages: string[]; fingerprint: string }>(
         `/api/inputs/activity-runs/${run.id}/correction-preview`,
         { method: "POST", body: JSON.stringify({ startTime, endTime }) }
       );
-      // Every correction is previewed and confirmed explicitly now — the
-      // general workflow can trim, split, delete, or create any number of
-      // other entries, so there's no "simple" case exempt from showing the
-      // admin exactly what will happen before Save commits it.
-      setActivityRunCorrectionPreview({
-        runId: run.id,
-        startTimeIso: startTime,
-        endTimeIso: endTime,
-        messages: preview.messages,
-        fingerprint: preview.fingerprint,
-      });
-      setActionInFlight(false);
-    } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
-      setActionInFlight(false);
-    }
-  }
-
-  async function applyActivityRunCorrection(
-    runId: string,
-    startTimeIso: string | undefined,
-    endTimeIso: string | undefined,
-    fingerprint: string
-  ) {
-    setActionInFlight(true);
-    setActionError(null);
-    try {
-      await api(`/api/inputs/activity-runs/${runId}/correction`, {
+      await api(`/api/inputs/activity-runs/${run.id}/correction`, {
         method: "PATCH",
-        body: JSON.stringify({ startTime: startTimeIso, endTime: endTimeIso, fingerprint }),
+        body: JSON.stringify({ startTime, endTime, fingerprint }),
       });
       await loadDaily();
       // The correction may have moved this employee's paid-hours total —
@@ -703,7 +676,6 @@ export function InputsPage() {
       setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
     } finally {
       setActionInFlight(false);
-      setActivityRunCorrectionPreview(null);
     }
   }
 
@@ -746,13 +718,19 @@ export function InputsPage() {
   }
 
   async function handleSaveEditBreak() {
-    if (!editingBreak || !daily || !editBreakTimeValue) return;
+    if (!editingBreak || !daily) return;
     const brk = daily.breaks.find((b) => b.id === editingBreak.id);
     if (!brk) return;
+    if (!editBreakTimeValue) {
+      setSuccessMessage(null);
+      setActionError("Enter a complete break time, or press Esc to cancel.");
+      return;
+    }
     const { field } = editingBreak;
     const newTimeIso = combineDateAndTimeToUtcIso(date, editBreakTimeValue);
     setEditingBreak(null);
-    // Saves directly on Save/Enter, with no confirmation popup — even when the
+    // Saves directly on Save, Enter or a click outside the editor, with no
+    // confirmation popup — even when the
     // new time trims, splits or removes a neighbouring activity entry. The
     // server's PATCH computes and applies that same adjustment itself
     // (computeBreakCorrectionPlan, the plan the old preview popup only
@@ -792,7 +770,12 @@ export function InputsPage() {
   }
 
   async function handleSaveEditWorkStart() {
-    if (!editingWorkStart || !daily || !editWorkStartTimeValue || !selectedEmployeeId) return;
+    if (!editingWorkStart || !daily || !selectedEmployeeId) return;
+    if (!editWorkStartTimeValue) {
+      setSuccessMessage(null);
+      setActionError("Enter a complete work start time, or press Esc to cancel.");
+      return;
+    }
     const newStartIso = combineDateAndTimeToUtcIso(date, editWorkStartTimeValue);
     setEditingWorkStart(false);
     setActionInFlight(true);
@@ -1190,24 +1173,6 @@ export function InputsPage() {
           error={deletionError}
           onConfirm={handleConfirmDeletion}
           onCancel={handleCancelDeletion}
-        />
-      )}
-
-      {activityRunCorrectionPreview && (
-        <BreakCorrectionPreviewModal
-          title="Confirm activity correction"
-          messages={activityRunCorrectionPreview.messages}
-          submitting={actionInFlight}
-          error={actionError}
-          onConfirm={() =>
-            applyActivityRunCorrection(
-              activityRunCorrectionPreview.runId,
-              activityRunCorrectionPreview.startTimeIso,
-              activityRunCorrectionPreview.endTimeIso,
-              activityRunCorrectionPreview.fingerprint
-            )
-          }
-          onCancel={() => setActivityRunCorrectionPreview(null)}
         />
       )}
 

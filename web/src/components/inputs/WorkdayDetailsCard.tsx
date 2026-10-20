@@ -1,5 +1,6 @@
 import { BreakDto, ManualEntryMeta } from "../../lib/inputsTypes";
 import { formatDurationHMS, formatTimeInAppTimezone } from "../../lib/timezone";
+import { useCommitOnOutsidePointerDown } from "./useCommitOnOutsidePointerDown";
 
 // Checkbox-selectable for deletion: the same rule the server enforces (a
 // finished break, by someone allowed to edit Inputs). Only break rows are
@@ -109,6 +110,10 @@ export function WorkdayDetailsCard({
   const checkedDeletableCount = deletableBreaks.filter((b) => selected.has(b.id)).length;
   const allDeletableChecked = deletableBreaks.length > 0 && checkedDeletableCount === deletableBreaks.length;
 
+  // Clicking anywhere outside an open time editor saves it, same as Enter.
+  useCommitOnOutsidePointerDown(editingBreak !== null, "break", onSaveEditBreak);
+  useCommitOnOutsidePointerDown(editingWorkStart, "work-start", onSaveEditWorkStart);
+
   function handleWorkStartClick() {
     if (workStartTime && !editingWorkStart) onStartEditWorkStart();
   }
@@ -197,6 +202,9 @@ export function WorkdayDetailsCard({
               className={`inputs-break-row${!workStartTime ? " inputs-break-row-disabled" : ""}${
                 editingWorkStart ? " inputs-break-row-selected" : ""
               }`}
+              // The whole row: any click on it (re)opens the editor, so it
+              // must not count as clicking elsewhere.
+              data-time-editor={editingWorkStart ? "work-start" : undefined}
               onClick={handleWorkStartClick}
             >
               <td className="inputs-select-cell" />
@@ -274,6 +282,7 @@ export function WorkdayDetailsCard({
                   </td>
                   <td
                     className={`inputs-time-cell${b.canEdit ? " inputs-time-cell-editable" : ""}`}
+                    data-time-editor={editingStart ? "break" : undefined}
                     onClick={(e) => {
                       e.stopPropagation();
                       handleTimeCellClick(b, "start", isSelected);
@@ -308,6 +317,7 @@ export function WorkdayDetailsCard({
                   </td>
                   <td
                     className={`inputs-time-cell${b.canEdit && b.endedAt ? " inputs-time-cell-editable" : ""}`}
+                    data-time-editor={editingEnd ? "break" : undefined}
                     onClick={(e) => {
                       e.stopPropagation();
                       if (b.endedAt) handleTimeCellClick(b, "end", isSelected);
