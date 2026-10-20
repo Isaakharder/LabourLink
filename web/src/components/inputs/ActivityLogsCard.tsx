@@ -5,6 +5,7 @@ import { ActivityRunDto } from "../../lib/inputsTypes";
 import { formatDateLong, formatDurationHMS, formatTimeInAppTimezone } from "../../lib/timezone";
 import { RowCompletionReviewModal } from "./RowCompletionReviewModal";
 import { InputsErrorBoundary } from "./InputsErrorBoundary";
+import { useCommitOnOutsidePointerDown } from "./useCommitOnOutsidePointerDown";
 
 // One row's worth of columns — 8 <th>s in the header above (select
 // checkbox, Activity, Row, Carrier, Speed, Start Time, Duration, End Time).
@@ -119,6 +120,9 @@ export function ActivityLogsCard({
   const deletableRuns = runs.filter(isRunDeletable);
   const checkedDeletableCount = deletableRuns.filter((r) => selected.has(r.id)).length;
   const allDeletableChecked = deletableRuns.length > 0 && checkedDeletableCount === deletableRuns.length;
+
+  // Clicking anywhere outside the open Start/End editor saves it, same as Enter.
+  useCommitOnOutsidePointerDown(editingRunId !== null && !saving, "activity-run", onSaveEdit);
 
   const [reviewTarget, setReviewTarget] = useState<{
     greenhouseRowId: string;
@@ -325,6 +329,7 @@ export function ActivityLogsCard({
                   </td>
                   <td
                     className={`inputs-log-starttime${run.canEdit ? " inputs-log-starttime-editable" : ""}`}
+                    data-time-editor={editingRunId === run.id ? "activity-run" : undefined}
                     onClick={(e) => {
                       e.stopPropagation();
                       handleTimeCellClick(run, e.ctrlKey || e.metaKey);
@@ -367,6 +372,7 @@ export function ActivityLogsCard({
                   </td>
                   <td
                     className={`inputs-log-endtime${run.canEdit ? " inputs-log-endtime-editable" : ""}`}
+                    data-time-editor={editingRunId === run.id ? "activity-run" : undefined}
                     onClick={(e) => {
                       e.stopPropagation();
                       handleTimeCellClick(run, e.ctrlKey || e.metaKey);
