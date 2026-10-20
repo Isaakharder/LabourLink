@@ -64,7 +64,7 @@ interface WorkdayDetailsCardProps {
   // there's no delete action or other row state that a select step would
   // otherwise be gating, so the row and its time cell both open the editor
   // directly. Only ever editable when workStartTime is non-null: an empty
-  // day (no work entry to correct) renders "—" and stays non-interactive.
+  // day (no work entry to correct) leaves the cell blank and non-interactive.
   editingWorkStart: boolean;
   editWorkStartTimeValue: string;
   onStartEditWorkStart: () => void;
@@ -242,13 +242,12 @@ export function WorkdayDetailsCard({
                     <span className="inputs-cell-time">{formatTimeInAppTimezone(workStartTime)}</span>
                     {workStartManualEntry && <ManualBadge meta={workStartManualEntry} />}
                   </span>
-                ) : (
-                  "—"
-                )}
+                ) : null}
               </td>
-              <td>—</td>
-              <td>—</td>
-              <td>—</td>
+              {/* No data → an empty cell (no "—" placeholder), here and below. */}
+              <td />
+              <td />
+              <td />
             </tr>
             {breaks.map((b) => {
               const durationDisplay = b.endedAt ? formatDurationHMS(b.durationSeconds) : "In progress";
@@ -356,8 +355,8 @@ export function WorkdayDetailsCard({
                       "In progress"
                     )}
                   </td>
-                  <td className="inputs-workday-duration">{b.isPaid ? durationDisplay : "—"}</td>
-                  <td className="inputs-workday-duration">{!b.isPaid ? durationDisplay : "—"}</td>
+                  <td className="inputs-workday-duration">{b.isPaid ? durationDisplay : null}</td>
+                  <td className="inputs-workday-duration">{!b.isPaid ? durationDisplay : null}</td>
                 </tr>
               );
             })}
