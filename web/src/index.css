@@ -3119,49 +3119,50 @@ input {
   width: 40px;
 }
 
-/* Activity/Row/Carrier truncate (see .inputs-cell-truncate), so they can
-   stay compact and give their width to the numeric columns. Row and
-   Carrier get enough that their headers and typical values ("Cart 3")
-   don't butt up against the next column — the widths are weights too:
-   wider tables scale every column proportionally, so a too-small Row/
-   Carrier next to an oversized Speed left the table looking lopsided. */
+/* Activity/Row/Carrier/Speed truncate (see .inputs-cell-truncate) — the
+   full value is in the title. The widths are weights too: a wider table
+   scales every column proportionally, so each is sized to what it shows,
+   not padded out. Activity is the widest so a typical name ("Picking
+   Peppers") fits with the "Manually added" tag beside it on one line
+   (.inputs-activity-line); Row/Carrier fit their headers and typical
+   values ("12", "Cart 3"). */
 .inputs-col-activity {
-  width: 140px;
+  width: 200px;
 }
 
 .inputs-col-row {
-  width: 70px;
+  width: 55px;
 }
 
 .inputs-col-carrier {
-  width: 85px;
+  width: 70px;
 }
 
-/* Fits a long speed on one line — e.g. "12345.6 plants" — plus the cell
+/* Fits a typical speed on one line — e.g. "1140.6 stems" — plus the cell
    padding. Anything longer still can't spill into Start Time: it
    truncates with the full value in its tooltip. */
 .inputs-col-speed {
-  width: 120px;
+  width: 100px;
 }
 
-/* Fits .inputs-time-input (140px) plus the cell's own horizontal padding.
-   Any badge (e.g. Manually added) stacks under the time
+/* Fits .inputs-time-input (140px) plus the cell's own horizontal padding
+   (2 × 0.4rem). Any badge (e.g. Auto-closed) stacks under the time
    (.inputs-cell-stack) rather than widening the column. */
 .inputs-col-starttime {
-  width: 155px;
+  width: 153px;
 }
 
-/* A duration, or the live timer with the "In progress" pill stacked
-   under it. */
+/* A duration, or the live timer with the "In progress" pill (~80px)
+   stacked under it. */
 .inputs-col-duration {
-  width: 100px;
+  width: 94px;
 }
 
 /* Same as Start Time: fits the 140px input. The editor's Save/Cancel
    buttons wrap onto their own line under the input (see
    .inputs-endtime-editor) instead of needing a ~305px column beside it. */
 .inputs-col-endtime {
-  width: 155px;
+  width: 153px;
 }
 
 .inputs-select-cell {
@@ -3218,12 +3219,29 @@ input {
   white-space: nowrap;
 }
 
-.inputs-log-activity .inputs-manual-badge {
-  display: inline-block;
+/* Activity name with the "Manually added" tag right after it on the same
+   line. The tag never shrinks or wraps; a name too long for what's left
+   truncates instead (full name in its title). The tag's line box is shorter
+   than the name's, so it doesn't add to the row height. */
+.inputs-activity-line {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-top: 0.15rem;
+}
+
+.inputs-activity-line > .inputs-cell-truncate {
+  flex: 0 1 auto;
+  min-width: 2.5rem;
+}
+
+.inputs-log-activity .inputs-manual-badge {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0 0.3rem;
+  font-size: 0.65rem;
+  line-height: 1.35;
 }
 
 .inputs-log-row {

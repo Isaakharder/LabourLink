@@ -277,13 +277,15 @@ export function ActivityLogsCard({
                     )}
                   </td>
                   <td className="inputs-log-activity">
-                    <span className="inputs-cell-truncate" title={run.activityName}>
-                      {run.activityName}
+                    <span className="inputs-activity-line">
+                      <span className="inputs-cell-truncate" title={run.activityName}>
+                        {run.activityName}
+                      </span>
+                      {run.manualEntry && <ManualBadge meta={run.manualEntry} />}
                     </span>
                     {run.isBelowMinimumDuration && (
                       <span className="sr-only">{` (${belowMinimumLabel(run.minimumDurationMinutes)})`}</span>
                     )}
-                    {run.manualEntry && <ManualBadge meta={run.manualEntry} />}
                   </td>
                   <td className="inputs-log-row-cell">
                     <span className="inputs-cell-truncate" title={run.row?.label ?? undefined}>
