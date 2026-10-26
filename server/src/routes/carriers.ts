@@ -3,6 +3,7 @@ import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { buildBulkCarrierNames, normalizeCarrierName, parseTareWeightKg, validateBulkCarrierRequest } from "../lib/carrierBulk";
+import { normalizeRfidTag, parseRfidTag } from "../lib/rfidTag";
 
 const router = Router();
 
@@ -16,6 +17,28 @@ function trimOrNull(v: unknown): string | null {
 
 function duplicateFieldFromConstraint(constraint?: string): string | null {
   if (constraint === "carriers_name_normalized_key") return "name";
+  if (constraint === "carriers_rfid_tag_key") return "rfidTag";
+  return null;
+}
+
+// Maps a unique-violation on create/edit to the 409 field error the form
+// shows. For a duplicate RFID tag it names the carrier that already holds
+// the tag, so the admin knows which assignment to clear first — a tag is
+// never moved off another carrier implicitly.
+async function duplicateErrors(err: unknown, rfidTag: string | null): Promise<Record<string, string> | null> {
+  const pgErr = err as { code?: string; constraint?: string };
+  if (pgErr.code !== "23505") return null;
+  const field = duplicateFieldFromConstraint(pgErr.constraint);
+  if (field === "name") return { name: "A carrier with this name already exists" };
+  if (field === "rfidTag") {
+    const { rows } = await pool.query(`select name from carriers where rfid_tag = $1`, [rfidTag]);
+    const owner = rows[0]?.name as string | undefined;
+    return {
+      rfidTag: owner
+        ? `RFID tag ${rfidTag} is already assigned to "${owner}". Clear it there first.`
+        : `RFID tag ${rfidTag} is already assigned to another carrier`,
+    };
+  }
   return null;
 }
 
@@ -30,13 +53,14 @@ function serializeCarrier(row: any) {
     // want an actual number, and 10-digit-precision kg values never
     // approach JS's safe-integer boundary.
     tareWeightKg: Number(row.tare_weight_kg),
+    rfidTag: row.rfid_tag ?? null,
     isActive: row.is_active,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-const SELECT = `select id, name, notes, tare_weight_kg, is_active, created_at, updated_at from carriers`;
+const SELECT = `select id, name, notes, tare_weight_kg, rfid_tag, is_active, created_at, updated_at from carriers`;
 
 router.get(
   "/",
@@ -52,9 +76,12 @@ router.get(
     if (status === "active") conditions.push("is_active = true");
     else if (status === "inactive") conditions.push("is_active = false");
 
+    // Matches the carrier name or its RFID tag (stored normalized, so the
+    // search term is normalized the same way for the tag side).
     if (search) {
       params.push(`%${search.toLowerCase()}%`);
-      conditions.push(`lower(name) like $${params.length}`);
+      params.push(`%${normalizeRfidTag(search)}%`);
+      conditions.push(`(lower(name) like $${params.length - 1} or rfid_tag like $${params.length})`);
     }
 
     const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
@@ -87,24 +114,25 @@ router.post(
     const notes = trimOrNull(req.body?.notes);
     const isActive = req.body?.isActive === undefined ? true : Boolean(req.body.isActive);
     const tareResult = parseTareWeightKg(req.body?.tareWeightKg);
+    const rfidResult = parseRfidTag(req.body?.rfidTag);
 
     const errors: Record<string, string> = {};
     if (!name) errors.name = "Carrier name is required";
     if (!tareResult.ok) errors.tareWeightKg = tareResult.error;
+    if (!rfidResult.ok) errors.rfidTag = rfidResult.error;
     if (Object.keys(errors).length > 0) return res.status(400).json({ errors });
+    const rfidTag = (rfidResult as { ok: true; value: string | null }).value;
 
     try {
       const { rows } = await pool.query(
-        `insert into carriers (name, notes, is_active, tare_weight_kg) values ($1, $2, $3, $4) returning id`,
-        [name, notes, isActive, (tareResult as { ok: true; value: number }).value]
+        `insert into carriers (name, notes, is_active, tare_weight_kg, rfid_tag) values ($1, $2, $3, $4, $5) returning id`,
+        [name, notes, isActive, (tareResult as { ok: true; value: number }).value, rfidTag]
       );
       const { rows: full } = await pool.query(`${SELECT} where id = $1`, [rows[0].id]);
       res.status(201).json({ carrier: serializeCarrier(full[0]) });
     } catch (err) {
-      const pgErr = err as { code?: string; constraint?: string };
-      if (pgErr.code === "23505" && duplicateFieldFromConstraint(pgErr.constraint) === "name") {
-        return res.status(409).json({ errors: { name: "A carrier with this name already exists" } });
-      }
+      const dupErrors = await duplicateErrors(err, rfidTag);
+      if (dupErrors) return res.status(409).json({ errors: dupErrors });
       throw err;
     }
   })
@@ -141,7 +169,7 @@ router.post(
       `insert into carriers (name, notes, is_active, tare_weight_kg)
        values ${rowsSql.join(", ")}
        on conflict ((lower(trim(name)))) do nothing
-       returning id, name, notes, tare_weight_kg, is_active, created_at, updated_at`,
+       returning id, name, notes, tare_weight_kg, rfid_tag, is_active, created_at, updated_at`,
       values
     );
 
@@ -189,6 +217,16 @@ router.patch(
       values.push(tareResult.value);
       columns.push(`tare_weight_kg = $${values.length}`);
     }
+    // Only touched when the body names it, so edits that don't mention the
+    // tag (e.g. the Activate/Deactivate toggle) never clear it.
+    let rfidTag: string | null = null;
+    if ("rfidTag" in body) {
+      const rfidResult = parseRfidTag(body.rfidTag);
+      if (!rfidResult.ok) return res.status(400).json({ errors: { rfidTag: rfidResult.error } });
+      rfidTag = rfidResult.value;
+      values.push(rfidTag);
+      columns.push(`rfid_tag = $${values.length}`);
+    }
     if (columns.length === 0) return res.status(400).json({ error: "No fields to update" });
     columns.push("updated_at = now()");
 
@@ -203,10 +241,8 @@ router.patch(
       const { rows: full } = await pool.query(`${SELECT} where id = $1`, [id]);
       res.json({ carrier: serializeCarrier(full[0]) });
     } catch (err) {
-      const pgErr = err as { code?: string; constraint?: string };
-      if (pgErr.code === "23505" && duplicateFieldFromConstraint(pgErr.constraint) === "name") {
-        return res.status(409).json({ errors: { name: "A carrier with this name already exists" } });
-      }
+      const dupErrors = await duplicateErrors(err, rfidTag);
+      if (dupErrors) return res.status(409).json({ errors: dupErrors });
       throw err;
     }
   })

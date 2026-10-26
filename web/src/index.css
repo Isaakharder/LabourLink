@@ -1408,6 +1408,18 @@ input {
   white-space: nowrap;
 }
 
+/* Carriers table's RFID Tag column: the full identifier, never wrapped or
+   truncated, so leading zeros stay visible and digits line up. */
+.carrier-rfid-tag {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.carrier-rfid-unassigned {
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+
 .app-content:has(.employees-page) {
   display: flex;
   flex-direction: column;

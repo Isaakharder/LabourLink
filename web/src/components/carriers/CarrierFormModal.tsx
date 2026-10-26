@@ -13,7 +13,15 @@ interface FormState {
   name: string;
   notes: string;
   tareWeightKg: string;
+  rfidTag: string;
   isActive: boolean;
+}
+
+// Same normalization as the server's lib/rfidTag.ts (whitespace removed,
+// uppercased) — used only to compare against the saved tag and to validate
+// before submit; the server re-normalizes and is authoritative.
+function normalizeRfidTag(raw: string): string {
+  return raw.replace(/\s+/g, "").toUpperCase();
 }
 
 function toFormState(carrier: Carrier | null): FormState {
@@ -21,6 +29,7 @@ function toFormState(carrier: Carrier | null): FormState {
     name: carrier?.name ?? "",
     notes: carrier?.notes ?? "",
     tareWeightKg: carrier ? String(carrier.tareWeightKg) : "0",
+    rfidTag: carrier?.rfidTag ?? "",
     isActive: carrier?.isActive ?? true,
   };
 }
@@ -43,6 +52,10 @@ export function CarrierFormModal({ carrier, onClose, onSaved }: CarrierFormModal
     if (form.tareWeightKg.trim() === "" || !Number.isFinite(tare) || tare < 0) {
       next.tareWeightKg = "Tare weight must be 0 or greater";
     }
+    const rfid = normalizeRfidTag(form.rfidTag);
+    if (rfid && !/^[0-9A-Z]{1,64}$/.test(rfid)) {
+      next.rfidTag = "RFID tag may only contain letters and digits (64 max)";
+    }
     setErrors(next);
     return Object.keys(next).length === 0;
   }
@@ -53,12 +66,23 @@ export function CarrierFormModal({ carrier, onClose, onSaved }: CarrierFormModal
     setSubmitError(null);
     if (!validate()) return;
 
+    // Replacing or clearing an existing assignment is never silent.
+    const nextRfid = normalizeRfidTag(form.rfidTag) || null;
+    const savedRfid = carrier?.rfidTag ?? null;
+    if (savedRfid && nextRfid !== savedRfid) {
+      const message = nextRfid
+        ? `Replace RFID tag ${savedRfid} on "${carrier!.name}" with ${nextRfid}?`
+        : `Remove RFID tag ${savedRfid} from "${carrier!.name}"? It will show as Not assigned.`;
+      if (!window.confirm(message)) return;
+    }
+
     setSubmitting(true);
     try {
       const payload = {
         name: form.name.trim(),
         notes: form.notes.trim() || null,
         tareWeightKg: Number(form.tareWeightKg),
+        rfidTag: nextRfid,
         isActive: form.isActive,
       };
 
@@ -109,6 +133,18 @@ export function CarrierFormModal({ carrier, onClose, onSaved }: CarrierFormModal
                 required
               />
               {errors.tareWeightKg && <span className="field-error">{errors.tareWeightKg}</span>}
+            </label>
+            <label>
+              RFID tag
+              <input
+                type="text"
+                autoComplete="off"
+                spellCheck={false}
+                value={form.rfidTag}
+                onChange={(e) => set("rfidTag", e.target.value)}
+                placeholder="Not assigned"
+              />
+              {errors.rfidTag && <span className="field-error">{errors.rfidTag}</span>}
             </label>
             <label>
               Notes
