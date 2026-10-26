@@ -65,6 +65,11 @@ export function CarriersTab() {
     }
   }
 
+  function renderRfidTag(carrier: Carrier) {
+    if (!carrier.rfidTag) return <span className="carrier-rfid-unassigned">Not assigned</span>;
+    return <span className="carrier-rfid-tag">{carrier.rfidTag}</span>;
+  }
+
   function renderActions(carrier: Carrier) {
     if (!isAdmin) return null;
     return (
@@ -84,7 +89,7 @@ export function CarriersTab() {
       <div className="employees-toolbar">
         <input
           type="search"
-          placeholder="Search by carrier name"
+          placeholder="Search by carrier name or RFID tag"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="employees-search"
@@ -125,6 +130,7 @@ export function CarriersTab() {
             <thead>
               <tr>
                 <th>Name</th>
+                <th>RFID Tag</th>
                 <th>Tare weight</th>
                 <th>Notes</th>
                 <th>Status</th>
@@ -135,6 +141,7 @@ export function CarriersTab() {
               {carriers.map((c) => (
                 <tr key={c.id}>
                   <td>{c.name}</td>
+                  <td>{renderRfidTag(c)}</td>
                   <td>{c.tareWeightKg} kg</td>
                   <td>{c.notes ?? "—"}</td>
                   <td>
@@ -160,6 +167,10 @@ export function CarriersTab() {
                   </div>
                 </div>
                 <dl className="employee-card-fields">
+                  <div>
+                    <dt>RFID Tag</dt>
+                    <dd>{renderRfidTag(c)}</dd>
+                  </div>
                   <div>
                     <dt>Tare weight</dt>
                     <dd>{c.tareWeightKg} kg</dd>

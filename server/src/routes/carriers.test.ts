@@ -241,6 +241,94 @@ async function main() {
     // overlapping bulk requests — the unique index is the real guarantee.
     const dbCount = await pool.query(`select count(*) from carriers where lower(trim(name)) = lower(trim($1))`, [`${BULK_PREFIX} 003`]);
     check(Number(dbCount.rows[0].count) === 1, "R) exactly one row exists in the DB for a name hit by both bulk requests", dbCount.rows);
+
+    // -----------------------------------------------------------------
+    // RFID tags (065_carrier_rfid_tag.sql). Tags are built from RUN_ID's
+    // digits reversed: unique per run (so a shared DB never collides with
+    // real bins' tags) but never a substring of the RUN_ID-suffixed fixture
+    // names, so the tag-search check below can't match on name instead.
+    // -----------------------------------------------------------------
+    const RUN_DIGITS_REVERSED = String(RUN_ID).split("").reverse().join("");
+    const TAG_1 = `0000${RUN_DIGITS_REVERSED}`;
+    const TAG_2 = `0001${RUN_DIGITS_REVERSED}`;
+
+    check(
+      (bulk1.body?.carriers ?? []).every((c: any) => c.rfidTag === null) && created.body?.carrier?.rfidTag === null,
+      "RFID-A) carriers created without a tag report rfidTag null (Not assigned)",
+      { bulk: bulk1.body?.carriers, created: created.body?.carrier }
+    );
+
+    const tagged = await call("POST", "/api/carriers", {
+      token: adminToken,
+      body: { name: `${NAME_PREFIX} Tagged`, tareWeightKg: 20, rfidTag: ` ${TAG_1} ` },
+    });
+    check(tagged.status === 201 && tagged.body?.carrier?.rfidTag === TAG_1, "RFID-B) create with a tag stores it as text with leading zeros", tagged);
+    if (tagged.body?.carrier?.id) carrierIds.push(tagged.body.carrier.id);
+    const taggedId = tagged.body?.carrier?.id as string;
+
+    const createDup = await call("POST", "/api/carriers", {
+      token: adminToken,
+      body: { name: `${NAME_PREFIX} Dup Tag`, tareWeightKg: 20, rfidTag: TAG_1 },
+    });
+    check(
+      createDup.status === 409 && String(createDup.body?.errors?.rfidTag ?? "").includes(`${NAME_PREFIX} Tagged`),
+      "RFID-C) create with an already-assigned tag is rejected, naming the carrier that holds it",
+      createDup
+    );
+    const dupRows = await pool.query(`select count(*) from carriers where name = $1`, [`${NAME_PREFIX} Dup Tag`]);
+    check(Number(dupRows.rows[0].count) === 0, "RFID-D) the rejected create left no row behind", dupRows.rows);
+
+    const patchDup = await call("PATCH", `/api/carriers/${carrierAId}`, {
+      token: adminToken,
+      body: { rfidTag: TAG_1, notes: "should not save" },
+    });
+    check(patchDup.status === 409 && Boolean(patchDup.body?.errors?.rfidTag), "RFID-E) edit to an already-assigned tag is rejected", patchDup);
+    const afterDup = await call("GET", `/api/carriers/${carrierAId}`, { token: adminToken });
+    const ownerAfterDup = await call("GET", `/api/carriers/${taggedId}`, { token: adminToken });
+    check(
+      afterDup.body?.carrier?.rfidTag === null && afterDup.body?.carrier?.notes !== "should not save" && ownerAfterDup.body?.carrier?.rfidTag === TAG_1,
+      "RFID-F) a rejected edit changes nothing on either carrier (no silent reassignment)",
+      { afterDup: afterDup.body, owner: ownerAfterDup.body }
+    );
+
+    const badFormat = await call("PATCH", `/api/carriers/${carrierAId}`, { token: adminToken, body: { rfidTag: "R-0000" } });
+    check(badFormat.status === 400 && Boolean(badFormat.body?.errors?.rfidTag), "RFID-G) a malformed tag is rejected", badFormat);
+    const numericTag = await call("PATCH", `/api/carriers/${carrierAId}`, { token: adminToken, body: { rfidTag: 182225750 } });
+    check(numericTag.status === 400 && Boolean(numericTag.body?.errors?.rfidTag), "RFID-H) a JSON number is rejected — tags must be sent as text", numericTag);
+
+    const managerEdit = await call("PATCH", `/api/carriers/${carrierAId}`, { token: managerToken, body: { rfidTag: TAG_2 } });
+    check(managerEdit.status === 403, "RFID-I) a Manager cannot assign tags (Administrator only)", managerEdit);
+    const anonEdit = await call("PATCH", `/api/carriers/${carrierAId}`, { body: { rfidTag: TAG_2 } });
+    check(anonEdit.status === 401, "RFID-J) an unauthenticated request cannot assign tags", anonEdit);
+
+    const assign = await call("PATCH", `/api/carriers/${carrierAId}`, { token: adminToken, body: { rfidTag: TAG_2 } });
+    check(assign.status === 200 && assign.body?.carrier?.rfidTag === TAG_2, "RFID-K) admin can assign a free tag on edit", assign);
+
+    const toggle = await call("PATCH", `/api/carriers/${carrierAId}`, { token: adminToken, body: { isActive: false } });
+    check(toggle.body?.carrier?.rfidTag === TAG_2, "RFID-L) an edit that doesn't mention rfidTag (status toggle) keeps it", toggle.body);
+
+    const takeFromInactive = await call("PATCH", `/api/carriers/${taggedId}`, { token: adminToken, body: { rfidTag: TAG_2 } });
+    check(takeFromInactive.status === 409, "RFID-M) a tag held by an inactive carrier is still protected", takeFromInactive);
+    await call("PATCH", `/api/carriers/${carrierAId}`, { token: adminToken, body: { isActive: true } });
+
+    const searchTag = await call("GET", `/api/carriers?status=all&search=${encodeURIComponent(TAG_1.slice(0, 12))}`, { token: adminToken });
+    check(
+      (searchTag.body?.carriers ?? []).length === 1 && searchTag.body.carriers[0].id === taggedId,
+      "RFID-N) search by part of a tag number finds exactly that carrier",
+      searchTag.body
+    );
+    const searchName = await call("GET", `/api/carriers?status=all&search=${encodeURIComponent(`${NAME_PREFIX} Tagged`)}`, { token: adminToken });
+    check((searchName.body?.carriers ?? []).some((c: any) => c.id === taggedId), "RFID-O) search by name still works", searchName.body);
+    const managerList = await call("GET", `/api/carriers?status=all&search=${encodeURIComponent(TAG_1)}`, { token: managerToken });
+    check(managerList.body?.carriers?.[0]?.rfidTag === TAG_1, "RFID-P) Managers can still view tags (read access unchanged)", managerList.body);
+
+    const clear = await call("PATCH", `/api/carriers/${taggedId}`, { token: adminToken, body: { rfidTag: "" } });
+    check(clear.status === 200 && clear.body?.carrier?.rfidTag === null, "RFID-Q) admin can clear a tag (blank → Not assigned)", clear);
+    const reuse = await call("PATCH", `/api/carriers/${carrierAId}`, { token: adminToken, body: { rfidTag: TAG_1 } });
+    check(reuse.status === 200 && reuse.body?.carrier?.rfidTag === TAG_1, "RFID-R) a cleared tag can be assigned to another carrier", reuse);
+    const clearNull = await call("PATCH", `/api/carriers/${carrierAId}`, { token: adminToken, body: { rfidTag: null } });
+    check(clearNull.status === 200 && clearNull.body?.carrier?.rfidTag === null, "RFID-S) rfidTag null also clears", clearNull);
+    check(clearNull.body?.carrier?.tareWeightKg === 30, "RFID-T) RFID edits leave the tare weight alone", clearNull.body);
   } finally {
     server.close();
 

@@ -71,6 +71,8 @@
     "test:nfc-tag-actions": "ts-node src/routes/nfcTags.actionTargets.test.ts",
     "test:mobile-time-switch-warnings": "ts-node src/routes/mobileTime.switchWarnings.test.ts",
     "test:carriers": "ts-node src/routes/carriers.test.ts",
+    "test:rfid-tag": "ts-node src/lib/rfidTag.test.ts",
+    "test:migration-065-carrier-rfid-tag": "ts-node src/scripts/migration065CarrierRfidTag.test.ts",
     "test:greenhouse-displays": "ts-node src/routes/greenhouseDisplays.test.ts",
     "test:greenhouse-display-state-errors": "ts-node src/routes/greenhouseLive.displayStateErrors.test.ts",
     "test:process-safety": "ts-node src/lib/processSafety.test.ts",
