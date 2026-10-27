@@ -65,13 +65,13 @@ cd scale/app && npx vitest run
 
 ```sh
 docker run --rm -v "$PWD":/work labourlink-scale-build sh /work/scale/docker/build-deb.sh
-# → scale/dist/labourlink-scale_0.1.0_amd64.deb (~4 MB)
+# → scale/dist/labourlink-scale_0.2.0_amd64.deb (~4 MB)
 ```
 
 To install on the NUC:
 
 ```sh
-sudo apt install ./labourlink-scale_0.1.0_amd64.deb
+sudo apt install ./labourlink-scale_0.2.0_amd64.deb
 ```
 
 The package starts `labourlink-scaled` in **simulation** mode and adds the display to XFCE autostart. Then run `sh /usr/share/labourlink-scale/setup-kiosk.sh` as the station user and enable automatic login.
