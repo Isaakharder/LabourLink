@@ -61,6 +61,13 @@ describe("headline", () => {
     expect(headline(unknown).detail).toContain("0000000099999999");
   });
 
+  it("warns WAIT when the next bin goes on before the scale returned to zero", () => {
+    const s = makeSnapshot({ waitForZero: true, phase: { phase: "awaitingRemoval", reason: "recorded", bin: null, emptySinceMs: null } });
+    expect(headline(s)).toMatchObject({ tone: "error", title: "WAIT — Scale must return to zero before next bin." });
+    // Cleared once the service reports the scale ready.
+    expect(headline(makeSnapshot({ waitForZero: false, phase: { phase: "idle" } })).title).toBe("Ready");
+  });
+
   it("asks for removal after recording, and after a restart with load on the scale", () => {
     expect(headline(makeSnapshot({ phase: { phase: "awaitingRemoval", reason: "recorded", bin: null, emptySinceMs: null } })).title).toBe("Weight recorded");
     expect(headline(makeSnapshot({ phase: { phase: "awaitingRemoval", reason: "startupLoad", bin: null, emptySinceMs: null } })).title).toBe("Remove the bin to begin");

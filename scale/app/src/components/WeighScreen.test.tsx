@@ -49,6 +49,29 @@ describe("WeighScreen", () => {
     expect(screen.getAllByText("Picker Alpha").length).toBeGreaterThan(0);
   });
 
+  it("shows the WAIT warning prominently and clears it when the scale is ready", () => {
+    const waiting = makeSnapshot({
+      waitForZero: true,
+      phase: { phase: "awaitingRemoval", reason: "recorded", bin: BIN, emptySinceMs: null },
+      bin: BIN,
+      reading: { weightG: 58_000, mode: "gross", motion: false, overload: false, underload: false, error: false },
+      liveNetG: 30_500,
+      currentWeighing: makeWeighing(),
+    });
+    const { rerender } = render(<WeighScreen s={waiting} />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("WAIT — Scale must return to zero before next bin.");
+    expect(status).toHaveClass("tone-error");
+    expect(screen.queryByText("Weight recorded")).not.toBeInTheDocument();
+    // The previous bin's frozen values are not shown while the next bin sits on the scale.
+    expect(screen.queryByText("Sim Bin 1")).not.toBeInTheDocument();
+    expect(screen.getByText(/58\.00/)).toBeInTheDocument();
+    expect(screen.getByTestId("net")).not.toHaveTextContent(/\d/);
+    rerender(<WeighScreen s={makeSnapshot({ waitForZero: false, phase: { phase: "idle" } })} />);
+    expect(screen.queryByText(/WAIT/)).not.toBeInTheDocument();
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+  });
+
   it("shows awaiting assignment, not a name, for a pending weighing", () => {
     const w = makeWeighing({ assignmentStatus: "pending", employeeName: null, pendingUntil: "2026-10-28T10:00:00.000Z" });
     render(<WeighScreen s={makeSnapshot({ phase: { phase: "awaitingRemoval", reason: "recorded", bin: BIN, emptySinceMs: null }, currentWeighing: w, recent: [w] })} />);

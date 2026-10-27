@@ -400,6 +400,30 @@ select {
   color: #fca5a5;
 }
 
+/* WAIT: next bin placed before the scale returned to zero. Impossible to miss. */
+.status-wait {
+  background: #7f1d1d;
+  border-color: #fca5a5;
+  animation: wait-pulse 1s ease-in-out infinite alternate;
+}
+
+.status-wait .status-title {
+  color: #fff;
+}
+
+.status-wait .status-detail {
+  color: #fecaca;
+}
+
+@keyframes wait-pulse {
+  from {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.2);
+  }
+  to {
+    box-shadow: 0 0 0 10px rgba(239, 68, 68, 0.55);
+  }
+}
+
 .settle {
   display: flex;
   align-items: center;

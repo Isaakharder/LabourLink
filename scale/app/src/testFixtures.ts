@@ -31,6 +31,7 @@ export function makeSnapshot(over: Partial<Snapshot> = {}): Snapshot {
     phase: { phase: "idle" },
     settleRemainingMs: 0,
     removalRemainingMs: 0,
+    waitForZero: false,
     scaleOnline: true,
     reading: { weightG: 0, mode: "gross", motion: false, overload: false, underload: false, error: false },
     bin: null,

@@ -204,6 +204,10 @@ pub struct Machine {
     /// until the load is removed, so a reader that reports a tag only once
     /// doesn't make the bin "lose" its identity while it waits.
     latched: Option<String>,
+    /// Load came back while the scale was confirming it was empty (a bin
+    /// swapped in too fast). Shown as a WAIT warning; cleared only when the
+    /// scale has read empty for the full `removal_ms`.
+    pub wait_for_zero: bool,
 }
 
 impl Machine {
@@ -219,6 +223,7 @@ impl Machine {
             recent: HashMap::new(),
             last_tag: None,
             latched: None,
+            wait_for_zero: false,
         }
     }
 
@@ -410,6 +415,7 @@ impl Machine {
     fn go_idle(&mut self) {
         self.phase = Phase::Idle;
         self.latched = None;
+        self.wait_for_zero = false;
     }
 
     fn phase_is_idle(&self) -> bool {
@@ -422,7 +428,10 @@ impl Machine {
     fn removal_progress(&mut self, now: u64, empty_since_ms: Option<u64>) -> Option<u64> {
         if !self.is_empty() {
             if empty_since_ms.is_some() {
-                // Load came back before removal completed: restart the wait.
+                // Load came back before removal completed: restart the wait
+                // and warn. Nothing is weighed until the scale reads empty for
+                // the full removal period.
+                self.wait_for_zero = true;
                 match &mut self.phase {
                     Phase::AwaitingRemoval { empty_since_ms, .. } | Phase::Blocked { empty_since_ms, .. } => *empty_since_ms = None,
                     _ => {}
@@ -988,5 +997,56 @@ mod tests {
             }
             assert!(records <= placements, "records {records} > placements {placements}");
         }
+    }
+
+    #[test]
+    fn next_bin_placed_before_zero_is_confirmed_warns_and_is_not_weighed() {
+        let c = carriers();
+        let mut m = started_empty(&c);
+        m.on_tag(TAG_A, 1_000);
+        assert_eq!(feed(&mut m, &c, 1_000, 15_000, |_| gross(64_000)).len(), 1);
+        assert!(!m.wait_for_zero);
+        // Bin A lifted off; Bin B goes on after only 1 s of empty readings.
+        feed(&mut m, &c, 15_000, 16_000, |_| gross(0));
+        assert!(!m.wait_for_zero, "no warning while the scale is simply empty");
+        m.on_tag(TAG_B, 16_000);
+        let recs = feed(&mut m, &c, 16_000, 40_000, |_| gross(58_000));
+        assert!(recs.is_empty(), "nothing is weighed until the scale has returned to zero");
+        assert!(m.wait_for_zero);
+        assert!(matches!(m.phase, Phase::AwaitingRemoval { .. }));
+        // Still warning during a second, still-too-short empty spell.
+        feed(&mut m, &c, 40_000, 41_000, |_| gross(0));
+        assert!(m.wait_for_zero);
+        // Scale reads empty for the full 2 s: warning clears, station is ready.
+        feed(&mut m, &c, 41_000, 43_100, |_| gross(0));
+        assert!(!m.wait_for_zero);
+        assert_eq!(m.phase, Phase::Idle);
+        // Bin B weighed normally from here.
+        m.on_tag(TAG_B, 44_000);
+        let recs = feed(&mut m, &c, 44_000, 58_000, |_| gross(58_000));
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].bin.carrier_name, "Bin 24");
+    }
+
+    #[test]
+    fn duplicate_guard_still_applies_after_a_zero_wait() {
+        let c = carriers();
+        let mut m = started_empty(&c);
+        m.on_tag(TAG_A, 1_000);
+        assert_eq!(feed(&mut m, &c, 1_000, 15_000, |_| gross(64_000)).len(), 1);
+        feed(&mut m, &c, 15_000, 15_500, |_| gross(0));
+        feed(&mut m, &c, 15_500, 17_000, |_| gross(64_000)); // same bin back on too soon
+        assert!(m.wait_for_zero);
+        feed(&mut m, &c, 17_000, 19_500, |_| gross(0));
+        assert!(!m.wait_for_zero);
+        m.on_tag(TAG_A, 20_000);
+        assert!(feed(&mut m, &c, 20_000, 40_000, |_| gross(64_000)).is_empty());
+        assert!(matches!(
+            m.phase,
+            Phase::Blocked {
+                reason: BlockReason::RecentlyWeighed { .. },
+                ..
+            }
+        ));
     }
 }

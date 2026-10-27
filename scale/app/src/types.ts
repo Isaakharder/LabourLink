@@ -83,6 +83,8 @@ export interface Snapshot {
   phase: Phase;
   settleRemainingMs: number;
   removalRemainingMs: number;
+  /** Load returned before the scale confirmed empty for 2 s. */
+  waitForZero: boolean;
   scaleOnline: boolean;
   reading: Reading | null;
   bin: BinRef | null;

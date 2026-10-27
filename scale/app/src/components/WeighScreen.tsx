@@ -17,8 +17,10 @@ function Weight({ grams, prefix = "" }: { grams: number | null; prefix?: string 
 export function WeighScreen({ s }: { s: Snapshot }) {
   const h = headline(s);
   const p = s.phase;
-  const recorded = s.currentWeighing;
-  const bin = s.bin;
+  // During a WAIT the previous bin's values no longer describe what is on the
+  // scale: show only the live gross until the scale has returned to zero.
+  const recorded = s.waitForZero ? null : s.currentWeighing;
+  const bin = s.waitForZero ? null : s.bin;
   const settling = p.phase === "settling";
   const settleProgress = settling ? 1 - s.settleRemainingMs / Math.max(1, s.params.settleMs) : 0;
   const emp = employeeLine(recorded, p);
@@ -26,12 +28,12 @@ export function WeighScreen({ s }: { s: Snapshot }) {
   // Recorded values are frozen once saved; otherwise show live values.
   const gross = recorded ? recorded.grossG : s.reading?.weightG ?? null;
   const tare = recorded ? recorded.tareG : bin?.tareG ?? null;
-  const net = recorded ? recorded.netG : s.liveNetG;
+  const net = recorded ? recorded.netG : s.waitForZero ? null : s.liveNetG;
   const indicatorNote = s.reading?.overload ? "OVERLOAD" : s.reading?.motion ? "Motion" : s.reading ? "Steady" : "";
 
   return (
     <div className="weigh">
-      <section className={`status tone-${h.tone}`} aria-live="polite">
+      <section className={`status tone-${h.tone}${s.waitForZero ? " status-wait" : ""}`} role="status" aria-live="assertive">
         <div className="status-title">{h.title}</div>
         <div className="status-detail">{h.detail}</div>
         {settling && (

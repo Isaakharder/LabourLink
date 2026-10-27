@@ -46,9 +46,18 @@ function blockedHeadline(p: Extract<Phase, { phase: "blocked" }>): Headline {
   }
 }
 
+export const WAIT_FOR_ZERO = "WAIT — Scale must return to zero before next bin.";
+
 export function headline(s: Snapshot): Headline {
   if (!s.scaleOnline && s.phase.phase !== "starting") {
     return { tone: "error", title: "Scale not responding", detail: "No data from the scale indicator. Weighing is paused." };
+  }
+  if (s.waitForZero) {
+    return {
+      tone: "error",
+      title: WAIT_FOR_ZERO,
+      detail: "Remove the bin. The scale must read empty for 2 seconds before the next bin can be weighed.",
+    };
   }
   const p = s.phase;
   switch (p.phase) {

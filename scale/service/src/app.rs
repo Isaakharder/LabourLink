@@ -490,6 +490,7 @@ impl App {
             "phase": e.machine.phase,
             "settleRemainingMs": settle_remaining_ms,
             "removalRemainingMs": removal_remaining_ms,
+            "waitForZero": e.machine.wait_for_zero,
             "scaleOnline": e.machine.scale_online,
             "reading": reading,
             "bin": bin,
@@ -846,5 +847,26 @@ mod tests {
         assert_eq!(normalize_status("needs_review"), "needs_review");
         assert_eq!(normalize_status("credited_pending_audit"), "unknown");
         assert_eq!(normalize_status(""), "unknown");
+    }
+
+    #[test]
+    fn snapshot_shows_wait_for_zero_until_the_scale_is_ready() {
+        let app = sim_app();
+        assert!(app.refresh_carriers());
+        weigh(&app, TAG_BIN1, 90_000);
+        assert_eq!(app.snapshot()["waitForZero"], false);
+        hold(&app, 0, 1); // lifted off for only 1 s...
+        app.handle(Input::Tag(TAG_BIN2.into()));
+        hold(&app, 80_000, 15); // ...and the next bin goes straight on
+        let snap = app.snapshot();
+        assert_eq!(snap["waitForZero"], true, "{snap}");
+        assert_eq!(app.recent.lock().unwrap().len(), 1, "no second weighing yet");
+        hold(&app, 0, 3); // scale returns to zero for the full 2 s
+        let snap = app.snapshot();
+        assert_eq!(snap["waitForZero"], false);
+        assert_eq!(snap["phase"]["phase"], "idle");
+        weigh(&app, TAG_BIN2, 80_000);
+        assert_eq!(app.recent.lock().unwrap().len(), 2);
+        assert_eq!(latest(&app).carrier_name, "Sim Bin 2");
     }
 }
