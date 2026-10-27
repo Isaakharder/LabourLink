@@ -1,0 +1,271 @@
+/* Pepper-plant training canvas. Uses the app's tokens from index.css. */
+
+.plant-trainer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 200px;
+  gap: 1.25rem;
+  height: 100%;
+  min-height: 0;
+}
+
+.plant-trainer-stage {
+  min-width: 0;
+  min-height: 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 1rem;
+  display: flex;
+  /* A plant taller/wider than the frame scrolls at the same scale. */
+  overflow: auto;
+}
+
+.plant-trainer-stage > .plant-canvas {
+  /* Centres while it fits; collapses to 0 (scrollable) once it doesn't. */
+  margin: auto;
+}
+
+.plant-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.plant-trainer-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  align-self: start;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+
+.plant-trainer-button {
+  min-height: 48px;
+  padding: 0.7rem 1rem;
+  border: 1px solid var(--color-primary);
+  border-radius: 8px;
+  background: var(--color-primary);
+  color: #ffffff;
+  font-size: 1rem;
+  font-weight: 600;
+  transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
+}
+
+.plant-trainer-button:hover:not(:disabled) {
+  background: #1e40af;
+  border-color: #1e40af;
+}
+
+.plant-trainer-button:focus-visible {
+  outline: 3px solid #93c5fd;
+  outline-offset: 2px;
+}
+
+.plant-trainer-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.plant-trainer-button-secondary {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+
+.plant-trainer-button-secondary:hover:not(:disabled) {
+  background: var(--color-bg);
+  border-color: #c7cbd3;
+}
+
+.plant-trainer-status {
+  margin: 0.25rem 0 0;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  text-align: center;
+}
+
+.plant-trainer-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--color-muted);
+  text-align: center;
+}
+
+@media (max-width: 700px) {
+  .plant-trainer {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+  .plant-trainer-controls {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-self: stretch;
+  }
+  .plant-trainer-button {
+    flex: 1 1 0;
+  }
+  .plant-trainer-status {
+    flex-basis: 100%;
+  }
+}
+
+/* --- Plant drawing --- */
+
+.plant-stem {
+  fill: #5c9a40;
+  stroke: #417530;
+  stroke-width: 0.8;
+  stroke-linejoin: round;
+}
+
+.plant-stem-highlight {
+  fill: none;
+  stroke: #9cca72;
+  stroke-linecap: round;
+  opacity: 0.55;
+}
+
+.plant-petiole {
+  fill: none;
+  stroke: #5a933d;
+  stroke-linecap: round;
+}
+
+.plant-leaf-half {
+  stroke: #3b6c27;
+  stroke-width: 0.5;
+  stroke-linejoin: round;
+}
+
+.plant-leaf-midrib {
+  fill: none;
+  stroke: #b9da8e;
+  stroke-width: 0.8;
+  stroke-linecap: round;
+  opacity: 0.8;
+}
+
+.plant-leaf-veins {
+  fill: none;
+  stroke: #a9cf86;
+  stroke-width: 0.5;
+  stroke-linecap: round;
+  opacity: 0.45;
+}
+
+.plant-pedicel {
+  fill: none;
+  stroke: #5b9443;
+  stroke-linecap: round;
+}
+
+.plant-bud {
+  fill: #eef3dc;
+  stroke: #9db07a;
+  stroke-width: 0.6;
+}
+
+.plant-petals {
+  fill: #ffffff;
+  stroke: #b9bfa6;
+  stroke-width: 0.6;
+  stroke-linejoin: round;
+}
+
+.plant-flower-centre {
+  fill: #f2e18f;
+  stroke: #d6c062;
+  stroke-width: 0.4;
+}
+
+.plant-anthers {
+  fill: #e2bf3c;
+}
+
+.plant-fruit-body {
+  fill: #3f8a2c;
+  stroke: #2a5f1d;
+  stroke-width: 0.8;
+  stroke-linejoin: round;
+}
+
+.plant-fruit-groove {
+  fill: none;
+  stroke: #2a5f1d;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+
+.plant-fruit-highlight {
+  fill: #e9f6d8;
+}
+
+.plant-calyx {
+  fill: #477f31;
+  stroke: #2f5d22;
+  stroke-width: 0.5;
+  stroke-linejoin: round;
+}
+
+.plant-slab {
+  fill: #eceae4;
+  stroke: #d6d3ca;
+  stroke-width: 1;
+}
+
+.plant-block {
+  fill: #d8ccb0;
+  stroke: #c2b493;
+  stroke-width: 1;
+}
+
+.plant-block-shade {
+  fill: #c9bb98;
+  opacity: 0.6;
+}
+
+.plant-block-hole {
+  fill: #b9a986;
+}
+
+.plant-ruler-spine,
+.plant-ruler-tick {
+  stroke: #9aa1ad;
+  stroke-width: 1;
+}
+
+.plant-ruler-tick-major {
+  stroke: #6b7280;
+  stroke-width: 1.4;
+}
+
+.plant-ruler-label {
+  fill: var(--color-muted);
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.plant-cut-face {
+  fill: #e6efc8;
+  stroke: #7fa35b;
+  stroke-width: 0.8;
+}
+
+/* Invisible, wider-than-the-stem target for double-click cutting. */
+.plant-stem-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 18;
+  stroke-linecap: round;
+  pointer-events: stroke;
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='white' stroke='%231a1d23' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='6' r='3'/%3E%3Ccircle cx='6' cy='18' r='3'/%3E%3Cpath d='M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12'/%3E%3C/svg%3E") 12 12, crosshair;
+}
+
+.plant-stem-hit:hover {
+  stroke: rgba(29, 78, 216, 0.14);
+}
