@@ -1,0 +1,9 @@
+# Build output
+dist/
+service/target/
+app/src-tauri/target/
+app/src-tauri/gen/
+# Staged service binary for the .deb (copied in by docker/build-deb.sh)
+app/src-tauri/bin/
+# Local simulation data when running the service from a checkout
+service/data/

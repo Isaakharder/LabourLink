@@ -1,0 +1,11 @@
+# Stable device names for LabourLink Scale (/dev/labourlink/*), and keep
+# ModemManager from probing either port (it sends AT commands on open).
+
+# PROTAGD RFID reader: FTDI FT230X (0403:6015).
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6015", SYMLINK+="labourlink/rfid", GROUP="dialout", MODE="0660", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# Rinstrum R300 via USB-RS232 adapter: UNKNOWN until the adapter arrives.
+# Find its ids with `udevadm info -a -n /dev/ttyUSB1 | grep -E 'idVendor|idProduct|serial'`
+# and replace the placeholder below. Adapters without a serial number
+# (e.g. CH340, 1a86:7523) must be matched by physical port: KERNELS=="1-1.2".
+# SUBSYSTEM=="tty", ATTRS{idVendor}=="XXXX", ATTRS{idProduct}=="YYYY", SYMLINK+="labourlink/scale", GROUP="dialout", MODE="0660", ENV{ID_MM_DEVICE_IGNORE}="1"
