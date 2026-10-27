@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
-use crate::backend::{AdminSession, Backend, BackendError};
+use crate::backend::{normalize_status, AdminSession, Backend, BackendError};
 use crate::config::{Config, Mode};
 use crate::machine::{CarrierInfo, Machine, Phase, RecordDraft};
 use crate::scale_proto::Reading;
@@ -83,6 +83,10 @@ pub struct App {
 
 const ADMIN_IDLE: Duration = Duration::from_secs(15 * 60);
 
+/// How far back the station keeps re-checking weighings with the server.
+/// Longer than the 24-hour pending window, so every outcome is seen.
+const VERIFY_WINDOW_HOURS: i64 = 48;
+
 pub fn utc_now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
@@ -145,6 +149,13 @@ impl App {
 
     pub fn now_ms(&self) -> u64 {
         self.epoch.elapsed().as_millis() as u64 + self.clock_skip_ms.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Wall-clock time for recording weighings. The skip is only ever
+    /// non-zero in tests, which move both clocks together.
+    fn wall_now(&self) -> String {
+        let skip = self.clock_skip_ms.load(std::sync::atomic::Ordering::Relaxed) as i64;
+        (Utc::now() + chrono::Duration::milliseconds(skip)).to_rfc3339_opts(SecondsFormat::Millis, true)
     }
 
     #[cfg(test)]
@@ -242,7 +253,7 @@ impl App {
             gross_g: d.gross_g,
             tare_g: d.bin.tare_g,
             net_g: d.net_g,
-            recorded_at: utc_now(),
+            recorded_at: self.wall_now(),
             samples_g: d.samples_g,
             simulated: self.mode() == Mode::Simulation,
             upload_state: "queued".into(),
@@ -328,11 +339,13 @@ impl App {
                 match self.backend.submit_weighing(&w) {
                     Ok(r) => {
                         self.server_ok();
+                        let status = normalize_status(&r.status);
+                        let employee = if status == "credited" { r.employee_name.as_deref() } else { None };
                         let _ = self
                             .store
                             .lock()
                             .unwrap()
-                            .mark_sent(&w.id, &utc_now(), &r.status, r.employee_name.as_deref(), r.pending_until.as_deref());
+                            .mark_sent(&w.id, &utc_now(), status, employee, r.pending_until.as_deref());
                     }
                     Err(e) if e.is_permanent_rejection() => {
                         let _ = self.store.lock().unwrap().mark_rejected(&w.id, &e.message());
@@ -351,23 +364,35 @@ impl App {
         }
     }
 
-    /// Follows weighings awaiting an employee assignment (the 24-hour
-    /// pending recovery window runs on the server; the station only shows it).
-    pub fn poll_pending(&self) {
-        let list = self.store.lock().unwrap().awaiting_assignment().unwrap_or_default();
-        for w in list {
-            match self.backend.weighing_status(&w.id) {
-                Ok(r) => {
+    /// Mirrors the server's authoritative assignment status for every
+    /// recent weighing: pending ones (the 24-hour window runs on the server)
+    /// and credited / under-review ones, so a credit is never shown after the
+    /// server has stopped holding it. The station never decides credit itself.
+    pub fn refresh_assignments(&self) {
+        let since = (Utc::now() - chrono::Duration::hours(VERIFY_WINDOW_HOURS)).to_rfc3339_opts(SecondsFormat::Millis, true);
+        let list = self.store.lock().unwrap().to_verify(&since).unwrap_or_default();
+        for chunk in list.chunks(100) {
+            let ids: Vec<String> = chunk.iter().map(|w| w.id.clone()).collect();
+            match self.backend.weighing_statuses(&ids) {
+                Ok(statuses) => {
                     self.server_ok();
-                    let _ = self
-                        .store
-                        .lock()
-                        .unwrap()
-                        .update_assignment(&w.id, &utc_now(), &r.status, r.employee_name.as_deref(), r.pending_until.as_deref());
-                }
-                Err(BackendError::Http { status: 404, .. }) => {
-                    let _ = self.store.lock().unwrap().requeue(&w.id);
-                    self.wake(Wake::Upload);
+                    let mut store = self.store.lock().unwrap();
+                    for id in &ids {
+                        match statuses.get(id) {
+                            Some(r) => {
+                                let status = normalize_status(&r.status);
+                                let employee = if status == "credited" { r.employee_name.as_deref() } else { None };
+                                if let Err(e) = store.update_assignment(id, &utc_now(), status, employee, r.pending_until.as_deref()) {
+                                    eprintln!("could not store status for {id}: {e}");
+                                }
+                            }
+                            None => {
+                                // The server doesn't know it: send it again (idempotent).
+                                let _ = store.requeue(id);
+                                self.wake(Wake::Upload);
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     self.server_failed(&e);
@@ -538,7 +563,7 @@ pub fn run_uploader(app: Arc<App>, rx: Receiver<Wake>) {
             }
         }
         if now >= next_poll {
-            app.poll_pending();
+            app.refresh_assignments();
             next_poll = now + poll_every;
         }
     }
@@ -591,7 +616,9 @@ mod tests {
         let app = sim_app();
         assert!(app.refresh_carriers());
         let (server, _) = app.sim.clone().unwrap();
-        server.add_claim("sim-employee-3", "sim-carrier-01", 20, true).unwrap();
+        server
+            .add_claim("sim-employee-3", crate::sim::ScanTiming::MinutesAgo("sim-carrier-01".into(), 20), true)
+            .unwrap();
 
         hold(&app, 0, 1);
         app.handle(Input::Tag("0000000182225750".into()));
@@ -653,7 +680,7 @@ mod tests {
         drop(app);
         // A fresh server that has never seen the weighing.
         let app = make();
-        app.poll_pending();
+        app.refresh_assignments();
         assert_eq!(app.snapshot()["outbox"]["queued"], 1, "re-queued for upload");
         assert!(app.upload_queued());
         assert_eq!(app.snapshot()["outbox"]["pending"], 1);
@@ -685,5 +712,139 @@ mod tests {
         let snap = app.snapshot();
         assert_eq!(snap["phase"]["reason"]["code"], "recentlyWeighed", "{snap}");
         assert_eq!(snap["outbox"]["queued"], 1, "no second weighing");
+    }
+
+    // ---- Regression: independent bin-use cycles, server-authoritative credit ----
+
+    const TAG_BIN1: &str = "0000000182225750";
+    const TAG_BIN2: &str = "0000000182225751";
+    const SIX_MIN_MS: u64 = 6 * 60_000;
+
+    fn sim_server(app: &App) -> Arc<SimServer> {
+        app.sim.clone().unwrap().0
+    }
+
+    fn latest(app: &App) -> Weighing {
+        app.recent.lock().unwrap()[0].clone()
+    }
+
+    /// Station status of a weighing, as the display would show it.
+    fn shown(app: &App, id: &str) -> (String, Option<String>) {
+        let w = app.recent.lock().unwrap().iter().find(|w| w.id == id).cloned().unwrap();
+        (w.assignment_status, w.employee_name)
+    }
+
+    fn scan_before(app: &App, employee: &str, weighing_id: &str) {
+        sim_server(app)
+            .add_claim(employee, crate::sim::ScanTiming::BeforeWeighing(weighing_id.into()), true)
+            .unwrap();
+        app.refresh_assignments();
+    }
+
+    fn credited(name: &str) -> (String, Option<String>) {
+        ("credited".into(), Some(name.into()))
+    }
+
+    #[test]
+    fn station_bin1_bin2_bin1_credits_each_use_and_keeps_history() {
+        let app = sim_app();
+        assert!(app.refresh_carriers());
+        weigh(&app, TAG_BIN1, 113_000);
+        assert!(app.upload_queued());
+        let w1 = latest(&app).id;
+        assert_eq!(shown(&app, &w1).0, "pending");
+        scan_before(&app, "sim-employee-1", &w1);
+        assert_eq!(shown(&app, &w1), credited("Picker Alpha"));
+
+        weigh(&app, TAG_BIN2, 148_350);
+        assert!(app.upload_queued());
+        let w2 = latest(&app).id;
+        scan_before(&app, "sim-employee-2", &w2);
+        assert_eq!(shown(&app, &w2), credited("Picker Bravo"));
+
+        // Bin 1 emptied, reassigned and weighed again after the duplicate guard.
+        hold(&app, 0, 3);
+        app.skip_clock(SIX_MIN_MS);
+        weigh(&app, TAG_BIN1, 238_400);
+        assert!(app.upload_queued());
+        let w3 = latest(&app).id;
+        assert_ne!(w3, w1);
+        assert_eq!(latest(&app).carrier_name, "Sim Bin 1");
+        assert_eq!(shown(&app, &w3).0, "pending", "the earlier credited use doesn't block this one");
+        scan_before(&app, "sim-employee-3", &w3);
+        assert_eq!(shown(&app, &w3), credited("Picker Charlie"));
+        assert_eq!(shown(&app, &w1), credited("Picker Alpha"));
+        assert_eq!(shown(&app, &w2), credited("Picker Bravo"));
+    }
+
+    #[test]
+    fn station_same_bin_used_twice_by_different_employees() {
+        let app = sim_app();
+        assert!(app.refresh_carriers());
+        weigh(&app, TAG_BIN1, 90_000);
+        assert!(app.upload_queued());
+        let w1 = latest(&app).id;
+        scan_before(&app, "sim-employee-1", &w1);
+        hold(&app, 0, 3);
+        app.skip_clock(SIX_MIN_MS);
+        weigh(&app, TAG_BIN1, 95_000);
+        assert!(app.upload_queued());
+        let w2 = latest(&app).id;
+        scan_before(&app, "sim-employee-4", &w2);
+        assert_eq!(shown(&app, &w1), credited("Picker Alpha"));
+        assert_eq!(shown(&app, &w2), credited("Picker Delta"));
+    }
+
+    #[test]
+    fn repeated_rfid_reads_and_steady_readings_make_exactly_one_weighing() {
+        let app = sim_app();
+        assert!(app.refresh_carriers());
+        hold(&app, 0, 3);
+        for _ in 0..600 {
+            // 60 s on the scale: a tag read every 500 ms, a reading every 100 ms.
+            app.skip_clock(100);
+            if app.now_ms() % 500 < 100 {
+                app.handle(Input::Tag(TAG_BIN1.into()));
+            }
+            app.handle(Input::Reading(gross(90_000)));
+        }
+        assert_eq!(app.recent.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn lift_and_replace_within_five_minutes_is_not_a_new_weighing() {
+        let app = sim_app();
+        assert!(app.refresh_carriers());
+        weigh(&app, TAG_BIN1, 90_000);
+        weigh(&app, TAG_BIN1, 90_000); // removed and put straight back
+        assert_eq!(app.snapshot()["phase"]["reason"]["code"], "recentlyWeighed");
+        assert_eq!(app.recent.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn station_never_shows_a_credit_the_server_no_longer_holds() {
+        let app = sim_app();
+        assert!(app.refresh_carriers());
+        let server = sim_server(&app);
+        server
+            .add_claim("sim-employee-1", crate::sim::ScanTiming::MinutesAgo("sim-carrier-01".into(), 5), true)
+            .unwrap();
+        weigh(&app, TAG_BIN1, 90_000);
+        assert!(app.upload_queued());
+        let w1 = latest(&app).id;
+        assert_eq!(shown(&app, &w1), credited("Picker Alpha"));
+        // A future authorized correction on the server: the station follows on its next check.
+        server.force_status(&w1, crate::matching::AssignmentStatus::NeedsReview);
+        app.refresh_assignments();
+        assert_eq!(shown(&app, &w1), ("needs_review".to_string(), None));
+        assert!(app.snapshot()["currentWeighing"]["employeeName"].is_null());
+    }
+
+    #[test]
+    fn unrecognised_server_status_is_never_shown_as_credited() {
+        assert_eq!(normalize_status("credited"), "credited");
+        assert_eq!(normalize_status("needs_review"), "needs_review");
+        assert_eq!(normalize_status("credited_pending_audit"), "unknown");
+        assert_eq!(normalize_status(""), "unknown");
     }
 }

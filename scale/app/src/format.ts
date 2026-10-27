@@ -96,9 +96,9 @@ export function employeeLine(w: Weighing | null, phase: Phase): EmployeeLine {
     case "pending":
       return { name: "Awaiting employee assignment", note: `No verified bin scan yet. Held until ${shortTime(w.pendingUntil)} (24 h).`, tone: "pending" };
     case "needs_review":
-      return { name: "Needs review", note: "More than one possible picker. Nobody credited until a supervisor reviews it.", tone: "review" };
+      return { name: "Needs review", note: "More than one possible picker, or under supervisor review. Nobody is credited.", tone: "review" };
     case "expired":
-      return { name: "Unassigned", note: "No verified bin scan within 24 hours. Kept for supervisor review.", tone: "review" };
+      return { name: "Not credited", note: "No verified bin scan within 24 hours. This weighing was discarded.", tone: "review" };
     case "voided":
       return { name: "Voided", note: "", tone: "review" };
     default:

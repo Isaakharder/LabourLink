@@ -295,7 +295,10 @@ async fn sim_flags(State(c): State<Ctx>, Json(b): Json<FlagsBody>) -> ApiResult 
 #[serde(rename_all = "camelCase")]
 struct ClaimBody {
     employee_id: String,
-    carrier_id: String,
+    /// "beforeWeighing" (needs weighingId), "now" or "minutesAgo" (need carrierId).
+    timing: String,
+    weighing_id: Option<String>,
+    carrier_id: Option<String>,
     #[serde(default)]
     minutes_ago: i64,
     #[serde(default = "yes")]
@@ -308,8 +311,15 @@ fn yes() -> bool {
 
 async fn sim_claim(State(c): State<Ctx>, Json(b): Json<ClaimBody>) -> ApiResult {
     let (server, _) = sim(&c)?;
+    let bad = |m: &str| err(StatusCode::BAD_REQUEST, m);
+    let timing = match b.timing.as_str() {
+        "beforeWeighing" => crate::sim::ScanTiming::BeforeWeighing(b.weighing_id.ok_or_else(|| bad("weighingId required"))?),
+        "now" => crate::sim::ScanTiming::Now(b.carrier_id.ok_or_else(|| bad("carrierId required"))?),
+        "minutesAgo" => crate::sim::ScanTiming::MinutesAgo(b.carrier_id.ok_or_else(|| bad("carrierId required"))?, b.minutes_ago),
+        _ => return Err(bad("timing must be beforeWeighing, now or minutesAgo")),
+    };
     server
-        .add_claim(&b.employee_id, &b.carrier_id, b.minutes_ago, b.clock_trusted)
+        .add_claim(&b.employee_id, timing, b.clock_trusted)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     c.app.wake(Wake::Upload);
     Ok(Json(json!({ "ok": true })))
@@ -325,7 +335,8 @@ async fn sim_advance(State(c): State<Ctx>, Json(b): Json<AdvanceBody>) -> ApiRes
     if !(0.0..=72.0).contains(&b.hours) {
         return Err(err(StatusCode::BAD_REQUEST, "hours must be 0–72"));
     }
-    server.advance_clock((b.hours * 3_600_000.0) as i64);
+    // One-off: applies the 24-hour rule as if this much time had passed.
+    server.expire_as_if((b.hours * 3_600_000.0) as i64);
     c.app.wake(Wake::Upload);
     Ok(Json(json!({ "ok": true })))
 }

@@ -8,14 +8,57 @@ import { clockTime } from "../format";
 interface World {
   carriers: { id: string; name: string; rfidTag: string | null; tareG: number; isActive: boolean }[];
   employees: { id: string; name: string }[];
-  claims: { id: string; employeeName: string; carrierName: string; occurredAt: string; clockTrusted: boolean; consumedBy: string | null }[];
-  serverWeighings: { id: string; carrierName: string; weighedAt: string; status: string; employeeName: string | null }[];
-  clockOffsetHours: number;
+  claims: SimClaim[];
+  serverWeighings: SimWeighing[];
   serverOnline: boolean;
   unregisteredTag: string;
 }
 
+interface SimClaim {
+  id: string;
+  employeeName: string;
+  carrierName: string;
+  occurredAt: string;
+  clockTrusted: boolean;
+  consumedBy: string | null;
+  state: "used" | "conflict" | "waiting" | "cycle_discarded" | "cycle_in_review" | "clock_flagged";
+}
+
+interface SimWeighing {
+  id: string;
+  carrierId: string;
+  carrierName: string;
+  weighedAt: string;
+  status: string;
+  employeeName: string | null;
+}
+
 const NO_TAG = "__none__";
+const NEXT_USE = "next";
+const MINUTES_AGO = "ago";
+
+export const CLAIM_STATE_LABEL: Record<SimClaim["state"], string> = {
+  used: "✓ credited this use",
+  conflict: "⚠ conflict: flagged for supervisor, credit unchanged",
+  waiting: "waiting for the bin's next weighing",
+  cycle_discarded: "too late: that use expired (discarded)",
+  cycle_in_review: "that use is under review",
+  clock_flagged: "phone clock flagged: ignored",
+};
+
+const STATUS_LABEL: Record<string, string> = {
+  credited: "credited",
+  pending: "awaiting assignment",
+  needs_review: "needs review",
+  expired: "expired (discarded)",
+};
+
+/** Body for /api/sim/claim from the "Scan for" choice. */
+export function claimBody(target: string, employeeId: string, carrierId: string, minutesAgo: string, clockTrusted: boolean) {
+  if (target.startsWith("w:")) return { employeeId, timing: "beforeWeighing", weighingId: target.slice(2), clockTrusted };
+  if (target === MINUTES_AGO) return { employeeId, timing: "minutesAgo", carrierId, minutesAgo: parseInt(minutesAgo, 10) || 0, clockTrusted };
+  return { employeeId, timing: "now", carrierId, clockTrusted };
+}
 
 export function SimPanel({ s }: { s: Snapshot }) {
   const [open, setOpen] = useState(true);
@@ -25,6 +68,7 @@ export function SimPanel({ s }: { s: Snapshot }) {
   const [otherTag, setOtherTag] = useState("0000000182225751");
   const [employee, setEmployee] = useState("sim-employee-1");
   const [claimCarrier, setClaimCarrier] = useState("sim-carrier-01");
+  const [target, setTarget] = useState<string>(NEXT_USE);
   const [minutesAgo, setMinutesAgo] = useState("20");
   const [trusted, setTrusted] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -128,35 +172,49 @@ export function SimPanel({ s }: { s: Snapshot }) {
               </select>
             </label>
             <label>
-              Bin
-              <select value={claimCarrier} onChange={(e) => setClaimCarrier(e.target.value)}>
-                {world.carriers.map((c) => (
-                  <option key={c.id} value={c.id}>{c.name}</option>
+              Scan for
+              <select value={target} onChange={(e) => setTarget(e.target.value)}>
+                <option value={NEXT_USE}>A bin's next use (scan now)</option>
+                {world.serverWeighings.map((w) => (
+                  <option key={w.id} value={`w:${w.id}`}>
+                    The use weighed {clockTime(w.weighedAt)} · {w.carrierName} ({STATUS_LABEL[w.status] ?? w.status})
+                  </option>
                 ))}
+                <option value={MINUTES_AGO}>Advanced: scanned N minutes ago</option>
               </select>
             </label>
-            <div className="row">
+            {!target.startsWith("w:") && (
               <label>
-                Scanned minutes ago
-                <input value={minutesAgo} onChange={(e) => setMinutesAgo(e.target.value)} inputMode="numeric" />
+                Bin
+                <select value={claimCarrier} onChange={(e) => setClaimCarrier(e.target.value)}>
+                  {world.carriers.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
               </label>
+            )}
+            <div className="row">
+              {target === MINUTES_AGO && (
+                <label>
+                  Scanned minutes ago
+                  <input value={minutesAgo} onChange={(e) => setMinutesAgo(e.target.value)} inputMode="numeric" />
+                </label>
+              )}
               <label className="toggle">
                 <input type="checkbox" checked={trusted} onChange={(e) => setTrusted(e.target.checked)} /> Phone clock OK
               </label>
             </div>
-            <button type="button" className="btn btn-primary" onClick={() => act("/api/sim/claim", { employeeId: employee, carrierId: claimCarrier, minutesAgo: parseInt(minutesAgo, 10) || 0, clockTrusted: trusted })}>
+            <button type="button" className="btn btn-primary" onClick={() => act("/api/sim/claim", claimBody(target, employee, claimCarrier, minutesAgo, trusted))}>
               Sync phone bin scan
             </button>
             <div className="row">
-              <button type="button" className="btn" onClick={() => act("/api/sim/advance", { hours: 24 })}>Advance server clock +24 h</button>
-              <span className="muted">offset {world.clockOffsetHours.toFixed(0)} h</span>
+              <button type="button" className="btn" onClick={() => act("/api/sim/advance", { hours: 24 })}>Simulate 24 h passing</button>
+              <span className="muted">expires unassigned weighings now; clocks are not shifted</span>
             </div>
             <ul className="sim-log">
               {world.claims.slice(0, 6).map((c) => (
                 <li key={c.id}>
-                  {clockTime(c.occurredAt)} {c.employeeName} → {c.carrierName}
-                  {!c.clockTrusted && " (clock flagged)"}
-                  {c.consumedBy && " ✓ used"}
+                  {clockTime(c.occurredAt)} {c.employeeName} → {c.carrierName}: {CLAIM_STATE_LABEL[c.state] ?? c.state}
                 </li>
               ))}
             </ul>
@@ -167,7 +225,7 @@ export function SimPanel({ s }: { s: Snapshot }) {
             <ul className="sim-log">
               {world.serverWeighings.slice(0, 10).map((w) => (
                 <li key={w.id}>
-                  {clockTime(w.weighedAt)} {w.carrierName}: <strong>{w.status}</strong>
+                  {clockTime(w.weighedAt)} {w.carrierName}: <strong>{STATUS_LABEL[w.status] ?? w.status}</strong>
                   {w.employeeName && ` · ${w.employeeName}`}
                 </li>
               ))}

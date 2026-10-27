@@ -13,7 +13,7 @@
 //! and duplicate-tag 409 as the Carriers page).
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use crate::machine::CarrierInfo;
@@ -73,10 +73,25 @@ pub struct AdminCarrier {
 pub trait Backend: Send + Sync {
     fn fetch_carriers(&self) -> Result<Vec<CarrierInfo>, BackendError>;
     fn submit_weighing(&self, w: &Weighing) -> Result<AssignmentResult, BackendError>;
-    fn weighing_status(&self, id: &str) -> Result<AssignmentResult, BackendError>;
+    /// Server's current status for each weighing it knows. Ids it has never
+    /// seen are absent from the map (the station then re-sends them).
+    fn weighing_statuses(&self, ids: &[String]) -> Result<HashMap<String, AssignmentResult>, BackendError>;
     fn admin_login(&self, email: &str, pin: &str) -> Result<AdminSession, BackendError>;
     fn admin_carriers(&self, session: &AdminSession, search: &str) -> Result<Vec<AdminCarrier>, BackendError>;
     fn admin_set_rfid(&self, session: &AdminSession, carrier_id: &str, rfid_tag: Option<&str>) -> Result<AdminCarrier, BackendError>;
+}
+
+/// Assignment statuses the station understands. Anything else the server
+/// reports is stored as "unknown", which the display never shows as credited.
+pub fn normalize_status(s: &str) -> &'static str {
+    match s {
+        "credited" => "credited",
+        "pending" => "pending",
+        "needs_review" => "needs_review",
+        "expired" => "expired",
+        "voided" => "voided",
+        _ => "unknown",
+    }
 }
 
 pub fn kg_to_g(kg: f64) -> i64 {
@@ -214,12 +229,13 @@ impl Backend for HttpBackend {
         json(req.send_json(serde_json::to_value(WeighingUpload::from(w)).unwrap()).map_err(map_err)?)
     }
 
-    fn weighing_status(&self, id: &str) -> Result<AssignmentResult, BackendError> {
-        json(
-            self.station(self.agent.get(&format!("{}/api/scale/weighings/{id}", self.base)))?
-                .call()
-                .map_err(map_err)?,
-        )
+    fn weighing_statuses(&self, ids: &[String]) -> Result<HashMap<String, AssignmentResult>, BackendError> {
+        #[derive(Deserialize)]
+        struct R {
+            statuses: HashMap<String, AssignmentResult>,
+        }
+        let req = self.station(self.agent.post(&format!("{}/api/scale/weighings/status", self.base)))?;
+        Ok(json::<R>(req.send_json(serde_json::json!({ "ids": ids })).map_err(map_err)?)?.statuses)
     }
 
     fn admin_login(&self, email: &str, pin: &str) -> Result<AdminSession, BackendError> {

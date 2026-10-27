@@ -37,16 +37,34 @@ pub struct SimClaimView {
     pub occurred_at: String,
     pub clock_trusted: bool,
     pub consumed_by: Option<String>,
+    /// used | conflict | waiting | cycle_discarded | cycle_in_review | clock_flagged
+    pub state: String,
+    /// The weighing whose cycle this scan falls in, if that cycle is closed.
+    pub weighing_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SimWeighingView {
     pub id: String,
+    pub carrier_id: String,
     pub carrier_name: String,
     pub weighed_at: String,
     pub status: String,
     pub employee_name: Option<String>,
+}
+
+/// When a simulated phone scan happened.
+#[derive(Debug, Clone)]
+pub enum ScanTiming {
+    /// Inside the bin-use cycle that ends with this weighing (between the
+    /// bin's previous weighing and this one): a scan that a phone made
+    /// before the weighing but synced late.
+    BeforeWeighing(String),
+    /// Now: a picker taking the bin for its next use.
+    Now(String),
+    /// Advanced: `minutes` before now, for the given carrier.
+    MinutesAgo(String, i64),
 }
 
 struct SimWeighing {
@@ -60,7 +78,8 @@ struct Inner {
     claims: Vec<Claim>,
     weighings: Vec<SimWeighing>,
     sessions: HashMap<String, AdminSession>,
-    clock_offset_ms: i64,
+    /// claim id -> credited weighing id it conflicts with (flag only).
+    conflicts: HashMap<String, String>,
     online: bool,
     next_id: u64,
 }
@@ -154,57 +173,77 @@ impl SimServer {
                 claims: vec![],
                 weighings: vec![],
                 sessions: HashMap::new(),
-                clock_offset_ms: 0,
+                conflicts: HashMap::new(),
                 online: true,
                 next_id: 1,
             }),
         }
     }
 
+    fn now() -> i64 {
+        Utc::now().timestamp_millis()
+    }
+
     #[cfg(test)]
     pub fn now_ms(&self) -> i64 {
-        Utc::now().timestamp_millis() + self.inner.lock().unwrap().clock_offset_ms
+        Self::now()
     }
 
     pub fn set_online(&self, online: bool) {
         self.inner.lock().unwrap().online = online;
     }
 
-    pub fn advance_clock(&self, ms: i64) {
+    /// Applies the 24-hour rule as if `ms` had passed, once. There is no
+    /// lasting clock offset: weighings and scans keep using the real clock,
+    /// so new weighings aren't born expired and scan times stay comparable
+    /// with station weighing times.
+    pub fn expire_as_if(&self, ms: i64) {
         let mut g = self.inner.lock().unwrap();
-        g.clock_offset_ms += ms;
-        let now = Utc::now().timestamp_millis() + g.clock_offset_ms;
+        let now = Self::now() + ms;
         let carrier_ids: Vec<String> = g.carriers.iter().map(|c| c.id.clone()).collect();
         for id in carrier_ids {
             Self::reevaluate(&mut g, &id, now);
         }
     }
 
-    /// A phone in the field switched `employee_id` to `carrier_id`,
-    /// `minutes_ago` minutes before now (simulating a late offline sync when
-    /// the weighing happened in between). Triggers re-evaluation, like the
-    /// server's post-sync matching trigger.
-    pub fn add_claim(&self, employee_id: &str, carrier_id: &str, minutes_ago: i64, clock_trusted: bool) -> Result<(), String> {
+    /// A phone in the field switched `employee_id` to a bin; `timing` says
+    /// when that happened. Arriving now models a late (offline) sync.
+    /// Triggers re-evaluation, like the server's post-sync matching trigger.
+    pub fn add_claim(&self, employee_id: &str, timing: ScanTiming, clock_trusted: bool) -> Result<String, String> {
         let mut g = self.inner.lock().unwrap();
         if !g.employees.iter().any(|e| e.id == employee_id) {
             return Err("unknown employee".into());
         }
+        let now = Self::now();
+        let (carrier_id, occurred_at) = match timing {
+            ScanTiming::BeforeWeighing(wid) => {
+                let w = g.weighings.iter().find(|w| w.facts.id == wid).ok_or("unknown weighing")?;
+                let prev = Self::previous_of(&g, &w.facts.carrier_id, w.facts.weighed_at, &w.facts.id);
+                // Halfway into the cycle, at most a minute before the weighing.
+                let back = match prev {
+                    Some(p) => ((w.facts.weighed_at - p) / 2).clamp(1, 60_000),
+                    None => 60_000,
+                };
+                (w.facts.carrier_id.clone(), w.facts.weighed_at - back)
+            }
+            ScanTiming::Now(carrier) => (carrier, now),
+            ScanTiming::MinutesAgo(carrier, m) => (carrier, now - m * 60_000),
+        };
         if !g.carriers.iter().any(|c| c.id == carrier_id) {
             return Err("unknown carrier".into());
         }
-        let now = Utc::now().timestamp_millis() + g.clock_offset_ms;
         let id = format!("sim-claim-{}", g.next_id);
         g.next_id += 1;
         g.claims.push(Claim {
-            id,
+            id: id.clone(),
             employee_id: employee_id.into(),
-            carrier_id: carrier_id.into(),
-            occurred_at: now - minutes_ago * 60_000,
+            carrier_id: carrier_id.clone(),
+            occurred_at,
             clock_trusted,
             consumed_by: None,
         });
-        Self::reevaluate(&mut g, carrier_id, now);
-        Ok(())
+        Self::reevaluate(&mut g, &carrier_id, now);
+        Ok(id)
     }
 
     fn previous_of(g: &Inner, carrier_id: &str, at: i64, exclude: &str) -> Option<i64> {
@@ -227,6 +266,9 @@ impl SimServer {
             let wid = g.weighings[i].facts.id.clone();
             for c in g.claims.iter_mut().filter(|c| d.consume.contains(&c.id)) {
                 c.consumed_by = Some(wid.clone());
+            }
+            for cid in &d.conflicts {
+                g.conflicts.insert(cid.clone(), wid.clone());
             }
             g.weighings[i].status = d.status;
             g.weighings[i].facts.current_employee = if d.status == AssignmentStatus::Credited {
@@ -257,6 +299,50 @@ impl SimServer {
         self.inner.lock().unwrap().carriers.clone()
     }
 
+    /// Current status of one weighing (re-evaluated first), or None if the
+    /// server has never seen it.
+    pub fn status(&self, id: &str) -> Option<AssignmentResult> {
+        let mut g = self.inner.lock().unwrap();
+        let carrier = g.weighings.iter().find(|w| w.facts.id == id)?.facts.carrier_id.clone();
+        Self::reevaluate(&mut g, &carrier, Self::now());
+        Self::result_for(&g, id)
+    }
+
+    /// Simulates a future, explicit and audited administrator correction
+    /// (not built yet) so tests can prove the station follows the server.
+    #[cfg(test)]
+    pub fn force_status(&self, id: &str, status: AssignmentStatus) {
+        let mut g = self.inner.lock().unwrap();
+        let w = g.weighings.iter_mut().find(|w| w.facts.id == id).unwrap();
+        w.status = status;
+        if status != AssignmentStatus::Credited {
+            w.facts.current_employee = None;
+        }
+    }
+
+    fn claim_state(g: &Inner, c: &Claim) -> (String, Option<String>) {
+        if let Some(w) = &c.consumed_by {
+            return ("used".into(), Some(w.clone()));
+        }
+        if let Some(w) = g.conflicts.get(&c.id) {
+            return ("conflict".into(), Some(w.clone()));
+        }
+        if !c.clock_trusted {
+            return ("clock_flagged".into(), None);
+        }
+        // The closed cycle this scan falls in, if any.
+        let owner = g
+            .weighings
+            .iter()
+            .filter(|w| w.facts.carrier_id == c.carrier_id && w.facts.weighed_at >= c.occurred_at)
+            .min_by_key(|w| w.facts.weighed_at);
+        match owner {
+            None => ("waiting".into(), None),
+            Some(w) if w.status == AssignmentStatus::Expired => ("cycle_discarded".into(), Some(w.facts.id.clone())),
+            Some(w) => ("cycle_in_review".into(), Some(w.facts.id.clone())),
+        }
+    }
+
     pub fn world(&self) -> serde_json::Value {
         let g = self.inner.lock().unwrap();
         let name_of_carrier = |id: &str| g.carriers.iter().find(|c| c.id == id).map(|c| c.name.clone()).unwrap_or_default();
@@ -266,13 +352,18 @@ impl SimServer {
             .iter()
             .rev()
             .take(30)
-            .map(|c| SimClaimView {
-                id: c.id.clone(),
-                employee_name: name_of_emp(&c.employee_id),
-                carrier_name: name_of_carrier(&c.carrier_id),
-                occurred_at: ms_to_rfc3339(c.occurred_at),
-                clock_trusted: c.clock_trusted,
-                consumed_by: c.consumed_by.clone(),
+            .map(|c| {
+                let (state, weighing_id) = Self::claim_state(&g, c);
+                SimClaimView {
+                    id: c.id.clone(),
+                    employee_name: name_of_emp(&c.employee_id),
+                    carrier_name: name_of_carrier(&c.carrier_id),
+                    occurred_at: ms_to_rfc3339(c.occurred_at),
+                    clock_trusted: c.clock_trusted,
+                    consumed_by: c.consumed_by.clone(),
+                    state,
+                    weighing_id,
+                }
             })
             .collect();
         let weighings: Vec<SimWeighingView> = g
@@ -282,6 +373,7 @@ impl SimServer {
             .take(30)
             .map(|w| SimWeighingView {
                 id: w.facts.id.clone(),
+                carrier_id: w.facts.carrier_id.clone(),
                 carrier_name: name_of_carrier(&w.facts.carrier_id),
                 weighed_at: ms_to_rfc3339(w.facts.weighed_at),
                 status: w.status.as_str().into(),
@@ -293,7 +385,6 @@ impl SimServer {
             "employees": g.employees,
             "claims": claims,
             "serverWeighings": weighings,
-            "clockOffsetHours": g.clock_offset_ms as f64 / 3_600_000.0,
             "serverOnline": g.online,
             "unregisteredTag": UNREGISTERED_TAG,
             "adminLogins": [
@@ -363,24 +454,14 @@ impl Backend for SimServer {
                 },
                 status: AssignmentStatus::Pending,
             });
-            let now = Utc::now().timestamp_millis() + g.clock_offset_ms;
-            Self::reevaluate(&mut g, &w.carrier_id, now);
+            Self::reevaluate(&mut g, &w.carrier_id, Self::now());
         }
         Ok(Self::result_for(&g, &w.id).unwrap())
     }
 
-    fn weighing_status(&self, id: &str) -> Result<AssignmentResult, BackendError> {
+    fn weighing_statuses(&self, ids: &[String]) -> Result<HashMap<String, AssignmentResult>, BackendError> {
         self.check_online()?;
-        let mut g = self.inner.lock().unwrap();
-        let carrier = g
-            .weighings
-            .iter()
-            .find(|w| w.facts.id == id)
-            .map(|w| w.facts.carrier_id.clone())
-            .ok_or_else(|| http(404, "Weighing not found"))?;
-        let now = Utc::now().timestamp_millis() + g.clock_offset_ms;
-        Self::reevaluate(&mut g, &carrier, now);
-        Ok(Self::result_for(&g, id).unwrap())
+        Ok(ids.iter().filter_map(|id| self.status(id).map(|r| (id.clone(), r))).collect())
     }
 
     fn admin_login(&self, email: &str, pin: &str) -> Result<AdminSession, BackendError> {
@@ -636,43 +717,177 @@ mod tests {
         }
     }
 
+    const MIN: i64 = 60_000;
+    const BIN1: &str = "sim-carrier-01";
+    const BIN2: &str = "sim-carrier-02";
+    const ALPHA: &str = "sim-employee-1";
+    const BRAVO: &str = "sim-employee-2";
+    const CHARLIE: &str = "sim-employee-3";
+    const DELTA: &str = "sim-employee-4";
+
+    fn submit(s: &SimServer, id: &str, carrier: &str, at: i64) -> AssignmentResult {
+        s.submit_weighing(&sim_weighing(id, carrier, at)).unwrap()
+    }
+
+    /// (status, employee name) as the server reports it now.
+    fn st(s: &SimServer, id: &str) -> (String, Option<String>) {
+        let r = s.status(id).unwrap();
+        (r.status, r.employee_name)
+    }
+
+    fn credited(name: &str) -> (String, Option<String>) {
+        ("credited".into(), Some(name.into()))
+    }
+
+    fn uncredited(status: &str) -> (String, Option<String>) {
+        (status.into(), None)
+    }
+
+    fn claim_state(s: &SimServer, claim_id: &str) -> String {
+        let world = s.world();
+        let c = world["claims"].as_array().unwrap().iter().find(|c| c["id"] == claim_id).unwrap().clone();
+        c["state"].as_str().unwrap().to_string()
+    }
+
     #[test]
-    fn credit_pending_recovery_and_expiry_through_the_sim_server() {
+    fn bin1_bin2_bin1_each_cycle_is_credited_independently() {
+        // The reported sequence: 1) Bin 1 weighed, 2) delayed scan credits Alpha,
+        // 3) Bin 2 weighed, 4) delayed scan credits Bravo, 5) Bin 1 weighed again,
+        // 6) a delayed scan for that second use credits a different picker.
+        let s = SimServer::new();
+        let t0 = s.now_ms() - 60 * MIN;
+        assert_eq!(submit(&s, "W1", BIN1, t0).status, "pending");
+        s.add_claim(ALPHA, ScanTiming::BeforeWeighing("W1".into()), true).unwrap();
+        assert_eq!(st(&s, "W1"), credited("Picker Alpha"));
+
+        assert_eq!(submit(&s, "W2", BIN2, t0 + 10 * MIN).status, "pending");
+        s.add_claim(BRAVO, ScanTiming::BeforeWeighing("W2".into()), true).unwrap();
+        assert_eq!(st(&s, "W2"), credited("Picker Bravo"));
+
+        assert_eq!(
+            submit(&s, "W3", BIN1, t0 + 20 * MIN).status,
+            "pending",
+            "an earlier credited use never blocks the next one"
+        );
+        s.add_claim(CHARLIE, ScanTiming::BeforeWeighing("W3".into()), true).unwrap();
+        assert_eq!(st(&s, "W3"), credited("Picker Charlie"));
+
+        // History is untouched.
+        assert_eq!(st(&s, "W1"), credited("Picker Alpha"));
+        assert_eq!(st(&s, "W2"), credited("Picker Bravo"));
+    }
+
+    #[test]
+    fn a_late_conflicting_scan_never_changes_a_credit_and_is_flagged() {
+        // What produced `Sim Bin 1: needs_review` in the report: a scan whose
+        // time fell inside the FIRST Bin 1 cycle, after it was credited.
+        let s = SimServer::new();
+        let t0 = s.now_ms() - 60 * MIN;
+        submit(&s, "W1", BIN1, t0);
+        s.add_claim(ALPHA, ScanTiming::BeforeWeighing("W1".into()), true).unwrap();
+        submit(&s, "W3", BIN1, t0 + 20 * MIN);
+        let late = s.add_claim(DELTA, ScanTiming::MinutesAgo(BIN1.into(), 70), true).unwrap();
+        assert_eq!(st(&s, "W1"), credited("Picker Alpha"));
+        assert_eq!(st(&s, "W3"), uncredited("pending"), "a scan from cycle 1 can't credit cycle 2");
+        assert_eq!(claim_state(&s, &late), "conflict");
+        let world = s.world();
+        assert!(world["serverWeighings"].as_array().unwrap().iter().all(|w| w["status"] != "needs_review"));
+    }
+
+    #[test]
+    fn bin1_then_bin1_two_cycles_two_different_employees() {
+        let s = SimServer::new();
+        let t0 = s.now_ms() - 60 * MIN;
+        submit(&s, "W1", BIN1, t0);
+        s.add_claim(ALPHA, ScanTiming::BeforeWeighing("W1".into()), true).unwrap();
+        submit(&s, "W2", BIN1, t0 + 10 * MIN); // emptied, reassigned, weighed again
+        s.add_claim(BRAVO, ScanTiming::BeforeWeighing("W2".into()), true).unwrap();
+        assert_eq!(st(&s, "W1"), credited("Picker Alpha"));
+        assert_eq!(st(&s, "W2"), credited("Picker Bravo"));
+    }
+
+    #[test]
+    fn the_same_employee_using_the_same_bin_twice_gets_two_credits() {
+        let s = SimServer::new();
+        let t0 = s.now_ms() - 60 * MIN;
+        submit(&s, "W1", BIN1, t0);
+        let c1 = s.add_claim(ALPHA, ScanTiming::BeforeWeighing("W1".into()), true).unwrap();
+        submit(&s, "W2", BIN1, t0 + 10 * MIN);
+        let c2 = s.add_claim(ALPHA, ScanTiming::BeforeWeighing("W2".into()), true).unwrap();
+        assert_eq!(st(&s, "W1"), credited("Picker Alpha"));
+        assert_eq!(st(&s, "W2"), credited("Picker Alpha"));
+        assert_eq!((claim_state(&s, &c1), claim_state(&s, &c2)), ("used".to_string(), "used".to_string()));
+    }
+
+    #[test]
+    fn a_scan_now_waits_for_the_bins_next_weighing() {
+        let s = SimServer::new();
+        let t0 = s.now_ms() - 60 * MIN;
+        submit(&s, "W1", BIN1, t0);
+        let c = s.add_claim(CHARLIE, ScanTiming::Now(BIN1.into()), true).unwrap();
+        assert_eq!(st(&s, "W1"), uncredited("pending"), "a scan after a weighing is never credited to it");
+        assert_eq!(claim_state(&s, &c), "waiting");
+        submit(&s, "W2", BIN1, s.now_ms() + 1_000);
+        assert_eq!(st(&s, "W2"), credited("Picker Charlie"));
+        assert_eq!(st(&s, "W1"), uncredited("pending"));
+    }
+
+    #[test]
+    fn two_pickers_in_one_cycle_need_review_and_earlier_credit_is_untouched() {
         let s = SimServer::new();
         let now = s.now_ms();
-        s.add_claim("sim-employee-1", "sim-carrier-01", 30, true).unwrap();
-        let r = s.submit_weighing(&sim_weighing("w1", "sim-carrier-01", now)).unwrap();
-        assert_eq!((r.status.as_str(), r.employee_name.as_deref()), ("credited", Some("Picker Alpha")));
-        // Idempotent resend.
-        assert_eq!(s.submit_weighing(&sim_weighing("w1", "sim-carrier-01", now)).unwrap(), r);
+        submit(&s, "W1", BIN1, now - 60 * MIN);
+        s.add_claim(ALPHA, ScanTiming::BeforeWeighing("W1".into()), true).unwrap();
+        // Both pickers' phones synced scans of Bin 1 before its second weighing arrived.
+        s.add_claim(BRAVO, ScanTiming::MinutesAgo(BIN1.into(), 30), true).unwrap();
+        s.add_claim(CHARLIE, ScanTiming::MinutesAgo(BIN1.into(), 25), true).unwrap();
+        submit(&s, "W2", BIN1, now - MIN);
+        assert_eq!(st(&s, "W2"), uncredited("needs_review"));
+        assert_eq!(st(&s, "W1"), credited("Picker Alpha"));
+    }
 
-        // Next cycle of the same bin with no new claim: pending.
-        let r2 = s.submit_weighing(&sim_weighing("w2", "sim-carrier-01", now + 1_000)).unwrap();
-        assert_eq!(r2.status, "pending");
-        assert!(r2.pending_until.is_some());
+    #[test]
+    fn unassigned_weighing_expires_after_24h_is_discarded_and_cycles_stay_separate() {
+        let s = SimServer::new();
+        let t0 = s.now_ms() - 60 * MIN;
+        submit(&s, "W1", BIN1, t0);
+        s.add_claim(ALPHA, ScanTiming::BeforeWeighing("W1".into()), true).unwrap();
+        let r = submit(&s, "W2", BIN1, t0 + 10 * MIN);
+        assert!(r.pending_until.is_some());
 
-        // Phone syncs late with a claim timed between the two weighings.
-        {
-            let mut g = s.inner.lock().unwrap();
-            g.claims.push(Claim {
-                id: "late".into(),
-                employee_id: "sim-employee-2".into(),
-                carrier_id: "sim-carrier-01".into(),
-                occurred_at: now + 500,
-                clock_trusted: true,
-                consumed_by: None,
-            });
-        }
-        let r2 = s.weighing_status("w2").unwrap();
-        assert_eq!((r2.status.as_str(), r2.employee_name.as_deref()), ("credited", Some("Picker Bravo")));
+        s.expire_as_if(24 * 60 * MIN);
+        assert_eq!(st(&s, "W2"), uncredited("expired"));
+        assert_eq!(st(&s, "W1"), credited("Picker Alpha"), "expiry never touches credits");
 
-        // A third cycle never claimed expires after 24 h.
-        let r3 = s.submit_weighing(&sim_weighing("w3", "sim-carrier-01", now + 2_000)).unwrap();
-        assert_eq!(r3.status, "pending");
-        s.advance_clock(25 * 3_600_000);
-        assert_eq!(s.weighing_status("w3").unwrap().status, "expired");
-        // Earlier credits are untouched by expiry.
-        assert_eq!(s.weighing_status("w1").unwrap().status, "credited");
+        // A scan for the discarded cycle arriving later revives nothing...
+        let late = s.add_claim(BRAVO, ScanTiming::BeforeWeighing("W2".into()), true).unwrap();
+        assert_eq!(st(&s, "W2"), uncredited("expired"));
+        assert_eq!(claim_state(&s, &late), "cycle_discarded");
+        // ...and doesn't leak into the bin's next use, which isn't born expired.
+        assert_eq!(submit(&s, "W3", BIN1, s.now_ms()).status, "pending");
+        assert_eq!(st(&s, "W3"), uncredited("pending"));
+    }
+
+    #[test]
+    fn untrusted_phone_clock_never_credits() {
+        let s = SimServer::new();
+        submit(&s, "W1", BIN1, s.now_ms() - 60 * MIN);
+        let c = s.add_claim(ALPHA, ScanTiming::BeforeWeighing("W1".into()), false).unwrap();
+        assert_eq!(st(&s, "W1"), uncredited("pending"));
+        assert_eq!(claim_state(&s, &c), "clock_flagged");
+    }
+
+    #[test]
+    fn resend_is_idempotent_and_batch_status_omits_unknown_ids() {
+        let s = SimServer::new();
+        let t0 = s.now_ms() - 60 * MIN;
+        s.add_claim(ALPHA, ScanTiming::MinutesAgo(BIN1.into(), 70), true).unwrap();
+        let r = submit(&s, "W1", BIN1, t0);
+        assert_eq!(r.employee_name.as_deref(), Some("Picker Alpha"));
+        assert_eq!(submit(&s, "W1", BIN1, t0), r);
+        let m = s.weighing_statuses(&["W1".into(), "never-sent".into()]).unwrap();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m["W1"].status, "credited");
     }
 
     #[test]

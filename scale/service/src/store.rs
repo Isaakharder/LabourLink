@@ -248,11 +248,14 @@ impl Store {
         self.query("select * from weighings order by recorded_at desc, id desc limit ?1", params![limit])
     }
 
-    /// Sent weighings still awaiting an employee assignment.
-    pub fn awaiting_assignment(&self) -> Result<Vec<Weighing>, String> {
+    /// Sent weighings whose server status the station must keep following:
+    /// everything recorded since `since` (RFC 3339) except expired, which is
+    /// final. Credited and under-review weighings are included so the station
+    /// can never keep showing a credit the server no longer holds.
+    pub fn to_verify(&self, since: &str) -> Result<Vec<Weighing>, String> {
         self.query(
-            "select * from weighings where upload_state = 'sent' and assignment_status in ('pending', 'unknown') order by recorded_at",
-            [],
+            "select * from weighings where upload_state = 'sent' and assignment_status <> 'expired' and recorded_at >= ?1 order by recorded_at",
+            params![since],
         )
     }
 
@@ -373,12 +376,18 @@ mod tests {
         assert_eq!(s.queued(10).unwrap()[0].upload_attempts, 1);
         s.mark_sent("a", "2026-10-27T10:01:00Z", "pending", None, Some("2026-10-28T10:00:00Z")).unwrap();
         assert!(s.queued(10).unwrap().is_empty());
-        assert_eq!(s.awaiting_assignment().unwrap().len(), 1);
+        let since = "2026-10-25T00:00:00Z";
+        assert_eq!(s.to_verify(since).unwrap().len(), 1);
         assert_eq!(s.counts().unwrap(), (0, 1, 0));
         s.update_assignment("a", "2026-10-27T11:00:00Z", "credited", Some("Picker Alpha"), None)
             .unwrap();
-        assert!(s.awaiting_assignment().unwrap().is_empty());
+        // Credited weighings keep being re-checked against the server...
+        assert_eq!(s.to_verify(since).unwrap().len(), 1);
         assert_eq!(s.get("a").unwrap().unwrap().employee_name.as_deref(), Some("Picker Alpha"));
+        // ...expired ones are final and aren't, and nothing older than the window is.
+        assert!(s.to_verify("2026-10-28T00:00:00Z").unwrap().is_empty());
+        s.update_assignment("a", "2026-10-28T11:00:00Z", "expired", None, None).unwrap();
+        assert!(s.to_verify(since).unwrap().is_empty());
     }
 
     #[test]

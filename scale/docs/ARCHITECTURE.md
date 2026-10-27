@@ -104,7 +104,9 @@ The recorded gross is the median of the stable window. Net is gross minus the ca
 **Upload order and failures**
 - The outbox uploads oldest first and stops at the first connectivity failure, so order is preserved. Backoff runs from 5 s up to 2 min.
 - A 4xx response other than auth marks the weighing `rejected`. It's kept and counted under "attention".
-- A 404 on a status check re-queues the weighing.
+- A weighing the server says it has never seen is re-queued and sent again.
+
+**Credit display follows the server.** The station never decides or keeps a credit of its own. Every poll it asks the server for the current status of every weighing sent in the last 48 hours, including credited and under-review ones. It stores exactly what the server answers, so a credit the server no longer holds (for example after a future, audited correction) disappears from the screen on the next poll. A status the station doesn't recognise is stored as `unknown`, which is never displayed as credited.
 
 ## 5. Server contract (PROPOSED: not implemented)
 
@@ -118,7 +120,7 @@ The station's live mode is written against this contract. **None of these endpoi
 |---|---|---|
 | GET | `/api/scale/carriers` | `{ carriers: [{ id, name, rfidTag, tareWeightKg, isActive }] }` |
 | POST | `/api/scale/weighings` | `{ stationWeighingId, carrierId, rfidTag, grossG, tareG, netG, weighedAt, samplesG }` → `{ status, employeeName, pendingUntil }`. Idempotent on `(station, stationWeighingId)` |
-| GET | `/api/scale/weighings/:stationWeighingId` | `{ status, employeeName, pendingUntil }` |
+| POST | `/api/scale/weighings/status` | `{ ids: [stationWeighingId…] }` → `{ statuses: { [id]: { status, employeeName, pendingUntil } } }`. Ids the server has never seen are omitted. Up to 100 ids per call |
 
 **Proposed tables**
 - **`weighings`**
@@ -128,19 +130,21 @@ The station's live mode is written against this contract. **None of these endpoi
   - Assignment: `status`, `employee_id` (set only when credited), `match_reason`.
 - **`weighing_claims`:** `weighing_id`, `mobile_time_event_id` (unique, so one phone event can support only one weighing).
 
-**The assignment rule** (executable spec: `service/src/matching.rs`, 12 tests)
+**The assignment rule** (executable spec: `service/src/matching.rs`, plus multi-weighing cases in `sim.rs` and `app.rs`)
 
-A bin-use cycle for carrier X weighed at T is **(previous weighing of X, T]**. A *claim* is an accepted `mobile_time_events` row, inside the cycle, in which the employee switched to X. Claims whose phone clock was flagged (backwards jump, or future time clamped) never count.
+A bin-use cycle for carrier X weighed at T is **(previous weighing of X, T]**. Every weighing closes a cycle, whatever its outcome, so consecutive uses of the same bin (Bin 1 → Bin 1, or Bin 1 → Bin 2 → Bin 1) are independent: an earlier credit never blocks a later one, and a scan can only ever count for the use it happened in. A *claim* is an accepted `mobile_time_events` row, inside the cycle, in which the employee switched to X. Claims whose phone clock was flagged (backwards jump, or future time clamped) never count.
 
 | Claims in the cycle | Result |
 |---|---|
 | Exactly one employee | **credited** to that employee. Their claims are consumed |
 | None yet | **pending**, re-evaluated whenever a phone syncs bin changes |
-| Still none 24 h after `weighed_at` | **expired**. Kept, never auto-assigned, shown for supervisor review |
+| Still none 24 h after `weighed_at` | **expired**: permanently discarded. Never credited and never assignable; there is no manual assignment for it. Only its time is kept, as the boundary of the bin's next cycle |
 | Two or more employees | **needs review**. Nobody is credited |
-| A later claim from a *different* employee for an already credited cycle | **needs review**. The credit is withdrawn |
+| A later claim from a *different* employee inside an already credited cycle | **Credit unchanged.** The claim is flagged as a conflict for supervisor review. Any correction must be an explicit, authorized and audited action (not built) |
 
-**The 24-hour pending recovery rule.** A weighing without a verified assignment stays pending for 24 hours after it was weighed. Any phone sync in that time that delivers a claim inside the bin's cycle resolves it. After 24 hours it expires uncredited.
+**Final states.** Credited, needs review and expired never change because of a phone sync. Historical credits are therefore stable; only a future, audited administrator action could alter one.
+
+**The 24-hour pending recovery rule.** A weighing without a verified assignment stays pending for 24 hours after it was weighed. Any phone sync in that time that delivers a claim inside that bin use's cycle resolves it. A sync that arrives after expiry changes nothing and the claim cannot spill into the bin's next use. After 24 hours the weighing expires uncredited and is discarded.
 
 That window runs on the server, because only the server sees phone syncs. The station's outbox has no time limit: a weighing that couldn't be uploaded is kept and resent however long the network is down.
 

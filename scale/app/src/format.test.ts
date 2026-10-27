@@ -23,11 +23,21 @@ describe("employeeLine: only a server-verified assignment shows a name", () => {
       makeWeighing({ uploadState: "sent", assignmentStatus: "needs_review" }),
       makeWeighing({ uploadState: "sent", assignmentStatus: "expired" }),
       makeWeighing({ uploadState: "rejected", lastError: "Unknown carrier" }),
+      // Server reported something the station doesn't recognise, or a correction voided it.
+      makeWeighing({ uploadState: "sent", assignmentStatus: "unknown", employeeName: "Picker Alpha" }),
+      makeWeighing({ uploadState: "sent", assignmentStatus: "voided", employeeName: "Picker Alpha" }),
+      makeWeighing({ uploadState: "sent", assignmentStatus: "needs_review", employeeName: "Picker Alpha" }),
     ]) {
       const l = employeeLine(w, { phase: "idle" });
       expect(l.name).not.toBe("Picker Alpha");
       expect(l.tone).not.toBe("credited");
     }
+  });
+
+  it("labels an expired weighing as discarded and not credited", () => {
+    const l = employeeLine(makeWeighing({ uploadState: "sent", assignmentStatus: "expired", employeeName: null }), { phase: "idle" });
+    expect(l).toMatchObject({ name: "Not credited", tone: "review" });
+    expect(l.note).toMatch(/discarded/);
   });
 
   it("explains the 24 h hold for pending weighings", () => {

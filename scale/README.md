@@ -45,17 +45,19 @@ In simulation, use the **Simulator** drawer to:
 - place or remove bins, including an unregistered tag or no tag
 - make the weight wobble, take the scale or reader offline, put the indicator in NET mode, or overload it
 - cut the "server" connection
-- sync picker phone scans, optionally with a flagged clock
-- move the simulated server clock forward 24 hours
+- sync a picker's phone scan for a specific earlier weighing (a delayed, offline scan), for a bin's next use, or (advanced) N minutes ago, optionally with a flagged clock
+- simulate 24 hours passing, which expires unassigned weighings once without shifting any clocks
+
+The **Simulated server** list shows each weighing's status, and each scan is labelled with what happened to it: credited this use, conflict (flagged, credit unchanged), waiting for the bin's next weighing, too late (that use expired), or ignored (clock flagged).
 
 Registration logins: `admin@sim.local` / `1234` (Administrator) and `manager@sim.local` / `1234` (refused).
 
 ## Tests
 
 ```sh
-# Service: 61 tests (parsers, state machine, matching rule, store, end to end in simulation)
+# Service: 78 tests (parsers, state machine, matching rule, store, end to end in simulation)
 docker run --rm -v "$PWD":/work -w /work/scale/service labourlink-scale-build cargo test
-# Display: 15 tests
+# Display: 21 tests
 cd scale/app && npx vitest run
 ```
 
