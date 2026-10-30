@@ -34,6 +34,8 @@ export const EMPLOYMENT_TIMELINE_COLUMNS = [
   DATE_FIELD_LABELS.startDate,
   DATE_FIELD_LABELS.workPermitExpiryDate,
   DATE_FIELD_LABELS.endDifferentDate,
+  DATE_FIELD_LABELS.vacationStartDate,
+  DATE_FIELD_LABELS.vacationEndDate,
   "Timeline ends",
   "Status",
 ] as const;
@@ -48,6 +50,8 @@ export interface EmploymentTimelineRow {
   startDate: string;
   workPermitExpiryDate: string;
   endDifferentDate: string;
+  vacationStartDate: string;
+  vacationEndDate: string;
   timelineEnds: string;
   status: string;
 }
@@ -74,6 +78,8 @@ export function buildEmploymentTimelineRows(employees: EmploymentTimelineEmploye
     startDate: emp.employmentStartDate ?? "",
     workPermitExpiryDate: emp.workPermitExpiryDate ?? "",
     endDifferentDate: emp.endDifferentDate ?? "",
+    vacationStartDate: emp.vacationStartDate ?? "",
+    vacationEndDate: emp.vacationEndDate ?? "",
     timelineEnds: describeTimelineEnd(emp),
     status: !emp.hasUsableDates ? "No Employment Start Date recorded" : emp.timelineLabel ? TIMELINE_BAR_LABEL_TEXT[emp.timelineLabel] : "",
   }));
@@ -90,10 +96,17 @@ export function employmentTimelineRowCells(row: EmploymentTimelineRow): string[]
     row.startDate,
     row.workPermitExpiryDate,
     row.endDifferentDate,
+    row.vacationStartDate,
+    row.vacationEndDate,
     row.timelineEnds,
     row.status,
   ];
 }
+
+// Legend line for the printed table and the PDF — vacation has no bar there,
+// only its two columns.
+export const VACATION_LEGEND_TEXT =
+  "Vacation: Start Vacation – End Vacation (orange on the graph). Planning only — the employee stays employed; no breaks, time entries or payroll are affected.";
 
 export function statusSummary(emp: EmploymentTimelineEmployee): string {
   return emp.statuses.map((s) => STATUS_LABELS[s]).join(", ");
@@ -195,6 +208,43 @@ export function computeBarPosition(emp: EmploymentTimelineEmployee, range: Timel
   const right = emp.timelineEndDate === null ? 100 : percentInRange(addDaysStr(emp.timelineEndDate, 1), range);
   const inRange = emp.employmentStartDate <= range.end && (emp.timelineEndDate === null || emp.timelineEndDate >= range.start);
   return { leftPercent: left, widthPercent: Math.max(right - left, MIN_BAR_WIDTH_PERCENT), clippedStart: emp.employmentStartDate < range.start, inRange };
+}
+
+export interface VacationPosition {
+  // Relative to the date track (same coordinates as the bar).
+  leftPercent: number;
+  widthPercent: number;
+  // Month starts inside the vacation, as a percentage of the vacation
+  // segment's own width — gridlines drawn through the orange.
+  monthLines: { key: string; leftPercentOfSegment: number }[];
+}
+
+// The vacation's orange overlay: Start Vacation's day through End
+// Vacation's day inclusive, in the bar's day slots, clipped to the bar and
+// to the visible range. Null when there's no vacation or none of it is
+// visible on the bar.
+export function computeVacationPosition(emp: EmploymentTimelineEmployee, range: TimelineRange): VacationPosition | null {
+  if (!emp.vacationStartDate || !emp.vacationEndDate || !emp.hasUsableDates || !emp.employmentStartDate) return null;
+  const from = [emp.vacationStartDate, emp.employmentStartDate, range.start].reduce((a, b) => (a > b ? a : b));
+  const lastDays = [emp.vacationEndDate, range.end];
+  if (emp.timelineEndDate) lastDays.push(emp.timelineEndDate);
+  const to = lastDays.reduce((a, b) => (a < b ? a : b));
+  if (from > to) return null;
+  const left = percentInRange(from, range);
+  const width = percentInRange(addDaysStr(to, 1), range) - left;
+  const monthLines: VacationPosition["monthLines"] = [];
+  let [y, m] = from.split("-").map(Number);
+  for (;;) {
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+    const key = `${y}-${String(m).padStart(2, "0")}-01`;
+    if (key > to) break;
+    monthLines.push({ key, leftPercentOfSegment: ((percentInRange(key, range) - left) / width) * 100 });
+  }
+  return { leftPercent: left, widthPercent: width, monthLines };
 }
 
 // -- zoom --------------------------------------------------------------

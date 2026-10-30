@@ -7,7 +7,7 @@
 // screen can never disagree about a value.
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { buildEmploymentTimelineRows, EMPLOYMENT_TIMELINE_COLUMNS, employmentTimelineRowCells } from "./employmentTimeline";
+import { buildEmploymentTimelineRows, EMPLOYMENT_TIMELINE_COLUMNS, employmentTimelineRowCells, VACATION_LEGEND_TEXT } from "./employmentTimeline";
 import { EmploymentTimelineEmployee } from "./employmentPeriodTypes";
 
 const HEADER = [...EMPLOYMENT_TIMELINE_COLUMNS];
@@ -52,11 +52,13 @@ export function exportEmploymentTimelinePdf(employees: EmploymentTimelineEmploye
     14,
     30
   );
+  doc.setFontSize(8);
+  doc.text(VACATION_LEGEND_TEXT, 14, 35);
 
   const body = rows.map((row) => employmentTimelineRowCells(row).map((cell) => cell || "—"));
 
   autoTable(doc, {
-    startY: 36,
+    startY: 39,
     head: [HEADER],
     body,
     styles: { fontSize: 8 },

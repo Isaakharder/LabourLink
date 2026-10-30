@@ -75,6 +75,8 @@ router.get(
               to_char(e.start_date, 'YYYY-MM-DD') as start_date,
               to_char(e.work_permit_expiry_date, 'YYYY-MM-DD') as work_permit_expiry_date,
               to_char(e.employment_end_date, 'YYYY-MM-DD') as employment_end_date,
+              to_char(e.vacation_start_date, 'YYYY-MM-DD') as vacation_start_date,
+              to_char(e.vacation_end_date, 'YYYY-MM-DD') as vacation_end_date,
               lp.employment_type, lp.work_group
        from employees e
        left join employee_groups eg on eg.id = e.employee_group_id
@@ -124,6 +126,9 @@ router.get(
           employmentStartDate: e.start_date,
           workPermitExpiryDate: e.work_permit_expiry_date,
           endDifferentDate: e.employment_end_date,
+          // One planned vacation (069), drawn as an orange overlay on the bar.
+          vacationStartDate: e.vacation_start_date,
+          vacationEndDate: e.vacation_end_date,
           workPermit: e.work_permit_expiry_date
             ? { expiryDate: e.work_permit_expiry_date, remainingDays: alert?.remainingDays ?? null, severity: alert?.severity ?? null }
             : null,

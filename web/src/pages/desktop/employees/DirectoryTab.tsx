@@ -363,6 +363,14 @@ export function DirectoryTab() {
                           <dd>{selectedEmployee.employmentEndDate ? formatDate(selectedEmployee.employmentEndDate) : "—"}</dd>
                         </div>
                         <div>
+                          <dt>Vacation</dt>
+                          <dd>
+                            {selectedEmployee.vacationStartDate && selectedEmployee.vacationEndDate
+                              ? `${formatDate(selectedEmployee.vacationStartDate)} – ${formatDate(selectedEmployee.vacationEndDate)}`
+                              : "—"}
+                          </dd>
+                        </div>
+                        <div>
                           <dt>Work Permit</dt>
                           <dd>
                             <WorkPermitStatus employee={selectedEmployee} />

@@ -27,6 +27,8 @@ function employee(overrides: Partial<EmploymentTimelineEmployee> = {}): Employme
     employmentStartDate: "2026-01-01",
     workPermitExpiryDate: null,
     endDifferentDate: null,
+    vacationStartDate: null,
+    vacationEndDate: null,
     workPermit: null,
     employmentType: null,
     workGroup: null,
@@ -249,5 +251,72 @@ describe("EmploymentTimelineGraph — middle-mouse panning", () => {
     expect(wrap.style.cursor).toBe("");
     fireEvent.click(screen.getByRole("button", { name: "1. Alice Smith: edit employment dates" }));
     expect(onEditDates).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("EmploymentTimelineGraph — vacation overlay", () => {
+  const YEAR: TimelineRange = { start: "2026-01-01", end: "2026-12-31" };
+  const withVacation = (overrides: Partial<EmploymentTimelineEmployee> = {}) =>
+    employee({ timelineEndDate: "2026-12-31", timelineLabel: "employed", vacationStartDate: "2026-06-15", vacationEndDate: "2026-08-14", ...overrides });
+  // The overlay's left/right edges in track percent (it's positioned inside the bar).
+  const overlayEdges = () => {
+    const bar = document.querySelector(".employment-timeline-bar:not(.employment-timeline-bar-missing-dates)") as HTMLElement;
+    const seg = bar.querySelector(".employment-timeline-vacation") as HTMLElement;
+    const barLeft = parseFloat(bar.style.left);
+    const barWidth = parseFloat(bar.style.width);
+    const left = barLeft + (parseFloat(seg.style.left) / 100) * barWidth;
+    return { left, right: left + (parseFloat(seg.style.width) / 100) * barWidth, seg };
+  };
+  const gridline = (date: string) => parseFloat((document.querySelector(`.employment-timeline-gridline[data-date="${date}"]`) as HTMLElement).style.left);
+
+  it("draws a translucent orange segment inside the blue bar from Start Vacation through End Vacation", () => {
+    renderGraph({ range: YEAR, employees: [withVacation({ vacationStartDate: "2026-07-01", vacationEndDate: "2026-07-31" })] });
+    const { left, right, seg } = overlayEdges();
+    expect(left).toBeCloseTo(gridline("2026-07-01"), 8);
+    expect(right).toBeCloseTo(gridline("2026-08-01"), 8); // through Jul 31 inclusive
+    expect(seg).toHaveAttribute("title", "Vacation: 2026-07-01 – 2026-07-31 (still employed)");
+    expect(seg.closest("button")).toHaveClass("employment-timeline-bar-current"); // the bar is still there (still employed)
+  });
+
+  it("keeps month gridlines through the orange, exactly on the timeline's gridlines", () => {
+    renderGraph({ range: YEAR, employees: [withVacation()] });
+    const { left, right, seg } = overlayEdges();
+    const lines = [...seg.querySelectorAll(".employment-timeline-vacation-gridline")] as HTMLElement[];
+    expect(lines).toHaveLength(2); // Jul 1 and Aug 1 inside Jun 15–Aug 14
+    const toTrack = (l: HTMLElement) => left + (parseFloat(l.style.left) / 100) * (right - left);
+    expect(toTrack(lines[0])).toBeCloseTo(gridline("2026-07-01"), 8);
+    expect(toTrack(lines[1])).toBeCloseTo(gridline("2026-08-01"), 8);
+  });
+
+  it("adds the vacation to the bar tooltip; clicking the orange opens the editor; the label stays readable", () => {
+    const onEditDates = vi.fn();
+    renderGraph({ range: YEAR, onEditDates, employees: [withVacation()] });
+    const bar = screen.getByRole("button", { name: "1. Alice Smith: edit employment dates" });
+    expect(bar.getAttribute("title")).toContain("Vacation: 2026-06-15 – 2026-08-14");
+    fireEvent.click(bar.querySelector(".employment-timeline-vacation")!);
+    expect(onEditDates).toHaveBeenCalledTimes(1);
+    expect(bar.querySelector(".employment-timeline-bar-label")!.textContent).toBe("Employed");
+  });
+
+  it("no vacation, or a vacation outside the visible range: no orange", () => {
+    renderGraph({ range: YEAR, employees: [employee({ timelineEndDate: "2026-12-31", timelineLabel: "employed" })] });
+    expect(document.querySelector(".employment-timeline-bar .employment-timeline-vacation")).toBeNull();
+    cleanup();
+    renderGraph({ range: { start: "2026-01-01", end: "2026-05-31" }, employees: [withVacation()] });
+    expect(document.querySelector(".employment-timeline-bar .employment-timeline-vacation")).toBeNull();
+  });
+
+  it("in a filtered list the orange is on the right (renumbered) row", () => {
+    renderGraph({
+      range: YEAR,
+      employees: [employee({ id: "z", firstName: "Zed", lastName: "Zulu", timelineEndDate: "2026-12-31", vacationStartDate: "2026-03-07", vacationEndDate: "2026-03-09" })],
+    });
+    const bar = screen.getByRole("button", { name: "1. Zed Zulu: edit employment dates" });
+    expect(bar.querySelector(".employment-timeline-vacation")).toHaveAttribute("data-vacation-start", "2026-03-07");
+  });
+
+  it("lists Vacation in the legend", () => {
+    renderGraph({ range: YEAR, employees: [withVacation()] });
+    expect(screen.getByText("Vacation (still employed)")).toBeInTheDocument();
   });
 });

@@ -700,6 +700,7 @@ edits — no separate timeline copy:
 | Employment Start Date | `employees.start_date` |
 | Work Permit Expiry Date | `employees.work_permit_expiry_date` |
 | End Different Date (optional) | `employees.employment_end_date` (migration 068) |
+| Start / End Vacation (optional) | `employees.vacation_start_date` / `vacation_end_date` (migration 069) |
 
 The bar starts on the Employment Start Date and ends on the End Different
 Date when one is entered, otherwise on the Work Permit Expiry Date, otherwise
@@ -715,6 +716,16 @@ while the monthly gridlines stay. `employee_employment_periods` (050) is no
 longer read for dates or written; its employment type/work group are still
 shown and filterable, read-only, and its old create/edit/delete endpoints
 answer 410 "refresh LabourLink".
+
+One planned vacation per employee is drawn as a translucent orange segment on
+the bar (Start Vacation through End Vacation inclusive; the blue bar stays
+visible because the employee is still employed). Both dates or neither; End
+not before Start; not before the Employment Start Date; not after End
+Different Date, or the Work Permit Expiry Date when there's none (ongoing
+employees may plan any future vacation). Edited from the timeline editor or
+the Employee form (same record). Planning information only: it creates no
+breaks and changes no time entries, payroll or phone syncing. The Table,
+CSV, PDF and Print show it as Start/End Vacation columns.
 
 ## Known gaps
 

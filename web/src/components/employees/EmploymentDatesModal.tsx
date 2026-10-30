@@ -2,6 +2,7 @@ import { FormEvent, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { api, ApiError } from "../../lib/api";
 import { DATE_FIELD_LABELS, EmploymentTimelineEmployee } from "../../lib/employmentPeriodTypes";
+import { vacationErrors } from "../../lib/employeeDateRules";
 
 interface EmploymentDatesModalProps {
   employee: EmploymentTimelineEmployee;
@@ -14,6 +15,8 @@ interface FormState {
   startDate: string;
   workPermitExpiryDate: string;
   endDifferentDate: string;
+  vacationStartDate: string;
+  vacationEndDate: string;
 }
 
 // Same rule the server enforces on every save path (employees.ts's
@@ -27,20 +30,23 @@ export function validateEmploymentDates(form: FormState): Record<string, string>
   if (form.startDate && form.workPermitExpiryDate && form.workPermitExpiryDate < form.startDate) {
     errors.workPermitExpiryDate = `${DATE_FIELD_LABELS.workPermitExpiryDate} can't be earlier than the ${DATE_FIELD_LABELS.startDate}`;
   }
-  return errors;
+  return { ...errors, ...vacationErrors(form) };
 }
 
-// The timeline bar's editor: exactly the employee's three employment dates,
-// saved to the same employee record the Employees Directory shows (PATCH
-// /api/employees/:id — one source of truth, Administrator-only as before).
-// Only these three fields are sent, so saving never changes the employee's
-// active status, clocks them out, or touches time entries or payroll.
+// The timeline bar's editor: the employee's three employment dates and one
+// planned vacation, saved to the same employee record the Employees
+// Directory shows (PATCH /api/employees/:id — one source of truth,
+// Administrator-only as before). Only these five fields are sent, so saving
+// never changes the employee's active status, clocks them out, or touches
+// time entries, breaks, payroll or phone syncing.
 export function EmploymentDatesModal({ employee, readOnly, onClose, onSaved }: EmploymentDatesModalProps) {
   const name = `${employee.firstName} ${employee.lastName}`;
   const [form, setForm] = useState<FormState>({
     startDate: employee.employmentStartDate ?? "",
     workPermitExpiryDate: employee.workPermitExpiryDate ?? "",
     endDifferentDate: employee.endDifferentDate ?? "",
+    vacationStartDate: employee.vacationStartDate ?? "",
+    vacationEndDate: employee.vacationEndDate ?? "",
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
@@ -66,6 +72,8 @@ export function EmploymentDatesModal({ employee, readOnly, onClose, onSaved }: E
           startDate: form.startDate,
           workPermitExpiryDate: form.workPermitExpiryDate || null,
           employmentEndDate: form.endDifferentDate || null,
+          vacationStartDate: form.vacationStartDate || null,
+          vacationEndDate: form.vacationEndDate || null,
         }),
       });
       onSaved();
@@ -123,6 +131,34 @@ export function EmploymentDatesModal({ employee, readOnly, onClose, onSaved }: E
           </span>
           {errors.employmentEndDate && <span className="field-error">{errors.employmentEndDate}</span>}
         </label>
+
+        <fieldset className="employment-dates-vacation">
+          <legend>
+            Vacation <span className="employment-dates-optional">(optional — both dates or neither)</span>
+          </legend>
+          <label>
+            {DATE_FIELD_LABELS.vacationStartDate}
+            <input type="date" value={form.vacationStartDate} onChange={(e) => set("vacationStartDate", e.target.value)} disabled={readOnly} />
+            {errors.vacationStartDate && <span className="field-error">{errors.vacationStartDate}</span>}
+          </label>
+          <label>
+            {DATE_FIELD_LABELS.vacationEndDate}
+            <input type="date" value={form.vacationEndDate} onChange={(e) => set("vacationEndDate", e.target.value)} disabled={readOnly} />
+            {errors.vacationEndDate && <span className="field-error">{errors.vacationEndDate}</span>}
+          </label>
+          {!readOnly && (form.vacationStartDate || form.vacationEndDate) && (
+            <button
+              type="button"
+              className="employment-dates-clear-vacation"
+              onClick={() => setForm((prev) => ({ ...prev, vacationStartDate: "", vacationEndDate: "" }))}
+            >
+              Clear vacation
+            </button>
+          )}
+          <span className="field-hint">
+            Shown in orange on the timeline. Planning only: it doesn't create breaks or change time entries, payroll or the phone.
+          </span>
+        </fieldset>
       </form>
 
       <p className="employment-period-modal-note">

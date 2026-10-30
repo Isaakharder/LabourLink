@@ -74,6 +74,8 @@ function existing(overrides: Partial<Employee> = {}): Employee {
     workPermitNotifyLeadMonths: null,
     workPermitNotifyLeadDays: null,
     employmentEndDate: null,
+    vacationStartDate: null,
+    vacationEndDate: null,
     createdAt: "",
     updatedAt: "",
     ...overrides,

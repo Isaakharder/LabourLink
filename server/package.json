@@ -35,6 +35,7 @@
     "test:employment-periods-logic": "ts-node src/lib/employmentPeriods.test.ts",
     "test:employment-timeline-view": "ts-node src/lib/employmentTimelineView.test.ts",
     "test:employment-periods": "ts-node src/routes/employmentPeriods.test.ts",
+    "test:employee-vacation": "ts-node src/routes/employeeVacation.test.ts",
     "test:greenhouse-row-options": "ts-node src/lib/activitySelection.greenhouseRowOptions.test.ts",
     "demo:seed": "ts-node src/cli/seedDemoInstance.ts",
     "reviewer:credentials": "ts-node src/cli/reviewerCredentials.ts",

@@ -5,6 +5,7 @@ import { Avatar } from "./Avatar";
 import { api, ApiError } from "../../lib/api";
 import { Employee, EmployeeBreakProfile, GENDERS, LANGUAGES, NATIONALITIES } from "../../lib/employeeTypes";
 import { EmployeeJobsField, JobOption } from "./EmployeeJobsField";
+import { vacationErrors } from "../../lib/employeeDateRules";
 import { DEFAULT_WORK_PERMIT_LEAD_MONTHS, WORK_PERMIT_LEAD_MONTH_OPTIONS } from "../../lib/workPermitTypes";
 
 interface EmployeeFormModalProps {
@@ -37,6 +38,8 @@ interface FormState {
   activityIds: Set<string>;
   workPermitExpiryDate: string;
   employmentEndDate: string;
+  vacationStartDate: string;
+  vacationEndDate: string;
   // "6" | "1" | "2" | "3" | "12" | "custom" — kept as the select's own
   // string value rather than splitting into two booleans, same reasoning
   // BreakProfileEditor.tsx's direction select uses.
@@ -82,6 +85,8 @@ function toFormState(employee: Employee | null): FormState {
     activityIds: new Set(employee?.assignedActivities.filter((a) => a.isActive).map((a) => a.id) ?? []),
     workPermitExpiryDate: employee?.workPermitExpiryDate ?? "",
     employmentEndDate: employee?.employmentEndDate ?? "",
+    vacationStartDate: employee?.vacationStartDate ?? "",
+    vacationEndDate: employee?.vacationEndDate ?? "",
     workPermitLeadChoice:
       employee?.workPermitNotifyLeadDays != null
         ? "custom"
@@ -191,6 +196,16 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
     if (form.startDate && form.employmentEndDate && form.employmentEndDate < form.startDate) {
       next.employmentEndDate = "End Different Date can't be earlier than the Employment Start Date";
     }
+    Object.assign(
+      next,
+      vacationErrors({
+        startDate: form.startDate,
+        workPermitExpiryDate: form.workPermitExpiryDate,
+        endDifferentDate: form.employmentEndDate,
+        vacationStartDate: form.vacationStartDate,
+        vacationEndDate: form.vacationEndDate,
+      })
+    );
     if (form.startDate && form.workPermitExpiryDate && form.workPermitExpiryDate < form.startDate) {
       next.workPermitExpiryDate = "Work Permit Expiry Date can't be earlier than the Employment Start Date";
     }
@@ -251,6 +266,8 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
         activityIds: [...form.activityIds],
         workPermitExpiryDate: form.workPermitExpiryDate || null,
         employmentEndDate: form.employmentEndDate || null,
+        vacationStartDate: form.vacationStartDate || null,
+        vacationEndDate: form.vacationEndDate || null,
         // Server clears both when workPermitExpiryDate is null regardless
         // of what's sent here — see employees.ts's resolveWorkPermitUpdate
         // — so these are only meaningful when a date is present.
@@ -452,6 +469,17 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
               <input type="date" value={form.employmentEndDate} onChange={(e) => set("employmentEndDate", e.target.value)} />
               <span className="field-hint">Only if they stopped working on a different day than their permit expiry.</span>
               {errors.employmentEndDate && <span className="field-error">{errors.employmentEndDate}</span>}
+            </label>
+            <label>
+              Start Vacation (optional)
+              <input type="date" value={form.vacationStartDate} onChange={(e) => set("vacationStartDate", e.target.value)} />
+              {errors.vacationStartDate && <span className="field-error">{errors.vacationStartDate}</span>}
+            </label>
+            <label>
+              End Vacation (optional)
+              <input type="date" value={form.vacationEndDate} onChange={(e) => set("vacationEndDate", e.target.value)} />
+              <span className="field-hint">Both or neither. Shown on the Employment Timeline only.</span>
+              {errors.vacationEndDate && <span className="field-error">{errors.vacationEndDate}</span>}
             </label>
             {form.workPermitExpiryDate && (
               <label>

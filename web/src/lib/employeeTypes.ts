@@ -56,6 +56,10 @@ export interface Employee {
   // different from the permit expiry. Shown and edited here and on the
   // Employment Timeline (same record); never deactivates anyone.
   employmentEndDate: string | null;
+  // One planned vacation (069): both set or both null. Shown on the
+  // Employment Timeline as an orange overlay; planning information only.
+  vacationStartDate: string | null;
+  vacationEndDate: string | null;
   workPermitNotifyLeadMonths: number | null;
   workPermitNotifyLeadDays: number | null;
   createdAt: string;
