@@ -4,6 +4,7 @@ import { asyncHandler } from "../lib/asyncHandler";
 import { sendPinResetEmail } from "../lib/email";
 import { hashPin } from "../lib/pin";
 import { generateResetToken, hashResetToken, RESET_TOKEN_TTL_MINUTES } from "../lib/resetToken";
+import { revokeEmployeeWebSessions } from "../lib/webSessions";
 
 const router = Router();
 
@@ -107,6 +108,9 @@ router.post(
         `update password_reset_requests set status = 'used', used_at = now() where id = $1`,
         [requestId]
       );
+      // A new PIN signs this employee out of every browser still holding a
+      // sign-in made with the old one.
+      await revokeEmployeeWebSessions(client, employeeId, "pin_reset");
 
       await client.query("commit");
     } catch (err) {

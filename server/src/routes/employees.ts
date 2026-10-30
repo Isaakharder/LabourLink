@@ -5,6 +5,7 @@ import sharp from "sharp";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { revokeEmployeeWebSessions } from "../lib/webSessions";
 import { normalizePhoneNumber } from "../lib/phone";
 import { deleteEmployeePhoto, getSignedPhotoUrl, getSignedPhotoUrls, uploadEmployeePhoto } from "../lib/storage";
 import { addEmployeeToActivityGroup, removeEmployeeFromActivityGroup } from "../lib/activityGroupAssignment";
@@ -857,6 +858,9 @@ router.patch(
            where employee_id = $1 and unassigned_at is null`,
           [id]
         );
+        // Desktop sign-ins end here too, not just at their next renewal
+        // (which also refuses an inactive employee — see lib/webSessions.ts).
+        await revokeEmployeeWebSessions(client, id, "employee_deactivated");
       }
 
       await client.query("commit");

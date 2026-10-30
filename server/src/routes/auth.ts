@@ -1,36 +1,24 @@
-import { CookieOptions, Router } from "express";
+import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { verifyPin } from "../lib/pin";
-import { requireAuth, signSession, SESSION_COOKIE } from "../middleware/auth";
+import {
+  clearSessionCookies,
+  getSessionCookieOptions,
+  REFRESH_COOKIE,
+  requireAuth,
+  SESSION_COOKIE,
+  setSessionCookies,
+  signSession,
+  verifyAccessToken,
+} from "../middleware/auth";
+import { createWebSession, revokeWebSession, revokeWebSessionByToken } from "../lib/webSessions";
 
 const router = Router();
 
-const isProduction = process.env.NODE_ENV === "production";
-
-// Web and API are deployed as separate Railway services on separate
-// subdomains, making every request cross-site. sameSite: "lax" only rides
-// along on top-level navigations, not on credentialed fetch() calls across
-// origins — it would silently drop the session cookie on every request. In
-// production we need "none" (which itself requires secure: true). Locally,
-// where both run on localhost, "lax" is fine and avoids needing HTTPS in dev.
-//
-// This is a secondary line of defense only — the primary one is staying
-// same-origin in the first place (see web/serve-static.js's proxy and
-// web/src/lib/api.ts's resolveApiUrl()). sameSite: "none" cookies are still
-// subject to Safari's full third-party cookie blocking (ITP) when a request
-// actually is cross-site, which is silent (no error, the Set-Cookie is just
-// never stored) — see README's Railway deploy notes for the config mistake
-// that reintroduces that cross-site request in production.
-export function getSessionCookieOptions(isProd: boolean): CookieOptions {
-  return {
-    httpOnly: true,
-    secure: isProd,
-    sameSite: isProd ? "none" : "lax",
-  };
-}
-
-const sessionCookieOptions: CookieOptions = getSessionCookieOptions(isProduction);
+// Moved to middleware/auth.ts (requireAuth now sets cookies too when it
+// silently renews a session); re-exported for auth.sessionCookie.test.ts.
+export { getSessionCookieOptions };
 
 router.post("/login", asyncHandler(async (req, res) => {
   console.log("[login] 1. Login request received");
@@ -118,21 +106,47 @@ router.post("/login", asyncHandler(async (req, res) => {
     teamRole: employee.team_role,
   };
 
-  const token = signSession(session);
-  res.cookie(SESSION_COOKIE, token, {
-    ...sessionCookieOptions,
-    maxAge: 12 * 60 * 60 * 1000,
-  });
+  let created;
+  try {
+    created = await createWebSession(pool, employee.id);
+  } catch (err) {
+    console.error(
+      "[login] FAILED at step 7 (create session):",
+      err instanceof Error ? err.message : err
+    );
+    return res.status(503).json({ error: "Service temporarily unavailable" });
+  }
+  setSessionCookies(
+    res,
+    { token: signSession(session, { sessionId: created.sessionId }) },
+    { token: created.refreshToken, maxAgeMs: created.refreshCookieMaxAgeMs }
+  );
   console.log("[login] 7. Session created");
 
   res.json({ employee: session });
   console.log("[login] 8. Response sent");
 }));
 
-router.post("/logout", (_req, res) => {
-  res.clearCookie(SESSION_COOKIE, sessionCookieOptions);
+// Never 401s: signing out must work with an expired access token. The row is
+// revoked by whichever handle the browser still has — the refresh token, or
+// the session id inside a (possibly expired) access token. If the database
+// can't be reached the cookies are kept and the 503 tells the web client to
+// retry (it has already dropped the signed-in state locally — see
+// AuthContext's pending sign-out), so the row is never left live with no
+// one able to revoke it.
+router.post("/logout", asyncHandler(async (req, res) => {
+  const refreshToken: string | undefined = req.cookies?.[REFRESH_COOKIE];
+  const sessionId = verifyAccessToken(req.cookies?.[SESSION_COOKIE], { ignoreExpiration: true })?.sid;
+  try {
+    if (refreshToken) await revokeWebSessionByToken(pool, refreshToken, "signed_out");
+    if (sessionId) await revokeWebSession(pool, sessionId, "signed_out");
+  } catch (err) {
+    console.error("[logout] session revoke failed:", err instanceof Error ? err.message : err);
+    return res.status(503).json({ error: "Service temporarily unavailable" });
+  }
+  clearSessionCookies(res);
   res.status(204).send();
-});
+}));
 
 router.get("/me", requireAuth, (req, res) => {
   res.json({ employee: req.employee });

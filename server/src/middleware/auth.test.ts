@@ -1,5 +1,6 @@
-// requireAuth/signSession never touch the database, so this runs against a
-// real HTTP server but with no DATABASE_URL required — same "real HTTP, no
+// requireAuth/signSession never touch the database unless a refresh cookie is
+// sent (see auth.webSessions.test.ts for that), so this runs against a
+// real HTTP server but with no database required — same "real HTTP, no
 // mocking" convention as the DB-backed route tests, just without the DB.
 //
 // Covers the desktop stale-auth investigation: every 401 requireAuth emits
@@ -11,6 +12,10 @@
 //
 // Run with: npm run test:auth-middleware
 process.env.JWT_SECRET = process.env.JWT_SECRET || "test-secret-for-auth-middleware-test";
+// requireAuth only queries the database to renew from a refresh cookie, which
+// none of these requests send; db.ts still needs a URL to build its Pool. A
+// loopback URL satisfies dbGuard.ts without needing a real database.
+process.env.DATABASE_URL = process.env.DATABASE_URL || "postgresql://postgres:postgres@127.0.0.1:5432/labourlink_test";
 
 import express, { NextFunction, Request, Response } from "express";
 import cookieParser from "cookie-parser";
