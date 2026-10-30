@@ -2,7 +2,6 @@ import { useEffect, useRef } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { JobsTab } from "./basic-data/JobsTab";
-import { ActivityGroupsTab } from "./basic-data/ActivityGroupsTab";
 import { BreaksTab } from "./basic-data/BreaksTab";
 import { RowsTab } from "./basic-data/RowsTab";
 import { EmployeeBlocksTab } from "./basic-data/EmployeeBlocksTab";
@@ -17,7 +16,6 @@ import { CarriersTab } from "./basic-data/CarriersTab";
 // so the default tab is always the leftmost one.
 const BASIC_DATA_TABS = [
   { path: "jobs", label: "Jobs", element: <JobsTab /> },
-  { path: "activity-groups", label: "Activity Groups", element: <ActivityGroupsTab /> },
   { path: "breaks", label: "Breaks", element: <BreaksTab /> },
   { path: "rows", label: "Rows", element: <RowsTab /> },
   { path: "employee-blocks", label: "Employee Blocks", element: <EmployeeBlocksTab /> },

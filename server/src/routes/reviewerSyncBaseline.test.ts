@@ -188,7 +188,7 @@ async function main() {
     await pool.query(`delete from device_assignments where device_id = any($1::uuid[])`, [deviceIds]);
     await pool.query(`delete from devices where id = any($1::uuid[])`, [deviceIds]);
     await pool.query(`delete from employee_message_recipients where employee_id = any($1::uuid[])`, [reviewerEmployeeIds]);
-    await pool.query(`delete from employee_activity_group_assignments where employee_id = any($1::uuid[])`, [reviewerEmployeeIds]);
+    await pool.query(`delete from employee_activity_assignments where employee_id = any($1::uuid[])`, [reviewerEmployeeIds]);
     await pool.query(`delete from employees where id = any($1::uuid[])`, [reviewerEmployeeIds]).catch(() => {});
     await pool.query(`update reviewer_pairing_credentials set revoked_at = now() where id = $1`, [credential.id]);
     await pool.end();

@@ -17,7 +17,6 @@ vi.mock("../../context/AuthContext", () => ({
   useAuth: () => ({ employee: { id: "emp-1", securityRole: role }, logout: vi.fn() }),
 }));
 
-vi.mock("./basic-data/ActivityGroupsTab", () => ({ ActivityGroupsTab: () => <p>Activity Groups content</p> }));
 vi.mock("./basic-data/BreaksTab", () => ({ BreaksTab: () => <p>Breaks content</p> }));
 vi.mock("./basic-data/RowsTab", () => ({ RowsTab: () => <p>Rows content</p> }));
 vi.mock("./basic-data/EmployeeBlocksTab", () => ({ EmployeeBlocksTab: () => <p>Employee Blocks content</p> }));
@@ -34,7 +33,7 @@ function makeJob(overrides: Partial<Activity> = {}): Activity {
     minimumDurationMinutes: 5,
     isActive: true,
     densitySource: "stems",
-    assignedGroupCount: 2,
+    assignedEmployeeCount: 2,
     updatedAt: "2026-08-01T00:00:00.000Z",
     questions: [{ id: "q-1", questionType: "greenhouse_row", label: "Where?", isRequired: true, sortOrder: 0 }],
     ...overrides,
@@ -122,8 +121,7 @@ describe("Basic data → Jobs route", () => {
     renderAt(["/basic-data"]);
     await waitFor(() => expect(location()).toBe("/basic-data/jobs"));
     const labels = within(tabNav()).getAllByRole("link").map((a) => a.textContent);
-    expect(labels.slice(0, 3)).toEqual(["Jobs", "Activity Groups", "Breaks"]);
-    expect(labels.slice(3)).toEqual(["Rows", "Employee Blocks", "Density", "Varieties", "Carriers"]);
+    expect(labels).toEqual(["Jobs", "Breaks", "Rows", "Employee Blocks", "Density", "Varieties", "Carriers"]);
     const jobsTab = within(tabNav()).getByRole("link", { name: "Jobs" });
     expect(jobsTab).toHaveAttribute("href", "/basic-data/jobs");
     expect(jobsTab).toHaveClass("tab", "tab-active");
@@ -152,10 +150,13 @@ describe("/activities bookmarks", () => {
     expect(within(tabNav()).getByRole("link", { name: "Jobs" })).toHaveClass("tab-active");
   });
 
-  it("redirects the old Activity Groups tab to its Basic data tab", async () => {
+  it("sends the removed Activity Groups pages to Jobs (old bookmarks and the interim tab)", async () => {
     renderAt(["/activities/groups"]);
-    await waitFor(() => expect(location()).toBe("/basic-data/activity-groups"));
-    expect(screen.getByText("Activity Groups content")).toBeInTheDocument();
+    await waitFor(() => expect(location()).toBe("/basic-data/jobs"));
+    cleanup();
+    renderAt(["/basic-data/activity-groups"]);
+    await waitFor(() => expect(location()).toBe("/basic-data/jobs"));
+    expect(screen.queryByRole("link", { name: "Activity Groups" })).not.toBeInTheDocument();
   });
 
   it("redirects any other old /activities/... address to Jobs", async () => {

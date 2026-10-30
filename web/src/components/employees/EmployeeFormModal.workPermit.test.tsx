@@ -26,12 +26,12 @@ vi.mock("../../lib/api", () => {
   return {
     ApiError,
     api: vi.fn((path: string, options?: RequestInit) => {
-      if (path.startsWith("/api/activity-groups")) return Promise.resolve({ activityGroups: [] });
+      if (path.startsWith("/api/activities")) return Promise.resolve({ activities: [] });
       if (path.startsWith("/api/break-profiles")) return Promise.resolve({ breakProfiles: [] });
       if (path === "/api/employees" && options?.method === "POST") {
         postCalls.push({ path, body: JSON.parse(options.body as string) });
         return Promise.resolve({
-          employee: { id: "new-emp", activityGroups: [], firstName: "Jordan", lastName: "Doe", device: null },
+          employee: { id: "new-emp", assignedActivities: [], firstName: "Jordan", lastName: "Doe", device: null },
         });
       }
       return Promise.reject(new Error(`Unhandled mock api() call in test: ${path}`));

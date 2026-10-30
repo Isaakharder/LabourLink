@@ -131,7 +131,7 @@ export function EmployeeGroupsTab() {
     <div className="employee-groups-tab">
       <p className="field-hint">
         Employee Groups organize the employee list — for example the Inputs sidebar. Assign an employee to a group from
-        their Add or Edit Employee form. Groups don't affect permissions, Job group, Activity Groups, or any time records.
+        their Add or Edit Employee form. Groups don't affect permissions, Job group, the Jobs an employee can use, or any time records.
       </p>
 
       {isAdmin && (

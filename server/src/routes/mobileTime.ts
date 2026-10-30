@@ -1513,7 +1513,12 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
         return { status: "permanent_conflict", conflictReason: "missing or invalid activityId" };
       }
       const answersArray = event.answers ? (Object.values(event.answers) as AnswerInput[]) : undefined;
-      const validation = await validateActivityAndAnswers(pool, event.activityId, employeeId, answersArray);
+      // Assigned now, or assigned when the event happened on the phone —
+      // work done offline before the Job was removed still syncs with its
+      // original Job (see validateActivityAndAnswers).
+      const validation = await validateActivityAndAnswers(pool, event.activityId, employeeId, answersArray, {
+        assignedAt: new Date(event.occurredAtUtc),
+      });
       if (!validation.ok) {
         return { status: "permanent_conflict", conflictReason: validation.error };
       }

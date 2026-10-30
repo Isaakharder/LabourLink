@@ -137,7 +137,7 @@ export function ActivitySelectionFields({
           ))}
         </select>
         {activities && activities.length === 0 && (
-          <span className="field-error">This employee has no active activity group assignment.</span>
+          <span className="field-error">This employee has no Jobs assigned. Assign Jobs on their Edit Employee form.</span>
         )}
       </label>
 

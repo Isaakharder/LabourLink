@@ -42,7 +42,7 @@ function makeActivity(overrides: Partial<Activity> = {}): Activity {
     minimumDurationMinutes: 5,
     isActive: true,
     densitySource: null,
-    assignedGroupCount: 0,
+    assignedEmployeeCount: 0,
     updatedAt: "2026-08-01T00:00:00.000Z",
     questions: [],
     ...overrides,

@@ -97,10 +97,7 @@ async function run() {
       employeeIds.push(rows[0].id);
     }
 
-    const group = await client.query(
-      `insert into activity_groups (name, description) values ('Greenhouse Crew', 'All demo jobs') returning id`
-    );
-    const groupId = group.rows[0].id;
+    const activityIds: string[] = [];
     for (let i = 0; i < ACTIVITIES.length; i++) {
       const a = ACTIVITIES[i];
       const { rows } = await client.query(
@@ -108,10 +105,7 @@ async function run() {
         [a.name, i, a.densitySource]
       );
       const activityId = rows[0].id;
-      await client.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2)`, [
-        groupId,
-        activityId,
-      ]);
+      activityIds.push(activityId);
       for (let q = 0; q < a.questions.length; q++) {
         const type = a.questions[q];
         await client.query(
@@ -120,10 +114,11 @@ async function run() {
         );
       }
     }
+    // Every demo employee may use every demo Job.
     for (const employeeId of employeeIds) {
       await client.query(
-        `insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`,
-        [employeeId, groupId]
+        `insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`,
+        [employeeId, activityIds]
       );
     }
 

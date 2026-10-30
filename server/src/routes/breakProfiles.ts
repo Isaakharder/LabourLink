@@ -99,7 +99,7 @@ function validateItems(raw: unknown): { error: string } | { items: ItemInput[] }
 // Upserts the submitted schedule by id instead of replacing it wholesale:
 // time_entries.break_profile_item_id references this table with no ON
 // DELETE action, so a blind delete-all-then-reinsert (the pattern used for
-// plain join tables like activity_group_activities) would throw a foreign
+// plain join tables like the former activity_group_activities) would throw a foreign
 // key violation on every edit after the first break has ever been recorded
 // against any item in the profile. Existing rows keep their id (and so stay
 // valid FK targets for history already recorded against them); anything
@@ -568,8 +568,8 @@ router.patch(
       // e.g. a plain active/inactive toggle shouldn't require resending
       // every row. Present means the submitted list becomes the new
       // schedule, reconciled by id via upsertItems (see its own comment for
-      // why this can't be a blind delete-then-reinsert like
-      // activity_group_activities in activityGroups.ts).
+      // why this can't be a blind delete-then-reinsert like the former
+      // Activity Group membership table).
       if (items) {
         await upsertItems(client, id, items);
       }

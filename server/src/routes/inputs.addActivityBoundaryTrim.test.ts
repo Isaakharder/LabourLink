@@ -82,7 +82,7 @@ async function main() {
   const fakePinHash = "$2a$10$QAplaceholderQAplaceholderQAplaceholderQAplaceholde";
   let adminActor!: { id: string; first_name: string; last_name: string };
   let target!: { id: string };
-  let group!: { id: string };
+  let assignedJobIds: string[] = [];
   let plainActivity!: { id: string };
   let insertedActivity!: { id: string };
   let densityActivity!: { id: string };
@@ -133,11 +133,7 @@ async function main() {
     // scenarios all go through POST /activities, so this group/assignment
     // setup is required here even though inputs.manualEntries.test.ts
     // already separately covers the authorization rule itself.
-    group = (
-      await pool.query(`insert into activity_groups (name, is_active) values ($1, true) returning id`, [
-        `QA AABT Group ${RUN_ID}`,
-      ])
-    ).rows[0];
+    assignedJobIds = [];
 
     plainActivity = (
       await pool.query(`insert into activities (name, is_active) values ($1, true) returning id`, [
@@ -156,14 +152,8 @@ async function main() {
       )
     ).rows[0];
 
-    await pool.query(
-      `insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2), ($1, $3), ($1, $4)`,
-      [group.id, plainActivity.id, insertedActivity.id, densityActivity.id]
-    );
-    await pool.query(
-      `insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`,
-      [target.id, group.id]
-    );
+    assignedJobIds.push(plainActivity.id, insertedActivity.id, densityActivity.id);
+    await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [target.id, assignedJobIds]);
 
     land = (
       await pool.query(
@@ -650,12 +640,9 @@ async function main() {
     if (row) await tryDelete("greenhouse_rows", () => pool.query("delete from greenhouse_rows where id = $1", [row.id]));
     if (phase) await tryDelete("greenhouse_phases", () => pool.query("delete from greenhouse_phases where id = $1", [phase.id]));
     if (land) await tryDelete("greenhouse_lands", () => pool.query("delete from greenhouse_lands where id = $1", [land.id]));
-    if (group) {
-      await tryDelete("employee_activity_group_assignments", () =>
-        pool.query("delete from employee_activity_group_assignments where activity_group_id = $1", [group.id])
-      );
-      await tryDelete("activity_group_activities", () =>
-        pool.query("delete from activity_group_activities where activity_group_id = $1", [group.id])
+    {
+      await tryDelete("employee_activity_assignments", () =>
+        pool.query(`delete from employee_activity_assignments where activity_id = any($1::uuid[])`, [assignedJobIds])
       );
     }
     for (const actor of [target, adminActor]) {
@@ -668,7 +655,6 @@ async function main() {
         ])
       );
     }
-    if (group) await tryDelete("activity_groups", () => pool.query("delete from activity_groups where id = $1", [group.id]));
     server.close();
   }
 

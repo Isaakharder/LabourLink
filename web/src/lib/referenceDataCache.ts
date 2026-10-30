@@ -28,7 +28,9 @@ const CACHE_KEYS = {
 
 export interface ActivitiesResponse {
   activities: PickerActivity[];
-  activityGroups: { id: string; name: string }[];
+  // Always empty since Activity Groups were replaced by each employee's own
+  // Jobs; still sent for phone builds from before that change.
+  activityGroups?: { id: string; name: string }[];
 }
 export interface RowsResponse {
   lands: RowPickerLand[];

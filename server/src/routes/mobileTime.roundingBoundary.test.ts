@@ -186,7 +186,7 @@ async function main() {
   const rowIds: string[] = [];
   const carrierIds: string[] = [];
   const activityIds: string[] = [];
-  let groupId!: string;
+  let assignedJobIds: string[] = [];
   let landId!: string;
   let phaseId!: string;
   let profileId!: string;
@@ -230,9 +230,7 @@ async function main() {
       return identifier;
     }
 
-    groupId = (
-      await pool.query(`insert into activity_groups (name, is_active) values ($1, true) returning id`, [`QA Rounding Boundary Group ${RUN_ID}`])
-    ).rows[0].id;
+    assignedJobIds = [];
 
     activityAId = (
       await pool.query(
@@ -262,9 +260,9 @@ async function main() {
         [activityAId]
       )
     ).rows[0].id;
-    await pool.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2)`, [groupId, activityAId]);
-    await pool.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2)`, [groupId, activityBId]);
-    await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [employeeId, groupId]);
+    assignedJobIds.push(activityAId);
+    assignedJobIds.push(activityBId);
+    await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [employeeId, assignedJobIds]);
 
     landId = (
       await pool.query(`insert into greenhouse_lands (name, north_south_feet, east_west_feet) values ($1, 100, 100) returning id`, [
@@ -1036,12 +1034,10 @@ async function main() {
     if (landId) await tryDelete("greenhouse_lands", () => pool.query(`delete from greenhouse_lands where id = $1`, [landId]));
     if (carrierIds.length) await tryDelete("carriers", () => pool.query(`delete from carriers where id = any($1::uuid[])`, [carrierIds]));
     if (activityIds.length)
-      await tryDelete("employee_activity_group_assignments", () =>
-        pool.query(`delete from employee_activity_group_assignments where activity_group_id = $1`, [groupId ?? null])
+      await tryDelete("employee_activity_assignments", () =>
+        pool.query(`delete from employee_activity_assignments where activity_id = any($1::uuid[])`, [assignedJobIds])
       );
-    if (groupId) await tryDelete("activity_group_activities", () => pool.query(`delete from activity_group_activities where activity_group_id = $1`, [groupId]));
     if (activityIds.length) await tryDelete("activity_questions", () => pool.query(`delete from activity_questions where activity_id = any($1::uuid[])`, [activityIds]));
-    if (groupId) await tryDelete("activity_groups", () => pool.query(`delete from activity_groups where id = $1`, [groupId]));
     if (activityIds.length) await tryDelete("activities", () => pool.query(`delete from activities where id = any($1::uuid[])`, [activityIds]));
     if (employeeIds.length) await tryDelete("employees", () => pool.query(`delete from employees where id = any($1::uuid[])`, [employeeIds]));
     if (profileId) await tryDelete("break_profiles", () => pool.query(`delete from break_profiles where id = $1`, [profileId]));

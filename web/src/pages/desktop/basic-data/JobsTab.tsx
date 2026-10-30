@@ -180,7 +180,7 @@ export function JobsTab() {
                 <th>Normal speed</th>
                 <th>Minimum duration</th>
                 <th>Status</th>
-                <th>Groups</th>
+                <th>Employees</th>
                 <th>Question</th>
                 <th></th>
               </tr>
@@ -196,7 +196,7 @@ export function JobsTab() {
                       {a.isActive ? "Active" : "Inactive"}
                     </span>
                   </td>
-                  <td>{a.assignedGroupCount}</td>
+                  <td>{a.assignedEmployeeCount}</td>
                   <td>{formatQuestion(a)}</td>
                   <td>{renderActions(a)}</td>
                 </tr>
@@ -225,8 +225,8 @@ export function JobsTab() {
                     <dd>{a.minimumDurationMinutes} min</dd>
                   </div>
                   <div>
-                    <dt>Groups</dt>
-                    <dd>{a.assignedGroupCount}</dd>
+                    <dt>Employees</dt>
+                    <dd>{a.assignedEmployeeCount}</dd>
                   </div>
                   <div>
                     <dt>Question</dt>

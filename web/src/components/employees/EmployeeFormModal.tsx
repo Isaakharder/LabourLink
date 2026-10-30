@@ -4,7 +4,7 @@ import { Modal } from "../ui/Modal";
 import { Avatar } from "./Avatar";
 import { api, ApiError } from "../../lib/api";
 import { Employee, EmployeeBreakProfile, GENDERS, LANGUAGES, NATIONALITIES } from "../../lib/employeeTypes";
-import { ActivityGroup } from "../../lib/activityTypes";
+import { EmployeeJobsField, JobOption } from "./EmployeeJobsField";
 import { DEFAULT_WORK_PERMIT_LEAD_MONTHS, WORK_PERMIT_LEAD_MONTH_OPTIONS } from "../../lib/workPermitTypes";
 
 interface EmployeeFormModalProps {
@@ -32,7 +32,9 @@ interface FormState {
   email: string;
   phoneNumber: string;
   notes: string;
-  activityGroupIds: Set<string>;
+  // Active Jobs the employee may use (Jobs section). Inactive Jobs they're
+  // still assigned to are shown read-only and never sent.
+  activityIds: Set<string>;
   workPermitExpiryDate: string;
   // "6" | "1" | "2" | "3" | "12" | "custom" — kept as the select's own
   // string value rather than splitting into two booleans, same reasoning
@@ -76,7 +78,7 @@ function toFormState(employee: Employee | null): FormState {
     email: employee?.email ?? "",
     phoneNumber: employee?.phoneNumber ?? "",
     notes: employee?.notes ?? "",
-    activityGroupIds: new Set(employee?.activityGroups.map((g) => g.id) ?? []),
+    activityIds: new Set(employee?.assignedActivities.filter((a) => a.isActive).map((a) => a.id) ?? []),
     workPermitExpiryDate: employee?.workPermitExpiryDate ?? "",
     workPermitLeadChoice:
       employee?.workPermitNotifyLeadDays != null
@@ -99,12 +101,22 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
   const [photoPickError, setPhotoPickError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [activityGroups, setActivityGroups] = useState<ActivityGroup[]>([]);
+  const [activeJobs, setActiveJobs] = useState<JobOption[] | null>(null);
+  const [jobsLoadError, setJobsLoadError] = useState<string | null>(null);
   useEffect(() => {
-    api<{ activityGroups: ActivityGroup[] }>("/api/activity-groups?status=active")
-      .then((res) => setActivityGroups(res.activityGroups))
-      .catch(() => {});
+    api<{ activities: JobOption[] }>("/api/activities?status=active")
+      .then((res) => {
+        setActiveJobs(res.activities.map((a) => ({ id: a.id, name: a.name })));
+        // A Job deactivated since this employee was loaded is no longer
+        // selectable; it moves to the read-only inactive list below.
+        const activeIds = new Set(res.activities.map((a) => a.id));
+        setForm((f) => ({ ...f, activityIds: new Set([...f.activityIds].filter((id) => activeIds.has(id))) }));
+      })
+      .catch((err) => setJobsLoadError(err instanceof ApiError ? err.message : "Could not load Jobs"));
   }, []);
+  const inactiveAssignedJobs = activeJobs
+    ? (employee?.assignedActivities ?? []).filter((a) => !activeJobs.some((j) => j.id === a.id))
+    : (employee?.assignedActivities ?? []).filter((a) => !a.isActive);
 
   const [breakProfiles, setBreakProfiles] = useState<EmployeeBreakProfile[]>([]);
   useEffect(() => {
@@ -136,15 +148,6 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((f) => ({ ...f, [key]: value }));
-  }
-
-  function toggleActivityGroup(id: string) {
-    setForm((f) => {
-      const next = new Set(f.activityGroupIds);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return { ...f, activityGroupIds: next };
-    });
   }
 
   function handlePhotoPick(e: React.ChangeEvent<HTMLInputElement>) {
@@ -235,6 +238,9 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
         email: form.email.trim() || null,
         phoneNumber: form.phoneNumber.trim() || null,
         notes: form.notes.trim() || null,
+        // The complete set of active Jobs, saved in the same transaction as
+        // the employee. Empty = no Jobs.
+        activityIds: [...form.activityIds],
         workPermitExpiryDate: form.workPermitExpiryDate || null,
         // Server clears both when workPermitExpiryDate is null regardless
         // of what's sent here — see employees.ts's resolveWorkPermitUpdate
@@ -273,24 +279,6 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
         }
       } else if (removePhoto && isEdit) {
         await api(`/api/employees/${employeeId}/photo`, { method: "DELETE" }).catch(() => {});
-      }
-
-      const currentGroupIds = new Set(employee?.activityGroups.map((g) => g.id) ?? []);
-      const desiredGroupIds = form.activityGroupIds;
-      const groupsChanged =
-        currentGroupIds.size !== desiredGroupIds.size ||
-        [...desiredGroupIds].some((gid) => !currentGroupIds.has(gid));
-      if (groupsChanged) {
-        try {
-          await api(`/api/employees/${employeeId}/activity-groups`, {
-            method: "PUT",
-            body: JSON.stringify({ activityGroupIds: [...desiredGroupIds] }),
-          });
-        } catch {
-          setSubmitError("Employee saved, but activity groups failed to update. You can try again below.");
-          setSubmitting(false);
-          return;
-        }
       }
 
       onSaved();
@@ -534,24 +522,18 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
               Active
             </label>
           </div>
-          <h3>Activity Groups</h3>
-          {activityGroups.length === 0 ? (
-            <p className="placeholder-page">No active activity groups exist yet.</p>
-          ) : (
-            <div className="activity-checklist">
-              {activityGroups.map((g) => (
-                <label key={g.id} className="activity-checklist-item">
-                  <input
-                    type="checkbox"
-                    checked={form.activityGroupIds.has(g.id)}
-                    onChange={() => toggleActivityGroup(g.id)}
-                  />
-                  {g.name}
-                </label>
-              ))}
-            </div>
-          )}
           {deviceWarning && <p className="form-warning">{deviceWarning}</p>}
+        </section>
+
+        <section className="employee-form-section">
+          <EmployeeJobsField
+            activeJobs={activeJobs}
+            loadError={jobsLoadError}
+            selectedIds={form.activityIds}
+            onChange={(next) => set("activityIds", next)}
+            inactiveAssigned={inactiveAssignedJobs}
+            error={errors.activityIds}
+          />
         </section>
 
         <section className="employee-form-section">

@@ -5,9 +5,12 @@ export interface EmployeeDevice {
   name: string | null;
 }
 
-export interface EmployeeActivityGroup {
+// A Job the employee is assigned to (Employee form → Jobs). Inactive Jobs
+// stay listed (isActive false) but aren't usable until reactivated.
+export interface EmployeeAssignedActivity {
   id: string;
   name: string;
+  isActive: boolean;
 }
 
 export interface EmployeeBreakProfile {
@@ -37,11 +40,11 @@ export interface Employee {
   teamRoleId: number;
   teamRole: string;
   device: EmployeeDevice | null;
-  activityGroups: EmployeeActivityGroup[];
+  assignedActivities: EmployeeAssignedActivity[];
   breakProfileId: string | null;
   breakProfile: EmployeeBreakProfile | null;
   // Employee Group (Employees > Employee Groups); null = Ungrouped. Purely
-  // organizational — independent of jobGroup and activityGroups.
+  // organizational — independent of jobGroup and the employee's Jobs.
   employeeGroup: EmployeeGroupRef | null;
   // Never the employee's Employment End Date, and never a reason to
   // auto-deactivate them — purely an optional expiry to track and warn

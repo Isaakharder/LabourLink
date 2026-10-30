@@ -72,7 +72,7 @@ async function main() {
   const fakePinHash = "$2a$10$QAplaceholderQAplaceholderQAplaceholderQAplaceholde";
   const employeeIds: string[] = [];
   const deviceIds: string[] = [];
-  let groupId!: string;
+  let assignedJobIds: string[] = [];
   let activityId!: string;
 
   try {
@@ -109,19 +109,14 @@ async function main() {
     deviceIds.push(deviceRow.id);
     await pool.query(`insert into device_assignments (device_id, employee_id) values ($1, $2)`, [deviceRow.id, employeeId]);
 
-    groupId = (
-      await pool.query(`insert into activity_groups (name, is_active) values ($1, true) returning id`, [`QA Clock Anomaly Group ${RUN_ID}`])
-    ).rows[0].id;
+    assignedJobIds = [];
     activityId = (
       await pool.query(`insert into activities (name, is_active, minimum_duration_minutes) values ($1, true, 0) returning id`, [
         `QA Clock Anomaly Activity ${RUN_ID}`,
       ])
     ).rows[0].id;
-    await pool.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2)`, [groupId, activityId]);
-    await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [
-      employeeId,
-      groupId,
-    ]);
+    assignedJobIds.push(activityId);
+    await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [employeeId, assignedJobIds]);
 
     const t0 = new Date(Date.now() - 60 * 60 * 1000); // an hour ago
 
@@ -301,10 +296,8 @@ async function main() {
       await client.query(`delete from time_entries where employee_id = any($1::uuid[])`, [employeeIds]);
       await client.query(`delete from device_assignments where device_id = any($1::uuid[])`, [deviceIds]);
       await client.query(`delete from devices where id = any($1::uuid[])`, [deviceIds]);
-      await client.query(`delete from employee_activity_group_assignments where activity_group_id = $1`, [groupId ?? null]);
-      await client.query(`delete from activity_group_activities where activity_group_id = $1`, [groupId ?? null]);
+      await client.query(`delete from employee_activity_assignments where activity_id = any($1::uuid[])`, [assignedJobIds]);
       await client.query(`delete from activities where id = any($1::uuid[])`, [[activityId].filter(Boolean)]);
-      if (groupId) await client.query(`delete from activity_groups where id = $1`, [groupId]);
       await client.query(`delete from employees where id = any($1::uuid[])`, [employeeIds]);
       await client.query("commit");
     } catch (err) {

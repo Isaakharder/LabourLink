@@ -59,7 +59,7 @@ async function main() {
   const fakePinHash = "$2a$10$QAplaceholderQAplaceholderQAplaceholderQAplaceholde";
   const employeeIds: string[] = [];
   const groupIds: string[] = [];
-  let activityGroupId: string | undefined;
+  let assignedJobIds: string[] = [];
   let activityId: string | undefined;
 
   try {
@@ -116,11 +116,11 @@ async function main() {
     const supervisor = await createEmployee("Supervisor", null, { role: "Supervisor" });
     const supervisorToken = signSession({ id: supervisor.id, firstName: supervisor.first_name, lastName: supervisor.last_name, securityRole: "Supervisor", teamRole: "Team Member" });
 
-    activityGroupId = (await pool.query(`insert into activity_groups (name, is_active) values ($1, true) returning id`, [`QA WT ${RUN_ID}`])).rows[0].id;
+    assignedJobIds = [];
     activityId = (
       await pool.query(`insert into activities (name, is_active, minimum_duration_minutes) values ($1, true, 0) returning id`, [`QA WT Activity ${RUN_ID}`])
     ).rows[0].id;
-    await pool.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2)`, [activityGroupId, activityId]);
+    assignedJobIds.push(activityId!);
 
     const locals = await createGroup("QA Locals");
     const guys = await createGroup("QA Greenhouse Guys");
@@ -134,7 +134,7 @@ async function main() {
     const prevDay = await createEmployee("Previous Day", guys.id);
     const deactivated = await createEmployee("Deactivated", guys.id, { active: false });
     const nextDayOnly = await createEmployee("Next Day Only", guys.id);
-    await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [manual.id, activityGroupId]);
+    await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [manual.id, assignedJobIds]);
 
     await entry(twoEntries.id, at(DAY.d, 7), at(DAY.d, 9));
     await entry(twoEntries.id, at(DAY.d, 9), null);
@@ -190,7 +190,7 @@ async function main() {
     // -----------------------------------------------------------------
     // Adding and deleting work updates the totals.
     // -----------------------------------------------------------------
-    await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [breakOnly.id, activityGroupId]);
+    await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [breakOnly.id, assignedJobIds]);
     const added = await call("POST", "/api/inputs/activities", adminToken, {
       employeeId: breakOnly.id,
       date: DAY.str,
@@ -216,12 +216,8 @@ async function main() {
       for (const table of ["time_entry_corrections", "time_entry_deletions", "time_entries"]) {
         await client.query(`delete from ${table} where employee_id in (select id from employees where email like $1)`, [EMAIL_PATTERN]);
       }
-      if (activityGroupId) {
-        await client.query(`delete from employee_activity_group_assignments where activity_group_id = $1`, [activityGroupId]);
-        await client.query(`delete from activity_group_activities where activity_group_id = $1`, [activityGroupId]);
-      }
+        await client.query(`delete from employee_activity_assignments where activity_id = any($1::uuid[])`, [assignedJobIds]);
       if (activityId) await client.query(`delete from activities where id = $1`, [activityId]);
-      if (activityGroupId) await client.query(`delete from activity_groups where id = $1`, [activityGroupId]);
       await client.query(`delete from employees where id = any($1::uuid[])`, [employeeIds]);
       await client.query(`delete from employee_groups where id = any($1::uuid[])`, [groupIds]);
       await client.query("commit");

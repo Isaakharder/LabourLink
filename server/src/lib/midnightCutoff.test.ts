@@ -114,7 +114,7 @@ async function main() {
   const timeEntryIds: string[] = [];
   const activityIds: string[] = [];
   let breakProfileId!: string;
-  let activityGroupId!: string;
+  let assignedJobIds: string[] = [];
 
   try {
     const teamRoleId = (await pool.query(`select id from team_roles where name = 'Team Member'`)).rows[0].id;
@@ -153,10 +153,8 @@ async function main() {
     // activity validation — validateActivityAndAnswers requires the
     // activity to reach the employee through an active activity group
     // assignment.
-    activityGroupId = (
-      await pool.query(`insert into activity_groups (name, is_active) values ($1, true) returning id`, [`QA Cutoff Group ${RUN_ID}`])
-    ).rows[0].id;
-    await pool.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2)`, [activityGroupId, activityId]);
+    assignedJobIds = [];
+    assignedJobIds.push(activityId);
 
     // Break profile with ALL THREE rounding settings enabled, for the
     // "rounding-enabled employee" scenario.
@@ -179,10 +177,7 @@ async function main() {
     async function freshFixture(label: string): Promise<{ employeeId: string; deviceRowId: string; deviceIdentifier: string }> {
       fixtureCounter++;
       const employeeId = await insertEmployee(`${label}${fixtureCounter}`);
-      await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [
-        employeeId,
-        activityGroupId,
-      ]);
+      await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [employeeId, assignedJobIds]);
       const { deviceRowId, deviceIdentifier } = await insertDevice(employeeId, `${label}${fixtureCounter}`);
       return { employeeId, deviceRowId, deviceIdentifier };
     }
@@ -595,8 +590,8 @@ async function main() {
       );
     }
     if (employeeIds.length) {
-      await tryDelete("employee_activity_group_assignments", () =>
-        pool.query(`delete from employee_activity_group_assignments where employee_id = any($1::uuid[])`, [employeeIds])
+      await tryDelete("employee_activity_assignments", () =>
+        pool.query(`delete from employee_activity_assignments where activity_id = any($1::uuid[])`, [assignedJobIds])
       );
       await tryDelete("time_entry_corrections (by employee)", () =>
         pool.query(`delete from time_entry_corrections where employee_id = any($1::uuid[])`, [employeeIds])
@@ -608,12 +603,6 @@ async function main() {
     }
     if (deviceIds.length) {
       await tryDelete("device_sync_state", () => pool.query(`delete from device_sync_state where device_id = any($1::uuid[])`, [deviceIds]));
-    }
-    if (activityGroupId) {
-      await tryDelete("activity_group_activities", () =>
-        pool.query(`delete from activity_group_activities where activity_group_id = $1`, [activityGroupId])
-      );
-      await tryDelete("activity_groups", () => pool.query(`delete from activity_groups where id = $1`, [activityGroupId]));
     }
     if (activityIds.length) await tryDelete("activities", () => pool.query(`delete from activities where id = any($1::uuid[])`, [activityIds]));
     if (deviceIds.length) {

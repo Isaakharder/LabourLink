@@ -65,7 +65,7 @@ function makeEmployee(overrides: Partial<Employee> = {}): Employee {
     teamRoleId: 1,
     teamRole: "Team Member",
     device: null,
-    activityGroups: [],
+    assignedActivities: [],
     breakProfileId: null,
     breakProfile: null,
     employeeGroup: null,

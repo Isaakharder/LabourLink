@@ -24,7 +24,7 @@ vi.mock("../../lib/api", () => {
   return {
     ApiError,
     api: vi.fn((path: string, options?: RequestInit) => {
-      if (path.startsWith("/api/activity-groups")) return Promise.resolve({ activityGroups: [] });
+      if (path.startsWith("/api/activities")) return Promise.resolve({ activities: [] });
       if (path.startsWith("/api/break-profiles")) return Promise.resolve({ breakProfiles: [] });
       if (path === "/api/employee-groups") {
         return Promise.resolve({
@@ -37,7 +37,7 @@ vi.mock("../../lib/api", () => {
       }
       if (path.startsWith("/api/employees") && (options?.method === "POST" || options?.method === "PATCH")) {
         sent.push({ method: options.method, path, body: JSON.parse(options.body as string) });
-        return Promise.resolve({ employee: { id: "emp-1", activityGroups: [], firstName: "Antonio", lastName: "Miss", device: null } });
+        return Promise.resolve({ employee: { id: "emp-1", assignedActivities: [], firstName: "Antonio", lastName: "Miss", device: null } });
       }
       return Promise.reject(new Error(`Unhandled mock api() call in test: ${path}`));
     }),
@@ -73,7 +73,7 @@ function existing(overrides: Partial<Employee> = {}): Employee {
     teamRoleId: 1,
     teamRole: "Team Member",
     device: null,
-    activityGroups: [],
+    assignedActivities: [],
     breakProfileId: null,
     breakProfile: null,
     employeeGroup: null,

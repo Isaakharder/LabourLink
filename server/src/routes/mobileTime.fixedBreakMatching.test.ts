@@ -89,7 +89,7 @@ async function main() {
   const employeeIds: string[] = [];
   const deviceIds: string[] = [];
   const breakProfileIds: string[] = [];
-  let groupId: string | undefined;
+  let assignedJobIds: string[] = [];
   let activityId: string | undefined;
 
   try {
@@ -102,15 +102,8 @@ async function main() {
       ])
     ).rows[0];
     activityId = activity.id;
-    groupId = (
-      await pool.query(`insert into activity_groups (name, is_active) values ($1, true) returning id`, [
-        `QA FBM Group ${RUN_ID}`,
-      ])
-    ).rows[0].id;
-    await pool.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2)`, [
-      groupId,
-      activity.id,
-    ]);
+    assignedJobIds = [];
+    assignedJobIds.push(activity.id);
 
     // One shared employee/device/profile per top-level scenario, kept
     // isolated from each other by using a fresh employee (and therefore a
@@ -146,10 +139,7 @@ async function main() {
       ).rows[0];
       deviceIds.push(device.id);
       await pool.query(`insert into device_assignments (device_id, employee_id) values ($1, $2)`, [device.id, employee.id]);
-      await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [
-        employee.id,
-        groupId,
-      ]);
+      await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [employee.id, assignedJobIds]);
 
       return { employeeId: employee.id, deviceIdentifier, profileId: profile.id };
     }
@@ -669,8 +659,8 @@ async function main() {
         pool.query(`delete from time_entry_corrections where employee_id = any($1::uuid[])`, [employeeIds])
       );
       await tryDelete("time_entries", () => pool.query(`delete from time_entries where employee_id = any($1::uuid[])`, [employeeIds]));
-      await tryDelete("employee_activity_group_assignments", () =>
-        pool.query(`delete from employee_activity_group_assignments where employee_id = any($1::uuid[])`, [employeeIds])
+      await tryDelete("employee_activity_assignments", () =>
+        pool.query(`delete from employee_activity_assignments where activity_id = any($1::uuid[])`, [assignedJobIds])
       );
     }
     if (deviceIds.length) {
@@ -684,13 +674,7 @@ async function main() {
       );
       await tryDelete("break_profiles", () => pool.query(`delete from break_profiles where id = any($1::uuid[])`, [breakProfileIds]));
     }
-    if (groupId) {
-      await tryDelete("activity_group_activities", () =>
-        pool.query(`delete from activity_group_activities where activity_group_id = $1`, [groupId])
-      );
-    }
     if (activityId) await tryDelete("activities", () => pool.query(`delete from activities where id = $1`, [activityId]));
-    if (groupId) await tryDelete("activity_groups", () => pool.query(`delete from activity_groups where id = $1`, [groupId]));
     server.close();
   }
 
