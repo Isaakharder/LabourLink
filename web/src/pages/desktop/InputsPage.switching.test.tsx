@@ -19,6 +19,7 @@ import { AuthProvider } from "../../context/AuthContext";
 import { api, ApiError } from "../../lib/api";
 import { BreakDto, DailyInputsResponse, InputsEmployee } from "../../lib/inputsTypes";
 import { formatTimeInAppTimezone } from "../../lib/timezone";
+import { renderInputsOn } from "../../lib/testUtils/inputsToday";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -205,14 +206,18 @@ function buildBreak(id: string, name: string, startedAt: string, endedAt: string
   };
 }
 
-function renderInputsPage(initialPath = "/inputs") {
-  return render(
-    <MemoryRouter initialEntries={[initialPath]}>
-      <AuthProvider>
-        <InputsPage />
-      </AuthProvider>
-    </MemoryRouter>
-  );
+// `openOn` opens Inputs with that day as today (Inputs always opens on today
+// — see renderInputsOn); without it the page opens on the real today.
+function renderInputsPage(openOn?: string) {
+  const doRender = () =>
+    render(
+      <MemoryRouter initialEntries={["/inputs"]}>
+        <AuthProvider>
+          <InputsPage />
+        </AuthProvider>
+      </MemoryRouter>
+    );
+  return openOn ? renderInputsOn(openOn, doRender) : doRender();
 }
 
 function findDailyCall(employeeId: string): DailyCall {
@@ -344,11 +349,11 @@ describe("InputsPage employee switching", () => {
     // concern. Confirmed here rather than assumed to still hold: it's the
     // same code path, but the trigger (Next day) is genuinely different
     // from a click on a different employee row.
-    // Pinned via the URL, not left to default to "today" — the other
+    // Opened on a fixed day, not left to the real "today" — the other
     // tests in this file don't care what date they land on, but this one
     // asserts on exact "Next day" results, which has to start from a known
     // date.
-    renderInputsPage("/inputs?date=2026-08-11");
+    renderInputsPage("2026-08-11");
     await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
     await act(async () => {
       findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Day 11 Activity"));
@@ -390,7 +395,7 @@ describe("InputsPage employee switching", () => {
     // InputsErrorBoundary at all, it degrades gracefully inline. Both
     // layers matter: this proves the inner one; InputsErrorBoundary.test.tsx
     // proves the outer backstop for anything neither layer anticipated.
-    renderInputsPage("/inputs?date=2026-08-11");
+    renderInputsPage("2026-08-11");
     await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
 
     const goodRun = buildDaily(empA, "2026-08-11", "Healthy Activity").runs[0];
@@ -504,7 +509,7 @@ describe("InputsPage employee switching", () => {
   // no "Confirm activity correction" popup. ---
 
   async function loadAlice(breaks: BreakDto[] = []) {
-    const utils = renderInputsPage("/inputs?date=2026-08-11");
+    const utils = renderInputsPage("2026-08-11");
     await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
     await act(async () => {
       findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity", breaks));
@@ -712,7 +717,7 @@ describe("InputsPage employee switching", () => {
   });
 
   it("editing only the End Time cell sends endTime and omits startTime entirely", async () => {
-    const { container } = renderInputsPage("/inputs?date=2026-08-11");
+    const { container } = renderInputsPage("2026-08-11");
     await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
     await act(async () => {
       findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity"));
@@ -733,7 +738,7 @@ describe("InputsPage employee switching", () => {
   });
 
   it("editing both Start Time and End Time together sends both fields in one correction", async () => {
-    const { container } = renderInputsPage("/inputs?date=2026-08-11");
+    const { container } = renderInputsPage("2026-08-11");
     await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
     await act(async () => {
       findDailyCall(empA.id).deferred.resolve(buildDaily(empA, "2026-08-11", "Alice's Activity"));

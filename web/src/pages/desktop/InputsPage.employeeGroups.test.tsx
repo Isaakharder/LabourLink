@@ -10,6 +10,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InputsPage } from "./InputsPage";
 import { DailyInputsResponse, InputsEmployee } from "../../lib/inputsTypes";
+import { renderInputsOn } from "../../lib/testUtils/inputsToday";
 
 const DATE = "2026-10-05";
 const pickers = { id: "g-pick", name: "Pickers" };
@@ -75,10 +76,12 @@ const headings = () => screen.getAllByRole("heading", { level: 4 }).map((h) => h
 
 describe("Inputs sidebar grouped by Employee Group", () => {
   it("shows employees under their group headings, Ungrouped last, with hours and the review controls", async () => {
-    render(
-      <MemoryRouter initialEntries={[`/inputs?date=${DATE}&employee=e-khen`]}>
-        <InputsPage />
-      </MemoryRouter>
+    renderInputsOn(DATE, () =>
+      render(
+        <MemoryRouter initialEntries={[`/inputs?employee=e-khen`]}>
+          <InputsPage />
+        </MemoryRouter>
+      )
     );
     await waitFor(() => expect(headings()).toEqual(["Bean Crew1", "Pickers2", "Ungrouped1"]));
     const khen = within(screen.getByRole("region", { name: "Pickers (2)" })).getByRole("button", { name: /Khen Lagto/ });
@@ -90,10 +93,12 @@ describe("Inputs sidebar grouped by Employee Group", () => {
 
   it("search works across every group; headings and counts follow the matches; selection is kept", async () => {
     const user = userEvent.setup();
-    render(
-      <MemoryRouter initialEntries={[`/inputs?date=${DATE}&employee=e-khen`]}>
-        <InputsPage />
-      </MemoryRouter>
+    renderInputsOn(DATE, () =>
+      render(
+        <MemoryRouter initialEntries={[`/inputs?employee=e-khen`]}>
+          <InputsPage />
+        </MemoryRouter>
+      )
     );
     await waitFor(() => expect(headings()).toHaveLength(3));
     // "la" matches Larry, Khen Lagto (Pickers) — and nobody in the other groups.

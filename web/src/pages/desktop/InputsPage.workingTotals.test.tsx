@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InputsPage } from "./InputsPage";
 import { api } from "../../lib/api";
 import { DailyInputsResponse, InputsWorkingTotals } from "../../lib/inputsTypes";
+import { renderInputsOn } from "../../lib/testUtils/inputsToday";
 
 const DATE = "2026-10-05";
 const NEXT_DATE = "2026-10-06";
@@ -94,10 +95,12 @@ function daily(employeeId: string, date: string): DailyInputsResponse {
 }
 
 function renderPage() {
-  return render(
-    <MemoryRouter initialEntries={[`/inputs?date=${DATE}&employee=emp-khen`]}>
-      <InputsPage />
-    </MemoryRouter>
+  return renderInputsOn(DATE, () =>
+    render(
+      <MemoryRouter initialEntries={[`/inputs?employee=emp-khen`]}>
+        <InputsPage />
+      </MemoryRouter>
+    )
   );
 }
 

@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InputsPage } from "./InputsPage";
 import { api } from "../../lib/api";
 import { ActivityRunDto, DailyInputsResponse } from "../../lib/inputsTypes";
+import { renderInputsOn } from "../../lib/testUtils/inputsToday";
 
 const DATE = "2026-10-05";
 let bulkDeleteFailure: string | null = null;
@@ -107,10 +108,12 @@ const deleteCalls = () =>
     .map(([p, o]) => ({ path: p as string, body: JSON.parse((o as RequestInit).body as string) }));
 
 async function renderPage() {
-  render(
-    <MemoryRouter initialEntries={[`/inputs?date=${DATE}&employee=emp-n`]}>
-      <InputsPage />
-    </MemoryRouter>
+  renderInputsOn(DATE, () =>
+    render(
+      <MemoryRouter initialEntries={[`/inputs?employee=emp-n`]}>
+        <InputsPage />
+      </MemoryRouter>
+    )
   );
   await screen.findAllByText("Picking Peppers");
 }

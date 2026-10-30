@@ -3,8 +3,9 @@
 // Focused coverage for the Inputs date calendar popover added to DateNav:
 // opening/closing (including Escape and outside-click), month/year
 // navigation to a distant date, that selecting a day goes through the same
-// date-loading path as the arrow buttons (URL update + GET /daily reload),
-// that it preserves other URL params (the selected employee), and that the
+// date-loading path as the arrow buttons (GET /daily reload — the day is
+// page state, never written to the URL), that it preserves the selected
+// employee (?employee=), and that the
 // arrow buttons keep working normally afterward. lib/api.ts is mocked the
 // same way as InputsPage.switching.test.tsx so every network call is fully
 // controlled by the test.
@@ -17,6 +18,7 @@ import { InputsPage } from "./InputsPage";
 import { AuthProvider } from "../../context/AuthContext";
 import { ApiError } from "../../lib/api";
 import { DailyInputsResponse, InputsEmployee } from "../../lib/inputsTypes";
+import { renderInputsOn } from "../../lib/testUtils/inputsToday";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -132,15 +134,23 @@ function LocationProbe() {
   return <div data-testid="location-probe">{location.pathname + location.search}</div>;
 }
 
-function renderInputsPage(initialPath = "/inputs?date=2026-08-11&employee=emp-a") {
-  return render(
-    <MemoryRouter initialEntries={[initialPath]}>
-      <AuthProvider>
-        <InputsPage />
-        <LocationProbe />
-      </AuthProvider>
-    </MemoryRouter>
+function renderInputsPage(initialPath = "/inputs?employee=emp-a") {
+  return renderInputsOn("2026-08-11", () =>
+    render(
+      <MemoryRouter initialEntries={[initialPath]}>
+        <AuthProvider>
+          <InputsPage />
+          <LocationProbe />
+        </AuthProvider>
+      </MemoryRouter>
+    )
   );
+}
+
+// The chosen day reaches the server (GET /daily) but never the URL.
+async function expectDayLoaded(employeeId: string, date: string) {
+  await waitFor(() => expect(() => findDailyCall(employeeId, date)).not.toThrow());
+  expect(screen.getByTestId("location-probe")).not.toHaveTextContent("date=");
 }
 
 function findDailyCall(employeeId: string, date: string): DailyCall {
@@ -212,11 +222,9 @@ describe("InputsPage date calendar popover", () => {
 
     await user.click(within(popover).getByRole("button", { name: "15" }));
 
-    // Same date-loading path as the arrows: URL updates, a new GET /daily
-    // fires for the new date (same employee), and the popover closes.
-    await waitFor(() =>
-      expect(screen.getByTestId("location-probe")).toHaveTextContent("date=2030-12-15")
-    );
+    // Same date-loading path as the arrows: a new GET /daily fires for the
+    // new date (same employee), and the popover closes.
+    await expectDayLoaded(empA.id, "2030-12-15");
     expect(screen.getByTestId("location-probe")).toHaveTextContent("employee=emp-a");
     expect(screen.queryByRole("dialog", { name: "Choose Inputs date" })).not.toBeInTheDocument();
 
@@ -227,7 +235,7 @@ describe("InputsPage date calendar popover", () => {
   });
 
   it("preserves the selected employee param when picking a date, falling back like a normal date change if unset", async () => {
-    renderInputsPage("/inputs?date=2026-08-11&employee=emp-b");
+    renderInputsPage("/inputs?employee=emp-b");
     await waitFor(() => expect(dailyCalls.length).toBeGreaterThan(0));
     await act(async () => {
       findDailyCall(empB.id, "2026-08-11").deferred.resolve(buildDaily(empB, "2026-08-11", "Beatriz's Activity"));
@@ -239,9 +247,7 @@ describe("InputsPage date calendar popover", () => {
     const popover = screen.getByRole("dialog", { name: "Choose Inputs date" });
     await user.click(within(popover).getByRole("button", { name: "20" }));
 
-    await waitFor(() =>
-      expect(screen.getByTestId("location-probe")).toHaveTextContent("date=2026-08-20")
-    );
+    await expectDayLoaded(empB.id, "2026-08-20");
     // The employee param (Beatriz) survives the date-only change, exactly
     // as it does for the arrow buttons.
     expect(screen.getByTestId("location-probe")).toHaveTextContent("employee=emp-b");
@@ -255,20 +261,20 @@ describe("InputsPage date calendar popover", () => {
     await user.click(screen.getByRole("button", { name: "Choose Inputs date" }));
     const popover = screen.getByRole("dialog", { name: "Choose Inputs date" });
     await user.click(within(popover).getByRole("button", { name: "12" }));
-    await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent("date=2026-08-12"));
+    await expectDayLoaded(empA.id, "2026-08-12");
     await act(async () => {
       findDailyCall(empA.id, "2026-08-12").deferred.resolve(buildDaily(empA, "2026-08-12", "Aug 12 Activity"));
     });
     await screen.findByText("Aug 12 Activity");
 
     await user.click(screen.getByRole("button", { name: "Next day" }));
-    await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent("date=2026-08-13"));
+    await expectDayLoaded(empA.id, "2026-08-13");
     await act(async () => {
       findDailyCall(empA.id, "2026-08-13").deferred.resolve(buildDaily(empA, "2026-08-13", "Aug 13 Activity"));
     });
     await screen.findByText("Aug 13 Activity");
 
     await user.click(screen.getByRole("button", { name: "Previous day" }));
-    await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent("date=2026-08-12"));
+    await expectDayLoaded(empA.id, "2026-08-12");
   });
 });
