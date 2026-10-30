@@ -3,20 +3,15 @@ import { api, ApiError } from "../../../lib/api";
 import { useAuth } from "../../../context/AuthContext";
 import { todayInAppTimezone } from "../../../lib/timezone";
 import { computeFittedRange, filterEmploymentTimelineEmployees, TimelineRange } from "../../../lib/employmentTimeline";
-import { EmploymentTimelineEmployee, EmploymentPeriod, EMPTY_FILTER_STATE, EmploymentTimelineFilterState } from "../../../lib/employmentPeriodTypes";
+import { EmploymentTimelineEmployee, EMPTY_FILTER_STATE, EmploymentTimelineFilterState } from "../../../lib/employmentPeriodTypes";
 import { EmploymentTimelineGraph, EmploymentTimelineGraphHandle } from "../../../components/employees/EmploymentTimelineGraph";
 import { EmploymentTimelineTable } from "../../../components/employees/EmploymentTimelineTable";
 import { EmploymentTimelineFilters } from "../../../components/employees/EmploymentTimelineFilters";
-import { EmploymentPeriodModal } from "../../../components/employees/EmploymentPeriodModal";
+import { EmploymentDatesModal } from "../../../components/employees/EmploymentDatesModal";
 import { exportEmploymentTimelineCsv, exportEmploymentTimelinePdf, printEmploymentTimeline } from "../../../lib/employmentTimelineExport";
 import { DownloadIcon, PrintIcon } from "../../../components/ui/icons";
 
 type ViewMode = "graph" | "table";
-
-interface ModalState {
-  employee: EmploymentTimelineEmployee;
-  period: EmploymentPeriod | null; // null = adding a new period
-}
 
 interface DisplayStartResponse {
   displayStart: string | null;
@@ -30,7 +25,8 @@ export function EmploymentTimelineTab() {
   const [error, setError] = useState<string | null>(null);
   const [filters, setFilters] = useState<EmploymentTimelineFilterState>(EMPTY_FILTER_STATE);
   const [viewMode, setViewMode] = useState<ViewMode>("graph");
-  const [modalState, setModalState] = useState<ModalState | null>(null);
+  // The employee whose employment dates are open in the editor.
+  const [editing, setEditing] = useState<EmploymentTimelineEmployee | null>(null);
   // Optional manual override of the default "Fit all" range — unrelated to
   // zoom (which just changes pixel density within whatever range is shown).
   // Clearing this returns to the saved "Timeline starts" setting, not to
@@ -140,11 +136,16 @@ export function EmploymentTimelineTab() {
   }
 
   function handleModalSaved() {
-    setModalState(null);
+    setEditing(null);
     load();
   }
 
   const employeeOptions = useMemo(() => (employees ?? []).map((e) => ({ id: e.id, firstName: e.firstName, lastName: e.lastName })), [employees]);
+  const employeeGroupOptions = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const e of employees ?? []) if (e.employeeGroup) byId.set(e.employeeGroup.id, e.employeeGroup.name);
+    return [...byId].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+  }, [employees]);
 
   return (
     <div className="employment-timeline-view">
@@ -255,7 +256,16 @@ export function EmploymentTimelineTab() {
         {settingsError && <span className="field-error">{settingsError}</span>}
       </div>
 
-      <EmploymentTimelineFilters filters={filters} onChange={setFilters} employees={employeeOptions} />
+      <div className="employment-timeline-filter-bar">
+        <EmploymentTimelineFilters filters={filters} onChange={setFilters} employees={employeeOptions} employeeGroups={employeeGroupOptions} />
+        {employees && (
+          // The employees currently displayed (after filters), numbered 1..n
+          // in the graph and table — not everyone in the database.
+          <p className="employment-timeline-count" aria-live="polite">
+            Employees: <strong>{filteredEmployees.length}</strong>
+          </p>
+        )}
+      </div>
 
       {error && <p className="error-text">{error}</p>}
 
@@ -277,28 +287,14 @@ export function EmploymentTimelineTab() {
             setCanZoomIn(zoomIn);
             setCanZoomOut(zoomOut);
           }}
-          onBarClick={(employee, period) => setModalState({ employee, period })}
-          onAddPeriod={(employee) => setModalState({ employee, period: null })}
+          onEditDates={setEditing}
         />
       ) : (
         <EmploymentTimelineTable employees={filteredEmployees} />
       )}
 
-      {modalState && (
-        <EmploymentPeriodModal
-          // Forces a remount (and fresh form state) when switching from
-          // editing one period to "Add another period" for the same
-          // employee — same component type, different `period` prop, which
-          // React would otherwise keep the existing form state for.
-          key={modalState.period?.id ?? `new-${modalState.employee.id}`}
-          employeeId={modalState.employee.id}
-          employeeName={`${modalState.employee.firstName} ${modalState.employee.lastName}`}
-          period={modalState.period}
-          readOnly={!canEdit}
-          onClose={() => setModalState(null)}
-          onSaved={handleModalSaved}
-          onAddAnother={() => setModalState({ employee: modalState.employee, period: null })}
-        />
+      {editing && (
+        <EmploymentDatesModal key={editing.id} employee={editing} readOnly={!canEdit} onClose={() => setEditing(null)} onSaved={handleModalSaved} />
       )}
     </div>
   );

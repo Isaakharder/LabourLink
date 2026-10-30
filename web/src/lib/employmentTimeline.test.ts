@@ -1,375 +1,321 @@
 import { describe, expect, it } from "vitest";
 import {
+  addDaysStr,
   buildEmploymentTimelineRows,
-  buildTimelineHeaderMarks,
-  chooseHeaderGranularity,
+  buildTimelineScale,
   computeBarPosition,
   computeFitAllPxPerDay,
   computeFittedRange,
   daysBetweenDateStrs,
+  EMPLOYMENT_TIMELINE_COLUMNS,
+  employmentTimelineRowCells,
   filterEmploymentTimelineEmployees,
   MAX_PX_PER_DAY,
+  MIN_MONTH_LABEL_PX,
   percentInRange,
+  pinnedYearLabel,
+  rangeDayCount,
+  TimelineRange,
 } from "./employmentTimeline";
-import { EmploymentTimelineEmployee, EmploymentTimelineFilterState, EMPTY_FILTER_STATE } from "./employmentPeriodTypes";
+import { EMPTY_FILTER_STATE, EmploymentTimelineEmployee } from "./employmentPeriodTypes";
 
-function period(overrides: Partial<EmploymentTimelineEmployee["periods"][number]> = {}): EmploymentTimelineEmployee["periods"][number] {
-  return {
-    id: "p1",
-    employeeId: "e1",
-    startDate: "2026-01-01",
-    expectedFinishDate: null,
-    actualFinishDate: null,
-    employmentType: null,
-    workGroup: null,
-    workGroupOtherDescription: null,
-    notes: null,
-    statuses: ["current"],
-    timelineEffectiveEndDate: "2026-06-15",
-    timelineLabel: "ongoing",
-    synthesized: false,
-    createdAt: "2026-01-01T00:00:00.000Z",
-    updatedAt: "2026-01-01T00:00:00.000Z",
-    ...overrides,
-  };
-}
-
-function employee(overrides: Partial<EmploymentTimelineEmployee> = {}): EmploymentTimelineEmployee {
+function emp(overrides: Partial<EmploymentTimelineEmployee> = {}): EmploymentTimelineEmployee {
   return {
     id: "e1",
     firstName: "Alice",
     lastName: "Smith",
-    nationality: null,
+    nationality: "Guatemalan",
     jobGroup: null,
+    employeeGroup: { id: "g-gh", name: "Greenhouse Guys" },
     isActive: true,
+    employmentStartDate: "2026-01-05",
+    workPermitExpiryDate: "2026-09-30",
+    endDifferentDate: null,
     workPermit: null,
+    employmentType: "Seasonal",
+    workGroup: "Greenhouse",
     hasUsableDates: true,
-    periods: [period()],
+    timelineEndDate: "2026-09-30",
+    timelineEndSource: "workPermitExpiry",
+    timelineLabel: "employed",
+    statuses: ["current"],
     ...overrides,
   };
 }
 
-describe("daysBetweenDateStrs", () => {
-  it("counts calendar days, positive when `to` is later", () => {
-    expect(daysBetweenDateStrs("2027-02-01", "2027-02-25")).toBe(24);
-    expect(daysBetweenDateStrs("2027-02-25", "2027-02-01")).toBe(-24);
-    expect(daysBetweenDateStrs("2026-01-01", "2026-01-01")).toBe(0);
+const TODAY = "2026-10-30";
+
+describe("date math", () => {
+  it("counts calendar days, and a range's day slots include both ends", () => {
+    expect(daysBetweenDateStrs("2026-01-01", "2026-01-31")).toBe(30);
+    expect(rangeDayCount({ start: "2026-01-01", end: "2026-01-31" })).toBe(31);
+    expect(addDaysStr("2028-02-28", 1)).toBe("2028-02-29");
+    expect(addDaysStr("2026-12-31", 1)).toBe("2027-01-01");
+  });
+
+  it("a date's position is the left edge of its day", () => {
+    const r = { start: "2026-01-01", end: "2026-01-10" }; // 10 slots
+    expect(percentInRange("2026-01-01", r)).toBe(0);
+    expect(percentInRange("2026-01-06", r)).toBe(50);
+    expect(percentInRange("2026-01-11", r)).toBe(100); // day after the end = right edge
+    expect(percentInRange("2025-12-01", r)).toBe(0);
+    expect(percentInRange("2027-01-01", r)).toBe(100);
+  });
+});
+
+describe("bar position: start, end priority, ongoing", () => {
+  const r: TimelineRange = { start: "2026-01-01", end: "2026-12-31" }; // 365 slots
+  const pct = (d: string) => percentInRange(d, r);
+
+  it("starts on the Employment Start Date and ends after the permit expiry's day when there's no End Different Date", () => {
+    const pos = computeBarPosition(emp(), r)!;
+    expect(pos.leftPercent).toBe(pct("2026-01-05"));
+    expect(pos.leftPercent + pos.widthPercent).toBeCloseTo(pct("2026-10-01"), 10); // through Sep 30 inclusive
+  });
+
+  it("ends on the End Different Date when one is entered (server already chose it as timelineEndDate)", () => {
+    const pos = computeBarPosition(emp({ endDifferentDate: "2026-06-30", timelineEndDate: "2026-06-30", timelineEndSource: "endDifferentDate" }), r)!;
+    expect(pos.leftPercent + pos.widthPercent).toBeCloseTo(pct("2026-07-01"), 10); // exactly on the Jul 1 gridline
+  });
+
+  it("an ongoing bar (no ending dates) runs to the right edge", () => {
+    const pos = computeBarPosition(emp({ workPermitExpiryDate: null, timelineEndDate: null, timelineEndSource: null, timelineLabel: "ongoing" }), r)!;
+    expect(pos.leftPercent + pos.widthPercent).toBe(100);
+  });
+
+  it("flags a start before the visible range and draws it from the edge", () => {
+    const pos = computeBarPosition(emp({ employmentStartDate: "2025-06-01" }), r)!;
+    expect(pos.clippedStart).toBe(true);
+    expect(pos.leftPercent).toBe(0);
+    expect(computeBarPosition(emp(), r)!.clippedStart).toBe(false);
+  });
+
+  it("a bar entirely outside the visible range isn't drawn (no edge sliver)", () => {
+    expect(computeBarPosition(emp({ employmentStartDate: "2024-01-01", timelineEndDate: "2025-12-31" }), r)!.inRange).toBe(false);
+    expect(computeBarPosition(emp({ employmentStartDate: "2027-01-01", timelineEndDate: null }), r)!.inRange).toBe(false);
+    expect(computeBarPosition(emp({ employmentStartDate: "2024-01-01", timelineEndDate: "2026-01-01" }), r)!.inRange).toBe(true);
+    expect(computeBarPosition(emp(), r)!.inRange).toBe(true);
+  });
+
+  it("no Employment Start Date: nothing to draw", () => {
+    expect(computeBarPosition(emp({ hasUsableDates: false, employmentStartDate: null }), r)).toBeNull();
   });
 });
 
 describe("computeFittedRange", () => {
-  const TODAY = "2026-06-15";
-
-  it("spans from the earliest period start to the latest timelineEffectiveEndDate", () => {
-    const a = employee({ id: "a", periods: [period({ startDate: "2020-01-01", timelineEffectiveEndDate: "2021-01-01", timelineLabel: "completed" })] });
-    const b = employee({ id: "b", periods: [period({ startDate: "2023-05-01", timelineEffectiveEndDate: "2027-01-01", timelineLabel: "employed" })] });
-    const range = computeFittedRange([a, b], TODAY);
-    expect(range).toEqual({ start: "2020-01-01", end: "2027-01-01" });
+  it("spans the earliest start to the latest end, at least through today", () => {
+    expect(computeFittedRange([emp(), emp({ id: "e2", employmentStartDate: "2025-03-01", timelineEndDate: "2027-02-04" })], TODAY)).toEqual({
+      start: "2025-03-01",
+      end: "2027-02-04",
+    });
+    expect(computeFittedRange([emp()], TODAY)).toEqual({ start: "2026-01-05", end: TODAY });
   });
 
-  it("includes today when every included period's effective end is already in the past", () => {
-    const a = employee({ periods: [period({ startDate: "2020-01-01", timelineEffectiveEndDate: "2020-06-01", timelineLabel: "completed" })] });
-    const range = computeFittedRange([a], TODAY);
-    expect(range).toEqual({ start: "2020-01-01", end: TODAY });
+  it("uses the saved 'Timeline starts' cutoff for the left edge only, ignores undated rows, null when nothing is datable", () => {
+    expect(computeFittedRange([emp()], TODAY, "2026-03-01")).toEqual({ start: "2026-03-01", end: TODAY });
+    expect(computeFittedRange([emp({ hasUsableDates: false, employmentStartDate: null })], TODAY)).toBeNull();
   });
 
-  it("skips employees flagged hasUsableDates:false entirely — they don't affect the range", () => {
-    const dated = employee({ id: "dated", periods: [period({ startDate: "2024-01-01", timelineEffectiveEndDate: "2024-06-01", timelineLabel: "completed" })] });
-    const flagged = employee({ id: "flagged", hasUsableDates: false, periods: [] });
-    const range = computeFittedRange([dated, flagged], TODAY);
-    expect(range).toEqual({ start: "2024-01-01", end: TODAY });
-  });
-
-  it("returns null when nothing datable is included at all", () => {
-    const flagged = employee({ hasUsableDates: false, periods: [] });
-    expect(computeFittedRange([flagged], TODAY)).toBeNull();
-  });
-
-  it("recalculates from whatever list it's given — simulating 'recalculate after filters'", () => {
-    const a = employee({ id: "a", periods: [period({ startDate: "2020-01-01", timelineEffectiveEndDate: "2021-01-01", timelineLabel: "completed" })] });
-    const b = employee({ id: "b", periods: [period({ startDate: "2023-01-01", timelineEffectiveEndDate: "2024-01-01", timelineLabel: "completed" })] });
-    expect(computeFittedRange([a, b], TODAY)).toEqual({ start: "2020-01-01", end: TODAY });
-    // Once "a" is filtered out client-side, the range recomputed over the
-    // remaining list narrows accordingly.
-    expect(computeFittedRange([b], TODAY)).toEqual({ start: "2023-01-01", end: TODAY });
-  });
-
-  it("a saved displayStartOverride replaces the true earliest start on the left edge only", () => {
-    const a = employee({ periods: [period({ startDate: "2018-01-01", timelineEffectiveEndDate: "2020-01-01", timelineLabel: "completed" })] });
-    const range = computeFittedRange([a], TODAY, "2022-01-01");
-    expect(range).toEqual({ start: "2022-01-01", end: TODAY });
-  });
-
-  it("the right edge is never affected by displayStartOverride", () => {
-    const a = employee({ periods: [period({ startDate: "2018-01-01", timelineEffectiveEndDate: "2030-01-01", timelineLabel: "employed" })] });
-    const range = computeFittedRange([a], TODAY, "2022-01-01");
-    expect(range?.end).toBe("2030-01-01");
-  });
-
-  it("a null/omitted displayStartOverride falls back to the true earliest start, unchanged", () => {
-    const a = employee({ periods: [period({ startDate: "2018-01-01", timelineEffectiveEndDate: "2020-01-01", timelineLabel: "completed" })] });
-    expect(computeFittedRange([a], TODAY, null)).toEqual({ start: "2018-01-01", end: TODAY });
-    expect(computeFittedRange([a], TODAY)).toEqual({ start: "2018-01-01", end: TODAY });
-  });
-
-  it("recalculates the fit-all range inside the configured display start after filters narrow the employee set", () => {
-    const a = employee({ id: "a", periods: [period({ startDate: "2019-01-01", timelineEffectiveEndDate: "2019-06-01", timelineLabel: "completed" })] });
-    const b = employee({ id: "b", periods: [period({ startDate: "2023-01-01", timelineEffectiveEndDate: "2024-01-01", timelineLabel: "completed" })] });
-    // Saved cutoff is later than "a"'s real start — "a" alone would clip;
-    // filtering it out entirely still keeps the same configured left edge.
-    expect(computeFittedRange([a, b], TODAY, "2022-01-01")).toEqual({ start: "2022-01-01", end: TODAY });
-    expect(computeFittedRange([b], TODAY, "2022-01-01")).toEqual({ start: "2022-01-01", end: TODAY });
-  });
-});
-
-describe("percentInRange / computeBarPosition", () => {
-  const range = { start: "2026-01-01", end: "2026-12-31" };
-
-  it("start of range is 0%, end of range is 100%", () => {
-    expect(percentInRange("2026-01-01", range)).toBe(0);
-    expect(percentInRange("2026-12-31", range)).toBe(100);
-  });
-
-  it("clamps a date outside the range instead of going negative or past 100", () => {
-    expect(percentInRange("2025-01-01", range)).toBe(0);
-    expect(percentInRange("2027-01-01", range)).toBe(100);
-  });
-
-  it("a completed period positions between its start and its actual (recorded) end, not extended", () => {
-    const p = period({ startDate: "2026-02-01", timelineEffectiveEndDate: "2026-03-01", timelineLabel: "completed" });
-    const pos = computeBarPosition(p, range);
-    expect(pos.leftPercent).toBeCloseTo(percentInRange("2026-02-01", range), 5);
-    expect(pos.leftPercent + pos.widthPercent).toBeCloseTo(percentInRange("2026-03-01", range), 5);
-  });
-
-  it("an 'ongoing' period is drawn all the way to the range's right edge (100%), not clipped at its own effectiveEndDate", () => {
-    const p = period({ startDate: "2026-02-01", timelineEffectiveEndDate: "2026-06-15", timelineLabel: "ongoing" });
-    const pos = computeBarPosition(p, range);
-    expect(pos.leftPercent + pos.widthPercent).toBeCloseTo(100, 5);
-  });
-
-  it("an 'expiredStillWorking' period is also drawn to the range's right edge", () => {
-    const p = period({ startDate: "2026-02-01", timelineEffectiveEndDate: "2026-06-15", timelineLabel: "expiredStillWorking" });
-    const pos = computeBarPosition(p, range);
-    expect(pos.leftPercent + pos.widthPercent).toBeCloseTo(100, 5);
-  });
-
-  it("an 'employed' period (future finish/expiry) ends exactly at its own effectiveEndDate, not the range edge", () => {
-    const p = period({ startDate: "2026-02-01", timelineEffectiveEndDate: "2026-08-01", timelineLabel: "employed" });
-    const pos = computeBarPosition(p, range);
-    expect(pos.leftPercent + pos.widthPercent).toBeCloseTo(percentInRange("2026-08-01", range), 5);
-  });
-
-  it("flags clippedStart when the period's real start is before the displayed range's left edge", () => {
-    const p = period({ startDate: "2025-06-01", timelineEffectiveEndDate: "2026-06-15", timelineLabel: "ongoing" });
-    const pos = computeBarPosition(p, range); // range starts 2026-01-01, period started 2025-06-01
-    expect(pos.clippedStart).toBe(true);
-    expect(pos.leftPercent).toBe(0); // drawn from the display boundary, not the true (earlier) start
-  });
-
-  it("does not flag clippedStart when the period starts at or after the range's left edge", () => {
-    const atEdge = computeBarPosition(period({ startDate: "2026-01-01", timelineLabel: "ongoing" }), range);
-    const afterEdge = computeBarPosition(period({ startDate: "2026-02-01", timelineLabel: "ongoing" }), range);
-    expect(atEdge.clippedStart).toBe(false);
-    expect(afterEdge.clippedStart).toBe(false);
-  });
-});
-
-describe("computeFitAllPxPerDay", () => {
-  it("divides the container width evenly across the whole range", () => {
+  it("fit-all density divides the track width across the range", () => {
     expect(computeFitAllPxPerDay(100, 1000)).toBe(10);
-  });
-
-  it("falls back to MAX_PX_PER_DAY for a degenerate (zero) range or container", () => {
     expect(computeFitAllPxPerDay(0, 1000)).toBe(MAX_PX_PER_DAY);
-    expect(computeFitAllPxPerDay(100, 0)).toBe(MAX_PX_PER_DAY);
   });
 });
 
-describe("chooseHeaderGranularity", () => {
-  it("picks the finest granularity whose marks are still comfortably spaced apart", () => {
-    expect(chooseHeaderGranularity(100)).toBe("day"); // 100px/day — plenty of room for daily marks
-    expect(chooseHeaderGranularity(10)).toBe("week"); // 70px/week
-    expect(chooseHeaderGranularity(3)).toBe("month"); // ~90px/month
-    expect(chooseHeaderGranularity(1)).toBe("quarter"); // ~91px/quarter
-    expect(chooseHeaderGranularity(0.05)).toBe("year"); // even a year is < 64px — coarsest available still used
+describe("date scale: month and year labels", () => {
+  // Every gridline position must equal the exact calendar-day offset of
+  // its month start — independent of DST or leap years.
+  function expectExactBoundaries(range: TimelineRange) {
+    const scale = buildTimelineScale(range, 5);
+    for (const seg of scale.months.filter((s) => s.isBoundary)) {
+      expect(seg.key.endsWith("-01")).toBe(true);
+      expect(seg.leftPercent).toBeCloseTo((daysBetweenDateStrs(range.start, seg.key) / rangeDayCount(range)) * 100, 10);
+    }
+    return scale;
+  }
+
+  it("labels every month Jan..Dec with the year above, across a year boundary", () => {
+    const range = { start: "2025-11-01", end: "2026-02-28" };
+    const scale = expectExactBoundaries(range);
+    expect(scale.months.map((s) => [s.key, s.label, s.showLabel])).toEqual([
+      ["2025-11-01", "Nov", true],
+      ["2025-12-01", "Dec", true],
+      ["2026-01-01", "Jan", true],
+      ["2026-02-01", "Feb", true],
+    ]);
+    expect(scale.years.map((s) => [s.label, s.isBoundary, s.showLabel])).toEqual([
+      ["2025", false, true],
+      ["2026", true, true],
+    ]);
+    // The year boundary sits exactly on the January gridline.
+    expect(scale.years[1].leftPercent).toBe(scale.months[2].leftPercent);
+  });
+
+  it("is exact through a leap February (2028-02-29) — March starts 60 days after Jan 1", () => {
+    const range = { start: "2028-01-01", end: "2028-04-30" };
+    const scale = expectExactBoundaries(range);
+    const march = scale.months.find((s) => s.key === "2028-03-01")!;
+    expect(march.leftPercent).toBeCloseTo((60 / 121) * 100, 10);
+    const feb = scale.months.find((s) => s.key === "2028-02-01")!;
+    expect(feb.widthPercent).toBeCloseTo((29 / 121) * 100, 10);
+  });
+
+  it("is exact across both Toronto DST changes (2026-03-08 and 2026-11-01): whole-day slots, no hour drift", () => {
+    const range = { start: "2026-02-01", end: "2026-12-31" };
+    const scale = expectExactBoundaries(range);
+    const slot = 100 / rangeDayCount(range);
+    // March (31 days, contains the spring-forward day) and November (30
+    // days, contains the fall-back day) are exactly 31 and 30 slots wide.
+    expect(scale.months.find((s) => s.key === "2026-03-01")!.widthPercent).toBeCloseTo(31 * slot, 10);
+    expect(scale.months.find((s) => s.key === "2026-11-01")!.widthPercent).toBeCloseTo(30 * slot, 10);
+    // A bar starting on each DST day starts exactly one whole slot after the day before.
+    for (const day of ["2026-03-08", "2026-11-01"]) {
+      const before = computeBarPosition(emp({ employmentStartDate: addDaysStr(day, -1) }), range)!.leftPercent;
+      const on = computeBarPosition(emp({ employmentStartDate: day }), range)!.leftPercent;
+      expect(on - before).toBeCloseTo(slot, 10);
+    }
+    // A bar ending Oct 31 meets the Nov 1 gridline exactly.
+    const pos = computeBarPosition(emp({ employmentStartDate: "2026-02-01", timelineEndDate: "2026-10-31" }), range)!;
+    expect(pos.leftPercent + pos.widthPercent).toBeCloseTo(scale.months.find((s) => s.key === "2026-11-01")!.leftPercent, 10);
+  });
+
+  it("thins month labels when zoomed out so they never overlap, keeping every gridline and January", () => {
+    const range = { start: "2020-01-01", end: "2026-12-31" };
+    for (const pxPerDay of [0.3, 0.6, 1, 2, 5]) {
+      const scale = buildTimelineScale(range, pxPerDay);
+      expect(scale.months.filter((s) => s.isBoundary)).toHaveLength(84); // a gridline for every month
+      const labeled = scale.months.filter((s) => s.showLabel);
+      const totalPx = rangeDayCount(range) * pxPerDay;
+      for (let i = 1; i < labeled.length; i++) {
+        expect(((labeled[i].leftPercent - labeled[i - 1].leftPercent) / 100) * totalPx).toBeGreaterThanOrEqual(MIN_MONTH_LABEL_PX - 3);
+      }
+      if (scale.monthLabelStep > 0) expect(labeled.filter((s) => s.label === "Jan")).toHaveLength(7);
+    }
+    expect(buildTimelineScale(range, 0.6).monthLabelStep).toBe(2);
+    expect(buildTimelineScale(range, 5).monthLabelStep).toBe(1);
+  });
+
+  it("labels years every year at normal zoom and hides a too-narrow partial first year", () => {
+    const scale = buildTimelineScale({ start: "2025-12-20", end: "2028-06-30" }, 1);
+    expect(scale.years.map((s) => [s.label, s.showLabel])).toEqual([
+      ["2025", false], // 12 days ≈ 12px: no room
+      ["2026", true],
+      ["2027", true],
+      ["2028", true],
+    ]);
+  });
+
+  it("follows a custom From/To mid-month range: partial first month labeled only when there's room", () => {
+    const scale = buildTimelineScale({ start: "2026-05-17", end: "2026-08-20" }, 6);
+    expect(scale.months[0]).toMatchObject({ key: "2026-05-17", label: "May", isBoundary: false, leftPercent: 0, showLabel: true });
+    const tight = buildTimelineScale({ start: "2026-05-29", end: "2026-08-20" }, 6);
+    expect(tight.months[0]).toMatchObject({ label: "May", showLabel: false });
+  });
+
+  it("adds week marks, then day marks, at close zoom", () => {
+    const r = { start: "2026-03-02", end: "2026-03-31" };
+    expect(buildTimelineScale(r, 5).minor).toBeNull();
+    const weeks = buildTimelineScale(r, 10).minor!;
+    expect(weeks.granularity).toBe("week");
+    expect(weeks.marks.map((m) => m.key)).toEqual(["2026-03-02", "2026-03-09", "2026-03-16", "2026-03-23", "2026-03-30"]);
+    const days = buildTimelineScale(r, MAX_PX_PER_DAY).minor!;
+    expect(days.granularity).toBe("day");
+    expect(days.marks).toHaveLength(30);
   });
 });
 
-describe("buildTimelineHeaderMarks", () => {
-  it("month granularity: one mark per calendar month crossed, inclusive of both ends", () => {
-    const marks = buildTimelineHeaderMarks({ start: "2026-01-15", end: "2026-04-05" }, 3);
-    expect(marks.map((m) => m.key)).toEqual(["2026-01-01", "2026-02-01", "2026-03-01", "2026-04-01"]);
+describe("filters and numbering", () => {
+  const people = [
+    emp({ id: "a", firstName: "Alice" }),
+    emp({ id: "b", firstName: "Bob", nationality: "Mexican", employeeGroup: null, workGroup: null, employmentType: null, statuses: ["permitExpired"] }),
+    emp({ id: "c", firstName: "Carla", employeeGroup: { id: "g-loc", name: "Locals" }, statuses: ["current", "finishingSoon"] }),
+  ];
+  const ids = (list: EmploymentTimelineEmployee[]) => list.map((e) => e.id);
+
+  it("no filters keeps everyone in the server's order", () => {
+    expect(ids(filterEmploymentTimelineEmployees(people, EMPTY_FILTER_STATE))).toEqual(["a", "b", "c"]);
   });
 
-  it("month granularity labels a year boundary (and the very first mark) with the year, other months with just the abbreviation", () => {
-    const marks = buildTimelineHeaderMarks({ start: "2025-11-01", end: "2026-02-01" }, 3);
-    expect(marks.map((m) => m.label)).toEqual(["Nov 2025", "Dec", "Jan 2026", "Feb"]);
+  it.each([
+    ["employee", { employeeIds: ["c"] }, ["c"]],
+    ["nationality", { nationalities: ["Mexican"] }, ["b"]],
+    ["employee group", { employeeGroupIds: ["g-gh"] }, ["a"]],
+    ["employee group Ungrouped", { employeeGroupIds: ["Ungrouped"] }, ["b"]],
+    ["employment type Unspecified", { employmentTypes: ["Unspecified"] }, ["b"]],
+    ["work group", { workGroups: ["Greenhouse"] }, ["a", "c"]],
+    ["status", { statuses: ["finishingSoon" as const] }, ["c"]],
+    ["two categories (AND)", { nationalities: ["Guatemalan"], employeeGroupIds: ["g-loc"] }, ["c"]],
+  ])("%s filter", (_label, f, expected) => {
+    expect(ids(filterEmploymentTimelineEmployees(people, { ...EMPTY_FILTER_STATE, ...f }))).toEqual(expected);
   });
 
-  it("positions each mark by percentage within the range", () => {
-    const marks = buildTimelineHeaderMarks({ start: "2026-01-01", end: "2026-12-31" }, 3);
-    expect(marks[0].leftPercent).toBe(0);
-    expect(marks[marks.length - 1].leftPercent).toBeGreaterThan(90);
-  });
-
-  it("year granularity: one mark per year crossed, when zoomed far out over a multi-year range", () => {
-    const marks = buildTimelineHeaderMarks({ start: "2020-06-01", end: "2026-03-01" }, 0.05);
-    expect(marks.map((m) => m.label)).toEqual(["2020", "2021", "2022", "2023", "2024", "2025", "2026"]);
-  });
-
-  it("quarter granularity: one mark per quarter, year shown at Q1 and the first mark", () => {
-    const marks = buildTimelineHeaderMarks({ start: "2025-11-01", end: "2026-08-01" }, 1);
-    expect(marks.map((m) => m.label)).toEqual(["Q4 2025", "Q1 2026", "Q2", "Q3"]);
-  });
-
-  it("week granularity: one mark per Monday-start week, when moderately zoomed in", () => {
-    const marks = buildTimelineHeaderMarks({ start: "2026-01-05", end: "2026-01-26" }, 10);
-    expect(marks.map((m) => m.key)).toEqual(["2026-01-05", "2026-01-12", "2026-01-19", "2026-01-26"]);
-  });
-
-  it("day granularity: one mark per day, when zoomed in close", () => {
-    const marks = buildTimelineHeaderMarks({ start: "2026-01-01", end: "2026-01-05" }, 100);
-    expect(marks.map((m) => m.key)).toEqual(["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04", "2026-01-05"]);
+  it("rows are numbered 1..n in displayed order, and renumber from 1 after filtering", () => {
+    expect(buildEmploymentTimelineRows(people).map((r) => [r.number, r.employeeName])).toEqual([
+      [1, "Alice Smith"],
+      [2, "Bob Smith"],
+      [3, "Carla Smith"],
+    ]);
+    const filtered = filterEmploymentTimelineEmployees(people, { ...EMPTY_FILTER_STATE, workGroups: ["Greenhouse"] });
+    expect(buildEmploymentTimelineRows(filtered).map((r) => [r.number, r.employeeName])).toEqual([
+      [1, "Alice Smith"],
+      [2, "Carla Smith"],
+    ]);
   });
 });
 
-describe("filterEmploymentTimelineEmployees", () => {
-  const alice = employee({
-    id: "alice",
-    firstName: "Alice",
-    nationality: "Guatemalan",
-    periods: [period({ id: "alice-1", workGroup: "Greenhouse", employmentType: "Seasonal", statuses: ["current"] })],
-  });
-  const bob = employee({
-    id: "bob",
-    firstName: "Bob",
-    nationality: "Guatemalan",
-    periods: [period({ id: "bob-1", workGroup: "Warehouse", employmentType: "Permanent", statuses: ["current"] })],
-  });
-  const carla = employee({
-    id: "carla",
-    firstName: "Carla",
-    nationality: "Filipino",
-    periods: [period({ id: "carla-1", workGroup: "Greenhouse", employmentType: "Seasonal", statuses: ["current"] })],
-  });
-  const dave = employee({
-    id: "dave",
-    firstName: "Dave",
-    nationality: null,
-    periods: [period({ id: "dave-1", workGroup: null, employmentType: null, statuses: ["current"] })],
-  });
-  const all = [alice, bob, carla, dave];
-
-  it("no filters (EMPTY_FILTER_STATE) returns everyone", () => {
-    expect(filterEmploymentTimelineEmployees(all, EMPTY_FILTER_STATE).map((e) => e.id)).toEqual(["alice", "bob", "carla", "dave"]);
-  });
-
-  it("combined filters: Guatemalan + Greenhouse + Seasonal returns only the exact match (Alice), not Bob (wrong Work Group) or Carla (wrong nationality)", () => {
-    const filters: EmploymentTimelineFilterState = { ...EMPTY_FILTER_STATE, nationalities: ["Guatemalan"], workGroups: ["Greenhouse"], employmentTypes: ["Seasonal"] };
-    expect(filterEmploymentTimelineEmployees(all, filters).map((e) => e.id)).toEqual(["alice"]);
-  });
-
-  it("OR within a category: two Work Group values returns employees matching either", () => {
-    const filters: EmploymentTimelineFilterState = { ...EMPTY_FILTER_STATE, workGroups: ["Greenhouse", "Warehouse"] };
-    expect(filterEmploymentTimelineEmployees(all, filters).map((e) => e.id).sort()).toEqual(["alice", "bob", "carla"]);
-  });
-
-  it("the literal 'Unspecified' value matches an employee/period with no classification", () => {
-    const filters: EmploymentTimelineFilterState = { ...EMPTY_FILTER_STATE, workGroups: ["Unspecified"] };
-    expect(filterEmploymentTimelineEmployees(all, filters).map((e) => e.id)).toEqual(["dave"]);
-  });
-
-  it("a qualifying employee keeps ALL of their periods, not just the matching one", () => {
-    const multi = employee({
-      id: "multi",
-      nationality: "Thai",
-      periods: [
-        period({ id: "multi-old", workGroup: "Outdoor", employmentType: "Temporary", statuses: ["completed"] }),
-        period({ id: "multi-new", workGroup: "Greenhouse", employmentType: "Seasonal", statuses: ["current"] }),
-      ],
-    });
-    const filters: EmploymentTimelineFilterState = { ...EMPTY_FILTER_STATE, workGroups: ["Greenhouse"] };
-    const result = filterEmploymentTimelineEmployees([multi], filters);
-    expect(result).toHaveLength(1);
-    expect(result[0].periods.map((p) => p.id)).toEqual(["multi-old", "multi-new"]);
-  });
-
-  it("employeeIds filter restricts to the selected employees regardless of other filters", () => {
-    const filters: EmploymentTimelineFilterState = { ...EMPTY_FILTER_STATE, employeeIds: ["bob", "dave"] };
-    expect(filterEmploymentTimelineEmployees(all, filters).map((e) => e.id).sort()).toEqual(["bob", "dave"]);
-  });
-
-  it("status filter uses the period's own computed statuses", () => {
-    const overdueEmp = employee({ id: "overdue-emp", periods: [period({ id: "od-1", statuses: ["current", "overdue"] })] });
-    const filters: EmploymentTimelineFilterState = { ...EMPTY_FILTER_STATE, statuses: ["overdue"] };
-    expect(filterEmploymentTimelineEmployees([overdueEmp, alice], filters).map((e) => e.id)).toEqual(["overdue-emp"]);
+describe("table/CSV/PDF/Print rows", () => {
+  it("use the new date names and the bar's end priority, one row per employee", () => {
+    expect(EMPLOYMENT_TIMELINE_COLUMNS).toEqual([
+      "#",
+      "Employee",
+      "Nationality",
+      "Employee Group",
+      "Employment Type",
+      "Work Group",
+      "Employment Start Date",
+      "Work Permit Expiry Date",
+      "End Different Date",
+      "Timeline ends",
+      "Status",
+    ]);
+    const rows = buildEmploymentTimelineRows([
+      emp(),
+      emp({ id: "x", endDifferentDate: "2026-06-30", timelineEndDate: "2026-06-30", timelineEndSource: "endDifferentDate" }),
+      emp({ id: "y", workPermitExpiryDate: null, timelineEndDate: null, timelineEndSource: null, timelineLabel: "ongoing" }),
+      emp({ id: "z", hasUsableDates: false, employmentStartDate: null, timelineEndDate: null, timelineLabel: null }),
+    ]);
+    expect(employmentTimelineRowCells(rows[0])).toEqual([
+      "1",
+      "Alice Smith",
+      "Guatemalan",
+      "Greenhouse Guys",
+      "Seasonal",
+      "Greenhouse",
+      "2026-01-05",
+      "2026-09-30",
+      "",
+      "2026-09-30 (Work Permit Expiry Date)",
+      "Employed",
+    ]);
+    expect(rows[1].timelineEnds).toBe("2026-06-30 (End Different Date)");
+    expect(rows[1].workPermitExpiryDate).toBe("2026-09-30");
+    expect(rows[2].timelineEnds).toBe("Ongoing");
+    expect(rows[3]).toMatchObject({ number: 4, startDate: "", status: "No Employment Start Date recorded" });
+    const allText = rows.flatMap(employmentTimelineRowCells).join(" ");
+    expect(allText).not.toMatch(/Expected finish|Actual finish|Expired — still working/i);
   });
 });
 
-describe("buildEmploymentTimelineRows — table/export parity", () => {
-  it("produces one row per period with the expected columns, Unspecified fallbacks, and the shared timelineLabel text as Status", () => {
-    const emp = employee({
-      nationality: null,
-      periods: [
-        period({
-          id: "p-a",
-          startDate: "2026-01-01",
-          expectedFinishDate: "2026-06-01",
-          actualFinishDate: null,
-          employmentType: null,
-          workGroup: "Greenhouse",
-          timelineLabel: "employed",
-        }),
-      ],
-    });
-    const rows = buildEmploymentTimelineRows([emp]);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toEqual({
-      employeeName: "Alice Smith",
-      nationality: "Unspecified",
-      workGroup: "Greenhouse",
-      employmentType: "Unspecified",
-      startDate: "2026-01-01",
-      expectedFinishDate: "2026-06-01",
-      actualFinishDate: "",
-      status: "Employed",
-    });
+describe("pinned year while scrolled", () => {
+  const range = { start: "2024-01-01", end: "2026-12-31" };
+  it("pins the year of the first visible day once its own label has scrolled away", () => {
+    // 10px/day: 2025-07-01 is day 547 -> 5470px.
+    expect(pinnedYearLabel(range, 10, 0)).toBeNull();
+    expect(pinnedYearLabel(range, 10, 5470)).toBe("2025");
+    expect(pinnedYearLabel(range, 10, 3660)).toBeNull(); // exactly on 2025-01-01: its own label is in view
   });
-
-  it("uses the exact 'Expired — still working' / 'Ongoing' text for those timeline labels", () => {
-    const expired = employee({ id: "e1", periods: [period({ timelineLabel: "expiredStillWorking" })] });
-    const ongoing = employee({ id: "e2", periods: [period({ timelineLabel: "ongoing" })] });
-    const rows = buildEmploymentTimelineRows([expired, ongoing]);
-    expect(rows[0].status).toBe("Expired — still working");
-    expect(rows[1].status).toBe("Ongoing");
-  });
-
-  it("an employee with no usable dates gets exactly one flagged placeholder row, not zero rows", () => {
-    const flagged = employee({ hasUsableDates: false, periods: [] });
-    const rows = buildEmploymentTimelineRows([flagged]);
-    expect(rows).toHaveLength(1);
-    expect(rows[0].status).toBe("No employment dates recorded");
-    expect(rows[0].employeeName).toBe("Alice Smith");
-  });
-
-  it("is the exact same builder the table view and CSV/PDF export both call — same array reference shape for identical input", () => {
-    const emp = employee();
-    const rowsA = buildEmploymentTimelineRows([emp]);
-    const rowsB = buildEmploymentTimelineRows([emp]);
-    expect(rowsA).toEqual(rowsB);
-  });
-
-  it("multiple periods for one employee produce multiple rows, one per period", () => {
-    const emp = employee({
-      periods: [
-        period({ id: "p1", startDate: "2024-01-01", actualFinishDate: "2024-06-01", timelineLabel: "completed" }),
-        period({ id: "p2", startDate: "2024-07-01", timelineLabel: "ongoing" }),
-      ],
-    });
-    const rows = buildEmploymentTimelineRows([emp]);
-    expect(rows).toHaveLength(2);
-    expect(rows[0].startDate).toBe("2024-01-01");
-    expect(rows[1].startDate).toBe("2024-07-01");
+  it("hides just before the next year's label arrives (no overlap)", () => {
+    const beforeJan1 = daysBetweenDateStrs(range.start, "2026-01-01") * 10 - 20; // 20px before
+    expect(pinnedYearLabel(range, 10, beforeJan1)).toBeNull();
   });
 });

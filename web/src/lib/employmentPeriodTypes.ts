@@ -1,7 +1,8 @@
-// Client mirror of server/src/lib/employmentPeriods.ts's enums/status logic
-// — this app has no shared package between server/ and web/ (see
-// timezone.ts's own header comment), so small duplication like this is the
-// established convention.
+// Client mirror of the Employment Timeline's server-side enums and
+// response shape (server/src/lib/employmentPeriods.ts and
+// employmentTimelineView.ts) — this app has no shared package between
+// server/ and web/ (see timezone.ts's own header comment), so small
+// duplication like this is the established convention.
 
 export const EMPLOYMENT_TYPES = ["Permanent", "Temporary", "Seasonal", "Other"] as const;
 export type EmploymentType = (typeof EMPLOYMENT_TYPES)[number];
@@ -9,55 +10,37 @@ export type EmploymentType = (typeof EMPLOYMENT_TYPES)[number];
 export const WORK_GROUPS = ["Greenhouse", "Warehouse", "Outdoor", "Maintenance", "Management", "Other"] as const;
 export type WorkGroup = (typeof WORK_GROUPS)[number];
 
-export type EmploymentPeriodStatus = "future" | "startingSoon" | "current" | "finishingSoon" | "overdue" | "completed";
+export type EmploymentPeriodStatus = "future" | "startingSoon" | "current" | "finishingSoon" | "permitExpired" | "completed";
 
 export const STATUS_LABELS: Record<EmploymentPeriodStatus, string> = {
   future: "Future/planned",
   startingSoon: "Starting soon",
   current: "Currently employed",
   finishingSoon: "Finishing soon",
-  overdue: "Expected finish overdue",
-  completed: "Completed",
+  permitExpired: "Permit expired",
+  completed: "Finished",
 };
 
-// Employment Timeline redesign — computed server-side once, in
-// server/src/lib/employmentTimelineView.ts, and shipped on every period so
-// the Graph, Table, CSV, PDF and Print views all read the same values
-// rather than each re-deriving inclusion/labeling and risking disagreement.
-export type TimelineBarLabel = "completed" | "ongoing" | "employed" | "expiredStillWorking";
+// The employment-date names used everywhere on the timeline (editor, graph
+// tooltip, table, CSV, PDF, print) and on the Employee form.
+export const DATE_FIELD_LABELS = {
+  startDate: "Employment Start Date",
+  workPermitExpiryDate: "Work Permit Expiry Date",
+  endDifferentDate: "End Different Date",
+} as const;
+
+// Computed server-side once (employmentTimelineView.ts) so the Graph,
+// Table, CSV, PDF and Print views all read the same values.
+export type TimelineBarLabel = "completed" | "ongoing" | "employed" | "permitExpired";
 
 export const TIMELINE_BAR_LABEL_TEXT: Record<TimelineBarLabel, string> = {
-  completed: "Completed",
+  completed: "Finished",
   ongoing: "Ongoing",
   employed: "Employed",
-  expiredStillWorking: "Expired — still working",
+  permitExpired: "Permit expired",
 };
 
-export interface EmploymentPeriod {
-  id: string;
-  employeeId: string;
-  startDate: string;
-  expectedFinishDate: string | null;
-  actualFinishDate: string | null;
-  employmentType: EmploymentType | null;
-  workGroup: WorkGroup | null;
-  workGroupOtherDescription: string | null;
-  notes: string | null;
-  statuses: EmploymentPeriodStatus[];
-  // Always a concrete YYYY-MM-DD (never null) — see computeTimelineBar's own
-  // comment for exactly how it's derived. "ongoing"/"expiredStillWorking"
-  // bars are drawn to the graph's actual right edge (always >= today), not
-  // literally clipped at this value.
-  timelineEffectiveEndDate: string;
-  timelineLabel: TimelineBarLabel;
-  // True only for the one virtual period the server synthesizes for an
-  // employee with zero real employment_periods rows but a usable
-  // employees.start_date — there is no real period behind it, so it must
-  // not be offered for edit/delete the way a real period is.
-  synthesized: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
+export type TimelineEndSource = "endDifferentDate" | "workPermitExpiry" | null;
 
 export interface EmploymentTimelineWorkPermit {
   expiryDate: string;
@@ -71,29 +54,34 @@ export interface EmploymentTimelineEmployee {
   lastName: string;
   nationality: string | null;
   jobGroup: string | null;
+  // Employee Group (Employees > Employee Groups); null = Ungrouped.
+  employeeGroup: { id: string; name: string } | null;
   isActive: boolean;
+  // The three employment dates, straight from the employee record (one
+  // source of truth with the Employees Directory).
+  employmentStartDate: string | null;
+  workPermitExpiryDate: string | null;
+  endDifferentDate: string | null;
   workPermit: EmploymentTimelineWorkPermit | null;
-  // False only when the employee has neither a usable employees.start_date
-  // nor any employment_periods row — nothing to draw a bar from. Renders as
-  // a flagged placeholder row rather than being silently omitted.
+  // From the employee's latest employment period — shown and filterable,
+  // no longer edited from the timeline.
+  employmentType: EmploymentType | null;
+  workGroup: WorkGroup | null;
+  // False when there's no Employment Start Date — rendered as a flagged
+  // placeholder row rather than silently omitted.
   hasUsableDates: boolean;
-  periods: EmploymentPeriod[];
-}
-
-export interface EmploymentPeriodHistoryEntry {
-  id: string;
-  employmentPeriodId: string | null;
-  changeType: "created" | "updated" | "deleted";
-  oldValue: Record<string, unknown> | null;
-  newValue: Record<string, unknown> | null;
-  changedAt: string;
-  reason: string | null;
-  changedBy: string;
+  // The bar's last day (inclusive): End Different Date, else permit expiry;
+  // null = ongoing (drawn to the visible range's right edge).
+  timelineEndDate: string | null;
+  timelineEndSource: TimelineEndSource;
+  timelineLabel: TimelineBarLabel | null;
+  statuses: EmploymentPeriodStatus[];
 }
 
 export interface EmploymentTimelineFilterState {
   employeeIds: string[]; // empty = All
   nationalities: string[]; // empty = All
+  employeeGroupIds: string[]; // empty = All; may include the literal "Ungrouped"
   workGroups: string[]; // empty = All; may include the literal "Unspecified"
   employmentTypes: string[]; // empty = All; may include the literal "Unspecified"
   statuses: EmploymentPeriodStatus[]; // empty = All
@@ -102,6 +90,7 @@ export interface EmploymentTimelineFilterState {
 export const EMPTY_FILTER_STATE: EmploymentTimelineFilterState = {
   employeeIds: [],
   nationalities: [],
+  employeeGroupIds: [],
   workGroups: [],
   employmentTypes: [],
   statuses: [],

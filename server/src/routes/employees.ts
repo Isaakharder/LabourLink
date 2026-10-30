@@ -79,6 +79,36 @@ interface EmployeeFields {
   breakProfileId: string | null;
   // Employee Group (056_employee_groups.sql); null = Ungrouped.
   employeeGroupId: string | null;
+  // End Different Date (068_employee_employment_end_date.sql): the day the
+  // employee actually stopped working when different from the work permit
+  // expiry. Optional; never deactivates anyone.
+  employmentEndDate: string | null;
+}
+
+// The Employment Timeline's date rule, enforced on every save path (the
+// Employee form and the timeline editor both PATCH this route): an ending
+// date — End Different Date or Work Permit Expiry Date — can't be earlier
+// than the Employment Start Date. Checked against the values the employee
+// will have after the save, so a partial update is validated too.
+function endingDateErrors(dates: {
+  startDate: string | null;
+  workPermitExpiryDate: string | null;
+  employmentEndDate: string | null;
+}): Record<string, string> {
+  const errors: Record<string, string> = {};
+  if (dates.startDate && dates.employmentEndDate && dates.employmentEndDate < dates.startDate) {
+    errors.employmentEndDate = "End Different Date can't be earlier than the Employment Start Date";
+  }
+  if (dates.startDate && dates.workPermitExpiryDate && dates.workPermitExpiryDate < dates.startDate) {
+    errors.workPermitExpiryDate = "Work Permit Expiry Date can't be earlier than the Employment Start Date";
+  }
+  return errors;
+}
+
+function parseEndDate(raw: unknown): { value: string | null } | { error: string } {
+  if (raw == null || String(raw).trim() === "") return { value: null };
+  if (!isValidDate(raw)) return { error: "End Different Date is not a valid date" };
+  return { value: raw as string };
 }
 
 // Validates a full create payload — every required field must be present.
@@ -94,6 +124,9 @@ function validateCreate(body: Record<string, unknown>):
   if (!lastName) errors.lastName = "Last name is required";
 
   if (!isValidDate(body.startDate)) errors.startDate = "A valid start date is required";
+
+  const endParse = parseEndDate(body.employmentEndDate);
+  if ("error" in endParse) errors.employmentEndDate = endParse.error;
 
   const nationality = body.nationality as Nationality;
   if (!NATIONALITIES.includes(nationality)) {
@@ -186,6 +219,7 @@ function validateCreate(body: Record<string, unknown>):
       teamRoleId,
       breakProfileId,
       employeeGroupId,
+      employmentEndDate: "value" in endParse ? endParse.value : null,
     },
   };
 }
@@ -211,6 +245,11 @@ function validateUpdate(body: Record<string, unknown>):
   if ("startDate" in body) {
     if (!isValidDate(body.startDate)) errors.startDate = "A valid start date is required";
     else data.startDate = body.startDate as string;
+  }
+  if ("employmentEndDate" in body) {
+    const endParse = parseEndDate(body.employmentEndDate);
+    if ("error" in endParse) errors.employmentEndDate = endParse.error;
+    else data.employmentEndDate = endParse.value;
   }
 
   let nationalityForPhone: Nationality | null = null;
@@ -466,6 +505,7 @@ const SELECT_COLUMNS = `
   to_char(e.date_of_birth, 'YYYY-MM-DD') as date_of_birth,
   e.email, e.phone_number, e.job_group,
   to_char(e.start_date, 'YYYY-MM-DD') as start_date,
+  to_char(e.employment_end_date, 'YYYY-MM-DD') as employment_end_date,
   e.is_active, e.employee_number, e.nationality,
   e.preferred_language, e.notes, e.profile_photo_path, e.security_role_id, e.team_role_id,
   e.break_profile_id, bp.name as break_profile_name, bp.is_active as break_profile_is_active,
@@ -515,6 +555,7 @@ function serializeEmployee(row: any, photoUrl: string | null, includeNotes: bool
     phoneNumber: row.phone_number,
     jobGroup: row.job_group,
     startDate: row.start_date,
+    employmentEndDate: row.employment_end_date,
     isActive: row.is_active,
     employeeNumber: row.employee_number,
     nationality: row.nationality,
@@ -677,6 +718,9 @@ router.post(
       return res.status(400).json({ errors: { employeeGroupId: EMPLOYEE_GROUP_NOT_FOUND } });
     }
 
+    const dateErrors = endingDateErrors({ startDate: d.startDate, workPermitExpiryDate: permitExpiryDate, employmentEndDate: d.employmentEndDate });
+    if (Object.keys(dateErrors).length) return res.status(400).json({ errors: dateErrors });
+
     const client = await pool.connect();
     try {
       await client.query("begin");
@@ -686,12 +730,12 @@ router.post(
             start_date, is_active, employee_number, nationality, preferred_language, notes,
             security_role_id, team_role_id, settings_pin_hash, break_profile_id,
             work_permit_expiry_date, work_permit_notify_lead_months, work_permit_notify_lead_days,
-            employee_group_id)
+            employee_group_id, employment_end_date)
          values
            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
             coalesce($14, (select id from security_roles where name = 'Employee')),
             coalesce($15, (select id from team_roles where name = 'Team Member')),
-            null, $16, $17, $18, $19, $20)
+            null, $16, $17, $18, $19, $20, $21)
          returning id`,
         [
           d.firstName,
@@ -714,6 +758,7 @@ router.post(
           permitLeadMonths,
           permitLeadDays,
           d.employeeGroupId,
+          d.employmentEndDate,
         ]
       );
 
@@ -802,6 +847,25 @@ router.patch(
       return res.status(400).json({ errors: { employeeGroupId: EMPLOYEE_GROUP_NOT_FOUND } });
     }
 
+    // Employment dates: validate the values the employee will have AFTER this
+    // save (a partial update is merged with the stored values first).
+    if ("startDate" in d || "employmentEndDate" in d || permitParse.data.expiryDate !== undefined) {
+      const stored = await pool.query(
+        `select to_char(start_date, 'YYYY-MM-DD') as start_date,
+                to_char(work_permit_expiry_date, 'YYYY-MM-DD') as work_permit_expiry_date,
+                to_char(employment_end_date, 'YYYY-MM-DD') as employment_end_date
+         from employees where id = $1`,
+        [id]
+      );
+      if (!stored.rows[0]) return res.status(404).json({ error: "Employee not found" });
+      const dateErrors = endingDateErrors({
+        startDate: d.startDate ?? stored.rows[0].start_date,
+        workPermitExpiryDate: permitParse.data.expiryDate !== undefined ? permitParse.data.expiryDate : stored.rows[0].work_permit_expiry_date,
+        employmentEndDate: d.employmentEndDate !== undefined ? d.employmentEndDate : stored.rows[0].employment_end_date,
+      });
+      if (Object.keys(dateErrors).length) return res.status(400).json({ errors: dateErrors });
+    }
+
     // Resolved against the CURRENT row (needed for the server-side 6-month
     // default, and to know whether the expiry date is actually changing —
     // only a real change gets a history row) — see resolveWorkPermitUpdate's
@@ -845,6 +909,7 @@ router.patch(
       teamRoleId: "team_role_id",
       breakProfileId: "break_profile_id",
       employeeGroupId: "employee_group_id",
+      employmentEndDate: "employment_end_date",
     };
 
     const keys = Object.keys(d) as (keyof EmployeeFields)[];

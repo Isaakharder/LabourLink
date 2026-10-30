@@ -74,6 +74,7 @@ function makeEmployee(overrides: Partial<Employee> = {}): Employee {
     workPermitExpiryDate: null,
     workPermitNotifyLeadMonths: null,
     workPermitNotifyLeadDays: null,
+    employmentEndDate: null,
     createdAt: "2024-01-01T00:00:00.000Z",
     updatedAt: "2024-01-01T00:00:00.000Z",
     ...overrides,

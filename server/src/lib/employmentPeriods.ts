@@ -26,39 +26,35 @@ export type WorkGroup = (typeof WORK_GROUPS)[number];
 export const STARTING_SOON_WINDOW_DAYS = 14;
 export const FINISHING_SOON_WINDOW_DAYS = 14;
 
-export type EmploymentPeriodStatus = "future" | "startingSoon" | "current" | "finishingSoon" | "overdue" | "completed";
+export type EmploymentPeriodStatus = "future" | "startingSoon" | "current" | "finishingSoon" | "permitExpired" | "completed";
 
-export interface EmploymentPeriodDates {
+export interface EmploymentStatusDates {
+  // Employment Start Date (employees.start_date).
   startDate: string;
-  expectedFinishDate: string | null;
-  actualFinishDate: string | null;
+  // employees.work_permit_expiry_date / employees.employment_end_date.
+  workPermitExpiryDate: string | null;
+  endDifferentDate: string | null;
 }
 
-// Returns every status tag that applies to this period as of `today` — a
-// period can carry more than one simultaneously (e.g. "current" AND
-// "overdue": still working, past the expected finish, no actual finish
-// recorded yet). Pure function of its string inputs, unit-testable with no
-// database.
-export function computePeriodStatuses(p: EmploymentPeriodDates, today: string): EmploymentPeriodStatus[] {
+// Every status tag that applies to an employee's employment as of `today`
+// — more than one can apply at once (e.g. "current" and "finishingSoon").
+// The end is the End Different Date when entered, otherwise the permit
+// expiry (same priority as the timeline bar, employmentTimelineView.ts).
+// Pure function of its string inputs.
+export function computeEmploymentStatuses(d: EmploymentStatusDates, today: string): EmploymentPeriodStatus[] {
   const statuses: EmploymentPeriodStatus[] = [];
-
-  if (p.startDate > today) {
+  if (d.startDate > today) {
     statuses.push("future");
-    if (p.startDate <= addDaysToDateStr(today, STARTING_SOON_WINDOW_DAYS)) statuses.push("startingSoon");
+    if (d.startDate <= addDaysToDateStr(today, STARTING_SOON_WINDOW_DAYS)) statuses.push("startingSoon");
     return statuses; // hasn't started yet: no other status applies
   }
-
-  const stillOpen = p.actualFinishDate === null || p.actualFinishDate >= today;
-  if (stillOpen) {
+  const end = d.endDifferentDate ?? d.workPermitExpiryDate;
+  if (end === null || end >= today) {
     statuses.push("current");
-    if (p.expectedFinishDate && p.actualFinishDate === null) {
-      if (p.expectedFinishDate < today) statuses.push("overdue");
-      else if (p.expectedFinishDate <= addDaysToDateStr(today, FINISHING_SOON_WINDOW_DAYS)) statuses.push("finishingSoon");
-    }
+    if (end !== null && end <= addDaysToDateStr(today, FINISHING_SOON_WINDOW_DAYS)) statuses.push("finishingSoon");
   }
-
-  if (p.actualFinishDate !== null && p.actualFinishDate <= today) statuses.push("completed");
-
+  if (d.endDifferentDate === null && d.workPermitExpiryDate !== null && d.workPermitExpiryDate < today) statuses.push("permitExpired");
+  if (d.endDifferentDate !== null && d.endDifferentDate <= today) statuses.push("completed");
   return statuses;
 }
 

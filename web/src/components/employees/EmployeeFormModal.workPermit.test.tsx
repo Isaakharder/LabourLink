@@ -48,7 +48,7 @@ afterEach(() => {
 async function fillRequiredFields(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText(/First name/), "Jordan");
   await user.type(screen.getByLabelText(/Last name/), "Doe");
-  await user.type(screen.getByLabelText(/Start date/), "2026-01-01");
+  await user.type(screen.getByLabelText(/^Employment Start Date/), "2026-01-01");
   await user.selectOptions(screen.getByLabelText(/Nationality/), "Canadian");
 }
 

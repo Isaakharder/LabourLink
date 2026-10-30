@@ -1,40 +1,27 @@
-// Employment Timeline: employment-period CRUD + the combined timeline/table
-// read endpoint. Session-auth surface only (requireAuth/requireRole, same
-// as employees.ts) — never touched by mobileEmployees.ts's device-auth
-// router, matching the brief's "never expose HR data to ordinary mobile
-// employees."
+// Employment Timeline: the combined timeline/table read endpoint, the
+// "Timeline starts" display setting and the period audit history.
+// Session-auth surface only (requireAuth/requireRole, same as employees.ts)
+// — never touched by mobileEmployees.ts's device-auth router.
 //
 // Viewing (GET) is Administrator+Manager, matching employees.ts's own GET
-// gate. Mutating (POST/PATCH/DELETE) and viewing audit history are
-// Administrator-only — stricter than viewing the timeline itself, matching
-// employees.ts's own POST/PATCH gate and the WORK_PERMIT_ROLES precedent
-// for the stricter of two related action sets.
-import { Router } from "express";
+// gate. The timeline's dates are edited through PATCH /api/employees/:id
+// (Administrator-only, unchanged) — one employee record shared with the
+// Employees Directory, see employmentTimelineView.ts. The old per-period
+// create/edit/delete endpoints answer 410 (see the bottom of this file).
+import { Request, Response, Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { calendarDateInAppTimezone } from "../lib/timezone";
 import { getActiveWorkPermitAlerts } from "../lib/workPermits";
-import {
-  computePeriodStatuses,
-  EMPLOYMENT_TYPES,
-  EmploymentPeriodStatus,
-  isOverlapViolation,
-  recordEmploymentPeriodHistory,
-  WORK_GROUPS,
-} from "../lib/employmentPeriods";
-import { computeTimelineBar, resolveEmployeeTimeline, ResolvedTimelinePeriod } from "../lib/employmentTimelineView";
+import { computeEmploymentStatuses, EmploymentPeriodStatus } from "../lib/employmentPeriods";
+import { resolveEmployeeTimeline } from "../lib/employmentTimelineView";
 import { getEmploymentTimelineDisplayStart, isValidDisplayStartDate, setEmploymentTimelineDisplayStart } from "../lib/employmentTimelineSettings";
 
 const router = Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const ALL_STATUSES: EmploymentPeriodStatus[] = ["future", "startingSoon", "current", "finishingSoon", "overdue", "completed"];
-
-function isValidDate(v: unknown): v is string {
-  return typeof v === "string" && DATE_RE.test(v) && !isNaN(Date.parse(v));
-}
+const ALL_STATUSES: EmploymentPeriodStatus[] = ["future", "startingSoon", "current", "finishingSoon", "permitExpired", "completed"];
 
 // Query-string array params arrive as either a single string, an array of
 // strings (repeated ?x=a&x=b), or undefined — Express/qs's usual shape.
@@ -45,87 +32,15 @@ function parseArrayParam(v: unknown): string[] {
   return [];
 }
 
-interface PeriodRow {
-  id: string;
-  employee_id: string;
-  start_date: string;
-  expected_finish_date: string | null;
-  actual_finish_date: string | null;
-  employment_type: string | null;
-  work_group: string | null;
-  work_group_other_description: string | null;
-  notes: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-// snake_case SQL row -> camelCase shape resolveEmployeeTimeline works with.
-function toTimelinePeriodInput(row: PeriodRow) {
-  return {
-    id: row.id,
-    startDate: row.start_date,
-    expectedFinishDate: row.expected_finish_date,
-    actualFinishDate: row.actual_finish_date,
-    employmentType: row.employment_type,
-    workGroup: row.work_group,
-    workGroupOtherDescription: row.work_group_other_description,
-    notes: row.notes,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-function serializePeriod(employeeId: string, p: ResolvedTimelinePeriod, today: string) {
-  return {
-    id: p.id,
-    employeeId,
-    startDate: p.startDate,
-    expectedFinishDate: p.expectedFinishDate,
-    actualFinishDate: p.actualFinishDate,
-    employmentType: p.employmentType,
-    workGroup: p.workGroup,
-    workGroupOtherDescription: p.workGroupOtherDescription,
-    notes: p.notes,
-    statuses: computePeriodStatuses({ startDate: p.startDate, expectedFinishDate: p.expectedFinishDate, actualFinishDate: p.actualFinishDate }, today),
-    // Employment Timeline redesign fields — see employmentTimelineView.ts.
-    // timelineEffectiveEndDate is always concrete (never null); "ongoing"/
-    // "expiredStillWorking" bars are drawn to the graph's actual right edge
-    // by the client, not literally clipped at this value.
-    timelineEffectiveEndDate: p.timelineEffectiveEndDate,
-    timelineLabel: p.timelineLabel,
-    synthesized: p.synthesized,
-    createdAt: p.createdAt,
-    updatedAt: p.updatedAt,
-  };
-}
-
-// For the single-period POST/PATCH responses (not the list route, which
-// already has every employee's work-permit date loaded) — one extra lookup
-// so those responses carry the same timelineEffectiveEndDate/timelineLabel
-// fields, computed via the exact same computeTimelineBar the list route
-// uses, rather than the client having to guess them from a bare period.
-async function serializeRealPeriod(row: PeriodRow, today: string) {
-  const { rows } = await pool.query<{ work_permit_expiry_date: string | null }>(
-    `select to_char(work_permit_expiry_date, 'YYYY-MM-DD') as work_permit_expiry_date from employees where id = $1`,
-    [row.employee_id]
-  );
-  const input = toTimelinePeriodInput(row);
-  const bar = computeTimelineBar(input, rows[0]?.work_permit_expiry_date ?? null, today);
-  return serializePeriod(row.employee_id, { ...input, timelineEffectiveEndDate: bar.effectiveEndDate, timelineLabel: bar.label, synthesized: false }, today);
-}
-
-function rangesOverlap(aStart: string, aEnd: string | null, bStart: string, bEnd: string | null): boolean {
-  const aEndEff = aEnd ?? "9999-12-31";
-  const bEndEff = bEnd ?? "9999-12-31";
-  return aStart <= bEndEff && bStart <= aEndEff;
-}
-
 // -- routes -------------------------------------------------------------
 
-// Combined timeline-graph/table-view read. One row per employee, periods
-// nested (each with computed `statuses`) — the single dataset the client's
-// graph, table, and export all read from, so they can never disagree on a
-// value.
+// Combined timeline-graph/table-view read: one row per active employee with
+// the three employment dates from the employee record, the server-computed
+// bar end/label and status tags — the single dataset the client's graph,
+// table and exports all read, so they can never disagree on a value.
+// Employment type and work group still come from the employee's latest
+// employment_periods row (migration 050): no longer edited from the
+// timeline, but shown and filterable, read-only.
 router.get(
   "/",
   requireAuth,
@@ -140,13 +55,9 @@ router.get(
     const statusFilter = parseArrayParam(req.query.status).filter((s): s is EmploymentPeriodStatus =>
       (ALL_STATUSES as string[]).includes(s)
     );
-    const rangeStart = isValidDate(req.query.rangeStart) ? (req.query.rangeStart as string) : null;
-    const rangeEnd = isValidDate(req.query.rangeEnd) ? (req.query.rangeEnd as string) : null;
 
-    // is_active = true is unconditional, not just another optional filter —
-    // deactivated employees must be completely excluded from the graph,
-    // table, totals, and every export, and this is the one endpoint all of
-    // those read from, so excluding here guarantees it everywhere at once.
+    // is_active = true is unconditional: deactivated employees are excluded
+    // from the graph, table, totals and every export, all of which read here.
     const conditions: string[] = ["e.is_active = true"];
     const params: unknown[] = [];
     if (nationalityFilter.length) {
@@ -157,112 +68,78 @@ router.get(
       params.push(employeeIdFilter);
       conditions.push(`e.id = any($${params.length}::uuid[])`);
     }
-    const where = `where ${conditions.join(" and ")}`;
 
-    const { rows: employeeRows } = await pool.query(
+    const { rows } = await pool.query(
       `select e.id, e.first_name, e.last_name, e.nationality, e.job_group, e.is_active,
+              e.employee_group_id, eg.name as employee_group_name,
               to_char(e.start_date, 'YYYY-MM-DD') as start_date,
-              to_char(e.work_permit_expiry_date, 'YYYY-MM-DD') as work_permit_expiry_date
+              to_char(e.work_permit_expiry_date, 'YYYY-MM-DD') as work_permit_expiry_date,
+              to_char(e.employment_end_date, 'YYYY-MM-DD') as employment_end_date,
+              lp.employment_type, lp.work_group
        from employees e
-       ${where}
-       order by e.first_name, e.last_name`,
+       left join employee_groups eg on eg.id = e.employee_group_id
+       left join lateral (
+         select p.employment_type, p.work_group
+         from employee_employment_periods p
+         where p.employee_id = e.id
+         order by p.start_date desc, p.created_at desc
+         limit 1
+       ) lp on true
+       where ${conditions.join(" and ")}
+       order by e.first_name, e.last_name, e.id`,
       params
     );
-    if (employeeRows.length === 0) return res.json({ employees: [] });
-
-    const employeeIds = employeeRows.map((r) => r.id);
-    const { rows: periodRows } = await pool.query<PeriodRow>(
-      `select id, employee_id,
-              to_char(start_date, 'YYYY-MM-DD') as start_date,
-              to_char(expected_finish_date, 'YYYY-MM-DD') as expected_finish_date,
-              to_char(actual_finish_date, 'YYYY-MM-DD') as actual_finish_date,
-              employment_type, work_group, work_group_other_description, notes,
-              created_at, updated_at
-       from employee_employment_periods
-       where employee_id = any($1::uuid[])
-       order by start_date`,
-      [employeeIds]
-    );
-
-    const periodsByEmployee = new Map<string, PeriodRow[]>();
-    for (const row of periodRows) {
-      const list = periodsByEmployee.get(row.employee_id) ?? [];
-      list.push(row);
-      periodsByEmployee.set(row.employee_id, list);
-    }
-
-    const hasWorkGroupFilter = workGroupFilter.length > 0;
-    const hasEmploymentTypeFilter = employmentTypeFilter.length > 0;
-    const hasStatusFilter = statusFilter.length > 0;
-    const hasAnyPeriodFilter = hasWorkGroupFilter || hasEmploymentTypeFilter || hasStatusFilter;
-
-    function periodMatchesFilters(p: ResolvedTimelinePeriod): boolean {
-      if (hasWorkGroupFilter) {
-        const matches = p.workGroup ? workGroupFilter.includes(p.workGroup) : workGroupFilter.includes("Unspecified");
-        if (!matches) return false;
-      }
-      if (hasEmploymentTypeFilter) {
-        const matches = p.employmentType ? employmentTypeFilter.includes(p.employmentType) : employmentTypeFilter.includes("Unspecified");
-        if (!matches) return false;
-      }
-      if (hasStatusFilter) {
-        const statuses = computePeriodStatuses({ startDate: p.startDate, expectedFinishDate: p.expectedFinishDate, actualFinishDate: p.actualFinishDate }, today);
-        if (!statuses.some((s) => statusFilter.includes(s))) return false;
-      }
-      return true;
-    }
+    if (rows.length === 0) return res.json({ employees: [] });
 
     const alerts = await getActiveWorkPermitAlerts(pool, today);
     const alertByEmployee = new Map(alerts.map((a) => [a.employeeId, a]));
 
-    const employees = employeeRows
+    const employees = rows
       .map((e) => {
-        const rawPeriods = (periodsByEmployee.get(e.id) ?? []).map(toTimelinePeriodInput);
-        // The one shared inclusion/labeling function (employmentTimelineView.ts)
-        // — is_active is already guaranteed true by the SQL filter above, but
-        // resolving through the same function used by its own unit tests
-        // keeps this one code path as the single source of truth rather than
-        // re-deriving the rule here.
         const resolved = resolveEmployeeTimeline(
-          { id: e.id, isActive: e.is_active, startDate: e.start_date, workPermitExpiryDate: e.work_permit_expiry_date },
-          rawPeriods,
+          { isActive: e.is_active, startDate: e.start_date, workPermitExpiryDate: e.work_permit_expiry_date, endDifferentDate: e.employment_end_date },
           today
         );
         if (!resolved.included) return null;
+        const statuses = e.start_date
+          ? computeEmploymentStatuses(
+              { startDate: e.start_date, workPermitExpiryDate: e.work_permit_expiry_date, endDifferentDate: e.employment_end_date },
+              today
+            )
+          : [];
 
-        // Row-visibility rule: qualifies if at least one period satisfies
-        // every active period-level filter (a single period must match
-        // Work Group AND Employment Type AND Status together — e.g.
-        // "Guatemalan + Greenhouse + Seasonal" means one period that is
-        // both Greenhouse and Seasonal, on a Guatemalan employee). Once
-        // qualified, ALL of the employee's periods render (not just the
-        // matching one), so employment history never shows misleading gaps.
-        if (hasAnyPeriodFilter && !resolved.periods.some(periodMatchesFilters)) return null;
+        if (workGroupFilter.length && !workGroupFilter.includes(e.work_group ?? "Unspecified")) return null;
+        if (employmentTypeFilter.length && !employmentTypeFilter.includes(e.employment_type ?? "Unspecified")) return null;
+        if (statusFilter.length && !statuses.some((s) => statusFilter.includes(s))) return null;
 
-        const visiblePeriods =
-          rangeStart || rangeEnd
-            ? resolved.periods.filter((p) => rangesOverlap(rangeStart ?? "0001-01-01", rangeEnd ?? null, p.startDate, p.timelineEffectiveEndDate))
-            : resolved.periods;
-
-        const workPermitExpiryDate: string | null = e.work_permit_expiry_date;
         const alert = alertByEmployee.get(e.id);
-
         return {
           id: e.id,
           firstName: e.first_name,
           lastName: e.last_name,
           nationality: e.nationality,
           jobGroup: e.job_group,
+          employeeGroup: e.employee_group_id ? { id: e.employee_group_id, name: e.employee_group_name } : null,
           isActive: e.is_active,
-          workPermit: workPermitExpiryDate
-            ? { expiryDate: workPermitExpiryDate, remainingDays: alert?.remainingDays ?? null, severity: alert?.severity ?? null }
+          employmentStartDate: e.start_date,
+          workPermitExpiryDate: e.work_permit_expiry_date,
+          endDifferentDate: e.employment_end_date,
+          workPermit: e.work_permit_expiry_date
+            ? { expiryDate: e.work_permit_expiry_date, remainingDays: alert?.remainingDays ?? null, severity: alert?.severity ?? null }
             : null,
-          // False only when there's genuinely no start_date and no
-          // employment_periods row to draw anything from — the client
-          // renders a flagged placeholder row instead of a bar for these,
-          // rather than silently omitting the employee.
+          employmentType: e.employment_type,
+          workGroup: e.work_group,
+          // False when there's no Employment Start Date to draw from — the
+          // client renders a flagged placeholder row instead of a bar.
           hasUsableDates: resolved.hasUsableDates,
-          periods: visiblePeriods.map((p) => serializePeriod(e.id, p, today)),
+          timelineEndDate: resolved.bar?.endDate ?? null,
+          timelineEndSource: resolved.bar?.endSource ?? null,
+          timelineLabel: resolved.bar?.label ?? null,
+          statuses,
+          // Always empty: periods are no longer the timeline's source. Kept so
+          // a desktop page still running the previous version renders an
+          // empty graph instead of failing on a missing field.
+          periods: [],
         };
       })
       .filter((e): e is NonNullable<typeof e> => e !== null);
@@ -334,300 +211,20 @@ router.get(
   })
 );
 
-interface PeriodPayload {
-  employeeId?: unknown;
-  startDate?: unknown;
-  expectedFinishDate?: unknown;
-  actualFinishDate?: unknown;
-  employmentType?: unknown;
-  workGroup?: unknown;
-  workGroupOtherDescription?: unknown;
-  notes?: unknown;
+// The timeline's dates moved onto the employee record (migration 068) and
+// are edited through PATCH /api/employees/:id. A desktop page still running
+// the previous version may call the old per-period endpoints; they answer
+// 410 and change nothing, so a stale page can never write dates the
+// timeline no longer reads.
+const PERIODS_REPLACED_MESSAGE =
+  "Employment periods were replaced by the employee's own employment dates. Refresh LabourLink to continue.";
+
+function periodsReplaced(_req: Request, res: Response) {
+  res.status(410).json({ error: PERIODS_REPLACED_MESSAGE, code: "employment_periods_replaced" });
 }
 
-interface ValidatedPeriodFields {
-  startDate?: string;
-  expectedFinishDate?: string | null;
-  actualFinishDate?: string | null;
-  employmentType?: string | null;
-  workGroup?: string | null;
-  workGroupOtherDescription?: string | null;
-  notes?: string | null;
-}
-
-// Shared shape-only validation for create (all relevant keys required) and
-// update (only keys present in the body are checked) — `requireStartDate`
-// distinguishes the two, mirroring employees.ts's validateCreate/
-// validateUpdate split.
-function validatePeriodFields(
-  body: PeriodPayload,
-  requireStartDate: boolean
-): { errors: Record<string, string> } | { data: ValidatedPeriodFields } {
-  const errors: Record<string, string> = {};
-  const data: ValidatedPeriodFields = {};
-
-  if (requireStartDate || "startDate" in body) {
-    if (!isValidDate(body.startDate)) errors.startDate = "A valid start date is required";
-    else data.startDate = body.startDate as string;
-  }
-
-  if (requireStartDate || "expectedFinishDate" in body) {
-    const raw = body.expectedFinishDate;
-    if (raw == null || raw === "") data.expectedFinishDate = null;
-    else if (!isValidDate(raw)) errors.expectedFinishDate = "Expected finish date is not a valid date";
-    else data.expectedFinishDate = raw as string;
-  }
-
-  if (requireStartDate || "actualFinishDate" in body) {
-    const raw = body.actualFinishDate;
-    if (raw == null || raw === "") data.actualFinishDate = null;
-    else if (!isValidDate(raw)) errors.actualFinishDate = "Actual finish date is not a valid date";
-    else data.actualFinishDate = raw as string;
-  }
-
-  if (requireStartDate || "employmentType" in body) {
-    const raw = body.employmentType;
-    if (raw == null || raw === "") data.employmentType = null;
-    else if (!(EMPLOYMENT_TYPES as readonly string[]).includes(raw as string)) {
-      errors.employmentType = `Employment type must be one of: ${EMPLOYMENT_TYPES.join(", ")}`;
-    } else data.employmentType = raw as string;
-  }
-
-  let workGroupForOtherCheck: string | null | undefined;
-  if (requireStartDate || "workGroup" in body) {
-    const raw = body.workGroup;
-    if (raw == null || raw === "") data.workGroup = null;
-    else if (!(WORK_GROUPS as readonly string[]).includes(raw as string)) {
-      errors.workGroup = `Work group must be one of: ${WORK_GROUPS.join(", ")}`;
-    } else data.workGroup = raw as string;
-    workGroupForOtherCheck = data.workGroup;
-  }
-
-  if (requireStartDate || "workGroupOtherDescription" in body) {
-    const raw = body.workGroupOtherDescription;
-    const trimmed = typeof raw === "string" ? raw.trim() : "";
-    data.workGroupOtherDescription = trimmed ? trimmed : null;
-    if (data.workGroupOtherDescription && workGroupForOtherCheck !== "Other" && workGroupForOtherCheck !== undefined) {
-      errors.workGroupOtherDescription = "A description is only allowed when Work Group is Other";
-    }
-  }
-
-  if (requireStartDate || "notes" in body) {
-    const raw = body.notes;
-    const trimmed = typeof raw === "string" ? raw.trim() : "";
-    data.notes = trimmed ? trimmed : null;
-  }
-
-  if (data.expectedFinishDate != null && data.startDate != null && data.expectedFinishDate < data.startDate) {
-    errors.expectedFinishDate = "Expected finish date cannot be before the start date";
-  }
-  if (data.actualFinishDate != null && data.startDate != null && data.actualFinishDate < data.startDate) {
-    errors.actualFinishDate = "Actual finish date cannot be before the start date";
-  }
-
-  if (Object.keys(errors).length) return { errors };
-  return { data };
-}
-
-router.post(
-  "/",
-  requireAuth,
-  requireRole("Administrator"),
-  asyncHandler(async (req, res) => {
-    const body = (req.body ?? {}) as PeriodPayload;
-    const employeeId = body.employeeId;
-    if (typeof employeeId !== "string" || !UUID_RE.test(employeeId)) {
-      return res.status(400).json({ error: "A valid employeeId is required" });
-    }
-
-    const result = validatePeriodFields(body, true);
-    if ("errors" in result) return res.status(400).json({ errors: result.errors });
-    const d = result.data;
-
-    const empCheck = await pool.query("select id from employees where id = $1", [employeeId]);
-    if (!empCheck.rows[0]) return res.status(404).json({ error: "Employee not found" });
-
-    const client = await pool.connect();
-    try {
-      await client.query("begin");
-      const { rows } = await client.query(
-        `insert into employee_employment_periods
-           (employee_id, start_date, expected_finish_date, actual_finish_date,
-            employment_type, work_group, work_group_other_description, notes, created_by_employee_id)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         returning *`,
-        [
-          employeeId,
-          d.startDate,
-          d.expectedFinishDate ?? null,
-          d.actualFinishDate ?? null,
-          d.employmentType ?? null,
-          d.workGroup ?? null,
-          d.workGroupOtherDescription ?? null,
-          d.notes ?? null,
-          req.employee!.id,
-        ]
-      );
-      const created = rows[0];
-      await recordEmploymentPeriodHistory(client, {
-        employmentPeriodId: created.id,
-        employeeId,
-        changeType: "created",
-        oldValue: null,
-        newValue: created,
-        changedByEmployeeId: req.employee!.id,
-        reason: null,
-      });
-      await client.query("commit");
-
-      const today = calendarDateInAppTimezone(new Date());
-      const { rows: full } = await pool.query<PeriodRow>(
-        `select id, employee_id, to_char(start_date, 'YYYY-MM-DD') as start_date,
-                to_char(expected_finish_date, 'YYYY-MM-DD') as expected_finish_date,
-                to_char(actual_finish_date, 'YYYY-MM-DD') as actual_finish_date,
-                employment_type, work_group, work_group_other_description, notes, created_at, updated_at
-         from employee_employment_periods where id = $1`,
-        [created.id]
-      );
-      res.status(201).json({ period: await serializeRealPeriod(full[0], today) });
-    } catch (err) {
-      await client.query("rollback");
-      if (isOverlapViolation(err)) {
-        return res.status(409).json({
-          error: "This period overlaps another employment period for this employee. A finish date is the last day worked — the next period must start the day after.",
-        });
-      }
-      throw err;
-    } finally {
-      client.release();
-    }
-  })
-);
-
-router.patch(
-  "/:id",
-  requireAuth,
-  requireRole("Administrator"),
-  asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid employment period id" });
-
-    const body = (req.body ?? {}) as PeriodPayload;
-    const result = validatePeriodFields(body, false);
-    if ("errors" in result) return res.status(400).json({ errors: result.errors });
-    const d = result.data;
-
-    const columnMap: Record<keyof ValidatedPeriodFields, string> = {
-      startDate: "start_date",
-      expectedFinishDate: "expected_finish_date",
-      actualFinishDate: "actual_finish_date",
-      employmentType: "employment_type",
-      workGroup: "work_group",
-      workGroupOtherDescription: "work_group_other_description",
-      notes: "notes",
-    };
-    const keys = Object.keys(d) as (keyof ValidatedPeriodFields)[];
-    if (keys.length === 0) return res.status(400).json({ error: "No fields to update" });
-
-    const client = await pool.connect();
-    try {
-      await client.query("begin");
-
-      const currentRes = await client.query("select * from employee_employment_periods where id = $1 for update", [id]);
-      if (!currentRes.rows[0]) {
-        await client.query("rollback");
-        return res.status(404).json({ error: "Employment period not found" });
-      }
-      const before = currentRes.rows[0];
-
-      const values = keys.map((k) => d[k]);
-      const setClauses = [...keys.map((k, i) => `${columnMap[k]} = $${i + 1}`), "updated_at = now()"];
-      const { rows } = await client.query(
-        `update employee_employment_periods set ${setClauses.join(", ")} where id = $${values.length + 1} returning *`,
-        [...values, id]
-      );
-      const after = rows[0];
-
-      // No code path in this route ever writes employees.is_active —
-      // recording an actual finish, or reaching/setting an expected finish,
-      // must not auto-deactivate the employee, clock them out, or touch
-      // payroll/time entries. Deactivation stays a fully separate, explicit
-      // action on the Employees Directory tab.
-      await recordEmploymentPeriodHistory(client, {
-        employmentPeriodId: id,
-        employeeId: before.employee_id,
-        changeType: "updated",
-        oldValue: before,
-        newValue: after,
-        changedByEmployeeId: req.employee!.id,
-        reason: null,
-      });
-
-      await client.query("commit");
-
-      const today = calendarDateInAppTimezone(new Date());
-      const { rows: full } = await pool.query<PeriodRow>(
-        `select id, employee_id, to_char(start_date, 'YYYY-MM-DD') as start_date,
-                to_char(expected_finish_date, 'YYYY-MM-DD') as expected_finish_date,
-                to_char(actual_finish_date, 'YYYY-MM-DD') as actual_finish_date,
-                employment_type, work_group, work_group_other_description, notes, created_at, updated_at
-         from employee_employment_periods where id = $1`,
-        [id]
-      );
-      res.json({ period: await serializeRealPeriod(full[0], today) });
-    } catch (err) {
-      await client.query("rollback");
-      if (isOverlapViolation(err)) {
-        return res.status(409).json({
-          error: "This period overlaps another employment period for this employee. A finish date is the last day worked — the next period must start the day after.",
-        });
-      }
-      throw err;
-    } finally {
-      client.release();
-    }
-  })
-);
-
-router.delete(
-  "/:id",
-  requireAuth,
-  requireRole("Administrator"),
-  asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid employment period id" });
-
-    const { reason } = (req.body ?? {}) as { reason?: unknown };
-    const trimmedReason = typeof reason === "string" ? reason.trim() : "";
-    if (!trimmedReason) return res.status(400).json({ error: "A reason is required to delete an employment period" });
-
-    const client = await pool.connect();
-    try {
-      await client.query("begin");
-      const { rows } = await client.query("delete from employee_employment_periods where id = $1 returning *", [id]);
-      if (!rows[0]) {
-        await client.query("rollback");
-        return res.status(404).json({ error: "Employment period not found" });
-      }
-      const deleted = rows[0];
-      await recordEmploymentPeriodHistory(client, {
-        employmentPeriodId: null,
-        employeeId: deleted.employee_id,
-        changeType: "deleted",
-        oldValue: deleted,
-        newValue: null,
-        changedByEmployeeId: req.employee!.id,
-        reason: trimmedReason,
-      });
-      await client.query("commit");
-      res.status(204).send();
-    } catch (err) {
-      await client.query("rollback");
-      throw err;
-    } finally {
-      client.release();
-    }
-  })
-);
+router.post("/", requireAuth, periodsReplaced);
+router.patch("/:id", requireAuth, periodsReplaced);
+router.delete("/:id", requireAuth, periodsReplaced);
 
 export default router;

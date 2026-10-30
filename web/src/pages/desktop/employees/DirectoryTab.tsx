@@ -12,6 +12,7 @@ import { WorkPermitStatus } from "../../../components/employees/WorkPermitStatus
 import { api, ApiError } from "../../../lib/api";
 import { Employee } from "../../../lib/employeeTypes";
 import { UNGROUPED_LABEL } from "../../../lib/employeeGroupTypes";
+import { formatCalendarDate } from "../../../lib/calendarDateDisplay";
 import { useAuth } from "../../../context/AuthContext";
 
 type StatusFilter = "active" | "inactive" | "all";
@@ -23,12 +24,7 @@ interface EmployeeDeviceAssignment {
   employeeId: string | null;
 }
 
-function formatDate(value: string | null | undefined) {
-  if (!value) return "—";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-}
+const formatDate = formatCalendarDate;
 
 function formatDateTime(value: string | null | undefined) {
   if (!value) return "—";
@@ -359,8 +355,12 @@ export function DirectoryTab() {
                           <dd>{selectedEmployee.gender ?? "—"}</dd>
                         </div>
                         <div>
-                          <dt>Work Start Date</dt>
+                          <dt>Employment Start Date</dt>
                           <dd>{formatDate(selectedEmployee.startDate)}</dd>
+                        </div>
+                        <div>
+                          <dt>End Different Date</dt>
+                          <dd>{selectedEmployee.employmentEndDate ? formatDate(selectedEmployee.employmentEndDate) : "—"}</dd>
                         </div>
                         <div>
                           <dt>Work Permit</dt>

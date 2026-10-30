@@ -52,6 +52,10 @@ export interface Employee {
   // section). Exactly one of the two lead fields is ever non-null when an
   // expiry date is set (see 047_work_permit_tracking.sql).
   workPermitExpiryDate: string | null;
+  // End Different Date (068): the day they actually stopped working when
+  // different from the permit expiry. Shown and edited here and on the
+  // Employment Timeline (same record); never deactivates anyone.
+  employmentEndDate: string | null;
   workPermitNotifyLeadMonths: number | null;
   workPermitNotifyLeadDays: number | null;
   createdAt: string;
