@@ -223,7 +223,11 @@ export function InputsPage() {
   // Pending review groups for `date`: total and per employee — the badges on
   // "Review all employees" and "Review speeds". null until loaded (no badge
   // shown rather than a misleading 0).
-  const [reviewCounts, setReviewCounts] = useState<{ total: number; byEmployee: Map<string, number> } | null>(null);
+  // Tagged with the date they're for: shown only while that is still the
+  // selected date, so a date change never briefly shows the previous date's
+  // counts or sidebar indicators before the new request has even started.
+  const [reviewCountsState, setReviewCounts] = useState<{ date: string; total: number; byEmployee: Map<string, number> } | null>(null);
+  const reviewCounts = reviewCountsState?.date === date ? reviewCountsState : null;
 
   // Background live-refresh state — distinct from `error`/`daily` above,
   // which are only ever touched by a foreground (initial/employee/date)
@@ -327,7 +331,7 @@ export function InputsPage() {
         const byEmployee = new Map<string, number>();
         for (const g of res.groups) byEmployee.set(g.employeeId, (byEmployee.get(g.employeeId) ?? 0) + 1);
         reviewCountsDateRef.current = date;
-        setReviewCounts({ total: res.groups.length, byEmployee });
+        setReviewCounts({ date, total: res.groups.length, byEmployee });
       })
       .catch(() => {
         // Keep the last known counts; the next refresh trigger retries.
@@ -1008,6 +1012,7 @@ export function InputsPage() {
           onSelect={(id) => updateParams({ employee: id })}
           search={employeeSearch}
           onSearchChange={setEmployeeSearch}
+          reviewCounts={reviewCounts?.byEmployee ?? null}
           headerAction={
             canReviewSpeeds || canAddEmployeeToDay ? (
               <div className="inputs-employee-header-actions">

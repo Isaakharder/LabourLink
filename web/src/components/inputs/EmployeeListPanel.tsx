@@ -22,6 +22,16 @@ interface EmployeeListPanelProps {
   // Optional control rendered above the search box (Inputs' "Review all
   // employees" bulk speed review button).
   headerAction?: ReactNode;
+  // Review groups per employee for the selected date — the same server
+  // grouping (GET /api/row-completions/review-groups) behind "Review all
+  // employees" and "Review speeds", counted by each group's one employee.
+  // null while unknown (loading, another date's counts, or a viewer who
+  // can't review): no row is marked then, rather than guessing.
+  reviewCounts?: Map<string, number> | null;
+}
+
+export function reviewLabel(count: number): string {
+  return count === 1 ? "1 item needs review" : `${count} items need review`;
 }
 
 // "8 hours paid" / "7 hours 45 minutes paid" / "0 hours paid" — the
@@ -97,6 +107,7 @@ export function EmployeeListPanel({
   search,
   onSearchChange,
   headerAction,
+  reviewCounts = null,
 }: EmployeeListPanelProps) {
   return (
     <div className="inputs-employee-panel">
@@ -129,16 +140,27 @@ export function EmployeeListPanel({
               <ul className="inputs-employee-list">
                 {section.employees.map((e) => {
                   const hours = hoursDisplay(e.paidSeconds, loading);
+                  // Like the hours, never shown while this row may still be
+                  // the previous date's/search's (see `loading`).
+                  const toReview = loading ? 0 : reviewCounts?.get(e.id) ?? 0;
                   return (
                     <li key={e.id}>
                       <button
                         type="button"
-                        className={`inputs-employee-item${e.id === selectedId ? " inputs-employee-item-selected" : ""}`}
+                        className={`inputs-employee-item${e.id === selectedId ? " inputs-employee-item-selected" : ""}${
+                          toReview > 0 ? " inputs-employee-item-needs-review" : ""
+                        }`}
                         onClick={() => onSelect(e.id)}
                       >
                         <span className="inputs-employee-name">
                           {e.firstName} {e.lastName}
                         </span>
+                        {toReview > 0 && (
+                          <span className="inputs-employee-review" title={reviewLabel(toReview)}>
+                            <span aria-hidden="true">{toReview}</span>
+                            <span className="sr-only">{`, ${reviewLabel(toReview)}`}</span>
+                          </span>
+                        )}
                         <span
                           className="inputs-employee-hours"
                           title={hours.isPlaceholder ? undefined : hours.label}
