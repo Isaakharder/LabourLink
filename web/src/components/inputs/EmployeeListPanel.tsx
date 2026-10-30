@@ -1,4 +1,4 @@
-import { ReactNode } from "react";
+import { ReactNode, useEffect, useRef } from "react";
 import { InputsEmployee } from "../../lib/inputsTypes";
 import { UNGROUPED_LABEL } from "../../lib/employeeGroupTypes";
 import { secondsToHoursMinutes } from "../../lib/reportTypes";
@@ -22,6 +22,16 @@ interface EmployeeListPanelProps {
   // Optional control rendered above the search box (Inputs' "Review all
   // employees" bulk speed review button).
   headerAction?: ReactNode;
+  // Review groups per employee for the selected date — the same server
+  // grouping (GET /api/row-completions/review-groups) behind "Review all
+  // employees" and "Review speeds", counted by each group's one employee.
+  // null while unknown (loading, another date's counts, or a viewer who
+  // can't review): no row is marked then, rather than guessing.
+  reviewCounts?: Map<string, number> | null;
+}
+
+export function reviewLabel(count: number): string {
+  return count === 1 ? "1 item needs review" : `${count} items need review`;
 }
 
 // "8 hours paid" / "7 hours 45 minutes paid" / "0 hours paid" — the
@@ -88,6 +98,12 @@ export function groupEmployees(employees: InputsEmployee[]): EmployeeSection[] {
   });
 }
 
+// Every listed employee top to bottom, exactly as rendered (groups in order,
+// headings skipped) — what the Up/Down arrows step through.
+export function visibleEmployeeOrder(employees: InputsEmployee[]): string[] {
+  return groupEmployees(employees).flatMap((s) => s.employees.map((e) => e.id));
+}
+
 export function EmployeeListPanel({
   employees,
   error,
@@ -97,9 +113,31 @@ export function EmployeeListPanel({
   search,
   onSearchChange,
   headerAction,
+  reviewCounts = null,
 }: EmployeeListPanelProps) {
+  // Keeps the selected employee visible in the (scrolling) list whenever the
+  // selection changes — needed for arrow-key navigation through a long list,
+  // and "nearest" makes it a no-op when the row is already on screen. The
+  // first employee of a group brings its group heading along, and the very
+  // first employee scrolls the panel back to the top (Review all + search).
+  const panelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!selectedId || !panel) return;
+    const rows = [...panel.querySelectorAll<HTMLElement>("[data-employee-id]")];
+    const index = rows.findIndex((el) => el.dataset.employeeId === selectedId);
+    if (index === -1) return;
+    const row = rows[index];
+    if (index === 0) {
+      panel.scrollTop = 0;
+    } else if (!row.closest("li")?.previousElementSibling) {
+      row.closest("section")?.querySelector<HTMLElement>(".inputs-employee-group-heading")?.scrollIntoView?.({ block: "nearest" });
+    }
+    row.scrollIntoView?.({ block: "nearest" });
+  }, [selectedId, employees]);
+
   return (
-    <div className="inputs-employee-panel">
+    <div className="inputs-employee-panel" ref={panelRef}>
       {headerAction}
       <input
         type="search"
@@ -129,16 +167,28 @@ export function EmployeeListPanel({
               <ul className="inputs-employee-list">
                 {section.employees.map((e) => {
                   const hours = hoursDisplay(e.paidSeconds, loading);
+                  // Like the hours, never shown while this row may still be
+                  // the previous date's/search's (see `loading`).
+                  const toReview = loading ? 0 : reviewCounts?.get(e.id) ?? 0;
                   return (
                     <li key={e.id}>
                       <button
                         type="button"
-                        className={`inputs-employee-item${e.id === selectedId ? " inputs-employee-item-selected" : ""}`}
+                        data-employee-id={e.id}
+                        className={`inputs-employee-item${e.id === selectedId ? " inputs-employee-item-selected" : ""}${
+                          toReview > 0 ? " inputs-employee-item-needs-review" : ""
+                        }`}
                         onClick={() => onSelect(e.id)}
                       >
                         <span className="inputs-employee-name">
                           {e.firstName} {e.lastName}
                         </span>
+                        {toReview > 0 && (
+                          <span className="inputs-employee-review" title={reviewLabel(toReview)}>
+                            <span aria-hidden="true">{toReview}</span>
+                            <span className="sr-only">{`, ${reviewLabel(toReview)}`}</span>
+                          </span>
+                        )}
                         <span
                           className="inputs-employee-hours"
                           title={hours.isPlaceholder ? undefined : hours.label}

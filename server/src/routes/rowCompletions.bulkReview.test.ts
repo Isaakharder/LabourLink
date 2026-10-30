@@ -257,6 +257,24 @@ async function main() {
       "4) all employees: Khen 3, other employee 1, Jeff 1, Larry 0 (his visits are on another date)",
       allGroups.map((g) => [g.employeeName, g.rowLabel])
     );
+    // Inputs' sidebar indicator counts each employee's groups from this same
+    // response: every group has exactly one owner and a unique id, so the
+    // per-employee counts always add up to the "Review all employees" total
+    // — even for row 174, worked by Khen and the other employee, which is one
+    // group on each of their rows.
+    const owners = new Set(allGroups.map((g) => g.employeeId));
+    check(
+      new Set(allGroups.map((g) => g.id)).size === allGroups.length &&
+        allGroups.every((g) => typeof g.employeeId === "string" && g.visits.every((v: any) => v.employeeId === g.employeeId)) &&
+        [...owners].reduce((sum, id) => sum + countFor(id), 0) === allGroups.length,
+      "4) one owner per group, unique ids: per-employee counts sum to the total",
+      allGroups.map((g) => [g.id, g.employeeId])
+    );
+    check(
+      allGroups.some((g) => g.employeeId === khen.id && g.greenhouseRowId === r174) &&
+        allGroups.some((g) => g.employeeId === other.id && g.greenhouseRowId === r174),
+      "4) row 174 (shared by Khen and the other employee on the date) is one group on each of their rows"
+    );
     const jeffGroup = allGroups.find((g) => g.employeeId === jeff.id);
     check(
       jeffGroup?.actions.merge.available === false && jeffGroup.actions.separate.available === false &&

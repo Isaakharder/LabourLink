@@ -2597,6 +2597,43 @@ input {
   background: rgba(255, 255, 255, 0.35);
 }
 
+/* Employees with items in the speed review ("Review all employees") for the
+   selected date: a faint orange wash plus a compact count beside the name
+   (see EmployeeListPanel.tsx). The selected row keeps its blue background —
+   only the badge marks it there. The badge's line box is no taller than the
+   name's, so marked rows stay the same height as every other row. */
+.inputs-employee-item-needs-review:not(.inputs-employee-item-selected) {
+  background: rgba(251, 146, 60, 0.12);
+}
+
+.inputs-employee-item-needs-review:hover:not(.inputs-employee-item-selected) {
+  background: rgba(251, 146, 60, 0.2);
+}
+
+.inputs-employee-review {
+  flex-shrink: 0;
+  min-width: 1rem;
+  margin-left: 0.35rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1rem;
+  text-align: center;
+  background: #ffedd5;
+  color: #9a3412;
+  border: 1px solid #fb923c;
+  box-sizing: border-box;
+  height: 1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.inputs-employee-item-selected .inputs-employee-review {
+  border-color: #fff;
+}
+
 .inputs-workspace-main {
   display: flex;
   flex-direction: column;
