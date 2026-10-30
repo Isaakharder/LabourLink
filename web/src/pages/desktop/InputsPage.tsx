@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { DateNav } from "../../components/inputs/DateNav";
-import { EmployeeListPanel } from "../../components/inputs/EmployeeListPanel";
+import { EmployeeListPanel, visibleEmployeeOrder } from "../../components/inputs/EmployeeListPanel";
+import { employeeArrowDirection, nextEmployeeId } from "../../lib/employeeArrowNav";
 import { InputsSkeleton } from "../../components/inputs/InputsSkeleton";
 import { ActivityLogsCard, isRunDeletable } from "../../components/inputs/ActivityLogsCard";
 import { WorkdayDetailsCard, EditingBreakField, isBreakDeletable } from "../../components/inputs/WorkdayDetailsCard";
@@ -384,6 +385,48 @@ export function InputsPage() {
     const t = window.setTimeout(loadEmployees, employeeSearch ? 300 : 0);
     return () => window.clearTimeout(t);
   }, [loadEmployees, employeeSearch]);
+
+  // Up/Down arrows step through the employees listed in the sidebar (current
+  // search, group order, headings skipped), stopping at either end. Only the
+  // ?employee= selection changes — the date stays — and switching goes
+  // through the same path as a click, so loadDaily's sequence/abort guard
+  // keeps an older employee's response from overwriting the newest choice
+  // however fast the key repeats. Never while the page is paused (inline
+  // edit, open modal, pending delete or save), and never when the focused
+  // control or an open dialog uses the arrows itself (employeeArrowNav.ts).
+  // Read through a ref so one window listener always sees the latest list
+  // and selection; the ref's selection is advanced immediately on each press
+  // so held-key repeats chain even before React has re-rendered.
+  const arrowNavRef = useRef({ employees, selectedEmployeeId });
+  arrowNavRef.current = { employees, selectedEmployeeId };
+  const selectEmployeeRef = useRef((id: string) => updateParams({ employee: id }));
+  selectEmployeeRef.current = (id: string) => updateParams({ employee: id });
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      const direction = employeeArrowDirection(e);
+      if (!direction || pausedRef.current) return;
+      const { employees: listed, selectedEmployeeId: current } = arrowNavRef.current;
+      if (!listed || listed.length === 0) return;
+      // Ours now, even at the first/last employee: the page itself must not
+      // scroll instead.
+      e.preventDefault();
+      const next = nextEmployeeId(visibleEmployeeOrder(listed), current, direction);
+      if (!next) return;
+      const focusWasOnARow = document.activeElement instanceof HTMLElement && document.activeElement.dataset.employeeId !== undefined;
+      arrowNavRef.current = { employees: listed, selectedEmployeeId: next };
+      selectEmployeeRef.current(next);
+      // Keyboard focus follows the selection when it was on an employee row,
+      // so the focus ring never stays behind on the previous employee.
+      if (focusWasOnARow) {
+        window.setTimeout(() => {
+          const rows = document.querySelectorAll<HTMLElement>(".inputs-employee-item[data-employee-id]");
+          [...rows].find((el) => el.dataset.employeeId === next)?.focus({ preventScroll: true });
+        }, 0);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   // Auto-select once an employee list is available and nothing is selected
   // yet (a fresh /inputs visit with no ?employee= param): prefer the
