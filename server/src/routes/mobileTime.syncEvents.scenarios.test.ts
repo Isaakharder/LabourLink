@@ -126,7 +126,9 @@ async function main() {
     const employeeId = await makeEmployee("Employee", "Employee");
     const employee2Id = await makeEmployee("Employee2", "Employee");
     const adminId = await makeEmployee("Admin", "Administrator");
-    const adminToken = signSession({ id: adminId, firstName: "QA", lastName: `Scenarios Admin ${RUN_ID}`, securityRole: "Administrator", teamRole: "Team Member" });
+    const adminToken = signSession({ id: adminId, firstName: "QA", lastName: `Scenarios Admin ${RUN_ID}`, securityRole: "Administrator", teamRole: "Team Member" },
+      // This script runs 10-20 minutes, longer than an access token lives.
+      { expiresInSeconds: 12 * 60 * 60 });
 
     async function makeDevice(label: string, employeeIdForAssignment: string | null): Promise<{ id: string; identifier: string }> {
       const identifier = randomUUID();

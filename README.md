@@ -140,6 +140,25 @@ the browser directly:
   module, and Vite only ever inlines `VITE_`-prefixed variables into the
   client build regardless).
 
+## Desktop sign-in lifetime
+
+Signing in on the desktop web app creates a `web_sessions` row (migration
+`066`) and sets two httpOnly cookies: `labourlink_session`, a short-lived
+(10-minute) access token checked on every request, and `labourlink_refresh`,
+a random token scoped to `/api` that the server silently trades for a new
+access token whenever the old one has expired (`server/src/middleware/auth.ts`,
+`server/src/lib/webSessions.ts`). A sign-in therefore survives overnight,
+browser restarts and any number of tabs. It ends when the user signs out, the
+employee is deactivated or their PIN is reset (all revoke the row), after
+**14 days without use**, or **30 days after signing in** at the latest. Each
+renewal re-reads the employee, so deactivation and role changes take effect
+within one access-token lifetime even without a revoke. If the server can't
+be reached at startup the app shows "Reconnecting…" and retries — it never
+falls back to the login form just because the network or the database is
+briefly unavailable. Only the refresh token's sha256 digest is stored. The
+phone/PWA app is unaffected: it authenticates by device pairing, not by this
+sign-in.
+
 ## Daily activity-log review & correction (Inputs page)
 
 The desktop Inputs page (`/inputs`, Administrator/Manager/Supervisor —
@@ -148,12 +167,21 @@ rather than the data, matching how the Employees page already restricts
 reads) is where a supervisor reviews and corrects one employee's activity
 log for one calendar day.
 
-**Layout:** a date selector (defaults to "today" in `APP_TIMEZONE`, with
-prev/next arrows and a direct date picker) above a two-column layout — a
-searchable, alphabetically-sorted employee list on the left (selection
-persists across date changes and is stored in the URL as `?date=&employee=`
-so a link can be shared/bookmarked), and the selected employee's day on the
-right: an activity-logs card followed by a "Workday details" card.
+**Layout:** a date selector (prev/next arrows and a direct date picker)
+above a two-column layout — a searchable, alphabetically-sorted employee list
+on the left (selection persists across date changes and is kept in the URL as
+`?employee=`), and the selected employee's day on the right: an
+activity-logs card followed by a "Workday details" card.
+
+**Which day it opens on:** every fresh open of Inputs — launching or
+reloading the app, signing in, a browser-restored tab, or clicking Inputs in
+the sidebar (even while already on it) — starts on **today in
+`APP_TIMEZONE`**. A day picked while working stays selected through employee
+switches, edits, deletes, added work and background refreshes (including past
+midnight) until Inputs is opened afresh. The day is page state only: it is
+never written to the URL or to storage, and there is **no dated deep link** —
+a `?date=` in an old URL or bookmark is ignored and removed (the page used to
+write one on every visit, which is what reopened Inputs on a stale day).
 
 **Activity runs, not raw rows:** consecutive `work` time entries for the
 *same* activity, separated only by breaks, are merged into one row (its

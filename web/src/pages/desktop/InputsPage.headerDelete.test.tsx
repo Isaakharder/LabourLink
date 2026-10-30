@@ -18,6 +18,7 @@ import { InputsPage } from "./InputsPage";
 import { api, ApiError } from "../../lib/api";
 import { ActivityRunDto, BreakDto, DailyInputsResponse } from "../../lib/inputsTypes";
 import { formatDurationHMS, formatTimeInAppTimezone } from "../../lib/timezone";
+import { renderInputsOn } from "../../lib/testUtils/inputsToday";
 
 const DATE = "2026-10-05";
 const PREV_DATE = "2026-10-04";
@@ -196,10 +197,12 @@ const breakRow = (name: string) => within(workdayTable()).getByText(name).closes
 const checkboxIn = (row: HTMLElement) => within(row).queryByRole("checkbox");
 
 async function renderPage(employee = "emp-n", date = DATE) {
-  render(
-    <MemoryRouter initialEntries={[`/inputs?date=${date}&employee=${employee}`]}>
-      <InputsPage />
-    </MemoryRouter>
+  renderInputsOn(date, () =>
+    render(
+      <MemoryRouter initialEntries={[`/inputs?employee=${employee}`]}>
+        <InputsPage />
+      </MemoryRouter>
+    )
   );
   await waitFor(() => expect(activityTable()).not.toBeNull());
 }

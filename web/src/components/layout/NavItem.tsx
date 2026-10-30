@@ -15,6 +15,10 @@ export function NavItem({ to, icon: Icon, label }: NavItemProps) {
   return (
     <NavLink
       to={to}
+      // Lets a page tell "opened from the main navigation" apart from its own
+      // URL updates — Inputs restarts at today on it, even when re-clicked
+      // while already open (see InputsPage).
+      state={{ fromMainNav: true }}
       className={({ isActive }) => `nav-item${Icon ? "" : " nav-item-child"}${isActive ? " active" : ""}`}
       onClick={(e) => {
         if (!confirmNavigation()) e.preventDefault();

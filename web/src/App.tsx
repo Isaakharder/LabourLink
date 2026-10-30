@@ -36,7 +36,7 @@ import { useIsMobile } from "./lib/useIsMobile";
 import { isNativePlatform, shouldRenderMobileApp } from "./lib/platform";
 
 function DesktopApp() {
-  const { employee, loading } = useAuth();
+  const { employee, loading, reconnecting } = useAuth();
   const location = useLocation();
   const [searchParams] = useSearchParams();
 
@@ -50,7 +50,17 @@ function DesktopApp() {
     return <GreenhouseDisplayPage displayKey={displayMatch[1]} />;
   }
 
-  if (loading) return <p className="centered-message">Loading...</p>;
+  // Not reaching the server at startup (overnight Wi-Fi drop, server
+  // restarting) must never look like being signed out — see AuthContext.
+  if (loading) {
+    return reconnecting ? (
+      <p className="centered-message" role="status">
+        Can’t reach LabourLink. Reconnecting automatically…
+      </p>
+    ) : (
+      <p className="centered-message">Loading...</p>
+    );
+  }
   if (!employee) {
     // A "forgot PIN" email link lands here while logged out. LoginPage
     // otherwise renders unconditionally (bypassing <Routes> below), so this

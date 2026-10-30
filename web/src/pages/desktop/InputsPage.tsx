@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useSearchParams } from "react-router-dom";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { DateNav } from "../../components/inputs/DateNav";
 import { EmployeeListPanel } from "../../components/inputs/EmployeeListPanel";
@@ -85,9 +85,35 @@ function describeRun(run: ActivityRunDto): string {
 export function InputsPage() {
   const { employee: currentEmployee } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
 
-  const date = searchParams.get("date") ?? todayInAppTimezone();
+  // The day being viewed belongs to this visit only. Every fresh open of
+  // Inputs — app launch, reload, signing in, a restored browser tab, or
+  // clicking Inputs in the sidebar — starts at today in the organization's
+  // time zone. It is deliberately not kept in the URL or in storage: it used
+  // to live in ?date=, which every reload, restored tab and post-login page
+  // then read back, reopening Inputs on whatever day was last viewed.
+  // There is no dated deep link into Inputs; a ?date= left in an old URL or
+  // bookmark is ignored and removed below.
+  const [date, setDate] = useState(() => todayInAppTimezone());
   const selectedEmployeeId = searchParams.get("employee");
+
+  useEffect(() => {
+    if (!searchParams.has("date")) return;
+    const params = new URLSearchParams(searchParams);
+    params.delete("date");
+    setSearchParams(params, { replace: true });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Clicking Inputs in the sidebar while already on Inputs is a fresh open
+  // too (NavItem marks main-navigation clicks). Any other location change —
+  // picking an employee, which rewrites ?employee= — keeps the chosen day.
+  const locationKeyRef = useRef(location.key);
+  useEffect(() => {
+    if (location.key === locationKeyRef.current) return;
+    locationKeyRef.current = location.key;
+    if ((location.state as { fromMainNav?: boolean } | null)?.fromMainNav) setDate(todayInAppTimezone());
+  }, [location.key, location.state]);
 
   const [employees, setEmployees] = useState<InputsEmployee[] | null>(null);
   const [employeesError, setEmployeesError] = useState<string | null>(null);
@@ -250,10 +276,12 @@ export function InputsPage() {
   }, []);
 
   function updateParams(next: { date?: string; employee?: string }) {
-    const params = new URLSearchParams(searchParams);
-    if (next.date !== undefined) params.set("date", next.date);
-    if (next.employee !== undefined) params.set("employee", next.employee);
-    setSearchParams(params, { replace: true });
+    if (next.date !== undefined) setDate(next.date);
+    if (next.employee !== undefined) {
+      const params = new URLSearchParams(searchParams);
+      params.set("employee", next.employee);
+      setSearchParams(params, { replace: true });
+    }
   }
 
   // Scoped to `date` — the panel lists whoever has an actual time-entry log
@@ -362,7 +390,7 @@ export function InputsPage() {
   useEffect(() => {
     if (selectedEmployeeId || !employees || employees.length === 0) return;
     const signedIn = currentEmployee ? employees.find((e) => e.id === currentEmployee.id) : undefined;
-    updateParams({ employee: (signedIn ?? employees[0]).id, date });
+    updateParams({ employee: (signedIn ?? employees[0]).id });
   }, [employees, selectedEmployeeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // `background: true` marks a poll/visibility/focus/online-triggered

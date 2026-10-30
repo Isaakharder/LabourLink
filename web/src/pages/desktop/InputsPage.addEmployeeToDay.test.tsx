@@ -17,6 +17,7 @@ import { InputsPage } from "./InputsPage";
 import { api, ApiError } from "../../lib/api";
 import { DailyInputsResponse } from "../../lib/inputsTypes";
 import { todayInAppTimezone } from "../../lib/timezone";
+import { renderInputsOn } from "../../lib/testUtils/inputsToday";
 
 const PAST_DATE = "2026-10-05";
 let role = "Administrator";
@@ -141,10 +142,12 @@ function daily(employeeId: string): DailyInputsResponse {
 }
 
 function renderPage(employee = "emp-khen", date = PAST_DATE) {
-  return render(
-    <MemoryRouter initialEntries={[`/inputs?date=${date}&employee=${employee}`]}>
-      <InputsPage />
-    </MemoryRouter>
+  return renderInputsOn(date, () =>
+    render(
+      <MemoryRouter initialEntries={[`/inputs?employee=${employee}`]}>
+        <InputsPage />
+      </MemoryRouter>
+    )
   );
 }
 
