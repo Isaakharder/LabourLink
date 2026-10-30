@@ -1,16 +1,16 @@
 // CSV/PDF/Print export for the Employment Timeline table view — same
 // library/pattern as reportExport.ts (csvEscape/triggerDownload,
 // jsPDF+autoTable, window.print() for a temporary @page orientation),
-// applied to a different data shape (one row per employment period, not a
-// date-column matrix). Reads the exact same buildEmploymentTimelineRows
+// applied to a different data shape (one numbered row per displayed
+// employee, not a date-column matrix). Reads the exact same buildEmploymentTimelineRows
 // output the on-screen table renders (employmentTimeline.ts), so CSV/PDF/
 // screen can never disagree about a value.
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { buildEmploymentTimelineRows } from "./employmentTimeline";
+import { buildEmploymentTimelineRows, EMPLOYMENT_TIMELINE_COLUMNS, employmentTimelineRowCells } from "./employmentTimeline";
 import { EmploymentTimelineEmployee } from "./employmentPeriodTypes";
 
-const HEADER = ["Employee", "Nationality", "Work Group", "Employment Type", "Start", "Expected Finish", "Actual Finish", "Status"];
+const HEADER = [...EMPLOYMENT_TIMELINE_COLUMNS];
 
 function triggerDownload(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
@@ -31,13 +31,7 @@ function csvEscape(value: string): string {
 export function exportEmploymentTimelineCsv(employees: EmploymentTimelineEmployee[]) {
   const rows = buildEmploymentTimelineRows(employees);
   const lines = [HEADER.map(csvEscape).join(",")];
-  for (const row of rows) {
-    lines.push(
-      [row.employeeName, row.nationality, row.workGroup, row.employmentType, row.startDate, row.expectedFinishDate, row.actualFinishDate, row.status]
-        .map(csvEscape)
-        .join(",")
-    );
-  }
+  for (const row of rows) lines.push(employmentTimelineRowCells(row).map(csvEscape).join(","));
   const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
   triggerDownload(blob, "Employment Timeline.csv");
 }
@@ -53,9 +47,13 @@ export function exportEmploymentTimelinePdf(employees: EmploymentTimelineEmploye
   doc.setFontSize(12);
   doc.text("Employment Timeline", 14, 24);
   doc.setFontSize(10);
-  doc.text(`Generated ${new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date())}`, 14, 30);
+  doc.text(
+    `Employees: ${rows.length} · Generated ${new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date())}`,
+    14,
+    30
+  );
 
-  const body = rows.map((row) => [row.employeeName, row.nationality, row.workGroup, row.employmentType, row.startDate, row.expectedFinishDate || "—", row.actualFinishDate || "—", row.status]);
+  const body = rows.map((row) => employmentTimelineRowCells(row).map((cell) => cell || "—"));
 
   autoTable(doc, {
     startY: 36,

@@ -36,6 +36,7 @@ interface FormState {
   // still assigned to are shown read-only and never sent.
   activityIds: Set<string>;
   workPermitExpiryDate: string;
+  employmentEndDate: string;
   // "6" | "1" | "2" | "3" | "12" | "custom" — kept as the select's own
   // string value rather than splitting into two booleans, same reasoning
   // BreakProfileEditor.tsx's direction select uses.
@@ -80,6 +81,7 @@ function toFormState(employee: Employee | null): FormState {
     notes: employee?.notes ?? "",
     activityIds: new Set(employee?.assignedActivities.filter((a) => a.isActive).map((a) => a.id) ?? []),
     workPermitExpiryDate: employee?.workPermitExpiryDate ?? "",
+    employmentEndDate: employee?.employmentEndDate ?? "",
     workPermitLeadChoice:
       employee?.workPermitNotifyLeadDays != null
         ? "custom"
@@ -185,7 +187,13 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
     const next: Record<string, string> = {};
     if (!form.firstName.trim()) next.firstName = "First name is required";
     if (!form.lastName.trim()) next.lastName = "Last name is required";
-    if (!form.startDate) next.startDate = "Start date is required";
+    if (!form.startDate) next.startDate = "Employment Start Date is required";
+    if (form.startDate && form.employmentEndDate && form.employmentEndDate < form.startDate) {
+      next.employmentEndDate = "End Different Date can't be earlier than the Employment Start Date";
+    }
+    if (form.startDate && form.workPermitExpiryDate && form.workPermitExpiryDate < form.startDate) {
+      next.workPermitExpiryDate = "Work Permit Expiry Date can't be earlier than the Employment Start Date";
+    }
     if (!NATIONALITIES.includes(form.nationality as (typeof NATIONALITIES)[number])) {
       next.nationality = "Nationality is required";
     }
@@ -242,6 +250,7 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
         // the employee. Empty = no Jobs.
         activityIds: [...form.activityIds],
         workPermitExpiryDate: form.workPermitExpiryDate || null,
+        employmentEndDate: form.employmentEndDate || null,
         // Server clears both when workPermitExpiryDate is null regardless
         // of what's sent here — see employees.ts's resolveWorkPermitUpdate
         // — so these are only meaningful when a date is present.
@@ -420,7 +429,7 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
               {errors.employeeNumber && <span className="field-error">{errors.employeeNumber}</span>}
             </label>
             <label>
-              Start date *
+              Employment Start Date *
               <input
                 type="date"
                 value={form.startDate}
@@ -437,6 +446,12 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
                 onChange={(e) => set("workPermitExpiryDate", e.target.value)}
               />
               {errors.workPermitExpiryDate && <span className="field-error">{errors.workPermitExpiryDate}</span>}
+            </label>
+            <label>
+              End Different Date (optional)
+              <input type="date" value={form.employmentEndDate} onChange={(e) => set("employmentEndDate", e.target.value)} />
+              <span className="field-hint">Only if they stopped working on a different day than their permit expiry.</span>
+              {errors.employmentEndDate && <span className="field-error">{errors.employmentEndDate}</span>}
             </label>
             {form.workPermitExpiryDate && (
               <label>

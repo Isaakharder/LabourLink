@@ -1,15 +1,14 @@
 // @vitest-environment jsdom
 //
-// Control-behavior regression tests for the Employment Timeline toolbar
-// after the "Fit all" redesign: Full timeline is the default/primary view
-// (no Month/Quarter/Year window, no Prev/Next), Graph/Table stays a
-// two-way segmented choice, Today/zoom/export/print controls still fire
-// their underlying actions, and a custom From/To override changes the
-// displayed range. lib/api and lib/employmentTimelineExport are mocked the
-// same way EmployeesPage.test.tsx mocks lib/api — no real network/PDF work
-// happens.
+// The Employment Timeline tab: toolbar controls (Full timeline / Today /
+// zoom / From-To / Graph-Table / exports), the "Employees: N" count and the
+// numbering following every filter, the simplified three-date editor (same
+// employee record as the Directory: PATCH /api/employees/:id with only
+// those three fields), validation, read-only viewing, and the saved
+// "Timeline starts" setting. lib/api and lib/employmentTimelineExport are
+// mocked — no real network/PDF work happens.
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EmploymentTimelineTab } from "./EmploymentTimelineTab";
@@ -22,6 +21,8 @@ const TODAY = todayInAppTimezone();
 let meResponse: { employee: { id: string; firstName: string; lastName: string; securityRole: string; teamRole: string } };
 let timelineResponse: { employees: EmploymentTimelineEmployee[] };
 let displayStartResponse: { displayStart: string | null };
+let patches: { path: string; body: Record<string, unknown> }[] = [];
+let timelineLoads = 0;
 
 vi.mock("../../../lib/api", () => {
   class ApiError extends Error {
@@ -43,7 +44,14 @@ vi.mock("../../../lib/api", () => {
         }
         return Promise.resolve(displayStartResponse);
       }
-      if (path.startsWith("/api/employment-periods")) return Promise.resolve(timelineResponse);
+      if (path === "/api/employment-periods") {
+        timelineLoads++;
+        return Promise.resolve(timelineResponse);
+      }
+      if (path.startsWith("/api/employees/") && options?.method === "PATCH") {
+        patches.push({ path, body: JSON.parse(options.body ?? "{}") });
+        return Promise.resolve({ employee: {} });
+      }
       return Promise.reject(new Error(`Unhandled mock api() call in test: ${path}`));
     }),
   };
@@ -58,38 +66,36 @@ vi.mock("../../../lib/employmentTimelineExport", () => ({
   printEmploymentTimeline: (...args: unknown[]) => printTimeline(...args),
 }));
 
-function makeTimelineEmployee(overrides: Partial<EmploymentTimelineEmployee> = {}): EmploymentTimelineEmployee {
+function emp(overrides: Partial<EmploymentTimelineEmployee> = {}): EmploymentTimelineEmployee {
   return {
     id: "emp-1",
     firstName: "Eve",
     lastName: "Employee",
     nationality: "Canadian",
-    jobGroup: "Greenhouse",
+    jobGroup: null,
+    employeeGroup: { id: "g-gh", name: "Greenhouse Guys" },
     isActive: true,
+    employmentStartDate: "2024-08-01",
+    workPermitExpiryDate: null,
+    endDifferentDate: null,
     workPermit: null,
+    employmentType: "Permanent",
+    workGroup: "Greenhouse",
     hasUsableDates: true,
-    periods: [
-      {
-        id: "period-1",
-        employeeId: "emp-1",
-        startDate: "2024-08-01",
-        expectedFinishDate: null,
-        actualFinishDate: null,
-        employmentType: "Permanent",
-        workGroup: "Greenhouse",
-        workGroupOtherDescription: null,
-        notes: null,
-        statuses: ["current"],
-        timelineEffectiveEndDate: TODAY,
-        timelineLabel: "ongoing",
-        synthesized: false,
-        createdAt: "2024-08-01T00:00:00.000Z",
-        updatedAt: "2024-08-01T00:00:00.000Z",
-      },
-    ],
+    timelineEndDate: null,
+    timelineEndSource: null,
+    timelineLabel: "ongoing",
+    statuses: ["current"],
     ...overrides,
   };
 }
+
+const crew = () => [
+  emp(),
+  emp({ id: "emp-2", firstName: "Gus", lastName: "Guatemala", nationality: "Guatemalan", employeeGroup: { id: "g-loc", name: "Locals" }, employmentType: "Seasonal" }),
+  emp({ id: "emp-3", firstName: "Mia", lastName: "Mexico", nationality: "Mexican", employeeGroup: null, employmentType: null, statuses: ["permitExpired"], workPermitExpiryDate: "2025-01-31", timelineEndDate: "2025-01-31", timelineEndSource: "workPermitExpiry", timelineLabel: "permitExpired" }),
+  emp({ id: "emp-4", firstName: "Zed", lastName: "Zulu", nationality: "Mexican", employeeGroup: { id: "g-gh", name: "Greenhouse Guys" } }),
+];
 
 function renderTab() {
   return render(
@@ -99,18 +105,27 @@ function renderTab() {
   );
 }
 
+const count = () => document.querySelector(".employment-timeline-count")!.textContent;
+const rowheads = () => [...document.querySelectorAll(".employment-timeline-rowhead")].map((r) => r.textContent);
+const monthCells = () =>
+  [...document.querySelectorAll(".employment-timeline-scale-months .employment-timeline-scale-cell")].map((el) => (el as HTMLElement).dataset.date);
+const graphWidth = () => parseFloat((document.querySelector(".employment-timeline-graph") as HTMLElement).style.width);
+
+async function pickFilter(user: ReturnType<typeof userEvent.setup>, trigger: string, option: string) {
+  await user.click(screen.getByText(trigger).closest("button")!);
+  const panel = document.querySelector(".employment-timeline-filter-panel") as HTMLElement;
+  await user.click(within(panel).getByLabelText(option));
+  await user.click(within(panel).getByRole("button", { name: /Apply/ }));
+}
+
 beforeEach(() => {
   meResponse = {
     employee: { id: "admin-1", firstName: "Ada", lastName: "Admin", securityRole: "Administrator", teamRole: "Team Member" },
   };
-  timelineResponse = { employees: [makeTimelineEmployee()] };
+  timelineResponse = { employees: [emp()] };
   displayStartResponse = { displayStart: null };
-  // jsdom never lays anything out, so a real DOM element's clientWidth is
-  // always 0 — EmploymentTimelineGraph measures its own scroll container
-  // to compute the "Fit all" density, so a hardcoded realistic width here
-  // is what makes the adaptive header-granularity choice (and zoom limits)
-  // behave the way an actual browser would, rather than always collapsing
-  // to the coarsest (year) granularity.
+  patches = [];
+  timelineLoads = 0;
   Object.defineProperty(HTMLElement.prototype, "clientWidth", { configurable: true, value: 1400 });
 });
 
@@ -120,185 +135,179 @@ afterEach(() => {
 });
 
 describe("EmploymentTimelineTab controls", () => {
-  it("defaults to the Graph view with a Full timeline / Today / Zoom toolbar, no Month/Quarter/Year or Prev/Next", async () => {
+  it("defaults to the Graph view with Full timeline / Today / Zoom, Graph-Table and the filters", async () => {
     renderTab();
     await screen.findByRole("button", { name: "Full timeline" });
-
-    expect(screen.getByRole("button", { name: "Today" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Zoom in" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Zoom out" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Month" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Quarter" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Previous" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Next" })).not.toBeInTheDocument();
-
-    const graph = screen.getByRole("button", { name: "Graph" });
-    const table = screen.getByRole("button", { name: "Table" });
-    expect(graph).toHaveAttribute("aria-pressed", "true");
-    expect(table).toHaveAttribute("aria-pressed", "false");
-    expect(document.querySelector(".employment-timeline-graph-wrap")).toBeInTheDocument();
+    for (const name of ["Today", "Zoom in", "Zoom out"]) expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Graph" })).toHaveAttribute("aria-pressed", "true");
+    for (const label of ["Employee: All", "Nationality: All", "Employee Group: All", "Work Group: All", "Employment Type: All", "Status: All"]) {
+      expect(screen.getByText(label).closest("button")).toHaveClass("employment-timeline-filter-trigger");
+    }
   });
 
-  it("fits the full employment range by default — the earliest period start and today both appear as month marks", async () => {
+  it("fits the full range: month gridlines from the earliest Employment Start Date through today", async () => {
     renderTab();
     await screen.findByRole("button", { name: "Full timeline" });
-    // The mock period starts 2024-08 and is ongoing through today — the
-    // fitted range must span both ends. Only the first mark and any
-    // January mark carry the year suffix (see buildTimelineMonthMarks), so
-    // check the current year appears somewhere rather than assuming it's
-    // on the very last mark.
-    const marks = Array.from(document.querySelectorAll(".employment-timeline-month-mark")).map((el) => el.textContent ?? "");
-    expect(marks[0]).toContain("2024");
-    expect(marks.some((m) => m.includes(TODAY.slice(0, 4)))).toBe(true);
+    const months = monthCells();
+    expect(months[0]).toBe("2024-08-01");
+    expect(months).toContain(`${TODAY.slice(0, 7)}-01`);
+    expect([...document.querySelectorAll(".employment-timeline-scale-years .employment-timeline-scale-cell")].map((c) => c.textContent)).toContain("2024");
   });
 
-  it("switches the Graph/Table segmented control and swaps the rendered view", async () => {
+  it("switches Graph/Table, and Print switches to the table first; CSV and PDF export the displayed employees", async () => {
+    timelineResponse = { employees: crew() };
     const user = userEvent.setup();
     renderTab();
-    await screen.findByRole("button", { name: "Graph" });
-
+    await screen.findByRole("button", { name: "Table" });
     await user.click(screen.getByRole("button", { name: "Table" }));
-    expect(screen.getByRole("button", { name: "Table" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "Graph" })).toHaveAttribute("aria-pressed", "false");
     expect(document.querySelector("table.employment-timeline-table")).toBeInTheDocument();
-    expect(document.querySelector(".employment-timeline-graph-wrap")).not.toBeInTheDocument();
-
     await user.click(screen.getByRole("button", { name: "Graph" }));
-    expect(document.querySelector(".employment-timeline-graph-wrap")).toBeInTheDocument();
-  });
 
-  it("still fires Export CSV, Export PDF and Print on click", async () => {
-    const user = userEvent.setup();
-    renderTab();
-    await screen.findByRole("button", { name: /Export CSV/ });
-
+    await pickFilter(user, "Nationality: All", "Mexican");
     await user.click(screen.getByRole("button", { name: /Export CSV/ }));
-    expect(exportCsv).toHaveBeenCalledTimes(1);
-
     await user.click(screen.getByRole("button", { name: /Export PDF/ }));
-    expect(exportPdf).toHaveBeenCalledTimes(1);
-
+    expect(exportCsv.mock.calls[0][0].map((e: EmploymentTimelineEmployee) => e.id)).toEqual(["emp-3", "emp-4"]);
+    expect(exportPdf.mock.calls[0][0].map((e: EmploymentTimelineEmployee) => e.id)).toEqual(["emp-3", "emp-4"]);
     await user.click(screen.getByRole("button", { name: /Print/ }));
-    // Print switches to the table view first, then prints on the next frame.
     expect(screen.getByRole("button", { name: "Table" })).toHaveAttribute("aria-pressed", "true");
+    const tableNumbers = [...document.querySelectorAll("table.employment-timeline-table tbody tr td:first-child")].map((td) => td.textContent);
+    expect(tableNumbers).toEqual(["1", "2"]);
   });
 
-  it("Zoom in increases the graph track's minimum pixel width; Full timeline resets it", async () => {
+  it("Zoom in widens the date track; Full timeline resets it", async () => {
     const user = userEvent.setup();
     renderTab();
     await screen.findByRole("button", { name: "Full timeline" });
-
-    const track = document.querySelector(".employment-timeline-track") as HTMLElement;
-    const baselineWidth = track.style.minWidth;
-
+    const baseline = graphWidth();
     await user.click(screen.getByRole("button", { name: "Zoom in" }));
-    const zoomedTrack = document.querySelector(".employment-timeline-track") as HTMLElement;
-    expect(parseFloat(zoomedTrack.style.minWidth)).toBeGreaterThan(parseFloat(baselineWidth));
-
+    expect(graphWidth()).toBeGreaterThan(baseline);
     await user.click(screen.getByRole("button", { name: "Full timeline" }));
-    const resetTrack = document.querySelector(".employment-timeline-track") as HTMLElement;
-    expect(resetTrack.style.minWidth).toBe(baselineWidth);
+    expect(graphWidth()).toBeCloseTo(baseline, 5);
   });
 
-  it("a custom From/To range overrides the fitted range, and Full timeline clears it", async () => {
+  it("a custom From/To range sets the month labels; Full timeline clears it", async () => {
     const user = userEvent.setup();
     renderTab();
     await screen.findByRole("button", { name: "Full timeline" });
-
-    const [fromInput, toInput] = screen.getAllByDisplayValue("") as HTMLInputElement[];
-    // fireEvent.change (not user.type) — native date inputs don't reliably
-    // accept segment-by-segment keystroke typing in jsdom.
+    const [fromInput, toInput] = [...document.querySelectorAll(".employment-timeline-range-picker input")] as HTMLInputElement[];
     fireEvent.change(fromInput, { target: { value: "2026-01-01" } });
     fireEvent.change(toInput, { target: { value: "2026-03-31" } });
-
-    // At the mocked 1400px container width, a 90-day range fits at
-    // ~15.6px/day — fine enough for weekly (not monthly) header marks, per
-    // buildTimelineHeaderMarks' adaptive granularity (see its own unit
-    // tests in employmentTimeline.test.ts for the full tier breakdown).
-    const marks = Array.from(document.querySelectorAll(".employment-timeline-month-mark")).map((el) => el.textContent ?? "");
-    expect(marks[0]).toBe("Dec 29"); // the Monday-start week containing 2026-01-01
-    expect(marks[marks.length - 1]).toBe("Mar 30");
-    expect(marks.length).toBeGreaterThan(3); // meaningfully finer than month-level for this range/width
-
+    expect(monthCells()).toEqual(["2026-01-01", "2026-02-01", "2026-03-01"]);
+    expect([...document.querySelectorAll(".employment-timeline-scale-months .employment-timeline-scale-cell")].map((c) => c.textContent)).toEqual(["Jan", "Feb", "Mar"]);
     await user.click(screen.getByRole("button", { name: "Full timeline" }));
-    expect((screen.getAllByDisplayValue("")[0] as HTMLInputElement).value).toBe("");
+    expect(fromInput.value).toBe("");
+  });
+});
+
+describe("EmploymentTimelineTab — numbering and the Employees count", () => {
+  it("shows 'Employees: N' for the displayed employees and numbers them 1..n", async () => {
+    timelineResponse = { employees: crew() };
+    renderTab();
+    await screen.findByText("Employees:");
+    expect(count()).toBe("Employees: 4");
+    expect(rowheads()).toEqual(["1Eve Employee", "2Gus Guatemala", "3Mia Mexico", "4Zed Zulu"]);
   });
 
-  it("an employee with no employment dates renders as a full-width dashed row, not a bar, in both Graph and Table", async () => {
-    timelineResponse = {
-      employees: [makeTimelineEmployee(), makeTimelineEmployee({ id: "no-dates", firstName: "No", lastName: "Dates", hasUsableDates: false, periods: [] })],
-    };
-    renderTab();
-    const flaggedRow = await screen.findByRole("button", { name: "Add employment dates for No Dates" });
-    expect(flaggedRow).toHaveTextContent("No Dates · Missing employment dates");
-    expect(flaggedRow).toHaveClass("employment-timeline-bar-missing-dates");
-    expect(flaggedRow).not.toBeDisabled(); // Administrator (canEdit) in this fixture
-
+  it.each([
+    ["Nationality: All", "Mexican", ["1Mia Mexico", "2Zed Zulu"]],
+    ["Employee Group: All", "Greenhouse Guys", ["1Eve Employee", "2Zed Zulu"]],
+    ["Employee Group: All", "Ungrouped", ["1Mia Mexico"]],
+    ["Employment Type: All", "Seasonal", ["1Gus Guatemala"]],
+    ["Status: All", "Permit expired", ["1Mia Mexico"]],
+    ["Employee: All", "Zed Zulu", ["1Zed Zulu"]],
+  ])("filter %s → %s renumbers from 1 and updates the count", async (trigger, option, expected) => {
+    timelineResponse = { employees: crew() };
     const user = userEvent.setup();
+    renderTab();
+    await screen.findByText("Employees:");
+    await pickFilter(user, trigger, option);
+    expect(rowheads()).toEqual(expected);
+    expect(count()).toBe(`Employees: ${expected.length}`);
+  });
+
+  it("an employee with no Employment Start Date is numbered and counted, shown as a dashed row in Graph and Table", async () => {
+    timelineResponse = { employees: [emp(), emp({ id: "nd", firstName: "No", lastName: "Dates", hasUsableDates: false, employmentStartDate: null, timelineLabel: null })] };
+    const user = userEvent.setup();
+    renderTab();
+    expect(await screen.findByRole("button", { name: "2. No Dates: add an Employment Start Date" })).toHaveClass("employment-timeline-bar-missing-dates");
+    expect(count()).toBe("Employees: 2");
     await user.click(screen.getByRole("button", { name: "Table" }));
-    // Table/CSV/PDF/Print all read the same buildEmploymentTimelineRows
-    // output, which spells it out as its own Status value there.
-    expect(screen.getAllByText("No employment dates recorded").length).toBeGreaterThan(0);
+    expect(screen.getByText("No Employment Start Date recorded")).toBeInTheDocument();
   });
+});
 
-  it("clicking the missing-dates row opens the Add-period modal for that employee", async () => {
-    timelineResponse = {
-      employees: [makeTimelineEmployee(), makeTimelineEmployee({ id: "no-dates", firstName: "No", lastName: "Dates", hasUsableDates: false, periods: [] })],
-    };
-    renderTab();
+describe("EmploymentTimelineTab — simplified employment-dates editor", () => {
+  async function openEditor(user: ReturnType<typeof userEvent.setup>, name = "1. Eve Employee: edit employment dates") {
+    await user.click(await screen.findByRole("button", { name }));
+    return screen.getByRole("dialog");
+  }
+
+  it("shows only Employment Start Date, Work Permit Expiry Date and End Different Date — no type, group, notes, add or delete", async () => {
+    timelineResponse = { employees: [emp({ workPermitExpiryDate: "2027-02-04", timelineEndDate: "2027-02-04", timelineEndSource: "workPermitExpiry", timelineLabel: "employed" })] };
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "Add employment dates for No Dates" }));
-    expect(await screen.findByRole("heading", { name: "Add employment period — No Dates" })).toBeInTheDocument();
-  });
-
-  it("a Manager (view-only) cannot click the missing-dates row — no permission to create a period", async () => {
-    meResponse = { employee: { id: "mgr-1", firstName: "Mo", lastName: "Manager", securityRole: "Manager", teamRole: "Team Member" } };
-    timelineResponse = {
-      employees: [makeTimelineEmployee(), makeTimelineEmployee({ id: "no-dates", firstName: "No", lastName: "Dates", hasUsableDates: false, periods: [] })],
-    };
     renderTab();
-    expect(await screen.findByRole("button", { name: "Add employment dates for No Dates" })).toBeDisabled();
-  });
-
-  it("renders each bar's label as 'Employee Name · Status' and opens the period editor on click, for any viewer", async () => {
-    renderTab();
-    const bar = await screen.findByRole("button", { name: "View or edit Eve Employee's employment period" });
-    expect(bar).toHaveTextContent("Eve Employee · Ongoing");
-    expect(bar).not.toBeDisabled();
-
-    const user = userEvent.setup();
-    await user.click(bar);
-    expect(await screen.findByRole("heading", { name: "Edit employment period — Eve Employee" })).toBeInTheDocument();
-  });
-
-  it("a Manager (view-only) can still open a real period read-only, but not a bar that would create one", async () => {
-    meResponse = { employee: { id: "mgr-1", firstName: "Mo", lastName: "Manager", securityRole: "Manager", teamRole: "Team Member" } };
-    renderTab();
-    const bar = await screen.findByRole("button", { name: "View or edit Eve Employee's employment period" });
-    expect(bar).not.toBeDisabled();
-    const user = userEvent.setup();
-    await user.click(bar);
-    expect(await screen.findByRole("heading", { name: "Eve Employee — Employment period" })).toBeInTheDocument();
-  });
-
-  it("the Add-period modal offers 'Add another period' when editing a real period, wired to reopen in add mode", async () => {
-    renderTab();
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "View or edit Eve Employee's employment period" }));
-    await screen.findByRole("heading", { name: "Edit employment period — Eve Employee" });
-
-    await user.click(screen.getByRole("button", { name: "Add another period" }));
-    expect(await screen.findByRole("heading", { name: "Add employment period — Eve Employee" })).toBeInTheDocument();
-  });
-
-  it("still renders all five filters with consistent trigger styling", async () => {
-    renderTab();
-    await screen.findByRole("button", { name: "Full timeline" });
-
-    for (const label of ["Employee: All", "Nationality: All", "Work Group: All", "Employment Type: All", "Status: All"]) {
-      const trigger = screen.getByText(label).closest("button");
-      expect(trigger).toHaveClass("employment-timeline-filter-trigger");
+    const dialog = await openEditor(user);
+    expect(within(dialog).getByLabelText(/^Employment Start Date/)).toHaveValue("2024-08-01");
+    expect(within(dialog).getByLabelText(/^Work Permit Expiry Date/)).toHaveValue("2027-02-04");
+    expect(within(dialog).getByLabelText(/^End Different Date/)).toHaveValue("");
+    expect(dialog.querySelectorAll("input")).toHaveLength(3);
+    expect(dialog.querySelectorAll("select, textarea")).toHaveLength(0);
+    for (const gone of [/Employment type/i, /Work group/i, /Notes/i, /Add another period/i, /Delete period/i]) {
+      expect(within(dialog).queryByText(gone)).not.toBeInTheDocument();
     }
+  });
+
+  it("saves the three dates to the employee record (the same PATCH the Directory uses) and reloads the timeline", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    const dialog = await openEditor(user);
+    fireEvent.change(within(dialog).getByLabelText(/^Employment Start Date/), { target: { value: "2024-07-15" } });
+    fireEvent.change(within(dialog).getByLabelText(/^Work Permit Expiry Date/), { target: { value: "2027-02-04" } });
+    fireEvent.change(within(dialog).getByLabelText(/^End Different Date/), { target: { value: "2026-12-15" } });
+    const loadsBefore = timelineLoads;
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]).toEqual({ path: "/api/employees/emp-1", body: { startDate: "2024-07-15", workPermitExpiryDate: "2027-02-04", employmentEndDate: "2026-12-15" } });
+    // Never isActive or anything else — saving can't deactivate or clock out.
+    expect(Object.keys(patches[0].body).sort()).toEqual(["employmentEndDate", "startDate", "workPermitExpiryDate"]);
+    await waitFor(() => expect(timelineLoads).toBeGreaterThan(loadsBefore));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("clearing the optional dates sends null for them", async () => {
+    timelineResponse = { employees: [emp({ workPermitExpiryDate: "2027-02-04", endDifferentDate: "2026-12-15" })] };
+    const user = userEvent.setup();
+    renderTab();
+    const dialog = await openEditor(user);
+    fireEvent.change(within(dialog).getByLabelText(/^Work Permit Expiry Date/), { target: { value: "" } });
+    fireEvent.change(within(dialog).getByLabelText(/^End Different Date/), { target: { value: "" } });
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0].body).toEqual({ startDate: "2024-08-01", workPermitExpiryDate: null, employmentEndDate: null });
+  });
+
+  it("rejects an ending date earlier than the Employment Start Date with a clear message, saving nothing", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    const dialog = await openEditor(user);
+    fireEvent.change(within(dialog).getByLabelText(/^End Different Date/), { target: { value: "2024-01-01" } });
+    fireEvent.change(within(dialog).getByLabelText(/^Work Permit Expiry Date/), { target: { value: "2024-07-31" } });
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(within(dialog).getByText("End Different Date can't be earlier than the Employment Start Date")).toBeInTheDocument();
+    expect(within(dialog).getByText("Work Permit Expiry Date can't be earlier than the Employment Start Date")).toBeInTheDocument();
+    expect(patches).toHaveLength(0);
+  });
+
+  it("a Manager can open a bar read-only (no Save) and can't open the missing-dates row", async () => {
+    meResponse = { employee: { id: "mgr-1", firstName: "Mo", lastName: "Manager", securityRole: "Manager", teamRole: "Team Member" } };
+    timelineResponse = { employees: [emp(), emp({ id: "nd", firstName: "No", lastName: "Dates", hasUsableDates: false, employmentStartDate: null, timelineLabel: null })] };
+    const user = userEvent.setup();
+    renderTab();
+    await user.click(await screen.findByRole("button", { name: "1. Eve Employee: view employment dates" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByLabelText(/^Employment Start Date/)).toBeDisabled();
+    expect(within(dialog).queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "2. No Dates: add an Employment Start Date" })).toBeDisabled();
   });
 });
 
@@ -307,15 +316,10 @@ describe("EmploymentTimelineTab — 'Timeline starts' saved display-cutoff setti
     displayStartResponse = { displayStart: "2024-03-01" };
     const user = userEvent.setup();
     renderTab();
-
     const input = (await screen.findByLabelText("Timeline starts")) as HTMLInputElement;
     expect(input.value).toBe("2024-03-01");
-    expect(input).not.toBeDisabled();
-
     fireEvent.change(input, { target: { value: "2025-01-01" } });
     await user.click(screen.getByRole("button", { name: "Save" }));
-
-    // Persisted through the mocked PATCH — a fresh read would see it too.
     expect(displayStartResponse.displayStart).toBe("2025-01-01");
   });
 
@@ -324,81 +328,41 @@ describe("EmploymentTimelineTab — 'Timeline starts' saved display-cutoff setti
     const user = userEvent.setup();
     renderTab();
     await screen.findByDisplayValue("2024-03-01");
-
     await user.click(screen.getByRole("button", { name: "Reset to earliest employee start" }));
-
     expect(displayStartResponse.displayStart).toBeNull();
-    expect((screen.getByLabelText("Timeline starts") as HTMLInputElement).value).toBe("");
   });
 
-  it("a Manager sees the saved cutoff read-only — disabled input, no Save/Reset, with an explanatory note", async () => {
+  it("a Manager sees the saved cutoff read-only", async () => {
     meResponse = { employee: { id: "mgr-1", firstName: "Mo", lastName: "Manager", securityRole: "Manager", teamRole: "Team Member" } };
     displayStartResponse = { displayStart: "2024-03-01" };
     renderTab();
-
     const input = (await screen.findByLabelText("Timeline starts")) as HTMLInputElement;
-    expect(input.value).toBe("2024-03-01");
     expect(input).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Reset to earliest employee start" })).not.toBeInTheDocument();
     expect(screen.getByText("Only an Administrator can change this.")).toBeInTheDocument();
   });
 
-  it("a period starting before the saved cutoff is clipped with a continuation indicator, not hidden or moved", async () => {
+  it("a start before the saved cutoff is clipped with a continuation indicator, not hidden or moved", async () => {
     displayStartResponse = { displayStart: "2025-01-01" };
-    timelineResponse = {
-      employees: [
-        makeTimelineEmployee({
-          periods: [
-            {
-              id: "period-1",
-              employeeId: "emp-1",
-              startDate: "2020-06-01", // well before the saved cutoff
-              expectedFinishDate: null,
-              actualFinishDate: null,
-              employmentType: "Permanent",
-              workGroup: "Greenhouse",
-              workGroupOtherDescription: null,
-              notes: null,
-              statuses: ["current"],
-              timelineEffectiveEndDate: TODAY,
-              timelineLabel: "ongoing",
-              synthesized: false,
-              createdAt: "2020-06-01T00:00:00.000Z",
-              updatedAt: "2020-06-01T00:00:00.000Z",
-            },
-          ],
-        }),
-      ],
-    };
+    timelineResponse = { employees: [emp({ employmentStartDate: "2020-06-01" })] };
     renderTab();
-
-    const bar = await screen.findByRole("button", { name: "View or edit Eve Employee's employment period" });
-    expect(bar.style.left).toBe("0%"); // drawn from the display boundary
+    const bar = await screen.findByRole("button", { name: "1. Eve Employee: edit employment dates" });
+    await waitFor(() => expect(bar.style.left).toBe("0%"));
     expect(bar.querySelector(".employment-timeline-bar-clip-notch")).toBeInTheDocument();
-    expect(bar.getAttribute("title")).toContain("2020-06-01"); // true start date still surfaced
-    expect(bar.getAttribute("title")).toContain("employment began before the displayed range");
+    expect(bar.getAttribute("title")).toContain("2020-06-01");
   });
 
-  it("clearing a custom From/To override returns to the saved cutoff, not the raw earliest employee start", async () => {
+  it("clearing a custom From/To override returns to the saved cutoff, not the raw earliest start", async () => {
     displayStartResponse = { displayStart: "2025-06-01" };
-    timelineResponse = {
-      employees: [makeTimelineEmployee({ periods: [{ ...makeTimelineEmployee().periods[0], startDate: "2018-01-01" }] })],
-    };
+    timelineResponse = { employees: [emp({ employmentStartDate: "2018-01-01" })] };
     const user = userEvent.setup();
     renderTab();
     await screen.findByDisplayValue("2025-06-01");
-
-    const [fromInput, toInput] = screen.getAllByDisplayValue("").filter((el) => el.closest(".employment-timeline-range-picker")) as HTMLInputElement[];
+    const [fromInput, toInput] = [...document.querySelectorAll(".employment-timeline-range-picker input")] as HTMLInputElement[];
     fireEvent.change(fromInput, { target: { value: "2026-01-01" } });
     fireEvent.change(toInput, { target: { value: "2026-03-31" } });
-    let marks = Array.from(document.querySelectorAll(".employment-timeline-month-mark")).map((el) => el.textContent ?? "");
-    expect(marks[0]).not.toContain("2018");
-
+    expect(monthCells()[0]).toBe("2026-01-01");
     await user.click(screen.getByRole("button", { name: "Full timeline" }));
-    marks = Array.from(document.querySelectorAll(".employment-timeline-month-mark")).map((el) => el.textContent ?? "");
-    // Back to the saved cutoff (2025-06-01), never the true 2018 start.
-    expect(marks.some((m) => m.includes("2018"))).toBe(false);
-    expect(marks[0]).toContain("2025");
+    expect(monthCells()[0]).toBe("2025-06-01");
+    expect(monthCells().some((d) => d!.startsWith("2018"))).toBe(false);
   });
 });

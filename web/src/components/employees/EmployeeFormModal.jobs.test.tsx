@@ -73,6 +73,7 @@ function existing(overrides: Partial<Employee> = {}): Employee {
     workPermitExpiryDate: null,
     workPermitNotifyLeadMonths: null,
     workPermitNotifyLeadDays: null,
+    employmentEndDate: null,
     createdAt: "",
     updatedAt: "",
     ...overrides,
@@ -248,7 +249,7 @@ describe("Employee form — Jobs", () => {
     render(<EmployeeFormModal employee={null} onClose={() => {}} onSaved={() => {}} />);
     await user.type(screen.getByLabelText(/First name/), "Jordan");
     await user.type(screen.getByLabelText(/Last name/), "Doe");
-    await user.type(screen.getByLabelText(/Start date/), "2026-01-01");
+    await user.type(screen.getByLabelText(/^Employment Start Date/), "2026-01-01");
     await user.selectOptions(screen.getByLabelText(/Nationality/), "Canadian");
     await waitFor(() => expect(shownJobs()).toHaveLength(5));
     await user.click(jobBox("General"));

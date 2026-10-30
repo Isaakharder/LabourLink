@@ -1,169 +1,86 @@
-// Employment Timeline redesign: the ONE place that decides, for a given
-// employee + their employment periods, (a) whether they belong on the
-// timeline at all and (b) how far each bar should be drawn and what it
-// should be labeled. GET /api/employment-periods (employmentPeriods.ts)
-// calls this once per request and ships the result straight to the client
-// — the Graph, Table, CSV, PDF and Print views all read these same
-// server-computed fields, so none of them can independently decide a
-// different employee is "expired" or draw a bar to a different date.
+// Employment Timeline: the ONE place that decides, for an employee, whether
+// they belong on the timeline and where their bar ends and what it's
+// labeled. GET /api/employment-periods (routes/employmentPeriods.ts) calls
+// this once per employee and ships the result to the client — the Graph,
+// Table, CSV, PDF and Print views all read these same server-computed
+// fields, so none of them can decide a different end date on its own.
 //
-// Source-of-truth fields, matched to what the Directory itself displays
-// (see DirectoryTab.tsx): active/deactivated is employees.is_active alone
-// (the Directory's status pill has no other input); "Work Start Date" is
-// employees.start_date; work-permit expiry is employees.work_permit_expiry_date,
-// checked with a bare `expiryDate < today` comparison — same as
-// WorkPermitStatus.tsx's own client-side check — deliberately NOT
-// getActiveWorkPermitAlerts()/its severity, which is gated by notification
-// windows and acknowledge/cancel snoozing and therefore is NOT a reliable
-// "is this actually expired" signal (an expired-but-acknowledged permit
-// produces zero alerts). Expected/actual finish live only on
-// employee_employment_periods (migration 050) — there is no employee-level
-// equivalent.
+// One source of truth: every date comes from the employee record the
+// Employees Directory shows and edits (migration 068) —
+//   Employment Start Date   = employees.start_date
+//   Work Permit Expiry Date = employees.work_permit_expiry_date
+//   End Different Date      = employees.employment_end_date (optional)
+// The bar starts on the Employment Start Date and ends on the End Different
+// Date when one is entered, otherwise on the Work Permit Expiry Date,
+// otherwise it is ongoing (drawn through the visible range). End Different
+// Date never changes the permit expiry.
 //
-// There is no dedicated "still working despite expiry" field anywhere in
-// the schema. The explicit choice IS employees.is_active remaining true —
-// confirmed by employmentPeriods.ts's PATCH route, which documents that
-// recording an actual/expected finish deliberately never touches is_active;
-// deactivation is a fully separate, explicit admin action. That gives the
-// precedence this module encodes: is_active is the sole inclusion gate, and
-// a recorded actual_finish_date is always absolute (never re-extended into
-// "still working," regardless of is_active — an active employee whose only
-// period already has a real actual_finish_date in the past just renders as
-// a normal Completed bar, per product decision).
+// Inclusion is employees.is_active alone, as before: deactivated employees
+// are left off the graph, table, totals and every export. Recording an End
+// Different Date never deactivates anyone (a separate, explicit action).
 
-export type TimelineBarLabel = "completed" | "ongoing" | "employed" | "expiredStillWorking";
+export type TimelineBarLabel = "completed" | "ongoing" | "employed" | "permitExpired";
 
 export const TIMELINE_BAR_LABEL_TEXT: Record<TimelineBarLabel, string> = {
-  completed: "Completed",
+  completed: "Finished",
   ongoing: "Ongoing",
   employed: "Employed",
-  expiredStillWorking: "Expired — still working",
+  permitExpired: "Permit expired",
 };
 
+// Which date ended the bar: the explicit End Different Date, the permit
+// expiry, or nothing (ongoing).
+export type TimelineEndSource = "endDifferentDate" | "workPermitExpiry" | null;
+
+export interface TimelineDates {
+  startDate: string | null;
+  workPermitExpiryDate: string | null;
+  endDifferentDate: string | null;
+}
+
 export interface TimelineBarInfo {
-  // Always a concrete YYYY-MM-DD — never null. For "ongoing"/
-  // "expiredStillWorking" this is `today`; callers that render bars extend
-  // those two labels visually to the graph's actual right edge (which is
-  // always >= today by construction — see computeFittedRange), rather than
-  // stopping exactly at this value.
-  effectiveEndDate: string;
+  // The bar's last day (inclusive), or null for an ongoing bar, which the
+  // client draws to the visible range's right edge.
+  endDate: string | null;
+  endSource: TimelineEndSource;
   label: TimelineBarLabel;
 }
 
-// A confirmed actual_finish_date is absolute: it ends the bar there and
-// labels it Completed, full stop — never overridden by expected_finish_date,
-// work permit expiry, or is_active (see header comment). Otherwise, the
-// applicable deadline is whichever of {expected_finish_date, work-permit
-// expiry} is EARLIER (a permit expiring before the period's own expected
-// finish caps real ability to work regardless of paperwork, and vice
-// versa) — a period with neither set is genuinely open-ended.
-export function computeTimelineBar(
-  period: { startDate: string; expectedFinishDate: string | null; actualFinishDate: string | null },
-  workPermitExpiryDate: string | null,
-  today: string
-): TimelineBarInfo {
-  if (period.actualFinishDate !== null) {
-    return { effectiveEndDate: period.actualFinishDate, label: "completed" };
+// End Different Date wins over the permit expiry; with neither the bar is
+// ongoing. A finished bar is one whose End Different Date has arrived (the
+// last day worked is today or earlier); a permit expiry in the past with no
+// End Different Date is "Permit expired" — the bar still ends on the expiry.
+export function computeTimelineBar(dates: Omit<TimelineDates, "startDate">, today: string): TimelineBarInfo {
+  if (dates.endDifferentDate !== null) {
+    return {
+      endDate: dates.endDifferentDate,
+      endSource: "endDifferentDate",
+      label: dates.endDifferentDate <= today ? "completed" : "employed",
+    };
   }
-
-  const candidates = [period.expectedFinishDate, workPermitExpiryDate].filter((d): d is string => d !== null);
-  const effectiveDeadline = candidates.length > 0 ? candidates.reduce((a, b) => (a < b ? a : b)) : null;
-
-  if (effectiveDeadline === null) {
-    return { effectiveEndDate: today, label: "ongoing" };
+  if (dates.workPermitExpiryDate !== null) {
+    return {
+      endDate: dates.workPermitExpiryDate,
+      endSource: "workPermitExpiry",
+      label: dates.workPermitExpiryDate < today ? "permitExpired" : "employed",
+    };
   }
-  if (effectiveDeadline > today) {
-    return { effectiveEndDate: effectiveDeadline, label: "employed" };
-  }
-  // effectiveDeadline <= today, no actual finish ever recorded: the
-  // employee's own is_active is what this function's caller already
-  // guarded on (only active employees ever reach here) — is_active
-  // remaining true past this deadline IS the explicit "still working" choice.
-  return { effectiveEndDate: today, label: "expiredStillWorking" };
-}
-
-export interface TimelinePeriodInput {
-  id: string;
-  startDate: string;
-  expectedFinishDate: string | null;
-  actualFinishDate: string | null;
-  employmentType: string | null;
-  workGroup: string | null;
-  workGroupOtherDescription: string | null;
-  notes: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface ResolvedTimelinePeriod extends TimelinePeriodInput {
-  timelineEffectiveEndDate: string;
-  timelineLabel: TimelineBarLabel;
-  // True only for the one virtual period synthesized below (an employee
-  // with zero employment_periods rows but a usable employees.start_date) —
-  // there is no real employment_periods row behind it, so callers must not
-  // let it be edited/deleted as if it were a real period.
-  synthesized: boolean;
-}
-
-export interface TimelineEmployeeInput {
-  id: string;
-  isActive: boolean;
-  startDate: string | null;
-  workPermitExpiryDate: string | null;
+  return { endDate: null, endSource: null, label: "ongoing" };
 }
 
 export interface ResolvedTimelineEmployee {
   // False only for is_active === false — deactivated employees are
-  // completely excluded from the graph/table/totals/exports, no exceptions.
+  // completely excluded from the graph/table/totals/exports.
   included: boolean;
-  // False only when the employee is included but has neither a usable
-  // employees.start_date NOR any employment_periods row — there is
-  // genuinely nothing to draw a bar from (distinct from "expired" or
-  // "deactivated"). Callers render a flagged placeholder row instead of a
-  // bar for these, rather than silently dropping the employee.
+  // False when the employee is included but has no Employment Start Date —
+  // nothing to draw a bar from. Callers render a flagged placeholder row
+  // instead of silently dropping the employee.
   hasUsableDates: boolean;
-  periods: ResolvedTimelinePeriod[];
+  bar: TimelineBarInfo | null;
 }
 
-// The one function that decides inclusion + how far every bar should be
-// drawn + what it's labeled, for one employee. See header comment for the
-// precedence this encodes.
-export function resolveEmployeeTimeline(
-  employee: TimelineEmployeeInput,
-  periods: TimelinePeriodInput[],
-  today: string
-): ResolvedTimelineEmployee {
-  if (!employee.isActive) {
-    return { included: false, hasUsableDates: false, periods: [] };
-  }
-
-  if (periods.length === 0) {
-    if (employee.startDate === null) {
-      return { included: true, hasUsableDates: false, periods: [] };
-    }
-    const synthetic: TimelinePeriodInput = {
-      id: `synthetic-${employee.id}`,
-      startDate: employee.startDate,
-      expectedFinishDate: null,
-      actualFinishDate: null,
-      employmentType: null,
-      workGroup: null,
-      workGroupOtherDescription: null,
-      notes: null,
-      createdAt: "",
-      updatedAt: "",
-    };
-    const bar = computeTimelineBar(synthetic, employee.workPermitExpiryDate, today);
-    return {
-      included: true,
-      hasUsableDates: true,
-      periods: [{ ...synthetic, timelineEffectiveEndDate: bar.effectiveEndDate, timelineLabel: bar.label, synthesized: true }],
-    };
-  }
-
-  const resolved = periods.map((p) => {
-    const bar = computeTimelineBar(p, employee.workPermitExpiryDate, today);
-    return { ...p, timelineEffectiveEndDate: bar.effectiveEndDate, timelineLabel: bar.label, synthesized: false };
-  });
-  return { included: true, hasUsableDates: true, periods: resolved };
+export function resolveEmployeeTimeline(employee: { isActive: boolean } & TimelineDates, today: string): ResolvedTimelineEmployee {
+  if (!employee.isActive) return { included: false, hasUsableDates: false, bar: null };
+  if (employee.startDate === null) return { included: true, hasUsableDates: false, bar: null };
+  return { included: true, hasUsableDates: true, bar: computeTimelineBar(employee, today) };
 }

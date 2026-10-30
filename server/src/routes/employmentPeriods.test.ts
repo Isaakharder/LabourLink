@@ -1,12 +1,15 @@
-// Real-HTTP-against-real-database coverage for Employment Timeline:
-// employmentPeriods.ts's create/update/delete/list/history routes,
-// employees.ts's expanded nationality set, and the 050_employment_timeline
-// migration's DB-level guarantees (overlap exclusion, backfill). See
-// employmentPeriods.test.ts (lib) for the pure computePeriodStatuses math
-// this builds on.
+// Real-HTTP-against-real-database coverage for the simplified Employment
+// Timeline: GET /api/employment-periods draws every bar from the employee
+// record (one source of truth with the Employees Directory), the timeline
+// editor's save path (PATCH /api/employees/:id) and its date validation,
+// that saving never deactivates/clocks out/touches time entries,
+// permissions, the stale-page 410s on the old period endpoints, filters,
+// and migration 068's backfill of End Different Date.
 //
 // Run with: npm run test:employment-periods
 import "dotenv/config";
+import fs from "fs";
+import path from "path";
 import express, { NextFunction, Request, Response } from "express";
 import cookieParser from "cookie-parser";
 import { AddressInfo } from "net";
@@ -19,9 +22,8 @@ import employmentPeriodsRouter from "./employmentPeriods";
 let pass = 0;
 let fail = 0;
 function check(condition: boolean, label: string, extra?: unknown) {
-  if (condition) {
-    pass++;
-  } else {
+  if (condition) pass++;
+  else {
     fail++;
     console.error(`FAIL: ${label}`, extra !== undefined ? JSON.stringify(extra) : "");
   }
@@ -29,6 +31,7 @@ function check(condition: boolean, label: string, extra?: unknown) {
 
 const RUN_ID = Date.now();
 const TODAY = calendarDateInAppTimezone(new Date());
+const d = (n: number) => addDaysToDateStr(TODAY, n);
 
 async function main() {
   const app = express();
@@ -41,462 +44,237 @@ async function main() {
   });
   const server = app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
-  const port = (server.address() as AddressInfo).port;
-  const BASE = `http://127.0.0.1:${port}`;
+  const BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
-  async function call(method: string, path: string, opts: { token?: string; body?: unknown } = {}): Promise<{ status: number; body: any }> {
-    const res = await fetch(`${BASE}${path}`, {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function call(method: string, p: string, token?: string, body?: unknown): Promise<{ status: number; body: any }> {
+    const res = await fetch(`${BASE}${p}`, {
       method,
-      headers: { "Content-Type": "application/json", ...(opts.token ? { Cookie: `labourlink_session=${opts.token}` } : {}) },
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      headers: { "Content-Type": "application/json", ...(token ? { Cookie: `labourlink_session=${token}` } : {}) },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
-    const body = await res.json().catch(() => null);
-    return { status: res.status, body };
+    return { status: res.status, body: await res.json().catch(() => null) };
   }
 
   const employeeIds: string[] = [];
+  let activityId: string | null = null;
 
   try {
     const teamRoleId = (await pool.query(`select id from team_roles where name = 'Team Member'`)).rows[0].id;
     const roleId = async (name: string) => (await pool.query(`select id from security_roles where name = $1`, [name])).rows[0].id;
-    const fakePinHash = "$2a$10$QAplaceholderQAplaceholderQAplaceholderQAplaceholde";
 
-    async function makeEmployee(label: string, role: string, extra: Record<string, unknown> = {}): Promise<string> {
-      const nationality = extra.nationality ?? null;
-      const isActive = extra.isActive ?? true;
-      const startDate = extra.startDate === undefined ? "2020-01-01" : extra.startDate;
+    async function makeEmployee(label: string, role: string, extra: { startDate?: string | null; isActive?: boolean; permit?: string | null; nationality?: string } = {}) {
       const id = (
         await pool.query(
-          `insert into employees (first_name, last_name, email, security_role_id, team_role_id, settings_pin_hash, is_active, nationality, start_date)
-           values ('QA', $1, $2, $3, $4, $5, $6, $7, $8) returning id`,
+          `insert into employees (first_name, last_name, security_role_id, team_role_id, is_active, nationality, start_date, work_permit_expiry_date,
+                                  work_permit_notify_lead_months)
+           values ($1, 'QA Timeline', $2, $3, $4, $5, $6, $7, case when $7::date is null then null else 6 end) returning id`,
           [
-            `EmpTimeline ${label} ${RUN_ID}`,
-            `qa-emp-timeline-${label.toLowerCase()}-${RUN_ID}@test.local`,
+            `${label} ${RUN_ID}`,
             await roleId(role),
             teamRoleId,
-            fakePinHash,
-            isActive,
-            nationality,
-            startDate,
+            extra.isActive ?? true,
+            extra.nationality ?? "Canadian",
+            extra.startDate === undefined ? "2026-01-05" : extra.startDate,
+            extra.permit ?? null,
           ]
         )
-      ).rows[0].id;
+      ).rows[0].id as string;
       employeeIds.push(id);
       return id;
     }
+    const token = (id: string, role: string) => signSession({ id, firstName: "QA", lastName: role, securityRole: role, teamRole: "Team Member" });
 
     const adminId = await makeEmployee("Admin", "Administrator");
-    const adminToken = signSession({ id: adminId, firstName: "QA", lastName: `Admin ${RUN_ID}`, securityRole: "Administrator", teamRole: "Team Member" });
+    const admin = token(adminId, "Administrator");
     const managerId = await makeEmployee("Manager", "Manager");
-    const managerToken = signSession({ id: managerId, firstName: "QA", lastName: `Manager ${RUN_ID}`, securityRole: "Manager", teamRole: "Team Member" });
-    const plainEmployeeId = await makeEmployee("Plain", "Employee");
-    const plainToken = signSession({ id: plainEmployeeId, firstName: "QA", lastName: `Plain ${RUN_ID}`, securityRole: "Employee", teamRole: "Team Member" });
+    const manager = token(managerId, "Manager");
+    const supervisor = token(await makeEmployee("Supervisor", "Supervisor"), "Supervisor");
 
-    // =====================================================================
-    // 1) Every Employment Type round-trips
-    // =====================================================================
-    for (const employmentType of ["Permanent", "Temporary", "Seasonal", "Other"]) {
-      const target = await makeEmployee(`Type${employmentType}`, "Employee");
-      const res = await call("POST", "/api/employment-periods", {
-        token: adminToken,
-        body: { employeeId: target, startDate: "2026-01-01", employmentType },
-      });
-      check(res.status === 201 && res.body?.period?.employmentType === employmentType, `1) Employment Type '${employmentType}' round-trips`, res.body);
+    const worker = await makeEmployee("Worker", "Employee", { startDate: "2026-04-15", permit: d(120) });
+    const noDates = await makeEmployee("NoStart", "Employee", { startDate: null });
+    const gone = await makeEmployee("Deactivated", "Employee", { isActive: false });
+
+    async function timelineRow(id: string, tok = admin) {
+      const r = await call("GET", "/api/employment-periods", tok);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return { status: r.status, row: (r.body?.employees ?? []).find((e: any) => e.id === id) };
     }
 
-    // =====================================================================
-    // 2) Every Work Group + Other with/without description; rejection when
-    //    a description is set without workGroup === 'Other'
-    // =====================================================================
-    for (const workGroup of ["Greenhouse", "Warehouse", "Outdoor", "Maintenance", "Management"]) {
-      const target = await makeEmployee(`WG${workGroup}`, "Employee");
-      const res = await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: target, startDate: "2026-01-01", workGroup } });
-      check(res.status === 201 && res.body?.period?.workGroup === workGroup, `2) Work Group '${workGroup}' round-trips`, res.body);
-    }
-    {
-      const target = await makeEmployee("WGOtherWith", "Employee");
-      const res = await call("POST", "/api/employment-periods", {
-        token: adminToken,
-        body: { employeeId: target, startDate: "2026-01-01", workGroup: "Other", workGroupOtherDescription: "Packhouse line lead" },
-      });
-      check(res.status === 201 && res.body?.period?.workGroupOtherDescription === "Packhouse line lead", "2b) Work Group 'Other' with a description round-trips", res.body);
-    }
-    {
-      const target = await makeEmployee("WGOtherWithout", "Employee");
-      const res = await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: target, startDate: "2026-01-01", workGroup: "Other" } });
-      check(res.status === 201 && res.body?.period?.workGroupOtherDescription === null, "2c) Work Group 'Other' with no description is allowed (optional)", res.body);
-    }
-    {
-      const target = await makeEmployee("WGDescRejected", "Employee");
-      const res = await call("POST", "/api/employment-periods", {
-        token: adminToken,
-        body: { employeeId: target, startDate: "2026-01-01", workGroup: "Greenhouse", workGroupOtherDescription: "Should be rejected" },
-      });
-      check(res.status === 400, "2d) a description is rejected when Work Group is not 'Other'", res.body);
-    }
+    // ---------------------------------------------------------------
+    // 1) One source of truth: the bar comes from the employee record.
+    // ---------------------------------------------------------------
+    let t = await timelineRow(worker);
+    check(t.row?.employmentStartDate === "2026-04-15", "1) bar starts on the Employment Start Date (employees.start_date)", t.row);
+    check(t.row?.timelineEndDate === d(120) && t.row?.timelineEndSource === "workPermitExpiry" && t.row?.timelineLabel === "employed", "1) no End Different Date: ends on the permit expiry", t.row);
+    check(Array.isArray(t.row?.periods) && t.row.periods.length === 0, "1) legacy `periods` is present and empty for stale pages");
+    check((await timelineRow(gone)).row === undefined, "1) deactivated employees are excluded");
+    const nd = (await timelineRow(noDates)).row;
+    check(nd?.hasUsableDates === false && nd?.timelineLabel === null, "1) no Employment Start Date: flagged row, no bar", nd);
 
-    // =====================================================================
-    // 3) All 4 new nationalities accepted; old 2 still accepted; invalid rejected
-    // =====================================================================
-    for (const nationality of ["Canadian", "Mexican", "Jamaican", "Guatemalan", "Filipino", "Thai"]) {
-      const res = await call("POST", "/api/employees", {
-        token: adminToken,
-        body: { firstName: "QA", lastName: `Nat ${nationality} ${RUN_ID}`, startDate: "2026-01-01", nationality },
-      });
-      check(res.status === 201 && res.body?.employee?.nationality === nationality, `3) nationality '${nationality}' is accepted on create`, res.body);
-      if (res.body?.employee?.id) employeeIds.push(res.body.employee.id);
-    }
-    {
-      const res = await call("POST", "/api/employees", {
-        token: adminToken,
-        body: { firstName: "QA", lastName: `Nat Invalid ${RUN_ID}`, startDate: "2026-01-01", nationality: "Martian" },
-      });
-      check(res.status === 400, "3b) an invalid nationality is still rejected", res.body);
-    }
+    // Timeline editor save (same PATCH the Employee form uses) -> Employee page.
+    const endDifferent = d(30);
+    const save = await call("PATCH", `/api/employees/${worker}`, admin, { startDate: "2026-04-10", workPermitExpiryDate: d(120), employmentEndDate: endDifferent });
+    check(save.status === 200, "2) timeline save succeeds", save.body);
+    const empPage = await call("GET", `/api/employees/${worker}`, admin);
+    check(
+      empPage.body.employee.startDate === "2026-04-10" && empPage.body.employee.employmentEndDate === endDifferent && empPage.body.employee.workPermitExpiryDate === d(120),
+      "2) timeline edits are on the Employee page (same record)",
+      empPage.body.employee
+    );
+    t = await timelineRow(worker);
+    check(t.row?.timelineEndDate === endDifferent && t.row?.timelineEndSource === "endDifferentDate", "2) End Different Date overrides the bar end", t.row);
+    check(t.row?.workPermitExpiryDate === d(120), "2) ...without changing the Work Permit Expiry Date");
 
-    // =====================================================================
-    // 4) Backfilled employee (via the migration's own INSERT statement, not
-    //    the route) shows exactly one Unspecified/open-ended period
-    // =====================================================================
-    {
-      const target = await makeEmployee("BackfillTarget", "Employee", { startDate: "2024-03-15" });
-      // Simulate the migration's backfill INSERT directly, since that
-      // employee already existed before this test employee did — this
-      // exercises the same statement 050_employment_timeline.sql runs.
-      await pool.query(`insert into employee_employment_periods (employee_id, start_date) values ($1, $2)`, [target, "2024-03-15"]);
-      const res = await call("GET", `/api/employment-periods?employeeId=${target}`, { token: adminToken });
-      const periods = res.body?.employees?.[0]?.periods ?? [];
-      check(periods.length === 1, "4) a backfilled employee shows exactly one period", periods);
-      check(periods[0]?.employmentType === null && periods[0]?.workGroup === null, "4b) the backfilled period's classification is Unspecified (null), not 'Other'", periods[0]);
-      check(periods[0]?.statuses?.includes("current"), "4c) the backfilled open-ended period reads as current", periods[0]);
-    }
+    // Employee page edit -> timeline.
+    await call("PATCH", `/api/employees/${worker}`, admin, { startDate: "2026-03-01", employmentEndDate: null, workPermitExpiryDate: d(200) });
+    t = await timelineRow(worker);
+    check(t.row?.employmentStartDate === "2026-03-01" && t.row?.timelineEndDate === d(200) && t.row?.endDifferentDate === null, "2) Employee-page edits show on the timeline", t.row);
+    await call("PATCH", `/api/employees/${worker}`, admin, { workPermitExpiryDate: null });
+    t = await timelineRow(worker);
+    check(t.row?.timelineEndDate === null && t.row?.timelineLabel === "ongoing", "2) no ending dates: ongoing bar", t.row);
 
-    // =====================================================================
-    // 5) Multiple periods / leave-and-return: a closed period, then a new
-    //    one starting the day after
-    // =====================================================================
-    const returnEmp = await makeEmployee("Returning", "Employee");
-    {
-      const first = await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: returnEmp, startDate: "2024-01-01", actualFinishDate: "2024-06-30" } });
-      check(first.status === 201, "5) first stint (closed) creates successfully", first.body);
-      const second = await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: returnEmp, startDate: "2024-07-01" } });
-      check(second.status === 201, "5b) second stint starting the day after the first's finish creates successfully", second.body);
-      const list = await call("GET", `/api/employment-periods?employeeId=${returnEmp}`, { token: adminToken });
-      check(list.body?.employees?.[0]?.periods?.length === 2, "5c) both periods are returned for the returning employee", list.body);
-    }
+    // ---------------------------------------------------------------
+    // 3) Validation.
+    // ---------------------------------------------------------------
+    const badEnd = await call("PATCH", `/api/employees/${worker}`, admin, { employmentEndDate: "2026-02-01" });
+    check(badEnd.status === 400 && /earlier than the Employment Start Date/.test(badEnd.body?.errors?.employmentEndDate ?? ""), "3) End Different Date before the start is rejected (partial update checked against stored start)", badEnd.body);
+    const badPermit = await call("PATCH", `/api/employees/${worker}`, admin, { workPermitExpiryDate: "2026-01-01" });
+    check(badPermit.status === 400 && /earlier than the Employment Start Date/.test(badPermit.body?.errors?.workPermitExpiryDate ?? ""), "3) permit expiry before the start is rejected", badPermit.body);
+    const badMove = await call("PATCH", `/api/employees/${worker}`, admin, { employmentEndDate: d(10) });
+    check(badMove.status === 200, "3) a valid End Different Date saves");
+    const moveStart = await call("PATCH", `/api/employees/${worker}`, admin, { startDate: d(20) });
+    check(moveStart.status === 400 && moveStart.body?.errors?.employmentEndDate, "3) moving the start after the stored End Different Date is rejected", moveStart.body);
+    const notDate = await call("PATCH", `/api/employees/${worker}`, admin, { employmentEndDate: "2026-13-40" });
+    check(notDate.status === 400 && notDate.body?.errors?.employmentEndDate, "3) a malformed date is rejected");
+    const createBad = await call("POST", "/api/employees", admin, { firstName: `Bad ${RUN_ID}`, lastName: "QA Timeline", nationality: "Canadian", startDate: "2026-05-01", employmentEndDate: "2026-04-01" });
+    check(createBad.status === 400 && createBad.body?.errors?.employmentEndDate, "3) creating with an end before the start is rejected");
+    const after = await call("GET", `/api/employees/${worker}`, admin);
+    check(after.body.employee.startDate === "2026-03-01" && after.body.employee.employmentEndDate === d(10), "3) rejected saves changed nothing");
 
-    // =====================================================================
-    // 6) Expected vs actual finish; is_active never touched by any mutation
-    // =====================================================================
-    const expVsActual = await makeEmployee("ExpVsActual", "Employee");
-    let expVsActualPeriodId = "";
-    {
-      const isActiveBefore = (await call("GET", `/api/employees/${expVsActual}`, { token: adminToken })).body.employee.isActive;
-      const created = await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: expVsActual, startDate: "2026-01-01", expectedFinishDate: addDaysToDateStr(TODAY, 5) } });
-      expVsActualPeriodId = created.body.period.id;
-      check(created.body?.period?.statuses?.includes("finishingSoon"), "6) an expected finish 5 days out reads as finishingSoon", created.body?.period);
+    // ---------------------------------------------------------------
+    // 4) Saving End Different Date never deactivates, clocks out or touches
+    //    time entries.
+    // ---------------------------------------------------------------
+    activityId = (await pool.query(`insert into activities (name, is_active) values ($1, true) returning id`, [`QA Timeline Job ${RUN_ID}`])).rows[0].id;
+    await pool.query(
+      `insert into time_entries (employee_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
+       values ($1, 'work', $2, gen_random_uuid(), now() - interval '2 days', now() - interval '2 days' + interval '3 hours', 'manual'),
+              ($1, 'work', $2, gen_random_uuid(), now() - interval '1 hour', null, 'manual')`,
+      [worker, activityId]
+    );
+    const entriesBefore = JSON.stringify((await pool.query(`select id, started_at, ended_at, activity_id, deleted_at from time_entries where employee_id = $1 order by started_at`, [worker])).rows);
+    const endToday = await call("PATCH", `/api/employees/${worker}`, admin, { employmentEndDate: TODAY });
+    check(endToday.status === 200 && endToday.body.employee.isActive === true, "4) saving an End Different Date (even today) keeps the employee active");
+    const entriesAfter = JSON.stringify((await pool.query(`select id, started_at, ended_at, activity_id, deleted_at from time_entries where employee_id = $1 order by started_at`, [worker])).rows);
+    check(entriesBefore === entriesAfter, "4) ...doesn't clock them out or change any time entry");
+    t = await timelineRow(worker);
+    check(t.row?.timelineLabel === "completed" && t.row?.statuses.includes("completed"), "4) an End Different Date of today shows as Finished", t.row);
 
-      const patched = await call("PATCH", `/api/employment-periods/${expVsActualPeriodId}`, { token: adminToken, body: { actualFinishDate: TODAY } });
-      check(patched.status === 200 && patched.body?.period?.statuses?.includes("completed"), "6b) recording an actual finish flips status to completed", patched.body);
+    // ---------------------------------------------------------------
+    // 5) Permissions (unchanged).
+    // ---------------------------------------------------------------
+    check((await timelineRow(worker, manager)).status === 200, "5) a Manager can view the timeline");
+    check((await call("PATCH", `/api/employees/${worker}`, manager, { employmentEndDate: null })).status === 403, "5) a Manager can't edit dates");
+    check((await call("GET", "/api/employment-periods", supervisor)).status === 403, "5) a Supervisor can't view the timeline");
+    check((await call("GET", "/api/employment-periods")).status === 401, "5) signed out is refused");
 
-      const isActiveAfter = (await call("GET", `/api/employees/${expVsActual}`, { token: adminToken })).body.employee.isActive;
-      check(isActiveBefore === true && isActiveAfter === true, "6c) recording an actual finish does NOT touch employees.is_active", { isActiveBefore, isActiveAfter });
+    // ---------------------------------------------------------------
+    // 6) Stale pages: old period endpoints answer 410 and change nothing.
+    // ---------------------------------------------------------------
+    const periodsBefore = (await pool.query(`select count(*)::int as n from employee_employment_periods`)).rows[0].n;
+    for (const [method, p, body] of [
+      ["POST", "/api/employment-periods", { employeeId: worker, startDate: "2026-01-01" }],
+      ["PATCH", "/api/employment-periods/00000000-0000-0000-0000-000000000000", { actualFinishDate: TODAY }],
+      ["DELETE", "/api/employment-periods/00000000-0000-0000-0000-000000000000", undefined],
+    ] as [string, string, unknown][]) {
+      const r = await call(method, p, admin, body);
+      check(r.status === 410 && /Refresh LabourLink/.test(r.body?.error ?? ""), `6) stale ${method} on employment periods answers 410`, r);
     }
+    check((await pool.query(`select count(*)::int as n from employee_employment_periods`)).rows[0].n === periodsBefore, "6) ...and changes nothing");
+    check((await call("GET", `/api/employment-periods/${worker}/history`, admin)).status === 200, "6) period audit history is still readable");
 
-    // =====================================================================
-    // 7) Overlap rejection incl. exact boundary; open-ended blocks any later
-    // =====================================================================
-    const overlapEmp = await makeEmployee("OverlapRoute", "Employee");
-    {
-      const a = await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: overlapEmp, startDate: "2026-01-01", actualFinishDate: "2026-01-10" } });
-      check(a.status === 201, "7) base period A [Jan 1, Jan 10] creates successfully", a.body);
-      const sameDay = await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: overlapEmp, startDate: "2026-01-10" } });
-      check(sameDay.status === 409, "7b) a period starting the SAME day as A's finish is rejected (409)", sameDay.body);
-      const dayAfter = await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: overlapEmp, startDate: "2026-01-11" } });
-      check(dayAfter.status === 201, "7c) a period starting the day AFTER A's finish is accepted", dayAfter.body);
-    }
-    const openEndedEmp = await makeEmployee("OpenEndedRoute", "Employee");
-    {
-      const open = await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: openEndedEmp, startDate: "2026-01-01" } });
-      check(open.status === 201, "7d) an open-ended period (no finish at all) creates successfully", open.body);
-      const later = await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: openEndedEmp, startDate: "2027-01-01" } });
-      check(later.status === 409, "7e) any later period is rejected while the prior one is still open-ended", later.body);
-    }
-    // PATCH can also trigger the overlap constraint, not just POST — a
-    // fresh employee with two well-separated periods, then move the second
-    // one's start date to overlap the first.
-    const patchOverlapEmp = await makeEmployee("PatchOverlap", "Employee");
-    {
-      const p1 = await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: patchOverlapEmp, startDate: "2026-01-01", actualFinishDate: "2026-01-10" } });
-      const p2 = await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: patchOverlapEmp, startDate: "2026-02-01", actualFinishDate: "2026-02-10" } });
-      check(p1.status === 201 && p2.status === 201, "7f-setup) two non-overlapping periods create successfully", { p1: p1.status, p2: p2.status });
-      const patchOverlap = await call("PATCH", `/api/employment-periods/${p2.body.period.id}`, { token: adminToken, body: { startDate: "2026-01-05" } });
-      check(patchOverlap.status === 409, "7f) PATCH can also trigger the overlap constraint (not just POST)", patchOverlap.body);
-    }
+    // ---------------------------------------------------------------
+    // 7) Server-side filters follow the new dates.
+    // ---------------------------------------------------------------
+    const expired = await makeEmployee("Expired", "Employee", { startDate: "2025-01-01", permit: d(-5), nationality: "Mexican" });
+    const r7 = await call("GET", "/api/employment-periods?status=permitExpired", admin);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ids7 = r7.body.employees.map((e: any) => e.id);
+    check(ids7.includes(expired) && !ids7.includes(worker), "7) status=permitExpired returns the expired-permit employee only", ids7);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const exp = r7.body.employees.find((e: any) => e.id === expired);
+    check(exp.timelineEndDate === d(-5) && exp.timelineLabel === "permitExpired", "7) an expired permit still ends the bar on the expiry date", exp);
 
-    // =====================================================================
-    // 8) Combined filters: Guatemalan + Greenhouse + Seasonal
-    // =====================================================================
-    const fullMatch = await makeEmployee("FullMatch", "Employee", { nationality: "Guatemalan" });
-    await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: fullMatch, startDate: "2026-01-01", workGroup: "Greenhouse", employmentType: "Seasonal" } });
-    const partialNationalityOnly = await makeEmployee("PartialNat", "Employee", { nationality: "Guatemalan" });
-    await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: partialNationalityOnly, startDate: "2026-01-01", workGroup: "Warehouse", employmentType: "Permanent" } });
-    const partialWorkGroupOnly = await makeEmployee("PartialWG", "Employee", { nationality: "Filipino" });
-    await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: partialWorkGroupOnly, startDate: "2026-01-01", workGroup: "Greenhouse", employmentType: "Seasonal" } });
-    {
-      const res = await call(
-        "GET",
-        `/api/employment-periods?nationality=Guatemalan&workGroup=Greenhouse&employmentType=Seasonal`,
-        { token: adminToken }
+    // ---------------------------------------------------------------
+    // 8) Migration 068 backfill (verbatim statement, rolled back).
+    // ---------------------------------------------------------------
+    const sql = fs.readFileSync(path.join(__dirname, "..", "..", "migrations", "068_employee_employment_end_date.sql"), "utf8");
+    const backfill = sql.slice(sql.indexOf("update employees e"), sql.indexOf(";", sql.indexOf("update employees e")) + 1);
+    const c = await pool.connect();
+    try {
+      await c.query("begin");
+      const a = await makeEmployeeOn(c, "BF closed", "2026-01-01");
+      const b = await makeEmployeeOn(c, "BF reopened", "2026-01-01");
+      const z = await makeEmployeeOn(c, "BF open", "2026-01-01");
+      const w = await makeEmployeeOn(c, "BF before start", "2026-06-01");
+      await c.query(
+        `insert into employee_employment_periods (employee_id, start_date, expected_finish_date, actual_finish_date) values
+           ($1, '2026-01-01', '2026-05-01', '2026-04-20'),
+           ($2, '2025-01-01', null, '2025-06-30'), ($2, '2026-01-01', null, null),
+           ($3, '2026-01-01', '2026-12-01', null),
+           ($4, '2026-01-01', null, '2026-03-01')`,
+        [a, b, z, w]
       );
-      const ids = res.body.employees.map((e: any) => e.id);
-      check(ids.includes(fullMatch), "8) the full match (Guatemalan + Greenhouse + Seasonal) IS returned", ids);
-      check(!ids.includes(partialNationalityOnly), "8b) an employee matching only nationality is NOT returned", ids);
-      check(!ids.includes(partialWorkGroupOnly), "8c) an employee matching only Work Group/Employment Type (wrong nationality) is NOT returned", ids);
-    }
-    // OR-within-category: two Work Group values returns employees matching either.
-    {
-      const res = await call("GET", `/api/employment-periods?workGroup=Greenhouse,Warehouse&employeeId=${fullMatch},${partialNationalityOnly}`, { token: adminToken });
-      const ids = res.body.employees.map((e: any) => e.id);
-      check(ids.includes(fullMatch) && ids.includes(partialNationalityOnly), "9) selecting two Work Group values returns employees matching EITHER (OR within category)", ids);
-    }
-    // "Unspecified" filter value includes employees with no classification.
-    {
-      const unspecified = await makeEmployee("UnspecifiedWG", "Employee");
-      await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: unspecified, startDate: "2026-01-01" } });
-      const res = await call("GET", `/api/employment-periods?workGroup=Unspecified&employeeId=${unspecified}`, { token: adminToken });
-      const ids = res.body.employees.map((e: any) => e.id);
-      check(ids.includes(unspecified), "10) the literal 'Unspecified' filter value includes an employee with no Work Group classification", ids);
-    }
-
-    // =====================================================================
-    // 11) Permit marker matches getWorkPermitStatus-equivalent data exactly
-    // =====================================================================
-    const permitEmp = await makeEmployee("PermitMarker", "Employee");
-    const permitExpiry = addDaysToDateStr(TODAY, 30);
-    await call("PATCH", `/api/employees/${permitEmp}`, { token: adminToken, body: { workPermitExpiryDate: permitExpiry } });
-    await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: permitEmp, startDate: "2026-01-01" } });
-    {
-      const res = await call("GET", `/api/employment-periods?employeeId=${permitEmp}`, { token: adminToken });
-      const workPermit = res.body.employees[0]?.workPermit;
-      check(workPermit?.expiryDate === permitExpiry, "11) the timeline read endpoint's workPermit.expiryDate matches the employee's actual permit expiry", workPermit);
-    }
-
-    // =====================================================================
-    // 12) Role restrictions
-    // =====================================================================
-    {
-      const listByPlain = await call("GET", "/api/employment-periods", { token: plainToken });
-      check(listByPlain.status === 401 || listByPlain.status === 403, "12) a plain Employee CANNOT view the timeline list", listByPlain.status);
-      const listByManager = await call("GET", "/api/employment-periods", { token: managerToken });
-      check(listByManager.status === 200, "12b) a Manager CAN view the timeline list", listByManager.status);
-      const createByManager = await call("POST", "/api/employment-periods", { token: managerToken, body: { employeeId: permitEmp, startDate: "2030-01-01" } });
-      check(createByManager.status === 403, "12c) a Manager CANNOT create a period (Administrator-only)", createByManager.body);
-      const historyByManager = await call("GET", `/api/employment-periods/${permitEmp}/history`, { token: managerToken });
-      check(historyByManager.status === 403, "12d) a Manager CANNOT view audit history (Administrator-only)", historyByManager.body);
-      const historyByAdmin = await call("GET", `/api/employment-periods/${permitEmp}/history`, { token: adminToken });
-      check(historyByAdmin.status === 200, "12e) an Administrator CAN view audit history", historyByAdmin.status);
-    }
-
-    // =====================================================================
-    // 13) Audit history: created / updated / deleted, incl. reason
-    //     requirement on delete and survival after the period is gone
-    // =====================================================================
-    const auditEmp = await makeEmployee("AuditTrail", "Employee");
-    let auditPeriodId = "";
-    {
-      const created = await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: auditEmp, startDate: "2026-01-01", employmentType: "Temporary" } });
-      auditPeriodId = created.body.period.id;
-      const patched = await call("PATCH", `/api/employment-periods/${auditPeriodId}`, { token: adminToken, body: { employmentType: "Permanent" } });
-      check(patched.status === 200, "13) extend/edit succeeds", patched.body);
-
-      const noReason = await call("DELETE", `/api/employment-periods/${auditPeriodId}`, { token: adminToken, body: {} });
-      check(noReason.status === 400, "13b) deleting without a reason is rejected (400)", noReason.body);
-      const withReason = await call("DELETE", `/api/employment-periods/${auditPeriodId}`, { token: adminToken, body: { reason: "Entered in error" } });
-      check(withReason.status === 204, "13c) deleting with a reason succeeds", withReason.status);
-
-      const hist = await call("GET", `/api/employment-periods/${auditEmp}/history`, { token: adminToken });
-      const types = hist.body.history.map((h: any) => h.changeType).sort();
-      check(JSON.stringify(types) === JSON.stringify(["created", "deleted", "updated"]), "13d) exactly created/updated/deleted history rows exist", types);
-      const deletedRow = hist.body.history.find((h: any) => h.changeType === "deleted");
-      check(deletedRow?.reason === "Entered in error", "13e) the delete's reason is recorded", deletedRow);
-      check(deletedRow?.oldValue?.employment_type === "Permanent", "13f) the delete's oldValue snapshot reflects the most recent edit", deletedRow?.oldValue);
-      // The history row survives even though the period itself is now gone
-      // (on delete set null on employment_period_id, not cascade).
-      const getDeleted = await call("PATCH", `/api/employment-periods/${auditPeriodId}`, { token: adminToken, body: { notes: "x" } });
-      check(getDeleted.status === 404, "13g) the deleted period itself now 404s", getDeleted.status);
-      check(hist.status === 200, "13h) history remains fully fetchable after the period is deleted", hist.status);
-    }
-
-    // =====================================================================
-    // 14) Timezone-safety: date strings round-trip byte-for-byte
-    // =====================================================================
-    {
-      const target = await makeEmployee("TzSafe", "Employee");
-      const dstAdjacent = "2026-03-08"; // a DST-transition-adjacent date in APP_TIMEZONE
-      const res = await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: target, startDate: dstAdjacent } });
-      check(res.body?.period?.startDate === dstAdjacent, "14) a DST-transition-adjacent date string round-trips byte-for-byte, no shift", res.body?.period);
-    }
-
-    // =====================================================================
-    // 15) Large-list smoke test — bounded response time with many employees
-    // =====================================================================
-    {
-      const bulkCount = 300;
-      // Bulk-insert via a single multi-row statement rather than N round
-      // trips — a pure test-setup performance concern, not part of the
-      // feature under test.
-      const employeeRoleId = await roleId("Employee");
-      const rows = await pool.query(
-        `insert into employees (first_name, last_name, email, security_role_id, team_role_id, settings_pin_hash, start_date)
-         select 'QA', 'Bulk ' || g || ' ${RUN_ID}', 'qa-bulk-' || g || '-${RUN_ID}@test.local', $1, $2, $3, '2020-01-01'
-         from generate_series(1, ${bulkCount}) g
-         returning id`,
-        [employeeRoleId, teamRoleId, fakePinHash]
+      await c.query(`update employees set employment_end_date = null where id = any($1::uuid[])`, [[a, b, z, w]]);
+      await c.query(backfill);
+      const got = Object.fromEntries(
+        (await c.query(`select id, to_char(employment_end_date, 'YYYY-MM-DD') as e, to_char(start_date, 'YYYY-MM-DD') as s from employees where id = any($1::uuid[])`, [[a, b, z, w]])).rows.map((r) => [r.id, r])
       );
-      const bulkIds = rows.rows.map((r) => r.id);
-      employeeIds.push(...bulkIds);
-      await pool.query(
-        `insert into employee_employment_periods (employee_id, start_date)
-         select unnest($1::uuid[]), '2020-01-01'`,
-        [bulkIds]
-      );
-
-      const startedAt = Date.now();
-      const res = await call("GET", "/api/employment-periods", { token: adminToken });
-      const elapsedMs = Date.now() - startedAt;
-      check(res.status === 200 && res.body.employees.length >= bulkCount, "15) the full-list read returns all bulk-inserted employees", res.body.employees.length);
-      check(elapsedMs < 5000, "15b) the full-list read completes within a generous bound (< 5s) with 300+ employees", elapsedMs);
-    }
-    // =====================================================================
-    // 16) Employment Timeline redesign — inclusion/labeling end-to-end
-    //     through the real route + real DB (pure math already covered by
-    //     src/lib/employmentTimelineView.test.ts).
-    // =====================================================================
-
-    // 16a) A deactivated employee is completely excluded from the read
-    // endpoint, even with a period that would otherwise render fine — the
-    // one guarantee the graph/table/CSV/PDF/Print all inherit for free by
-    // sharing this endpoint.
-    {
-      const deactivated = await makeEmployee("Deactivated", "Employee", { isActive: false });
-      await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: deactivated, startDate: "2020-01-01" } });
-      // POST itself doesn't gate on is_active, so insert directly to avoid
-      // fighting any future validation change there — this test is about
-      // the READ endpoint's exclusion, not whether POST allows it.
-      const res = await call("GET", `/api/employment-periods?employeeId=${deactivated}`, { token: adminToken });
-      const ids = res.body.employees.map((e: any) => e.id);
-      check(!ids.includes(deactivated), "16a) a deactivated employee never appears in the timeline read endpoint", ids);
+      check(got[a].e === "2026-04-20", "8) backfill: the actual finish becomes End Different Date", got[a]);
+      check(got[b].e === null, "8) backfill: a later open period (re-employed) leaves no end date", got[b]);
+      check(got[z].e === null, "8) backfill: an expected finish is NOT copied (no ending date was recorded)", got[z]);
+      check(got[w].e === null && got[w].s === "2026-06-01", "8) backfill: an actual finish before the Directory start is skipped; start dates are never changed", got[w]);
+    } finally {
+      await c.query("rollback");
+      c.release();
     }
 
-    // 16b) Active employee, zero employment_periods rows, no start_date —
-    // included but flagged (hasUsableDates: false), not silently dropped.
-    {
-      const noDates = await makeEmployee("NoDates", "Employee", { startDate: null });
-      const res = await call("GET", `/api/employment-periods?employeeId=${noDates}`, { token: adminToken });
-      const emp = res.body.employees.find((e: any) => e.id === noDates);
-      check(!!emp && emp.hasUsableDates === false && emp.periods.length === 0, "16b) no start_date and no periods is included but flagged hasUsableDates:false", emp);
+    async function makeEmployeeOn(client: import("pg").PoolClient, label: string, start: string) {
+      return (
+        await client.query(
+          `insert into employees (first_name, last_name, security_role_id, team_role_id, start_date) values ($1, 'QA Timeline', $2, $3, $4) returning id`,
+          [`${label} ${RUN_ID}`, await roleId("Employee"), teamRoleId, start]
+        )
+      ).rows[0].id as string;
     }
-
-    // 16c) Active employee, zero employment_periods rows, but a real
-    // start_date — a synthesized "ongoing" virtual period appears.
-    {
-      const synth = await makeEmployee("Synthesized", "Employee", { startDate: "2021-03-01" });
-      const res = await call("GET", `/api/employment-periods?employeeId=${synth}`, { token: adminToken });
-      const emp = res.body.employees.find((e: any) => e.id === synth);
-      const period = emp?.periods?.[0];
-      check(
-        emp?.hasUsableDates === true && period?.synthesized === true && period?.startDate === "2021-03-01" && period?.timelineLabel === "ongoing",
-        "16c) zero periods with a real start_date synthesizes one ongoing virtual period",
-        emp
-      );
-    }
-
-    // 16d) Overdue expected finish + still-active employee -> the read
-    // endpoint's own timelineLabel says 'expiredStillWorking', extended to
-    // today, not the raw (already-past) expected finish date.
-    {
-      const stillWorking = await makeEmployee("ExpiredStillWorking", "Employee");
-      const created = await call("POST", "/api/employment-periods", {
-        token: adminToken,
-        body: { employeeId: stillWorking, startDate: "2020-01-01", expectedFinishDate: addDaysToDateStr(TODAY, -30) },
-      });
-      check(created.body?.period?.timelineLabel === "expiredStillWorking" && created.body?.period?.timelineEffectiveEndDate === TODAY, "16d) POST response itself carries timelineLabel/timelineEffectiveEndDate", created.body?.period);
-      const res = await call("GET", `/api/employment-periods?employeeId=${stillWorking}`, { token: adminToken });
-      const period = res.body.employees[0]?.periods?.[0];
-      check(period?.timelineLabel === "expiredStillWorking" && period?.timelineEffectiveEndDate === TODAY, "16e) the list read endpoint agrees: 'expiredStillWorking', ending today", period);
-    }
-
-    // 16f) A confirmed actual finish is absolute even with a still-valid,
-    // far-future work permit on file — 'completed', never re-extended.
-    {
-      const completedEmp = await makeEmployee("CompletedAbsolute", "Employee");
-      await call("PATCH", `/api/employees/${completedEmp}`, { token: adminToken, body: { workPermitExpiryDate: addDaysToDateStr(TODAY, 400) } });
-      const finishDate = addDaysToDateStr(TODAY, -10);
-      await call("POST", "/api/employment-periods", { token: adminToken, body: { employeeId: completedEmp, startDate: "2020-01-01", actualFinishDate: finishDate } });
-      const res = await call("GET", `/api/employment-periods?employeeId=${completedEmp}`, { token: adminToken });
-      const period = res.body.employees[0]?.periods?.[0];
-      check(period?.timelineLabel === "completed" && period?.timelineEffectiveEndDate === finishDate, "16f) a recorded actual finish is absolute — 'completed', not extended by a valid future permit", period);
-    }
-
-    // =====================================================================
-    // 17) "Timeline starts" org setting — GET/PATCH round-trip and
-    //     permissions. org_settings is a singleton, so this restores the
-    //     original value before finishing (see the try/finally below).
-    // =====================================================================
-    {
-      const original = await call("GET", "/api/employment-periods/settings/display-start", { token: adminToken });
-      check(original.status === 200 && "displayStart" in original.body, "17a) GET display-start returns 200 with a displayStart field", original.body);
-
-      try {
-        const managerRead = await call("GET", "/api/employment-periods/settings/display-start", { token: managerToken });
-        check(managerRead.status === 200, "17b) a Manager CAN view the saved display-start setting", managerRead.status);
-
-        const managerWrite = await call("PATCH", "/api/employment-periods/settings/display-start", { token: managerToken, body: { displayStart: "2020-01-01" } });
-        check(managerWrite.status === 403, "17c) a Manager CANNOT change the display-start setting (Administrator-only)", managerWrite.body);
-
-        const plainRead = await call("GET", "/api/employment-periods/settings/display-start", { token: plainToken });
-        check(plainRead.status === 401 || plainRead.status === 403, "17d) a plain Employee cannot view the setting either", plainRead.status);
-
-        const invalid = await call("PATCH", "/api/employment-periods/settings/display-start", { token: adminToken, body: { displayStart: "not-a-date" } });
-        check(invalid.status === 400, "17e) an invalid date string is rejected (400)", invalid.body);
-
-        const saved = await call("PATCH", "/api/employment-periods/settings/display-start", { token: adminToken, body: { displayStart: "2022-06-15" } });
-        check(saved.status === 200 && saved.body.displayStart === "2022-06-15", "17f) an Administrator can save a valid display-start date", saved.body);
-
-        const reread = await call("GET", "/api/employment-periods/settings/display-start", { token: adminToken });
-        check(reread.body.displayStart === "2022-06-15", "17g) the saved date persists across a fresh GET (real DB row, not in-memory)", reread.body);
-
-        const reset = await call("PATCH", "/api/employment-periods/settings/display-start", { token: adminToken, body: { displayStart: null } });
-        check(reset.status === 200 && reset.body.displayStart === null, "17h) PATCHing displayStart: null resets/clears the saved cutoff", reset.body);
-
-        const rereadAfterReset = await call("GET", "/api/employment-periods/settings/display-start", { token: adminToken });
-        check(rereadAfterReset.body.displayStart === null, "17i) the cleared value persists across a fresh GET too", rereadAfterReset.body);
-      } finally {
-        // Restore whatever was saved before this test section touched it —
-        // org_settings is a real singleton shared by the whole database.
-        await call("PATCH", "/api/employment-periods/settings/display-start", { token: adminToken, body: { displayStart: original.body.displayStart } });
-      }
-    }
-
   } finally {
-    for (const eid of employeeIds) {
-      await pool
-        .query(`delete from employee_employment_period_history where employee_id = $1 or changed_by_employee_id = $1`, [eid])
-        .catch(() => {});
-      await pool.query(`delete from employee_employment_periods where employee_id = $1`, [eid]).catch(() => {});
-    }
-    for (const eid of employeeIds) {
-      await pool.query(`delete from employees where id = $1`, [eid]).catch(() => {});
-    }
     server.close();
+    const c = await pool.connect();
+    try {
+      await c.query("begin");
+      await c.query(`delete from time_entries where employee_id = any($1::uuid[])`, [employeeIds]);
+      await c.query(`delete from employee_work_permit_history where employee_id = any($1::uuid[]) or changed_by_employee_id = any($1::uuid[])`, [employeeIds]);
+      await c.query(`delete from employee_employment_periods where employee_id = any($1::uuid[])`, [employeeIds]);
+      if (activityId) await c.query(`delete from activities where id = $1`, [activityId]);
+      await c.query(`delete from employees where id = any($1::uuid[])`, [employeeIds]);
+      await c.query("commit");
+    } catch (err) {
+      await c.query("rollback");
+      console.error("cleanup failed, nothing removed:", err);
+      fail++;
+    } finally {
+      c.release();
+    }
+    const left = await pool.query(`select count(*)::int as n from employees where first_name like $1`, [`% ${RUN_ID}`]);
+    check(left.rows[0].n === 0, "cleanup removed every fixture");
+    await pool.end();
   }
-
   console.log(`\n${pass} passed, ${fail} failed`);
-  process.exit(fail > 0 ? 1 : 0);
+  if (fail > 0) process.exit(1);
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error(err);
   process.exit(1);
 });

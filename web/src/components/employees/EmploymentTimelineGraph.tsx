@@ -10,94 +10,85 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from "react";
 import {
+  buildTimelineScale,
   computeBarPosition,
-  buildTimelineHeaderMarks,
   computeFitAllPxPerDay,
+  describeTimelineEnd,
   MAX_PX_PER_DAY,
   percentInRange,
+  pinnedYearLabel,
+  rangeDayCount,
   TimelineRange,
 } from "../../lib/employmentTimeline";
-import { EmploymentPeriod, EmploymentTimelineEmployee, TIMELINE_BAR_LABEL_TEXT } from "../../lib/employmentPeriodTypes";
+import { DATE_FIELD_LABELS, EmploymentTimelineEmployee, TIMELINE_BAR_LABEL_TEXT, TimelineBarLabel } from "../../lib/employmentPeriodTypes";
 
 interface EmploymentTimelineGraphProps {
+  // Already filtered, in displayed order — row n is numbered n.
   employees: EmploymentTimelineEmployee[];
   range: TimelineRange;
   today: string;
   canEdit: boolean;
   // Incremented by the Today button — this component scrolls the today
-  // line into view in response, rather than the parent needing a DOM ref
-  // into a component it doesn't otherwise touch.
+  // line into view in response.
   scrollToTodayToken: number;
-  // Reported after every zoom-affecting change (range, container resize,
-  // user zoom) so the toolbar's +/- buttons can disable themselves at the
-  // true limits, without duplicating this component's own density math.
+  // Reported after every zoom-affecting change so the toolbar's +/-
+  // buttons can disable themselves at the true limits.
   onZoomLimitsChange?: (canZoomIn: boolean, canZoomOut: boolean) => void;
-  onBarClick: (employee: EmploymentTimelineEmployee, period: EmploymentPeriod) => void;
-  onAddPeriod: (employee: EmploymentTimelineEmployee) => void;
+  // Opens the employment-dates editor (read-only for a viewer who can't edit).
+  onEditDates: (employee: EmploymentTimelineEmployee) => void;
 }
 
 export interface EmploymentTimelineGraphHandle {
   zoomIn(): void;
   zoomOut(): void;
-  // Resets to the exact "entire configured range fits inside the available
-  // width, nothing to scroll" density — recomputed fresh against the
-  // container's current measured width, not a cached/remembered value.
+  // Resets to the exact "entire range fits the available width" density.
   fitAll(): void;
 }
 
-function barStateClass(label: EmploymentPeriod["timelineLabel"]): string {
+function barStateClass(label: TimelineBarLabel): string {
   if (label === "completed") return "employment-timeline-bar-completed";
-  if (label === "expiredStillWorking") return "employment-timeline-bar-expired-still-working";
+  if (label === "permitExpired") return "employment-timeline-bar-permit-expired";
   if (label === "ongoing") return "employment-timeline-bar-ongoing";
-  return "employment-timeline-bar-current"; // "employed" — a normal in-progress bar with a real, future end
+  return "employment-timeline-bar-current"; // "employed" — a real, future end date
 }
 
 const LEGEND: { className: string; label: string }[] = [
-  { className: "employment-timeline-bar-current", label: "Employed (scheduled finish/expiry)" },
-  { className: "employment-timeline-bar-ongoing", label: "Ongoing (no end in sight)" },
-  { className: "employment-timeline-bar-expired-still-working", label: "Expired — still working" },
-  { className: "employment-timeline-bar-completed", label: "Completed" },
+  { className: "employment-timeline-bar-current", label: "Employed (ends on End Different Date or permit expiry)" },
+  { className: "employment-timeline-bar-ongoing", label: "Ongoing (no end date)" },
+  { className: "employment-timeline-bar-permit-expired", label: "Permit expired" },
+  { className: "employment-timeline-bar-completed", label: "Finished (End Different Date reached)" },
 ];
 
-// Full detail for the hover/focus tooltip — name, status, start, end/expiry
-// and work group, per the brief. The bar's visible label (name · status) is
-// deliberately shorter; this is what a short, ellipsized bar still exposes
-// on hover/focus. `clipped` adds the "began before the displayed range"
-// note the brief requires for a bar clipped at the display boundary — the
-// true startDate is still shown here even though the bar itself is drawn
-// starting at the boundary, not the real date.
-function periodTooltip(name: string, period: EmploymentPeriod, clipped: boolean): string {
-  const label = TIMELINE_BAR_LABEL_TEXT[period.timelineLabel];
-  const endText = period.timelineLabel === "ongoing" || period.timelineLabel === "expiredStillWorking" ? "present" : period.timelineEffectiveEndDate;
+function barTooltip(number: number, emp: EmploymentTimelineEmployee, clipped: boolean): string {
+  const name = `${emp.firstName} ${emp.lastName}`;
   return [
-    `${name} — ${label}`,
-    `Start: ${period.startDate}${clipped ? " (employment began before the displayed range)" : ""}`,
-    `End/expiry: ${endText}`,
-    `Work Group: ${period.workGroup ?? "Unspecified"}`,
-    period.employmentType ? `Type: ${period.employmentType}` : null,
+    `${number}. ${name} — ${emp.timelineLabel ? TIMELINE_BAR_LABEL_TEXT[emp.timelineLabel] : ""}`,
+    `${DATE_FIELD_LABELS.startDate}: ${emp.employmentStartDate}${clipped ? " (before the displayed range)" : ""}`,
+    `${DATE_FIELD_LABELS.workPermitExpiryDate}: ${emp.workPermitExpiryDate ?? "—"}`,
+    `${DATE_FIELD_LABELS.endDifferentDate}: ${emp.endDifferentDate ?? "—"}`,
+    `Timeline ends: ${describeTimelineEnd(emp)}`,
+    emp.employmentType ? `Type: ${emp.employmentType}` : null,
   ]
     .filter(Boolean)
     .join("\n");
 }
 
-// Zoom step multiplier per click/wheel-notch — chosen so a handful of
-// clicks comfortably spans the full range from fit-all to MAX_PX_PER_DAY
-// regardless of how many years the fitted range covers.
+// Zoom step multiplier per click/wheel-notch.
 const ZOOM_STEP_FACTOR = 1.6;
-// A wheel-zoom notch anchors on the pointer; below this we treat the two
-// densities as equal (float drift guard), matching the same epsilon a
-// button click's clamped comparison uses.
+// Float drift guard when comparing densities.
 const ZOOM_EPSILON = 0.001;
 
 export const EmploymentTimelineGraph = forwardRef<EmploymentTimelineGraphHandle, EmploymentTimelineGraphProps>(function EmploymentTimelineGraph(
-  { employees, range, today, canEdit, scrollToTodayToken, onZoomLimitsChange, onBarClick, onAddPeriod },
+  { employees, range, today, canEdit, scrollToTodayToken, onZoomLimitsChange, onEditDates },
   ref
 ) {
-  const rangeDays = Math.max(1, Math.round((new Date(range.end).getTime() - new Date(range.start).getTime()) / 86400000));
+  const rangeDays = rangeDayCount(range);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const [containerWidthPx, setContainerWidthPx] = useState(0);
-  useEffect(() => {
+  // Layout effect: measured before the first paint, so the very first frame
+  // already uses the real width (no flash of a mis-scaled header).
+  useLayoutEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
     setContainerWidthPx(el.clientWidth);
@@ -251,14 +242,10 @@ export const EmploymentTimelineGraph = forwardRef<EmploymentTimelineGraphHandle,
     }
   }
 
+  // Horizontal scroll offset of the date track, for the pinned year label.
+  const [scrollLeftPx, setScrollLeftPx] = useState(0);
+
   const todayAnchorRef = useRef<HTMLDivElement>(null);
-  // Compares against the PREVIOUS token rather than a mutable "is this the
-  // first render" flag: a boolean flag flips permanently on the first
-  // effect run and stays flipped through React 18 StrictMode's dev-only
-  // double-invocation of effects, which would otherwise fire an unwanted
-  // scroll-to-today on every mount. Comparing values instead is safe under
-  // double-invocation — the second simulated run sees the same (unchanged)
-  // token and correctly still skips.
   const prevTokenRef = useRef(scrollToTodayToken);
   useEffect(() => {
     if (scrollToTodayToken !== prevTokenRef.current) {
@@ -267,116 +254,171 @@ export const EmploymentTimelineGraph = forwardRef<EmploymentTimelineGraphHandle,
     }
   }, [scrollToTodayToken]);
 
-  const headerMarks = buildTimelineHeaderMarks(range, pxPerDay);
+  const scale = buildTimelineScale(range, pxPerDay);
+  const pinnedYear = pinnedYearLabel(range, pxPerDay, scrollLeftPx);
+  const todayInRange = today >= range.start && today <= range.end;
   const todayLeftPercent = percentInRange(today, range);
-  const trackMinWidthPx = rangeDays * pxPerDay;
+  const trackWidthPx = Math.max(rangeDays * pxPerDay, 1);
+  const hasMinorRow = scale.minor !== null;
 
   return (
-    <div className="employment-timeline-graph-outer">
-      {/* No frozen employee-names column — each bar carries its own
-          employee's name (see the label below), so the date track can use
-          the full available width. Native overflow-x: auto is kept as the
-          always-visible, always-accessible fallback for scrolling (trackpad
-          two-finger swipe and touch swipe both already work through it with
-          no extra code) — middle-mouse panning and Ctrl/Cmd+wheel zoom
-          below are additions on top of it, not replacements. */}
-      <div
-        ref={wrapRef}
-        className="employment-timeline-graph-wrap"
-        onWheel={handleWheel}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={endPan}
-        onPointerCancel={endPan}
-        onClickCapture={handleClickCapture}
-      >
-        <div className="employment-timeline-graph">
-          <div className="employment-timeline-header-track" style={{ minWidth: `${trackMinWidthPx}px` }}>
-            {headerMarks.map((m) => (
-              <div key={m.key} className="employment-timeline-month-mark" style={{ left: `${m.leftPercent}%` }}>
-                {m.label}
-              </div>
-            ))}
-            <div ref={todayAnchorRef} className="employment-timeline-today-anchor" style={{ left: `${todayLeftPercent}%` }} aria-hidden="true" />
+    <div className={`employment-timeline-graph-outer${hasMinorRow ? " employment-timeline-has-minor-row" : ""}`}>
+      <div className="employment-timeline-body">
+        {/* Numbers and names: a separate panel that is never inside the
+            horizontally scrolling element, so it can't drift at long scroll
+            distances (a sticky column inside the scroller once did). Its
+            header and rows use the same fixed heights as the date track's,
+            so row n here always lines up with bar n. */}
+        <div className="employment-timeline-rowheads">
+          <div className="employment-timeline-rowheads-header">
+            <span className="employment-timeline-rowhead-number">#</span>
+            <span>Employee</span>
           </div>
-
-          {employees.map((emp) => {
+          {employees.map((emp, i) => {
             const name = `${emp.firstName} ${emp.lastName}`;
             return (
-              <div key={emp.id} className="employment-timeline-track" style={{ minWidth: `${trackMinWidthPx}px`, position: "relative" }}>
-                <div className="employment-timeline-today-marker" style={{ left: `${todayLeftPercent}%` }} />
+              <div key={emp.id} className="employment-timeline-rowhead" data-employee-id={emp.id}>
+                <span className="employment-timeline-rowhead-number">{i + 1}</span>
+                <span className="employment-timeline-rowhead-name" title={name}>
+                  {name}
+                </span>
+              </div>
+            );
+          })}
+        </div>
 
-                {!emp.hasUsableDates ? (
-                  // Full-width dashed neutral row — nothing to draw a real
-                  // bar from (no start date, no employment period), but
-                  // still clickable (when the viewer can edit) to fix that,
-                  // rather than the employee silently vanishing from the
-                  // graph.
-                  <button
-                    type="button"
-                    className="employment-timeline-bar employment-timeline-bar-missing-dates"
-                    style={{ left: "0%", width: "100%" }}
-                    disabled={!canEdit}
-                    onClick={canEdit ? () => onAddPeriod(emp) : undefined}
-                    aria-label={`Add employment dates for ${name}`}
-                    title={`${name} — Missing employment dates. No start date or employment period is recorded for this employee.`}
+        <div
+          ref={wrapRef}
+          className="employment-timeline-graph-wrap"
+          onWheel={handleWheel}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={endPan}
+          onPointerCancel={endPan}
+          onClickCapture={handleClickCapture}
+          onScroll={(e) => setScrollLeftPx(e.currentTarget.scrollLeft)}
+        >
+          <div className="employment-timeline-graph" style={{ width: `${trackWidthPx}px` }}>
+            <div className="employment-timeline-scale">
+              <div className="employment-timeline-scale-row employment-timeline-scale-years">
+                {scale.years.map((seg) => (
+                  <div
+                    key={seg.key}
+                    className={`employment-timeline-scale-cell${seg.isBoundary ? " employment-timeline-scale-boundary" : ""}`}
+                    style={{ left: `${seg.leftPercent}%`, width: `${seg.widthPercent}%` }}
+                    data-date={seg.key}
                   >
-                    <span className="employment-timeline-bar-label">{name} · Missing employment dates</span>
-                  </button>
-                ) : (
-                  <>
-                    {emp.workPermit &&
-                      emp.workPermit.expiryDate >= range.start &&
-                      emp.workPermit.expiryDate <= range.end &&
-                      (() => {
-                        const left = percentInRange(emp.workPermit!.expiryDate, range);
-                        return (
-                          <div
-                            className="employment-timeline-permit-marker"
-                            style={{ left: `${left}%` }}
-                            title={`Work permit expires ${emp.workPermit!.expiryDate}`}
-                            aria-label={`Work permit expires ${emp.workPermit!.expiryDate}`}
-                          />
-                        );
-                      })()}
-                    {emp.periods.map((period) => {
-                      const pos = computeBarPosition(period, range);
-                      const label = `${name} · ${TIMELINE_BAR_LABEL_TEXT[period.timelineLabel]}`;
-                      // A synthesized bar has no real employment_periods row
-                      // behind it (see employmentTimelineView.ts) — clicking
-                      // it opens the Add-period flow instead of an editor
-                      // for a period that doesn't actually exist yet, and
-                      // (like adding one from scratch) only when the viewer
-                      // can edit at all. A real period is always clickable,
-                      // even read-only (Manager), to at least view it — the
-                      // modal itself renders read-only in that case.
-                      const clickable = period.synthesized ? canEdit : true;
-                      const ariaLabel = period.synthesized ? `Add an employment period for ${name}` : `View or edit ${name}'s employment period`;
-                      return (
+                    {seg.showLabel && seg.label}
+                  </div>
+                ))}
+                {pinnedYear && (
+                  // Keeps the year visible while scrolled into the middle of it.
+                  <div className="employment-timeline-scale-pinned-year" style={{ left: `${scrollLeftPx}px` }}>
+                    {pinnedYear}
+                  </div>
+                )}
+              </div>
+              <div className="employment-timeline-scale-row employment-timeline-scale-months">
+                {scale.months.map((seg) => (
+                  <div
+                    key={seg.key}
+                    className={`employment-timeline-scale-cell${seg.isBoundary ? " employment-timeline-scale-boundary" : ""}`}
+                    style={{ left: `${seg.leftPercent}%`, width: `${seg.widthPercent}%` }}
+                    data-date={seg.key}
+                  >
+                    {seg.showLabel && seg.label}
+                  </div>
+                ))}
+              </div>
+              {scale.minor && (
+                <div className="employment-timeline-scale-row employment-timeline-scale-minor">
+                  {scale.minor.marks.map((m) => (
+                    <div key={m.key} className="employment-timeline-scale-tick" style={{ left: `${m.leftPercent}%` }} data-date={m.key}>
+                      {m.label}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* One gridline per month start (stronger on January 1) through
+                every row, in the same coordinates as the bars. */}
+            <div className="employment-timeline-grid" aria-hidden="true">
+              {scale.months
+                .filter((seg) => seg.isBoundary)
+                .map((seg) => (
+                  <div
+                    key={seg.key}
+                    className={`employment-timeline-gridline${seg.key.endsWith("-01-01") ? " employment-timeline-gridline-year" : ""}`}
+                    style={{ left: `${seg.leftPercent}%` }}
+                    data-date={seg.key}
+                  />
+                ))}
+              {todayInRange && (
+                <div
+                  ref={todayAnchorRef}
+                  className="employment-timeline-today-marker"
+                  style={{ left: `${todayLeftPercent}%` }}
+                  title={`Today, ${today}`}
+                />
+              )}
+            </div>
+
+            {employees.map((emp, i) => {
+              const number = i + 1;
+              const name = `${emp.firstName} ${emp.lastName}`;
+              const pos = computeBarPosition(emp, range);
+              return (
+                <div key={emp.id} className="employment-timeline-track" data-employee-id={emp.id}>
+                  {!pos ? (
+                    // Nothing to draw from (no Employment Start Date) — a
+                    // full-width dashed row that opens the editor to fix it.
+                    <button
+                      type="button"
+                      className="employment-timeline-bar employment-timeline-bar-missing-dates"
+                      style={{ left: "0%", width: "100%" }}
+                      disabled={!canEdit}
+                      onClick={canEdit ? () => onEditDates(emp) : undefined}
+                      aria-label={`${number}. ${name}: add an Employment Start Date`}
+                      title={`${number}. ${name} — no Employment Start Date recorded`}
+                    >
+                      <span className="employment-timeline-bar-label">Missing Employment Start Date</span>
+                    </button>
+                  ) : (
+                    <>
+                      {emp.workPermit && emp.workPermit.expiryDate >= range.start && emp.workPermit.expiryDate <= range.end && (
+                        <div
+                          className="employment-timeline-permit-marker"
+                          style={{ left: `${percentInRange(emp.workPermit.expiryDate, range)}%` }}
+                          title={`Work permit expires ${emp.workPermit.expiryDate}`}
+                          aria-label={`Work permit expires ${emp.workPermit.expiryDate}`}
+                        />
+                      )}
+                      {pos.inRange && (
                         <button
-                          key={period.id}
                           type="button"
-                          disabled={!clickable}
-                          className={`employment-timeline-bar ${barStateClass(period.timelineLabel)}${period.synthesized ? " employment-timeline-bar-synthesized" : ""}`}
+                          className={`employment-timeline-bar ${barStateClass(emp.timelineLabel ?? "ongoing")}`}
                           style={{ left: `${pos.leftPercent}%`, width: `${pos.widthPercent}%` }}
-                          onClick={clickable ? () => (period.synthesized ? onAddPeriod(emp) : onBarClick(emp, period)) : undefined}
-                          aria-label={ariaLabel}
-                          title={period.synthesized ? ariaLabel : periodTooltip(name, period, pos.clippedStart)}
+                          onClick={() => onEditDates(emp)}
+                          aria-label={`${number}. ${name}: ${canEdit ? "edit" : "view"} employment dates`}
+                          title={barTooltip(number, emp, pos.clippedStart)}
+                          data-start={emp.employmentStartDate ?? undefined}
+                          data-end={emp.timelineEndDate ?? "ongoing"}
                         >
                           {pos.clippedStart && (
                             <span className="employment-timeline-bar-clip-notch" aria-hidden="true">
                               ◀
                             </span>
                           )}
-                          <span className="employment-timeline-bar-label">{label}</span>
+                          <span className="employment-timeline-bar-label">{emp.timelineLabel ? TIMELINE_BAR_LABEL_TEXT[emp.timelineLabel] : ""}</span>
                         </button>
-                      );
-                    })}
-                  </>
-                )}
-              </div>
-            );
-          })}
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       </div>
 

@@ -691,6 +691,31 @@ server-side regardless of what the client sends.
   running the old version can't create access that disagrees with the
   employees' Jobs.
 
+**Employment Timeline (Employees → Employment Timeline)**: one blue bar per
+active employee, drawn only from the employee record the Directory shows and
+edits — no separate timeline copy:
+
+| Shown as | Stored in |
+| --- | --- |
+| Employment Start Date | `employees.start_date` |
+| Work Permit Expiry Date | `employees.work_permit_expiry_date` |
+| End Different Date (optional) | `employees.employment_end_date` (migration 068) |
+
+The bar starts on the Employment Start Date and ends on the End Different
+Date when one is entered, otherwise on the Work Permit Expiry Date, otherwise
+it's ongoing. End Different Date never changes the permit expiry and never
+deactivates anyone, clocks them out or touches time entries/payroll. Clicking
+a bar opens an editor with just those three dates; it saves through the same
+`PATCH /api/employees/:id` as the Employee form (Administrators only;
+Managers see it read-only), and both reject an ending date earlier than the
+start date. Rows are numbered 1..n in the displayed (filtered) order, with
+the count shown as "Employees: N". The date scale shows years above month
+labels; month labels thin out at narrow zoom (every 2nd/3rd/6th/12th month)
+while the monthly gridlines stay. `employee_employment_periods` (050) is no
+longer read for dates or written; its employment type/work group are still
+shown and filterable, read-only, and its old create/edit/delete endpoints
+answer 410 "refresh LabourLink".
+
 ## Known gaps
 
 - **Windows nodemon restart race**: editing server files while `npm run dev`

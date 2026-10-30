@@ -1,136 +1,137 @@
 // Pure range/positioning + filter-composition logic for the Employment
 // Timeline graph/table — kept independent of any component so it's
 // directly testable and so the graph, table, and export all read the exact
-// same filtered/positioned data (guarantees parity by construction).
+// same filtered/positioned data (parity by construction).
 //
-// The graph's default and primary view is "Fit all": one continuous
-// date range spanning every included employee's employment, positioned by
-// percentage rather than a fixed per-day/week/month grid (a grid can't
-// reasonably span years of history). computeFittedRange/buildTimelineHeaderMarks/
-// computeBarPosition below are that range-based system. Every date-range
-// rule (inclusion, effective end date, label) is already decided
-// server-side per period (employmentTimelineView.ts on the server) — this
-// file only aggregates/positions those already-agreed-upon fields, the
-// same "server decides, client positions" split computePeriodStatuses
-// (server) + the old computeBarPosition (client) already used.
-import { EmploymentPeriod, EmploymentTimelineEmployee, EmploymentTimelineFilterState, TIMELINE_BAR_LABEL_TEXT } from "./employmentPeriodTypes";
+// Every bar's dates and end/label are decided server-side
+// (employmentTimelineView.ts) from the employee record — this file only
+// filters, numbers and positions them.
+//
+// Positioning model: the visible range [start, end] is a run of whole
+// calendar days, each one an equal slot; a date's position is the LEFT edge
+// of its day. A bar covers its start day through its last day inclusive, so
+// it ends at the left edge of the day after — exactly on the next month's
+// gridline when it ends on a month's last day. All arithmetic is on
+// YYYY-MM-DD strings in UTC-arithmetic space (calendar days, never a real
+// timezone conversion), so DST changes can't move anything by an hour.
+import {
+  DATE_FIELD_LABELS,
+  EmploymentTimelineEmployee,
+  EmploymentTimelineFilterState,
+  STATUS_LABELS,
+  TIMELINE_BAR_LABEL_TEXT,
+} from "./employmentPeriodTypes";
 
-// -- table/export row shape ----------------------------------------------
+// -- table/export rows -----------------------------------------------------
+
+export const EMPLOYMENT_TIMELINE_COLUMNS = [
+  "#",
+  "Employee",
+  "Nationality",
+  "Employee Group",
+  "Employment Type",
+  "Work Group",
+  DATE_FIELD_LABELS.startDate,
+  DATE_FIELD_LABELS.workPermitExpiryDate,
+  DATE_FIELD_LABELS.endDifferentDate,
+  "Timeline ends",
+  "Status",
+] as const;
 
 export interface EmploymentTimelineRow {
+  number: number;
   employeeName: string;
   nationality: string;
-  workGroup: string;
+  employeeGroup: string;
   employmentType: string;
+  workGroup: string;
   startDate: string;
-  expectedFinishDate: string;
-  actualFinishDate: string;
+  workPermitExpiryDate: string;
+  endDifferentDate: string;
+  timelineEnds: string;
   status: string;
 }
 
-// One row per employment period (not per employee) — the single builder the
-// table view and CSV/PDF export both call, so they can never disagree about
-// row content or order (parity by construction, not by re-implementing the
-// same mapping twice). An employee with no usable dates at all (see
-// EmploymentTimelineEmployee.hasUsableDates) still gets exactly one row, so
-// they're visibly flagged rather than silently missing from the table/export.
+// Where the bar ends, in words — same priority as the bar itself.
+export function describeTimelineEnd(emp: EmploymentTimelineEmployee): string {
+  if (!emp.hasUsableDates) return "";
+  if (emp.timelineEndDate === null) return "Ongoing";
+  const source = emp.timelineEndSource === "endDifferentDate" ? DATE_FIELD_LABELS.endDifferentDate : DATE_FIELD_LABELS.workPermitExpiryDate;
+  return `${emp.timelineEndDate} (${source})`;
+}
+
+// One row per displayed employee, numbered 1.. in displayed order — the
+// single builder the table view, CSV, PDF and Print all use, so they can
+// never disagree with each other or with the graph's numbering.
 export function buildEmploymentTimelineRows(employees: EmploymentTimelineEmployee[]): EmploymentTimelineRow[] {
-  const rows: EmploymentTimelineRow[] = [];
-  for (const emp of employees) {
-    const name = `${emp.firstName} ${emp.lastName}`;
-    if (!emp.hasUsableDates) {
-      rows.push({
-        employeeName: name,
-        nationality: emp.nationality ?? "Unspecified",
-        workGroup: "—",
-        employmentType: "—",
-        startDate: "",
-        expectedFinishDate: "",
-        actualFinishDate: "",
-        status: "No employment dates recorded",
-      });
-      continue;
-    }
-    for (const period of emp.periods) {
-      rows.push({
-        employeeName: name,
-        nationality: emp.nationality ?? "Unspecified",
-        workGroup: period.workGroup ?? "Unspecified",
-        employmentType: period.employmentType ?? "Unspecified",
-        startDate: period.startDate,
-        expectedFinishDate: period.expectedFinishDate ?? "",
-        actualFinishDate: period.actualFinishDate ?? "",
-        status: TIMELINE_BAR_LABEL_TEXT[period.timelineLabel],
-      });
-    }
-  }
-  return rows;
+  return employees.map((emp, i) => ({
+    number: i + 1,
+    employeeName: `${emp.firstName} ${emp.lastName}`,
+    nationality: emp.nationality ?? "Unspecified",
+    employeeGroup: emp.employeeGroup?.name ?? "Ungrouped",
+    employmentType: emp.employmentType ?? "Unspecified",
+    workGroup: emp.workGroup ?? "Unspecified",
+    startDate: emp.employmentStartDate ?? "",
+    workPermitExpiryDate: emp.workPermitExpiryDate ?? "",
+    endDifferentDate: emp.endDifferentDate ?? "",
+    timelineEnds: describeTimelineEnd(emp),
+    status: !emp.hasUsableDates ? "No Employment Start Date recorded" : emp.timelineLabel ? TIMELINE_BAR_LABEL_TEXT[emp.timelineLabel] : "",
+  }));
+}
+
+export function employmentTimelineRowCells(row: EmploymentTimelineRow): string[] {
+  return [
+    String(row.number),
+    row.employeeName,
+    row.nationality,
+    row.employeeGroup,
+    row.employmentType,
+    row.workGroup,
+    row.startDate,
+    row.workPermitExpiryDate,
+    row.endDifferentDate,
+    row.timelineEnds,
+    row.status,
+  ];
+}
+
+export function statusSummary(emp: EmploymentTimelineEmployee): string {
+  return emp.statuses.map((s) => STATUS_LABELS[s]).join(", ");
 }
 
 // -- filter composition ------------------------------------------------
 
-// AND across categories (employee, nationality, and "at least one period
-// matches every active period-level filter"), OR within a category (any
-// selected value in that category counts as a match). A period must
-// satisfy Work Group AND Employment Type AND Status together to count for
-// the employee-qualifies check — e.g. "Guatemalan + Greenhouse + Seasonal"
-// requires one period that is both Greenhouse and Seasonal, on a
-// Guatemalan employee, not any period being Greenhouse and any (possibly
-// different) period being Seasonal.
-//
-// Row-visibility rule: once an employee qualifies, ALL of their periods are
-// kept (not just the matching one) — employment history never shows
-// misleading gaps just because an older period doesn't match the current
-// filter.
+// AND across categories, OR within a category. Keeps the server's order
+// (first name, last name), which is the order the numbering follows.
 export function filterEmploymentTimelineEmployees(
   employees: EmploymentTimelineEmployee[],
   filters: EmploymentTimelineFilterState
 ): EmploymentTimelineEmployee[] {
-  const hasEmployeeFilter = filters.employeeIds.length > 0;
-  const hasNationalityFilter = filters.nationalities.length > 0;
-  const hasWorkGroupFilter = filters.workGroups.length > 0;
-  const hasEmploymentTypeFilter = filters.employmentTypes.length > 0;
-  const hasStatusFilter = filters.statuses.length > 0;
-  const hasAnyPeriodFilter = hasWorkGroupFilter || hasEmploymentTypeFilter || hasStatusFilter;
-
-  function periodMatches(p: EmploymentPeriod): boolean {
-    if (hasWorkGroupFilter) {
-      const matches = p.workGroup ? filters.workGroups.includes(p.workGroup) : filters.workGroups.includes("Unspecified");
-      if (!matches) return false;
-    }
-    if (hasEmploymentTypeFilter) {
-      const matches = p.employmentType ? filters.employmentTypes.includes(p.employmentType) : filters.employmentTypes.includes("Unspecified");
-      if (!matches) return false;
-    }
-    if (hasStatusFilter) {
-      if (!p.statuses.some((s) => filters.statuses.includes(s))) return false;
-    }
-    return true;
-  }
-
-  return employees.filter((emp) => {
-    if (hasEmployeeFilter && !filters.employeeIds.includes(emp.id)) return false;
-    if (hasNationalityFilter) {
-      const matches = emp.nationality ? filters.nationalities.includes(emp.nationality) : filters.nationalities.includes("Unspecified");
-      if (!matches) return false;
-    }
-    if (!hasAnyPeriodFilter) return true;
-    return emp.periods.some(periodMatches);
-  });
+  const inList = (list: string[], value: string) => list.length === 0 || list.includes(value);
+  return employees.filter(
+    (emp) =>
+      inList(filters.employeeIds, emp.id) &&
+      inList(filters.nationalities, emp.nationality ?? "Unspecified") &&
+      inList(filters.employeeGroupIds, emp.employeeGroup?.id ?? "Ungrouped") &&
+      inList(filters.workGroups, emp.workGroup ?? "Unspecified") &&
+      inList(filters.employmentTypes, emp.employmentType ?? "Unspecified") &&
+      (filters.statuses.length === 0 || emp.statuses.some((s) => filters.statuses.includes(s)))
+  );
 }
 
-// -- date-range math -------------------------------------------------------
+// -- date math -------------------------------------------------------------
 
-// Calendar-day difference (to - from), positive when `to` is later. Pure
-// UTC-arithmetic-space subtraction — same "never a real timezone
-// conversion" convention as every other calendar-date helper in this
-// codebase (see timezone.ts's own header comment).
+// Calendar-day difference (to - from), positive when `to` is later.
 export function daysBetweenDateStrs(from: string, to: string): number {
   const [fy, fm, fd] = from.split("-").map(Number);
   const [ty, tm, td] = to.split("-").map(Number);
-  const fromMs = Date.UTC(fy, fm - 1, fd);
-  const toMs = Date.UTC(ty, tm - 1, td);
-  return Math.round((toMs - fromMs) / 86400000);
+  return Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86400000);
+}
+
+export function addDaysStr(dateStr: string, days: number): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d) + days * 86400000);
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
 }
 
 export interface TimelineRange {
@@ -138,234 +139,219 @@ export interface TimelineRange {
   end: string; // inclusive YYYY-MM-DD
 }
 
-// The default "Fit all" range: begins at the earliest start date of any
-// included, dated employee/period (or the saved "Timeline starts" org
-// setting, when one is on file — see displayStartOverride) and ends at the
-// latest timelineEffectiveEndDate among them — which is already `today` for
-// any "ongoing"/"expiredStillWorking" bar (see employmentTimelineView.ts) —
-// so today is naturally included without special-casing it here beyond the
-// final floor below. The right edge is NEVER affected by
-// displayStartOverride, per spec: "The right edge remains the latest
-// applicable future end/expiry date or Today, whichever is later."
-// Returns null only when there is nothing datable to show at all (e.g.
-// every visible employee is flagged hasUsableDates:false). Recompute this
-// from whatever employee list is currently visible — it naturally
-// "recalculates after filters" simply by being called with the
-// already-filtered array, no separate filter-awareness needed here.
+// Number of day slots shown: start..end inclusive.
+export function rangeDayCount(range: TimelineRange): number {
+  return Math.max(1, daysBetweenDateStrs(range.start, range.end) + 1);
+}
+
+// Left edge of `dateStr`'s day, as a percentage of the visible range,
+// clamped to [0, 100] (a date outside the range sits on the edge).
+export function percentInRange(dateStr: string, range: TimelineRange): number {
+  const offset = daysBetweenDateStrs(range.start, dateStr);
+  return Math.min(100, Math.max(0, (offset / rangeDayCount(range)) * 100));
+}
+
+// The default "Full timeline" range: from the earliest Employment Start
+// Date among the displayed employees (or the saved "Timeline starts"
+// setting, when set) to the latest bar end, never earlier than today — so
+// ongoing bars and the Today marker always fit. Null when nothing is
+// datable. Recomputed from the already-filtered list.
 export function computeFittedRange(
   employees: EmploymentTimelineEmployee[],
   today: string,
   displayStartOverride?: string | null
 ): TimelineRange | null {
-  let trueEarliestStart: string | null = null;
-  let end: string | null = null;
+  let earliest: string | null = null;
+  let end: string = today;
   for (const emp of employees) {
-    if (!emp.hasUsableDates) continue;
-    for (const p of emp.periods) {
-      if (trueEarliestStart === null || p.startDate < trueEarliestStart) trueEarliestStart = p.startDate;
-      if (end === null || p.timelineEffectiveEndDate > end) end = p.timelineEffectiveEndDate;
-    }
+    if (!emp.hasUsableDates || !emp.employmentStartDate) continue;
+    if (earliest === null || emp.employmentStartDate < earliest) earliest = emp.employmentStartDate;
+    if (emp.timelineEndDate && emp.timelineEndDate > end) end = emp.timelineEndDate;
   }
-  if (trueEarliestStart === null) return null;
-  if (end === null || end < today) end = today;
-  return { start: displayStartOverride ?? trueEarliestStart, end };
-}
-
-// Clamps a date into [0, 100] percent of `range` — a date before range.start
-// (a bar clipped by a custom From/To override, say) reads as 0%, one after
-// range.end reads as 100%, matching the same "clip at the visible edge"
-// behavior the old fixed-grid computeBarPosition had.
-export function percentInRange(dateStr: string, range: TimelineRange): number {
-  const totalDays = daysBetweenDateStrs(range.start, range.end);
-  if (totalDays <= 0) return 0;
-  const offset = daysBetweenDateStrs(range.start, dateStr);
-  return Math.min(100, Math.max(0, (offset / totalDays) * 100));
+  if (earliest === null) return null;
+  const start = displayStartOverride ?? earliest;
+  return { start, end: end < start ? start : end };
 }
 
 export interface BarPosition {
   leftPercent: number;
   widthPercent: number;
-  // True when the period's real startDate is earlier than the currently
-  // displayed range's left edge — most commonly because it started before
-  // the saved "Timeline starts" cutoff, but the same treatment applies
-  // whenever a custom From override does the same thing. The bar is never
-  // stretched or its true dates altered to compensate — it's simply drawn
-  // from the display boundary, flagged so the caller can render a
-  // continuation indicator, and the true startDate is still always
-  // available on `period` itself for the tooltip.
+  // The real start is before the visible range (drawn from the edge with a
+  // continuation notch; the tooltip still shows the real date).
   clippedStart: boolean;
+  // False when the whole bar falls outside the visible range (e.g. a custom
+  // From after it ended): nothing is drawn, the row and its number stay.
+  inRange: boolean;
 }
 
-// "Ongoing"/"expiredStillWorking" bars are drawn all the way to the range's
-// own right edge (not literally clipped at their timelineEffectiveEndDate,
-// which is always `today` — the range's right edge is always >= today by
-// construction, so this reaches exactly "through today/the displayed right
-// boundary" per spec). A tiny minimum width keeps a same-day bar visible
-// rather than collapsing to nothing.
+// A tiny minimum width keeps a one-day bar visible at far zoom.
 const MIN_BAR_WIDTH_PERCENT = 0.4;
 
-export function computeBarPosition(period: EmploymentPeriod, range: TimelineRange): BarPosition {
-  const extendsToEdge = period.timelineLabel === "ongoing" || period.timelineLabel === "expiredStillWorking";
-  const endDate = extendsToEdge ? range.end : period.timelineEffectiveEndDate;
-  const left = percentInRange(period.startDate, range);
-  const right = extendsToEdge ? 100 : percentInRange(endDate, range);
-  return { leftPercent: left, widthPercent: Math.max(right - left, MIN_BAR_WIDTH_PERCENT), clippedStart: period.startDate < range.start };
+// Start day's left edge to the left edge of the day after the last day.
+// Ongoing bars (no end date) run to the right edge of the visible range.
+export function computeBarPosition(emp: EmploymentTimelineEmployee, range: TimelineRange): BarPosition | null {
+  if (!emp.hasUsableDates || !emp.employmentStartDate) return null;
+  const left = percentInRange(emp.employmentStartDate, range);
+  const right = emp.timelineEndDate === null ? 100 : percentInRange(addDaysStr(emp.timelineEndDate, 1), range);
+  const inRange = emp.employmentStartDate <= range.end && (emp.timelineEndDate === null || emp.timelineEndDate >= range.start);
+  return { leftPercent: left, widthPercent: Math.max(right - left, MIN_BAR_WIDTH_PERCENT), clippedStart: emp.employmentStartDate < range.start, inRange };
 }
 
 // -- zoom --------------------------------------------------------------
 
-// Close enough to inspect individual days without the bars/labels becoming
-// unusably fat — a day column this wide comfortably fits a short label.
+// Close enough to inspect individual days.
 export const MAX_PX_PER_DAY = 60;
-// An absolute floor so pathological inputs (a zero-width container mid
-// layout, say) can't produce a zero/negative or infinite density. The REAL
-// zoomed-out floor in normal operation is whatever computeFitAllPxPerDay
-// returns for the actual container width — that's almost always larger
-// than this.
+// Absolute floor against pathological inputs (a zero-width container).
 export const MIN_PX_PER_DAY_FLOOR = 0.02;
 
-// The exact "farthest zoom-out" density: the whole range fits inside the
-// container's own measured width, with nothing left over to scroll. "Full
-// timeline" always resets to exactly this value, recomputed fresh (not
-// cached) so it stays exact across a container resize, a filter change, or
-// a saved-cutoff edit.
+// The exact "farthest zoom-out" density: the whole range fits the date
+// track's measured width with nothing to scroll. "Full timeline" resets to
+// this, recomputed fresh after resizes, filter changes and range changes.
 export function computeFitAllPxPerDay(rangeDays: number, containerWidthPx: number): number {
   if (rangeDays <= 0 || containerWidthPx <= 0) return MAX_PX_PER_DAY;
   return Math.max(MIN_PX_PER_DAY_FLOOR, containerWidthPx / rangeDays);
 }
 
-const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// -- date scale (header) ------------------------------------------------
 
-function addDaysStr(dateStr: string, days: number): string {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d) + days * 86400000);
-  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+export const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// Narrowest space a label needs before the next one starts ("Sep" plus
+// padding, "2026" plus padding).
+export const MIN_MONTH_LABEL_PX = 34;
+export const MIN_YEAR_LABEL_PX = 40;
+const MONTH_LABEL_STEPS = [1, 2, 3, 6, 12];
+const YEAR_LABEL_STEPS = [1, 2, 5, 10, 25];
+// Close-zoom third row: Monday-start weeks once a week is this wide, day
+// numbers once a day fits one ("31" plus padding) — reachable below
+// MAX_PX_PER_DAY.
+const MIN_WEEK_MARK_PX = 64;
+export const MIN_DAY_MARK_PX = 24;
+
+export interface TimelineScaleSegment {
+  key: string; // YYYY-MM-DD of the boundary (or the range start for a leading partial segment)
+  label: string;
+  leftPercent: number;
+  widthPercent: number;
+  // A whole month/year starts here (a gridline is drawn); false for the
+  // leading partial segment that begins mid-month/mid-year at the range start.
+  isBoundary: boolean;
+  showLabel: boolean;
 }
 
-// Monday-start week (matches this codebase's existing startOfWeekMonday
-// convention in timezone.ts) containing `dateStr`.
-function startOfWeekMonday(dateStr: string): string {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0=Sun..6=Sat
-  const backToMonday = (dow + 6) % 7;
-  return addDaysStr(dateStr, -backToMonday);
+// The year to pin at the left edge of the visible area when a scrolled
+// (zoomed-in) view would otherwise show no year at all: the year of the
+// first visible day, unless that year's own label is still in view or the
+// next year's label is about to reach the pinned spot. `scrollLeftPx` is the
+// date track's horizontal scroll offset.
+export function pinnedYearLabel(range: TimelineRange, pxPerDay: number, scrollLeftPx: number): string | null {
+  if (scrollLeftPx <= 0 || pxPerDay <= 0) return null;
+  const firstVisible = addDaysStr(range.start, Math.floor(scrollLeftPx / pxPerDay));
+  if (firstVisible > range.end) return null;
+  const year = Number(firstVisible.slice(0, 4));
+  const ownStartPx = Math.max(0, daysBetweenDateStrs(range.start, `${year}-01-01`)) * pxPerDay;
+  if (ownStartPx >= scrollLeftPx) return null; // its own label is in view
+  const nextStartPx = daysBetweenDateStrs(range.start, `${year + 1}-01-01`) * pxPerDay;
+  if (nextStartPx - scrollLeftPx < MIN_YEAR_LABEL_PX) return null;
+  return String(year);
 }
 
-export interface TimelineHeaderMark {
-  key: string; // the mark's own start date, YYYY-MM-DD
+export interface TimelineMinorMark {
+  key: string;
   label: string;
   leftPercent: number;
 }
 
-export type TimelineHeaderGranularity = "year" | "quarter" | "month" | "week" | "day";
-
-// Headers get coarser as pxPerDay shrinks — picks the FINEST granularity
-// whose marks are still spaced at least this far apart on screen, so
-// labels never overlap however the range/zoom combine (a few weeks at
-// closest zoom shows days; a decade at "Fit all" shows years).
-const MIN_MARK_SPACING_PX = 64;
-
-export function chooseHeaderGranularity(pxPerDay: number): TimelineHeaderGranularity {
-  if (pxPerDay * 1 >= MIN_MARK_SPACING_PX) return "day";
-  if (pxPerDay * 7 >= MIN_MARK_SPACING_PX) return "week";
-  if (pxPerDay * 30 >= MIN_MARK_SPACING_PX) return "month";
-  if (pxPerDay * 91 >= MIN_MARK_SPACING_PX) return "quarter";
-  return "year";
+export interface TimelineScale {
+  years: TimelineScaleSegment[];
+  months: TimelineScaleSegment[];
+  // Every n-th month is labeled (1 = every month); labels are thinned, the
+  // monthly gridlines never are.
+  monthLabelStep: number;
+  minor: { granularity: "week" | "day"; marks: TimelineMinorMark[] } | null;
 }
 
-function buildYearMarks(range: TimelineRange): TimelineHeaderMark[] {
-  const marks: TimelineHeaderMark[] = [];
-  const startY = Number(range.start.slice(0, 4));
-  const endY = Number(range.end.slice(0, 4));
-  for (let y = startY; y <= endY; y++) {
-    const key = `${y}-01-01`;
-    marks.push({ key, label: String(y), leftPercent: percentInRange(key, range) });
+function pickStep(widthPx: number, minPx: number, steps: number[]): number | null {
+  for (const s of steps) if (widthPx * s >= minPx) return s;
+  return null;
+}
+
+function segments(boundaries: string[], range: TimelineRange, label: (key: string) => string): TimelineScaleSegment[] {
+  const out: TimelineScaleSegment[] = [];
+  const next = (i: number) => (i + 1 < boundaries.length ? percentInRange(boundaries[i + 1], range) : 100);
+  if (boundaries.length === 0 || boundaries[0] > range.start) {
+    const firstEdge = boundaries.length ? percentInRange(boundaries[0], range) : 100;
+    out.push({ key: range.start, label: label(range.start), leftPercent: 0, widthPercent: firstEdge, isBoundary: false, showLabel: true });
   }
-  return marks;
+  boundaries.forEach((b, i) => {
+    const left = percentInRange(b, range);
+    out.push({ key: b, label: label(b), leftPercent: left, widthPercent: next(i) - left, isBoundary: true, showLabel: true });
+  });
+  return out;
 }
 
-function buildQuarterMarks(range: TimelineRange): TimelineHeaderMark[] {
-  const marks: TimelineHeaderMark[] = [];
-  const [startY, startM] = range.start.split("-").map(Number);
-  const [endY, endM] = range.end.split("-").map(Number);
-  let y = startY;
-  let q = Math.floor((startM - 1) / 3); // 0-3
-  const endQAbs = endY * 4 + Math.floor((endM - 1) / 3);
-  let first = true;
-  while (y * 4 + q <= endQAbs) {
-    const month = q * 3 + 1;
-    const key = `${y}-${String(month).padStart(2, "0")}-01`;
-    const label = first || q === 0 ? `Q${q + 1} ${y}` : `Q${q + 1}`;
-    marks.push({ key, label, leftPercent: percentInRange(key, range) });
-    first = false;
-    q += 1;
-    if (q > 3) {
-      q = 0;
-      y += 1;
-    }
-  }
-  return marks;
-}
+// Year row, month row and (at close zoom) a week/day row for `range` at
+// `pxPerDay`. Gridlines sit on every month start; labels are thinned so
+// they never overlap: months to every 2nd/3rd/6th/12th month (January is
+// always one of them, so each year's first label stays put), years to every
+// 2nd/5th/... year at extreme ranges. A partial month/year at the range
+// start is labeled only when there's room before the next label.
+export function buildTimelineScale(range: TimelineRange, pxPerDay: number): TimelineScale {
+  const totalPx = rangeDayCount(range) * pxPerDay;
 
-function buildMonthMarks(range: TimelineRange): TimelineHeaderMark[] {
-  const marks: TimelineHeaderMark[] = [];
-  const [startY, startM] = range.start.split("-").map(Number);
-  const [endY, endM] = range.end.split("-").map(Number);
-  let y = startY;
-  let m = startM;
-  let first = true;
-  while (y < endY || (y === endY && m <= endM)) {
-    const key = `${y}-${String(m).padStart(2, "0")}-01`;
-    const label = first || m === 1 ? `${MONTH_ABBR[m - 1]} ${y}` : MONTH_ABBR[m - 1];
-    marks.push({ key, label, leftPercent: percentInRange(key, range) });
-    first = false;
+  const monthStarts: string[] = [];
+  const yearStarts: string[] = [];
+  let [y, m] = range.start.split("-").map(Number);
+  if (range.start.slice(8) !== "01") {
     m += 1;
     if (m > 12) {
       m = 1;
       y += 1;
     }
   }
-  return marks;
-}
-
-function buildWeekMarks(range: TimelineRange): TimelineHeaderMark[] {
-  const marks: TimelineHeaderMark[] = [];
-  let cursor = startOfWeekMonday(range.start);
-  while (cursor <= range.end) {
-    const [, m, d] = cursor.split("-").map(Number);
-    marks.push({ key: cursor, label: `${MONTH_ABBR[m - 1]} ${d}`, leftPercent: percentInRange(cursor, range) });
-    cursor = addDaysStr(cursor, 7);
+  for (;;) {
+    const key = `${y}-${String(m).padStart(2, "0")}-01`;
+    if (key > range.end) break;
+    monthStarts.push(key);
+    if (m === 1) yearStarts.push(key);
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
   }
-  return marks;
-}
 
-function buildDayMarks(range: TimelineRange): TimelineHeaderMark[] {
-  const marks: TimelineHeaderMark[] = [];
-  let cursor = range.start;
-  while (cursor <= range.end) {
-    const [, m, d] = cursor.split("-").map(Number);
-    marks.push({ key: cursor, label: `${MONTH_ABBR[m - 1]} ${d}`, leftPercent: percentInRange(cursor, range) });
-    cursor = addDaysStr(cursor, 1);
+  const months = segments(monthStarts, range, (k) => MONTH_ABBR[Number(k.slice(5, 7)) - 1]);
+  const monthLabelStep = pickStep(pxPerDay * 30.44, MIN_MONTH_LABEL_PX, MONTH_LABEL_STEPS);
+  for (const seg of months) {
+    const monthIndex = Number(seg.key.slice(5, 7)) - 1;
+    const segPx = (seg.widthPercent / 100) * totalPx;
+    if (monthLabelStep === null) seg.showLabel = false;
+    else if (!seg.isBoundary) seg.showLabel = segPx >= MIN_MONTH_LABEL_PX && monthLabelStep === 1;
+    else seg.showLabel = monthIndex % monthLabelStep === 0;
   }
-  return marks;
-}
 
-// Adaptive header marks — one mark per year/quarter/month/week/day boundary
-// crossed by `range`, whichever granularity chooseHeaderGranularity picks
-// for the current zoom density, positioned by percentage (not a discrete
-// grid column) so the same function covers a two-week range and a
-// multi-year one alike.
-export function buildTimelineHeaderMarks(range: TimelineRange, pxPerDay: number): TimelineHeaderMark[] {
-  switch (chooseHeaderGranularity(pxPerDay)) {
-    case "year":
-      return buildYearMarks(range);
-    case "quarter":
-      return buildQuarterMarks(range);
-    case "month":
-      return buildMonthMarks(range);
-    case "week":
-      return buildWeekMarks(range);
-    case "day":
-      return buildDayMarks(range);
+  const years = segments(yearStarts, range, (k) => k.slice(0, 4));
+  const yearStep = pickStep(pxPerDay * 365.25, MIN_YEAR_LABEL_PX, YEAR_LABEL_STEPS) ?? YEAR_LABEL_STEPS[YEAR_LABEL_STEPS.length - 1];
+  for (const seg of years) {
+    const segPx = (seg.widthPercent / 100) * totalPx;
+    if (!seg.isBoundary) seg.showLabel = segPx >= MIN_YEAR_LABEL_PX;
+    else seg.showLabel = Number(seg.key.slice(0, 4)) % yearStep === 0;
   }
+
+  let minor: TimelineScale["minor"] = null;
+  if (pxPerDay >= MIN_DAY_MARK_PX) {
+    minor = { granularity: "day", marks: [] };
+    for (let c = range.start; c <= range.end; c = addDaysStr(c, 1)) {
+      minor.marks.push({ key: c, label: String(Number(c.slice(8))), leftPercent: percentInRange(c, range) });
+    }
+  } else if (pxPerDay * 7 >= MIN_WEEK_MARK_PX) {
+    minor = { granularity: "week", marks: [] };
+    const dow = new Date(`${range.start}T00:00:00Z`).getUTCDay();
+    for (let c = addDaysStr(range.start, (8 - dow) % 7); c <= range.end; c = addDaysStr(c, 7)) {
+      minor.marks.push({ key: c, label: `${MONTH_ABBR[Number(c.slice(5, 7)) - 1]} ${Number(c.slice(8))}`, leftPercent: percentInRange(c, range) });
+    }
+  }
+
+  return { years, months, monthLabelStep: monthLabelStep ?? 0, minor };
 }

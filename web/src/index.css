@@ -7774,11 +7774,32 @@ input {
 
 /* -- filters -- */
 
+/* Filters with the displayed-employees count beside them. */
+.employment-timeline-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin-bottom: 1rem;
+}
+
 .employment-timeline-filters {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  margin-bottom: 1rem;
+}
+
+.employment-timeline-count {
+  margin: 0;
+  padding: 0.4rem 0;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.employment-dates-optional {
+  font-weight: 400;
+  color: var(--color-muted);
 }
 
 .employment-timeline-filter {
@@ -7934,62 +7955,191 @@ input {
    own comment on that), and the outer wrapper's border makes the two still
    read as one unified box. */
 .employment-timeline-graph-outer {
+  --timeline-row-height: 32px;
+  --timeline-scale-row-height: 20px;
+  --timeline-scale-height: calc(2 * var(--timeline-scale-row-height));
   border: 1px solid var(--color-border);
   border-radius: 6px;
   overflow: hidden;
 }
 
-/* No frozen names column any more — every bar carries its own employee's
-   name (see EmploymentTimelineGraph's label), so the date track simply
-   uses the full available width. This used to be a sticky-column CSS Grid,
-   then a genuinely separate non-scrolling panel after sticky broke at
-   large scroll distances (see git history) — removed per redesign now
-   that each bar is self-identifying. */
+.employment-timeline-has-minor-row {
+  --timeline-scale-height: calc(3 * var(--timeline-scale-row-height));
+}
+
+/* Numbers + names panel beside the scrolling date track. Deliberately NOT a
+   sticky column inside the scroller: a sticky descendant several thousand
+   pixels into a long horizontal scroll once silently stopped tracking (see
+   git history). This panel is never inside the scrolling element, and its
+   header/rows share the track's fixed heights, so row n always lines up
+   with bar n. */
+.employment-timeline-body {
+  display: flex;
+  align-items: flex-start;
+}
+
+.employment-timeline-rowheads {
+  flex: 0 0 auto;
+  width: 220px;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-surface);
+  font-size: 0.8rem;
+}
+
+.employment-timeline-rowheads-header,
+.employment-timeline-rowhead {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.6rem;
+  box-sizing: border-box;
+}
+
+.employment-timeline-rowheads-header {
+  height: var(--timeline-scale-height);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-muted);
+}
+
+.employment-timeline-rowhead {
+  height: var(--timeline-row-height);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.employment-timeline-rowhead-number {
+  flex: 0 0 2.2rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-muted);
+}
+
+.employment-timeline-rowhead-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
 .employment-timeline-graph-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow-x: auto;
 }
 
 .employment-timeline-graph {
+  position: relative;
   display: flex;
   flex-direction: column;
   font-size: 0.78rem;
 }
 
-/* Header row's date track — month/year marks positioned by percentage
-   across the fitted (or custom-overridden) range, not a discrete per-day
-   grid column, so this same markup covers a two-week range and a
-   multi-year one alike. */
-.employment-timeline-header-track {
+/* Date scale: year row, month row, and at close zoom a week/day row —
+   cells positioned by percentage of the visible range (whole-day slots, see
+   employmentTimeline.ts), so labels, gridlines and bars share coordinates. */
+.employment-timeline-scale {
   position: relative;
-  min-height: 32px;
+  overflow: hidden;
+  height: var(--timeline-scale-height);
   border-bottom: 1px solid var(--color-border);
   background: var(--color-bg);
 }
 
-.employment-timeline-month-mark {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  padding: 0.4rem 0 0 0.35rem;
-  border-left: 1px solid var(--color-border);
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--color-muted);
-  white-space: nowrap;
+.employment-timeline-scale-row {
+  position: relative;
+  height: var(--timeline-scale-row-height);
 }
 
-/* Zero-width — exists only as a stable scrollIntoView target for the Today
-   button, independent of how many employee rows are rendered. */
-.employment-timeline-today-anchor {
+.employment-timeline-scale-years {
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* Labels may run past their own (possibly narrow) month cell: thinning in
+   buildTimelineScale guarantees room before the next label, and the scale
+   clips at the graph's edge. */
+.employment-timeline-scale-cell,
+.employment-timeline-scale-tick {
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 1px;
+  box-sizing: border-box;
+  padding: 0.2rem 0 0 0.3rem;
+  overflow: visible;
+  white-space: nowrap;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  color: var(--color-muted);
+}
+
+.employment-timeline-scale-years .employment-timeline-scale-cell,
+.employment-timeline-scale-pinned-year {
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.employment-timeline-scale-pinned-year {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  padding: 0.2rem 0.4rem 0 0.3rem;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  background: var(--color-bg);
+  border-right: 1px solid var(--color-border);
+}
+
+.employment-timeline-scale-months .employment-timeline-scale-cell {
+  font-weight: 600;
+}
+
+.employment-timeline-scale-years .employment-timeline-scale-boundary,
+.employment-timeline-scale-tick {
+  border-left: 1px solid var(--color-border);
+}
+
+/* Months: a short tick at each month start instead of a full-height line,
+   so a label isn't struck through by the next months' boundaries. */
+.employment-timeline-scale-months .employment-timeline-scale-boundary::before {
+  content: "";
+  position: absolute;
+  left: -1px;
+  bottom: 0;
+  height: 5px;
+  border-left: 1px solid var(--color-muted);
+}
+
+/* One overlay for the whole graph: a gridline per month start (stronger on
+   January 1) and the single Today marker, through the scale and every row. */
+.employment-timeline-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.employment-timeline-gridline {
+  position: absolute;
+  top: var(--timeline-scale-height);
+  bottom: 0;
+  width: 0;
+  border-left: 1px solid var(--color-border);
+  opacity: 0.7;
+}
+
+.employment-timeline-gridline-year {
+  top: 0;
+  border-left-color: var(--color-muted);
+  opacity: 0.55;
 }
 
 .employment-timeline-track {
+  position: relative;
+  height: var(--timeline-row-height);
+  box-sizing: border-box;
   border-bottom: 1px solid var(--color-border);
-  min-height: 32px;
 }
 
 .employment-timeline-today-marker {
@@ -7997,8 +8147,9 @@ input {
   top: 0;
   bottom: 0;
   width: 2px;
+  margin-left: -1px;
   background: var(--color-danger);
-  z-index: 1;
+  z-index: 2;
 }
 
 .employment-timeline-permit-marker {
@@ -8009,11 +8160,12 @@ input {
   border-radius: 50%;
   background: var(--color-warning, #b45309);
   transform: translateX(-50%);
-  z-index: 1;
+  z-index: 3;
 }
 
 .employment-timeline-bar {
   position: absolute;
+  z-index: 1;
   top: 4px;
   height: calc(100% - 8px);
   border-radius: 4px;
@@ -8031,7 +8183,7 @@ input {
 }
 
 /* z-index so the ring isn't visually clipped by an adjacent bar's own
-   box — every real (non-synthesized) bar is keyboard-focusable now that
+   box — every bar is keyboard-focusable now that
    clicking one always opens at least a read-only view. */
 .employment-timeline-bar:focus-visible {
   outline: 2px solid var(--color-primary);
@@ -8063,11 +8215,9 @@ input {
   opacity: 0.65;
 }
 
-/* "Expired — still working" — the explicit is_active-stays-true override;
-   deliberately the same visual alarm (striped danger) the old "Overdue"
-   state used, since it's the same underlying situation: an applicable
-   date already passed with nothing recorded to close it out. */
-.employment-timeline-bar-expired-still-working {
+/* "Permit expired" — the permit expiry passed with no End Different Date
+   recorded; the bar ends on the expiry, striped as an alarm. */
+.employment-timeline-bar-permit-expired {
   background: var(--color-danger);
   background-image: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.25) 0, rgba(255, 255, 255, 0.25) 4px, transparent 4px, transparent 8px);
 }
@@ -8093,14 +8243,6 @@ input {
 
 .employment-timeline-bar-missing-dates:disabled {
   opacity: 0.85;
-}
-
-/* The one virtual, non-real period synthesized for an employee with no
-   employment_periods row (see employmentTimelineView.ts) — a dashed border
-   marks it as "not a real recorded period" at a glance, on top of it being
-   non-clickable (no real id to edit/delete). */
-.employment-timeline-bar-synthesized {
-  border: 1px dashed rgba(255, 255, 255, 0.7);
 }
 
 /* Continuation indicator for a bar clipped at the displayed range's left
@@ -8174,41 +8316,31 @@ input {
 .employment-period-form {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 0.9rem;
+  margin-bottom: 1rem;
+}
+
+.employment-period-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.employment-period-form input[type="date"] {
+  max-width: 14rem;
+}
+
+.employment-period-form .field-hint,
+.employment-period-form .field-error {
+  font-weight: 400;
 }
 
 .employment-period-modal-footer {
   display: flex;
   justify-content: flex-end;
   gap: 0.5rem;
-}
-
-.employment-period-delete-confirm {
-  margin-top: 1rem;
-  padding: 0.75rem;
-  border: 1px solid var(--color-danger);
-  border-radius: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.employment-period-delete-confirm-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 0.5rem;
-}
-
-.danger-button {
-  border: 1px solid var(--color-danger);
-  background: transparent;
-  color: var(--color-danger);
-  font-weight: 600;
-}
-
-.danger-button:hover {
-  background: var(--color-danger);
-  color: white;
 }
 
 /* Print: only the timeline's table view + generated-at note — the graph
