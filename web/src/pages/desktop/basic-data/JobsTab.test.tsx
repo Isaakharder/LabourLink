@@ -1,15 +1,15 @@
 // @vitest-environment jsdom
 //
-// Tests the "Deactivate activity?" ConfirmDialog that replaced the
+// Tests the "Deactivate job?" ConfirmDialog that replaced the
 // window.confirm() popup previously used by handleToggleActive (see
-// ActivitiesTab.tsx). lib/api.ts is mocked so every network call — the
+// JobsTab.tsx). lib/api.ts is mocked so every network call — the
 // admin auth check, the activities list, and the deactivate PATCH — is
 // fully controlled by the test, same convention as InputsPage.switching.test.tsx.
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ActivitiesTab } from "./ActivitiesTab";
+import { JobsTab } from "./JobsTab";
 import { AuthProvider } from "../../../context/AuthContext";
 import { ApiError } from "../../../lib/api";
 import { Activity } from "../../../lib/activityTypes";
@@ -90,7 +90,7 @@ vi.mock("../../../lib/api", () => {
 function renderTab() {
   return render(
     <AuthProvider>
-      <ActivitiesTab />
+      <JobsTab />
     </AuthProvider>
   );
 }
@@ -109,7 +109,7 @@ beforeEach(() => {
   patchCalls = [];
 });
 
-describe("ActivitiesTab deactivate confirmation", () => {
+describe("JobsTab deactivate confirmation", () => {
   it("opens the ConfirmDialog (not window.confirm) when Deactivate is clicked, focused inside it", async () => {
     const user = userEvent.setup();
     const confirmSpy = vi.spyOn(window, "confirm");
@@ -118,8 +118,8 @@ describe("ActivitiesTab deactivate confirmation", () => {
     await screen.findAllByText("Harvesting");
     await user.click(firstDeactivateButton());
 
-    const dialog = await screen.findByRole("dialog", { name: "Deactivate activity?" });
-    expect(within(dialog).getByText(/"Harvesting" will no longer appear in the mobile activity picker/)).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "Deactivate job?" });
+    expect(within(dialog).getByText(/"Harvesting" will no longer appear in the mobile job picker/)).toBeInTheDocument();
     expect(within(dialog).getByText(/Historical time entries will not be affected\./)).toBeInTheDocument();
     // Initial focus lands on Cancel (the safe action), inside the dialog.
     expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus();
@@ -134,7 +134,7 @@ describe("ActivitiesTab deactivate confirmation", () => {
     const trigger = firstDeactivateButton();
     await user.click(trigger);
 
-    const dialog = await screen.findByRole("dialog", { name: "Deactivate activity?" });
+    const dialog = await screen.findByRole("dialog", { name: "Deactivate job?" });
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -149,7 +149,7 @@ describe("ActivitiesTab deactivate confirmation", () => {
 
     await screen.findAllByText("Harvesting");
     await user.click(firstDeactivateButton());
-    await screen.findByRole("dialog", { name: "Deactivate activity?" });
+    await screen.findByRole("dialog", { name: "Deactivate job?" });
 
     await user.keyboard("{Escape}");
 
@@ -163,7 +163,7 @@ describe("ActivitiesTab deactivate confirmation", () => {
 
     await screen.findAllByText("Harvesting");
     await user.click(firstDeactivateButton());
-    const dialog = await screen.findByRole("dialog", { name: "Deactivate activity?" });
+    const dialog = await screen.findByRole("dialog", { name: "Deactivate job?" });
 
     await user.click(within(dialog).getByRole("button", { name: "Deactivate" }));
 
@@ -187,7 +187,7 @@ describe("ActivitiesTab deactivate confirmation", () => {
 
     await screen.findAllByText("Harvesting");
     await user.click(firstDeactivateButton());
-    const dialog = await screen.findByRole("dialog", { name: "Deactivate activity?" });
+    const dialog = await screen.findByRole("dialog", { name: "Deactivate job?" });
 
     await user.click(within(dialog).getByRole("button", { name: "Deactivate" }));
     expect(patchCalls).toHaveLength(1);

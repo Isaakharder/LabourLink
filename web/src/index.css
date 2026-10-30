@@ -2190,6 +2190,19 @@ input {
   font-weight: 600;
 }
 
+/* A tab bar with more tabs than fit (Basic data at narrow desktop widths)
+   scrolls sideways instead of wrapping or squeezing labels. */
+.tabs-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.tabs-scroll .tab {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 /* ---------- Activity / employee checklist (desktop admin multi-select) ---------- */
 /* Not named .mobile-sheet* — mobile's ActivityPicker.tsx already owns that
    naming for the on-device job picker bottom sheet. */

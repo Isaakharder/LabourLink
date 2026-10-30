@@ -113,7 +113,7 @@ describe("RowCompletionReviewModal", () => {
     await act(async () => {
       candidatesDeferred.resolve({ candidates: [candidate(), candidate({ runId: "run-2", segmentIds: ["run-2"] })], windowDays: 10 });
     });
-    expect(await screen.findByText(/more than one visit for this activity less than 10 days apart/)).toBeInTheDocument();
+    expect(await screen.findByText(/more than one visit for this job less than 10 days apart/)).toBeInTheDocument();
     expect(screen.getByText(/Visits 10 or more days apart are/)).toBeInTheDocument();
   });
 

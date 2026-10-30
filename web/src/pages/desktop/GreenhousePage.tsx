@@ -200,7 +200,7 @@ export function GreenhousePage() {
         setAvailableActivities(res.activities);
         if (activityFilterId && !res.activities.some((a) => a.id === activityFilterId)) {
           setActivityFilterId(null);
-          setActivityResetMessage("The previously selected activity has no work in this range — showing all activities.");
+          setActivityResetMessage("The previously selected job has no work in this range — showing all jobs.");
         } else {
           setActivityResetMessage(null);
         }
@@ -711,14 +711,14 @@ export function GreenhousePage() {
         <div className="greenhouse-office-main">
           <div className="greenhouse-office-toprow">
             <label className="greenhouse-office-field greenhouse-office-toprow-field">
-              Activity
+              Job
               <span className="greenhouse-office-select-wrap greenhouse-office-select-wide">
                 <select
                   className="greenhouse-office-select"
                   value={activityFilterId ?? ""}
                   onChange={(e) => setActivityFilterId(e.target.value || null)}
                 >
-                  <option value="">All activities currently in use</option>
+                  <option value="">All jobs currently in use</option>
                   {availableActivities?.map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.name}
@@ -728,13 +728,13 @@ export function GreenhousePage() {
               </span>
             </label>
             {availableActivities?.length === 0 && (
-              <p className="greenhouse-office-activity-note">No activities have recorded work in this range.</p>
+              <p className="greenhouse-office-activity-note">No jobs have recorded work in this range.</p>
             )}
             {activityResetMessage && <p className="greenhouse-office-activity-note">{activityResetMessage}</p>}
 
             <span className="greenhouse-office-published-status">
               {selectedDisplay
-                ? `Published: ${selectedDisplay.activityName ?? "All activities"} · ${formatRangeLabel({
+                ? `Published: ${selectedDisplay.activityName ?? "All jobs"} · ${formatRangeLabel({
                     start: selectedDisplay.effectiveDateStart,
                     end: selectedDisplay.effectiveDateEnd,
                   })}${selectedDisplay.datePreset ? " (advances daily)" : ""} · ${publishedPhasesLabel(

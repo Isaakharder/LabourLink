@@ -133,7 +133,7 @@ describe("DashboardPage", () => {
     await act(async () => {
       cardsDeferred.resolve({ weekStart: "2026-08-17", weekEnd: "2026-08-23", cards: [] });
     });
-    await screen.findByText(/No one is currently doing a Dashboard-tracked activity/);
+    await screen.findByText(/No one is currently doing a Dashboard-tracked job/);
     expect(screen.getByRole("button", { name: "Edit Dashboard" })).toBeInTheDocument();
   });
 
@@ -183,7 +183,7 @@ describe("DashboardPage", () => {
     await act(async () => {
       cardsDeferred.resolve({ weekStart: "2026-08-17", weekEnd: "2026-08-23", cards: [] });
     });
-    await screen.findByText(/No one is currently doing a Dashboard-tracked activity/);
+    await screen.findByText(/No one is currently doing a Dashboard-tracked job/);
     expect(screen.queryByText("Edit Dashboard")).not.toBeInTheDocument();
   });
 

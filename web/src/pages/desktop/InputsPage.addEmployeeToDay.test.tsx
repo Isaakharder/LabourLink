@@ -168,7 +168,7 @@ async function fillPlain(user: ReturnType<typeof userEvent.setup>, dialog: HTMLE
   const employeeSelect = within(dialog).getByRole("combobox", { name: /Employee/ });
   await waitFor(() => expect(within(employeeSelect).getByRole("option", { name: NAMES[employeeId].join(" ") })).toBeInTheDocument());
   await user.selectOptions(employeeSelect, employeeId);
-  const activitySelect = within(dialog).getByRole("combobox", { name: /Activity/ });
+  const activitySelect = within(dialog).getByRole("combobox", { name: /Job/ });
   await waitFor(() => expect(within(activitySelect).getByRole("option", { name: "Cleaning" })).toBeInTheDocument());
   await user.selectOptions(activitySelect, "act-plain");
   const startInput = within(dialog).getByLabelText(/Work start time/);
@@ -254,7 +254,7 @@ describe("Inputs: Add employee to this day", () => {
     await waitFor(() => expect(within(employeeSelect).getByRole("option", { name: "Jhang Cruz" })).toBeInTheDocument());
     await user.selectOptions(employeeSelect, "emp-jhang");
 
-    const activitySelect = within(dialog).getByRole("combobox", { name: /Activity/ });
+    const activitySelect = within(dialog).getByRole("combobox", { name: /Job/ });
     await waitFor(() => expect(within(activitySelect).getByRole("option", { name: "Picking" })).toBeInTheDocument());
     await user.selectOptions(activitySelect, "act-pick");
     await user.type(within(dialog).getByLabelText(/Work start time/), "07:00:00");
@@ -296,7 +296,7 @@ describe("Inputs: Add employee to this day", () => {
       expect(vi.mocked(api).mock.calls.some(([p]) => (p as string).includes("/api/inputs/daily?employeeId=emp-jhang"))).toBe(true)
     );
     // Further activities/breaks are then added from the normal day view.
-    expect(await screen.findByRole("button", { name: "Add activity" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Add job" })).toBeInTheDocument();
   });
 
   it("allows an in-progress entry (no end time) today", async () => {

@@ -3,7 +3,7 @@ import { AppLayout } from "./components/layout/AppLayout";
 import { MobileLayout } from "./components/mobile/MobileLayout";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { DevicePairingProvider, useDevicePairing } from "./context/DevicePairingContext";
-import { ActivitiesPage } from "./pages/desktop/ActivitiesPage";
+import { LegacyActivitiesRedirect } from "./pages/desktop/LegacyActivitiesRedirect";
 import { BasicDataPage } from "./pages/desktop/BasicDataPage";
 import { DashboardPage } from "./pages/desktop/DashboardPage";
 import { DevicesPage } from "./pages/desktop/DevicesPage";
@@ -122,7 +122,7 @@ function DesktopApp() {
           }
         />
         <Route path="employees/*" element={<EmployeesPage />} />
-        <Route path="activities/*" element={<ActivitiesPage />} />
+        <Route path="activities/*" element={<LegacyActivitiesRedirect />} />
         <Route path="basic-data/*" element={<BasicDataPage />} />
         <Route path="devices" element={<DevicesPage />} />
         <Route

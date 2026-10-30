@@ -254,7 +254,7 @@ function EmployeeLiveCard({ card }: { card: LiveEmployeeCard }) {
               </div>
             ))}
             <div className="mobile-employee-card-row">
-              <span>Time on activity: </span>
+              <span>Time on job: </span>
               <ActivityTimer startedAt={card.statusSince} />
             </div>
             <div className="mobile-employee-card-row">

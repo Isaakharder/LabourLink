@@ -87,7 +87,7 @@ export function QuestionsEditor({ questions, onChange, error }: QuestionsEditorP
 
       {questions.length === 0 ? (
         <p className="placeholder-page questions-editor-empty">
-          No questions — the employee starts this activity immediately.
+          No questions — the employee starts this job immediately.
         </p>
       ) : (
         <ol className="questions-editor-list">

@@ -304,7 +304,7 @@ describe("permissions", () => {
     role = "Supervisor";
     renderPage();
     await screen.findByRole("button", { name: new RegExp(`^${fullName("emp-zed")}`) });
-    await screen.findByText("Activity details");
+    await screen.findByText("Job details");
     expect(document.querySelectorAll(".inputs-employee-item-needs-review, .inputs-employee-review")).toHaveLength(0);
     expect(reviewCalls()).toHaveLength(0);
   });

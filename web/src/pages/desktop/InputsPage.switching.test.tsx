@@ -291,7 +291,7 @@ describe("InputsPage employee switching", () => {
     });
     await screen.findByText("Alice's Activity");
     // Sanity check: an editable day does render its Add-entry controls.
-    expect(screen.getByText("Add activity")).toBeInTheDocument();
+    expect(screen.getByText("Add job")).toBeInTheDocument();
 
     const user = userEvent.setup();
     await user.click(screen.getByText("Beatriz Barrios"));
@@ -299,7 +299,7 @@ describe("InputsPage employee switching", () => {
     // No add/edit/delete affordance of any kind while `daily` is null —
     // ActivityLogsCard/WorkdayDetailsCard (the only place those controls
     // are rendered) are replaced entirely by the skeleton.
-    expect(screen.queryByText("Add activity")).not.toBeInTheDocument();
+    expect(screen.queryByText("Add job")).not.toBeInTheDocument();
     expect(screen.queryByText("Add work start")).not.toBeInTheDocument();
     expect(screen.queryByText("Add break")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /delete/i })).not.toBeInTheDocument();
@@ -446,7 +446,7 @@ describe("InputsPage employee switching", () => {
     await vi.waitFor(() => expect(screen.getByText("Alice's Updated Activity")).toBeInTheDocument());
   });
 
-  it("renders break-correction feedback inside the Activity details header instead of above the card", async () => {
+  it("renders break-correction feedback inside the Job details header instead of above the card", async () => {
     breakPatchFailure = { status: 409, message: "Corrected break overlaps a work entry" };
     const teaBreak = buildBreak(
       "break-1",
@@ -469,7 +469,7 @@ describe("InputsPage employee switching", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     const statusMessage = await screen.findByText("Corrected break overlaps a work entry");
-    const header = screen.getByText("Activity details").closest(".inputs-section-header");
+    const header = screen.getByText("Job details").closest(".inputs-section-header");
 
     expect(header).not.toBeNull();
     expect(within(header as HTMLElement).getByText("Corrected break overlaps a work entry")).toBe(statusMessage);
@@ -553,7 +553,7 @@ describe("InputsPage employee switching", () => {
     await waitFor(() => expect(activityRunEndTimePatchCalls).toBe(1));
     expect(lastActivityRunCorrectionBody?.fingerprint).toBe("qa-fingerprint");
     await resolveReload();
-    expect(await screen.findByText("Activity time updated.")).toBeInTheDocument();
+    expect(await screen.findByText("Job time updated.")).toBeInTheDocument();
     expect(screen.queryByText("Confirm activity correction")).not.toBeInTheDocument();
     expect(screen.queryByText(activityRunPreviewMessages[0])).not.toBeInTheDocument();
     expect(container.querySelector('input[type="time"]')).toBeNull();
@@ -564,13 +564,13 @@ describe("InputsPage employee switching", () => {
     const user = userEvent.setup();
     const { end } = await openRunEditor(user, container);
     fireEvent.change(end, { target: { value: "16:00:00" } });
-    await user.click(screen.getByText("Activity details"));
+    await user.click(screen.getByText("Job details"));
 
     await waitFor(() => expect(activityRunEndTimePatchCalls).toBe(1));
     expect(lastActivityRunCorrectionBody?.endTime).toBeDefined();
     expect(lastActivityRunCorrectionBody?.startTime).toBeUndefined();
     await resolveReload();
-    expect(await screen.findByText("Activity time updated.")).toBeInTheDocument();
+    expect(await screen.findByText("Job time updated.")).toBeInTheDocument();
     expect(screen.queryByText("Confirm activity correction")).not.toBeInTheDocument();
 
     // Further clicks once the editor has closed save nothing more.
@@ -594,7 +594,7 @@ describe("InputsPage employee switching", () => {
     await waitFor(() => expect(activityRunEndTimePatchCalls).toBe(1));
     expect(lastActivityRunCorrectionBody?.startTime).toBeDefined();
     expect(lastActivityRunCorrectionBody?.endTime).toBeDefined();
-    await user.click(screen.getByText("Activity details"));
+    await user.click(screen.getByText("Job details"));
     expect(activityRunEndTimePatchCalls).toBe(1);
   });
 
@@ -602,7 +602,7 @@ describe("InputsPage employee switching", () => {
     const { container } = await loadAlice();
     const user = userEvent.setup();
     await openRunEditor(user, container);
-    await user.click(screen.getByText("Activity details"));
+    await user.click(screen.getByText("Job details"));
     expect(container.querySelector('input[type="time"]')).toBeNull();
     expect(lastActivityRunPreviewBody).toBeNull();
     expect(activityRunEndTimePatchCalls).toBe(0);
@@ -614,9 +614,9 @@ describe("InputsPage employee switching", () => {
     const user = userEvent.setup();
     const { end } = await openRunEditor(user, container);
     fireEvent.change(end, { target: { value: "12:30:00" } });
-    await user.click(screen.getByText("Activity details"));
+    await user.click(screen.getByText("Job details"));
 
-    const header = screen.getByText("Activity details").closest(".inputs-section-header") as HTMLElement;
+    const header = screen.getByText("Job details").closest(".inputs-section-header") as HTMLElement;
     expect(await within(header).findByText("End time must be after the start time")).toBeInTheDocument();
     expect(activityRunEndTimePatchCalls).toBe(0);
   });
@@ -626,7 +626,7 @@ describe("InputsPage employee switching", () => {
     const user = userEvent.setup();
     const { end } = await openRunEditor(user, container);
     fireEvent.change(end, { target: { value: "" } });
-    await user.click(screen.getByText("Activity details"));
+    await user.click(screen.getByText("Job details"));
 
     expect(await screen.findByText("Enter a complete start and end time, or press Esc to cancel.")).toBeInTheDocument();
     expect(container.querySelector('.inputs-log-endtime input[type="time"]')).not.toBeNull();
@@ -684,7 +684,7 @@ describe("InputsPage employee switching", () => {
 
     await resolveReload([teaBreak]);
     expect(await screen.findByText("Break updated.")).toBeInTheDocument();
-    await user.click(screen.getByText("Activity details"));
+    await user.click(screen.getByText("Job details"));
     expect(requestPaths().filter((p) => p === "PATCH /api/inputs/breaks/break-1")).toHaveLength(1);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });

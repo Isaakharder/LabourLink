@@ -59,7 +59,7 @@ const TRANSLATIONS_EN = {
   noRecentJobs: "No recent jobs yet.",
   autoClosedSuffix: "Auto-closed",
   workedBeforeBreak: (p: Params) => `Worked on ${p.activity} for ${p.duration} before this break`,
-  noActivitiesMessage: "No activities have been assigned to you. Please contact your supervisor.",
+  noActivitiesMessage: "No jobs have been assigned to you. Please contact your supervisor.",
 
   // --- Question flow (row/carrier pickers) ---
   stepXOfY: (p: Params) => `Step ${p.step} of ${p.total}`,
@@ -111,9 +111,9 @@ const TRANSLATIONS_EN = {
   goBackIntoRow: "Go back into row",
   goBackIntoBin: "Go back into bin",
   minimumDurationWarningRow: (p: Params) =>
-    `You have worked on this row for ${p.elapsedMinutes} minute${p.elapsedMinutes === 1 ? "" : "s"}. The minimum for this activity is ${p.minimumMinutes} minute${p.minimumMinutes === 1 ? "" : "s"}. Make sure you scanned the correct row.`,
+    `You have worked on this row for ${p.elapsedMinutes} minute${p.elapsedMinutes === 1 ? "" : "s"}. The minimum for this job is ${p.minimumMinutes} minute${p.minimumMinutes === 1 ? "" : "s"}. Make sure you scanned the correct row.`,
   minimumDurationWarningBin: (p: Params) =>
-    `You have worked on this bin for ${p.elapsedMinutes} minute${p.elapsedMinutes === 1 ? "" : "s"}. The minimum for this activity is ${p.minimumMinutes} minute${p.minimumMinutes === 1 ? "" : "s"}. Make sure you scanned the correct bin.`,
+    `You have worked on this bin for ${p.elapsedMinutes} minute${p.elapsedMinutes === 1 ? "" : "s"}. The minimum for this job is ${p.minimumMinutes} minute${p.minimumMinutes === 1 ? "" : "s"}. Make sure you scanned the correct bin.`,
   startNewRowAnyway: "Start new row anyway",
   startNewBinAnyway: "Start new bin anyway",
 
@@ -147,7 +147,7 @@ const TRANSLATIONS_EN = {
   // --- WorkSessionContext status/error strings surfaced on Home ---
   couldNotLoadStatus: "Could not load status",
   queuedChangesFailed:
-    "One or more queued activity changes could not be completed because the activity is no longer available. Your status has been refreshed — please choose again.",
+    "One or more queued job changes could not be completed because the job is no longer available. Your status has been refreshed — please choose again.",
   somethingWentWrong: "Something went wrong",
   mustBeOnlineToFinish: "You must be online to finish work.",
   couldNotReachServer: "Could not reach the server. Please try again.",
@@ -197,7 +197,7 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   noRecentJobs: "Aún no hay trabajos recientes.",
   autoClosedSuffix: "Cerrado automáticamente",
   workedBeforeBreak: (p) => `Trabajó en ${p.activity} durante ${p.duration} antes de este descanso`,
-  noActivitiesMessage: "No se le han asignado actividades. Comuníquese con su supervisor.",
+  noActivitiesMessage: "No se le han asignado trabajos. Comuníquese con su supervisor.",
 
   stepXOfY: (p) => `Paso ${p.step} de ${p.total}`,
   noRowsMessage: "No hay filas de invernadero configuradas. Comuníquese con su supervisor.",
@@ -240,9 +240,9 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   goBackIntoRow: "Volver a entrar en la fila",
   goBackIntoBin: "Volver a entrar en el transportador",
   minimumDurationWarningRow: (p: Params) =>
-    `Ha trabajado en esta fila durante ${p.elapsedMinutes} minuto${p.elapsedMinutes === 1 ? "" : "s"}. El mínimo para esta actividad es ${p.minimumMinutes} minuto${p.minimumMinutes === 1 ? "" : "s"}. Asegúrese de haber escaneado la fila correcta.`,
+    `Ha trabajado en esta fila durante ${p.elapsedMinutes} minuto${p.elapsedMinutes === 1 ? "" : "s"}. El mínimo para este trabajo es ${p.minimumMinutes} minuto${p.minimumMinutes === 1 ? "" : "s"}. Asegúrese de haber escaneado la fila correcta.`,
   minimumDurationWarningBin: (p: Params) =>
-    `Ha trabajado en este transportador durante ${p.elapsedMinutes} minuto${p.elapsedMinutes === 1 ? "" : "s"}. El mínimo para esta actividad es ${p.minimumMinutes} minuto${p.minimumMinutes === 1 ? "" : "s"}. Asegúrese de haber escaneado el transportador correcto.`,
+    `Ha trabajado en este transportador durante ${p.elapsedMinutes} minuto${p.elapsedMinutes === 1 ? "" : "s"}. El mínimo para este trabajo es ${p.minimumMinutes} minuto${p.minimumMinutes === 1 ? "" : "s"}. Asegúrese de haber escaneado el transportador correcto.`,
   startNewRowAnyway: "Comenzar nueva fila de todos modos",
   startNewBinAnyway: "Comenzar nuevo transportador de todos modos",
 
@@ -272,7 +272,7 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
 
   couldNotLoadStatus: "No se pudo cargar el estado",
   queuedChangesFailed:
-    "Uno o más cambios de actividad en cola no se pudieron completar porque la actividad ya no está disponible. Su estado se ha actualizado — por favor, elija de nuevo.",
+    "Uno o más cambios de trabajo en cola no se pudieron completar porque el trabajo ya no está disponible. Su estado se ha actualizado — por favor, elija de nuevo.",
   somethingWentWrong: "Ocurrió un error",
   mustBeOnlineToFinish: "Debe estar en línea para finalizar el trabajo.",
   couldNotReachServer: "No se pudo conectar con el servidor. Inténtelo de nuevo.",
@@ -314,18 +314,30 @@ export function t(language: Language, key: TranslationKey, params: Params = {}):
 const KNOWN_SERVER_MESSAGES: Record<string, string> = {
   "activityId and a valid idempotencyKey are required": "Se requiere activityId y un idempotencyKey válido",
   "a valid idempotencyKey is required": "Se requiere un idempotencyKey válido",
-  "No prior activity to resume": "No hay una actividad anterior para reanudar",
+  "No prior activity to resume": "No hay un trabajo anterior para reanudar",
   "A valid activityId is required": "Se requiere un activityId válido",
-  "activityId is not available to this employee": "Esta actividad no está disponible para este empleado",
+  "activityId is not available to this employee": "Este trabajo no está disponible para este empleado",
   "One or more answers do not match a configured question for this activity":
-    "Una o más respuestas no coinciden con una pregunta configurada para esta actividad",
-  "greenhouseRowId is required for this activity": "Se requiere una fila para esta actividad",
+    "Una o más respuestas no coinciden con una pregunta configurada para este trabajo",
+  "greenhouseRowId is required for this activity": "Se requiere una fila para este trabajo",
   "Invalid or inactive greenhouseRowId": "Fila inválida o inactiva",
-  "carrierId is required for this activity": "Se requiere un transportador para esta actividad",
+  "carrierId is required for this activity": "Se requiere un transportador para este trabajo",
   "Invalid or inactive carrierId": "Transportador inválido o inactivo",
 };
 
+// English rewordings of the same server strings: the API keeps its
+// original "activity" wording (installed phones match it by exact text),
+// but what the employee reads says "job", like the rest of the phone.
+const KNOWN_SERVER_MESSAGES_EN: Record<string, string> = {
+  "No prior activity to resume": "No previous job to resume",
+  "activityId is not available to this employee": "This job is not available to this employee",
+  "One or more answers do not match a configured question for this activity":
+    "One or more answers do not match a configured question for this job",
+  "greenhouseRowId is required for this activity": "A row is required for this job",
+  "carrierId is required for this activity": "A carrier is required for this job",
+};
+
 export function translateServerMessage(language: Language, message: string): string {
-  if (language === "en") return message;
+  if (language === "en") return KNOWN_SERVER_MESSAGES_EN[message] ?? message;
   return KNOWN_SERVER_MESSAGES[message] ?? message;
 }

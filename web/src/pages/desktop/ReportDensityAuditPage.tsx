@@ -132,15 +132,15 @@ export function ReportDensityAuditPage() {
         <h1>Production Audit</h1>
       </div>
       <p className="report-view-meta">
-        Read-only diagnostic — shows, per raw work segment, exactly why the Activity Report's quantity/speed attribution does or doesn't
+        Read-only diagnostic — shows, per raw work segment, exactly why the Job Report's quantity/speed attribution does or doesn't
         include it.
       </p>
 
       <div className="report-density-audit-form">
         <label>
-          Activity
+          Job
           <select value={activityId} onChange={(e) => setActivityId(e.target.value)}>
-            <option value="">Select an activity...</option>
+            <option value="">Select a job...</option>
             {activities?.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
@@ -214,7 +214,7 @@ export function ReportDensityAuditPage() {
                 {result.segments.length === 0 && (
                   <tr>
                     <td colSpan={10} className="placeholder-page">
-                      No work segments for this employee/activity in this date range.
+                      No work segments for this employee/job in this date range.
                     </td>
                   </tr>
                 )}

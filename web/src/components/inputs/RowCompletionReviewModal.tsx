@@ -131,7 +131,7 @@ export function RowCompletionReviewModal({
     >
       {!isEmpty && (
         <p className="field-hint">
-          This row has more than one visit for this activity less than {windowDays} days apart — select the visits that
+          This row has more than one visit for this job less than {windowDays} days apart — select the visits that
           represent the same completed row before its density-based speed can be calculated. Selecting just one visit
           on its own confirms it as a separate, deliberately-not-combined completion. Visits {windowDays} or more days apart are
           reviewed separately and aren't listed here.

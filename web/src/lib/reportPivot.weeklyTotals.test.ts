@@ -48,7 +48,7 @@ describe("buildActivityPivotGrid — weekly totals columns", () => {
       totals: { ...emptyActivityTotals(), workSeconds: 8.75 * 3600 },
     };
     const grid = buildActivityPivotGrid(data, { start: "2026-08-10", end: "2026-08-11" }, "workTime", ["activityHours"]);
-    expect(grid.weeklyTotalColumns).toEqual([{ key: "activityHours", label: "Weekly Activity Hours" }]);
+    expect(grid.weeklyTotalColumns).toEqual([{ key: "activityHours", label: "Weekly Job Hours" }]);
     const alice = grid.employees.find((e) => e.employeeName === "Alice")!;
     const bob = grid.employees.find((e) => e.employeeName === "Bob")!;
     expect(alice.weeklyTotals).toEqual(["6:45"]);
@@ -73,7 +73,7 @@ describe("buildActivityPivotGrid — weekly totals columns", () => {
       "employeePaidTime",
     ]);
     expect(grid.weeklyTotalColumns).toEqual([
-      { key: "activityHours", label: "Weekly Activity Hours" },
+      { key: "activityHours", label: "Weekly Job Hours" },
       { key: "employeePaidTime", label: "Employee Paid Time" },
     ]);
     expect(grid.employees[0].weeklyTotals).toEqual(["5:00", "5:30"]);

@@ -49,7 +49,7 @@ export type PayrollMetric = (typeof PAYROLL_METRICS)[number];
 
 export const ACTIVITY_METRIC_LABELS: Record<ActivityMetric, string> = {
   employee: "Employee",
-  activity: "Activity",
+  activity: "Job",
   speed: "Speed",
   speedUnit: "Speed unit",
   paidTime: "Paid time",
@@ -65,7 +65,7 @@ export const ACTIVITY_METRIC_LABELS: Record<ActivityMetric, string> = {
   // reportQueries.ts's ActivityReportRow.workSeconds), never the employee's
   // full-week/whole-shift hours. "Total Hours" invited exactly that
   // confusion.
-  activityHours: "Activity hours",
+  activityHours: "Job hours",
   averageSpeed: "Average speed",
   employeePaidTime: "Employee Paid Time",
   date: "Date",
@@ -89,7 +89,7 @@ export const PAYROLL_METRIC_LABELS: Record<PayrollMetric, string> = {
   unpaidTime: "Unpaid time (H:MM)",
   totalHours: "Total hours (H:MM)",
   daysWorked: "Days worked",
-  activityBreakdown: "Activity breakdown",
+  activityBreakdown: "Job breakdown",
   weeklyTotals: "Weekly totals",
 };
 
@@ -247,7 +247,7 @@ export const WEEKLY_TOTAL_METRIC_LABELS: Record<ActivityMetric, string> = {
   workTime: "Weekly Productive/Work Time",
   breakTime: "Weekly Break Time",
   paidTime: "Weekly Paid Time",
-  activityHours: "Weekly Activity Hours",
+  activityHours: "Weekly Job Hours",
   rows: "Weekly Rows",
   rowsCompleted: "Weekly Rows Completed",
   quantityWorked: "Weekly Quantity Worked",

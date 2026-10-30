@@ -221,7 +221,7 @@ describe("InputsPage bulk speed review buttons", () => {
   it("a Supervisor doesn't see them and never requests review data", async () => {
     role = "Supervisor";
     renderPage("emp-khen");
-    await screen.findByText("Activity details");
+    await screen.findByText("Job details");
     expect(screen.queryByRole("button", { name: /Review speeds/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Review all employees/ })).not.toBeInTheDocument();
     expect(reviewCalls()).toHaveLength(0);

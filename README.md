@@ -417,8 +417,17 @@ applied identically to both the blue and green checks, so a row that only
 had *unrelated* activity completed on it is never marked green while
 filtered to a different activity.
 
-**Activity Row Questions**: an activity can be configured (Activities page →
-row action → *Questions*) to ask a Greenhouse Row question before an
+**Jobs (Basic data → Jobs)**: the configured work activities are called
+**Jobs** everywhere in the interface; the database, API and code keep the
+`activity` names. Job setup lives at `/basic-data/jobs`, the first Basic data
+tab and the one Basic data opens on. The old standalone Activities page
+address `/activities` (and `/activities/...`) redirects there, keeping any
+query string, and replaces the history entry so Back is unaffected.
+Permissions are unchanged: whoever could open Activities can open Basic data
+→ Jobs, and only Administrators can add, edit, activate or deactivate a Job.
+
+**Activity Row Questions**: an activity can be configured (Basic data → Jobs →
+*Job Questions*) to ask a Greenhouse Row question before an
 employee's phone lets them start it — configurable label (default "Where?")
 and **Required** vs **Optional**:
 - **Required** — the row picker must be used; Cancel returns to the job

@@ -88,7 +88,7 @@ describe("Display > Setup", () => {
     expect(await screen.findByText("Picking Peppers")).toBeInTheDocument();
     expect(screen.getByText("Winding & Pruning")).toBeInTheDocument();
     expect(screen.getAllByText("Speed: stems/hour")).toHaveLength(2);
-    expect(screen.getByText(/No speed calculation for this activity/)).toBeInTheDocument();
+    expect(screen.getByText(/No speed calculation for this job/)).toBeInTheDocument();
     expect(screen.getByText("1 sent to TV")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("500 (normal speed)")).toBeInTheDocument();
   });

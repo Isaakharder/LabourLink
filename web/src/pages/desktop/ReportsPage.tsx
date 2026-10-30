@@ -7,7 +7,7 @@ import { CreateReportModal } from "../../components/reports/CreateReportModal";
 import { EditReportModal } from "../../components/reports/EditReportModal";
 
 const REPORT_TYPE_LABELS: Record<string, string> = {
-  activity: "Activity Report",
+  activity: "Job Report",
   payroll: "Payroll Report",
 };
 

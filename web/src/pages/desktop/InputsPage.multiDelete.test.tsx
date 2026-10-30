@@ -182,15 +182,15 @@ describe("Inputs multi-row select and delete", () => {
     await user.keyboard("{/Control}");
 
     await user.click(screen.getByRole("button", { name: "Delete (3)" }));
-    const dialog = screen.getByRole("dialog", { name: "Delete 3 activity entries?" });
+    const dialog = screen.getByRole("dialog", { name: "Delete 3 job entries?" });
     expect(within(dialog).getAllByRole("listitem")).toHaveLength(3);
-    expect(within(dialog).getByText(/1 selected in-progress activity is not included/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/1 selected in-progress job entry is not included/)).toBeInTheDocument();
     expect(deleteCalls()).toHaveLength(0); // nothing deleted before confirming
 
     await act(async () => {
       await user.click(within(dialog).getByRole("button", { name: "Delete 3 entries" }));
     });
-    await waitFor(() => expect(screen.getByText("3 activity entries deleted.")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("3 job entries deleted.")).toBeInTheDocument());
     expect(deleteCalls()).toEqual([
       {
         path: "/api/inputs/activity-runs/bulk-delete",
@@ -211,7 +211,7 @@ describe("Inputs multi-row select and delete", () => {
     await act(async () => {
       await user.click(screen.getByRole("button", { name: "Delete 2 entries" }));
     });
-    const dialog = screen.getByRole("dialog", { name: "Delete 2 activity entries?" });
+    const dialog = screen.getByRole("dialog", { name: "Delete 2 job entries?" });
     expect(await within(dialog).findByText(/Nothing was deleted\. One or more of the selected activity logs changed/)).toBeInTheDocument();
     expect(screen.queryByText(/activity entries deleted\./)).not.toBeInTheDocument();
     expect(deleteCalls()).toHaveLength(1);

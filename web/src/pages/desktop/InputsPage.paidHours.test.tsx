@@ -323,7 +323,7 @@ describe("InputsPage — employee sidebar paid-hours totals", () => {
     const user = userEvent.setup();
     await user.click(screen.getByText("Picking Peppers"));
     await user.click(screen.getByRole("button", { name: "Delete (1)" }));
-    await screen.findByText("Delete 1 activity entry?");
+    await screen.findByText("Delete 1 job entry?");
     await user.click(screen.getByRole("button", { name: "Delete 1 entry" }));
 
     await act(async () => {

@@ -61,7 +61,7 @@ export function ActivityFormModal({ activity, onClose, onSaved }: ActivityFormMo
 
   function validate(): boolean {
     const next: Record<string, string> = {};
-    if (!form.name.trim()) next.name = "Activity name is required";
+    if (!form.name.trim()) next.name = "Job name is required";
     if (form.normalSpeed.trim()) {
       const n = Number(form.normalSpeed);
       if (!Number.isFinite(n) || n <= 0) next.normalSpeed = "Normal speed must be greater than 0";
@@ -109,21 +109,21 @@ export function ActivityFormModal({ activity, onClose, onSaved }: ActivityFormMo
       } else if (err instanceof ApiError) {
         setSubmitError(err.message);
       } else {
-        setSubmitError("Something went wrong saving this activity");
+        setSubmitError("Something went wrong saving this job");
       }
       setSubmitting(false);
     }
   }
 
   return (
-    <Modal title={isEdit ? "Edit Activity" : "Add Activity"} onClose={onClose} wide>
+    <Modal title={isEdit ? "Edit Job" : "Add Job"} onClose={onClose} wide>
       <form onSubmit={handleSubmit} className="employee-form" noValidate>
         {submitError && <p className="error-text">{submitError}</p>}
 
         <section className="employee-form-section">
           <div className="employee-form-grid">
             <label>
-              Activity name *
+              Job name *
               <input type="text" value={form.name} onChange={(e) => set("name", e.target.value)} required />
               {errors.name && <span className="field-error">{errors.name}</span>}
             </label>

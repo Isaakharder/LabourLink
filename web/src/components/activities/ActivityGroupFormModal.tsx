@@ -61,7 +61,7 @@ export function ActivityGroupFormModal({ group, onClose, onSaved }: ActivityGrou
   function validate(): boolean {
     const next: Record<string, string> = {};
     if (!form.name.trim()) next.name = "Group name is required";
-    if (form.activityIds.size === 0) next.activityIds = "At least one activity is required";
+    if (form.activityIds.size === 0) next.activityIds = "At least one job is required";
     setErrors(next);
     return Object.keys(next).length === 0;
   }
@@ -123,11 +123,11 @@ export function ActivityGroupFormModal({ group, onClose, onSaved }: ActivityGrou
         </section>
 
         <section className="employee-form-section">
-          <h3>Activities *</h3>
+          <h3>Jobs *</h3>
           {activeActivities === null ? (
-            <p>Loading activities...</p>
+            <p>Loading jobs...</p>
           ) : activeActivities.length === 0 && alreadyAssignedInactive.length === 0 ? (
-            <p className="placeholder-page">No activities exist yet — add one on the Activities tab first.</p>
+            <p className="placeholder-page">No jobs exist yet — add one on the Jobs tab first.</p>
           ) : (
             <div className="activity-checklist">
               {activeActivities.map((a) => (

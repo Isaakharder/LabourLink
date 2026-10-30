@@ -32,7 +32,7 @@ function formatQuestion(activity: Activity): string {
   return qs.map((q) => `${q.label} · ${q.isRequired ? "Required" : "Optional"}`).join(" → ");
 }
 
-export function ActivitiesTab() {
+export function JobsTab() {
   const { employee: currentEmployee } = useAuth();
   const isAdmin = currentEmployee?.securityRole === "Administrator";
 
@@ -64,7 +64,7 @@ export function ActivitiesTab() {
         setError(null);
       })
       .catch((err) => {
-        setError(err instanceof ApiError ? err.message : "Could not load activities");
+        setError(err instanceof ApiError ? err.message : "Could not load jobs");
       });
   }, [search, status]);
 
@@ -89,7 +89,7 @@ export function ActivitiesTab() {
       });
       load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not update activity");
+      setError(err instanceof ApiError ? err.message : "Could not update job");
     }
   }
 
@@ -105,7 +105,7 @@ export function ActivitiesTab() {
       setDeactivateTarget(null);
       load();
     } catch (err) {
-      setDeactivateError(err instanceof ApiError ? err.message : "Could not update activity");
+      setDeactivateError(err instanceof ApiError ? err.message : "Could not update job");
     } finally {
       setDeactivating(false);
     }
@@ -121,7 +121,7 @@ export function ActivitiesTab() {
     return (
       <div className="employee-row-actions">
         <button type="button" onClick={() => setQuestionsActivity(activity)}>
-          Activity Questions
+          Job Questions
         </button>
         {isAdmin && (
           <>
@@ -142,7 +142,7 @@ export function ActivitiesTab() {
       <div className="employees-toolbar">
         <input
           type="search"
-          placeholder="Search by activity name"
+          placeholder="Search by job name"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="employees-search"
@@ -155,12 +155,12 @@ export function ActivitiesTab() {
         </select>
 
         <span className="employees-count">
-          {activities ? `${activities.length} activit${activities.length === 1 ? "y" : "ies"}` : ""}
+          {activities ? `${activities.length} job${activities.length === 1 ? "" : "s"}` : ""}
         </span>
 
         {isAdmin && (
           <button type="button" className="employees-add-button" onClick={() => setModalActivity("new")}>
-            Add Activity
+            Add Job
           </button>
         )}
       </div>
@@ -170,7 +170,7 @@ export function ActivitiesTab() {
       {!activities ? (
         <p>Loading...</p>
       ) : activities.length === 0 ? (
-        <p className="placeholder-page">No activities match these filters.</p>
+        <p className="placeholder-page">No jobs match these filters.</p>
       ) : (
         <>
           <table className="employees-table">
@@ -264,8 +264,8 @@ export function ActivitiesTab() {
 
       {deactivateTarget && (
         <ConfirmDialog
-          title="Deactivate activity?"
-          message={`"${deactivateTarget.name}" will no longer appear in the mobile activity picker. Historical time entries will not be affected.`}
+          title="Deactivate job?"
+          message={`"${deactivateTarget.name}" will no longer appear in the mobile job picker. Historical time entries will not be affected.`}
           confirmLabel="Deactivate"
           confirmingLabel="Deactivating…"
           submitting={deactivating}
