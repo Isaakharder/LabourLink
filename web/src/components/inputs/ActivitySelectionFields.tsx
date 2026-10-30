@@ -107,7 +107,7 @@ export function ActivitySelectionFields({
         setCarriers(carriersRes.carriers);
         onActivitiesLoaded?.(activitiesRes.activities);
       })
-      .catch((err) => setLoadError(err instanceof ApiError ? err.message : "Could not load activity options"));
+      .catch((err) => setLoadError(err instanceof ApiError ? err.message : "Could not load job options"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [employeeId]);
 
@@ -122,14 +122,14 @@ export function ActivitySelectionFields({
   return (
     <>
       <label>
-        Activity *
+        Job *
         <select
           value={value.activityId}
           disabled={disabled || !activities}
           required
           onChange={(e) => onChange({ activityId: e.target.value, greenhouseRowId: "", carrierId: "" })}
         >
-          <option value="">{activities ? "Select an activity" : "Loading activities…"}</option>
+          <option value="">{activities ? "Select a job" : "Loading jobs…"}</option>
           {activities?.map((a) => (
             <option key={a.id} value={a.id}>
               {a.name}
@@ -137,7 +137,7 @@ export function ActivitySelectionFields({
           ))}
         </select>
         {activities && activities.length === 0 && (
-          <span className="field-error">This employee has no active activity group assignment.</span>
+          <span className="field-error">This employee has no Jobs assigned. Assign Jobs on their Edit Employee form.</span>
         )}
       </label>
 

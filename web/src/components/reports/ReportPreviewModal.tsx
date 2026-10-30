@@ -66,7 +66,7 @@ export function ReportPreviewModal({ report, dateRange, grid, metricLabel, mode,
       <div className="report-preview-meta">
         <h3>{report.name}</h3>
         <p>
-          {report.reportType === "activity" ? "Activity Report" : "Payroll Report"}
+          {report.reportType === "activity" ? "Job Report" : "Payroll Report"}
           {report.activity ? ` · ${report.activity.name}` : ""}
           {" · "}
           {dateRange.start} – {dateRange.end}

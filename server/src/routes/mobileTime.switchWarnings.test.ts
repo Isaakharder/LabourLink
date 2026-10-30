@@ -71,7 +71,7 @@ async function main() {
   const fakePinHash = "$2a$10$QAplaceholderQAplaceholderQAplaceholderQAplaceholde";
   const employeeIds: string[] = [];
   const deviceIds: string[] = [];
-  let groupId!: string;
+  let assignedJobIds: string[] = [];
   let activity15Id!: string; // requires 15 min minimum
   let activity0Id!: string; // 0 min minimum — a practical "never warns" boundary case
   let questionId15!: string;
@@ -119,11 +119,7 @@ async function main() {
     deviceIds.push(deviceRow.id);
     await pool.query(`insert into device_assignments (device_id, employee_id) values ($1, $2)`, [deviceRow.id, employee.id]);
 
-    groupId = (
-      await pool.query(`insert into activity_groups (name, is_active) values ($1, true) returning id`, [
-        `QA Switch Warnings Group ${RUN_ID}`,
-      ])
-    ).rows[0].id;
+    assignedJobIds = [];
 
     activity15Id = (
       await pool.query(
@@ -152,15 +148,8 @@ async function main() {
       )
     ).rows[0].id;
 
-    await pool.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2), ($1, $3)`, [
-      groupId,
-      activity15Id,
-      activity0Id,
-    ]);
-    await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [
-      employee.id,
-      groupId,
-    ]);
+    assignedJobIds.push(activity15Id, activity0Id);
+    await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [employee.id, assignedJobIds]);
 
     landId = (
       await pool.query(`insert into greenhouse_lands (name, north_south_feet, east_west_feet) values ($1, 100, 100) returning id`, [
@@ -208,10 +197,8 @@ async function main() {
         [activityRowCarrierId]
       )
     ).rows[0].id;
-    await pool.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2)`, [
-      groupId,
-      activityRowCarrierId,
-    ]);
+    assignedJobIds.push(activityRowCarrierId);
+    await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) values ($1, $2)`, [employee.id, activityRowCarrierId]);
 
     carrierAId = (
       await pool.query(`insert into carriers (name, is_active) values ($1, true) returning id`, [`QA Bin A ${RUN_ID}`])
@@ -497,15 +484,13 @@ async function main() {
       await client.query(`delete from time_entries where employee_id = any($1::uuid[])`, [employeeIds]);
       await client.query(`delete from device_assignments where device_id = any($1::uuid[])`, [deviceIds]);
       await client.query(`delete from devices where id = any($1::uuid[])`, [deviceIds]);
-      await client.query(`delete from employee_activity_group_assignments where activity_group_id = $1`, [groupId ?? null]);
-      await client.query(`delete from activity_group_activities where activity_group_id = $1`, [groupId ?? null]);
+      await client.query(`delete from employee_activity_assignments where activity_id = any($1::uuid[])`, [assignedJobIds]);
       await client.query(`delete from activity_questions where id = any($1::uuid[])`, [
         [questionId15, questionId0, questionIdRowCarrierRow, questionIdRowCarrierCarrier].filter(Boolean),
       ]);
       await client.query(`delete from activities where id = any($1::uuid[])`, [
         [activity15Id, activity0Id, activityRowCarrierId].filter(Boolean),
       ]);
-      if (groupId) await client.query(`delete from activity_groups where id = $1`, [groupId]);
       await client.query(`delete from greenhouse_rows where id = any($1::uuid[])`, [
         [rowAId, rowBId, rowCId, rowDId, rowEId].filter(Boolean),
       ]);

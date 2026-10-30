@@ -135,15 +135,10 @@ async function main() {
                (select id from team_roles where name='Team Member')) returning id`,
       [PROD_MARKER]
     );
-    const prodGroup = await prod.query(`insert into activity_groups (name) values ('Prodlike Crew') returning id`);
     const prodActivity = await prod.query(`insert into activities (name) values ('Prodlike Harvest') returning id`);
-    await prod.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2)`, [
-      prodGroup.rows[0].id,
-      prodActivity.rows[0].id,
-    ]);
     await prod.query(
-      `insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $3), ($2, $3)`,
-      [adminRow.rows[0].id, workerRow.rows[0].id, prodGroup.rows[0].id]
+      `insert into employee_activity_assignments (employee_id, activity_id) values ($1, $3), ($2, $3)`,
+      [adminRow.rows[0].id, workerRow.rows[0].id, prodActivity.rows[0].id]
     );
     const prodDevice = `iso-prod-device-${randomUUID()}`;
     const dev = await prod.query(

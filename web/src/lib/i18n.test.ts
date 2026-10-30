@@ -114,21 +114,26 @@ describe("t (translation dictionary)", () => {
 });
 
 describe("translateServerMessage", () => {
-  it("never translates when the language is English", () => {
+  it("rewords the server's activity wording as Job wording in English", () => {
     expect(translateServerMessage("en", "greenhouseRowId is required for this activity")).toBe(
-      "greenhouseRowId is required for this activity"
+      "A row is required for this job"
     );
+    expect(translateServerMessage("en", "activityId is not available to this employee")).toBe(
+      "This job is not available to this employee"
+    );
+    expect(translateServerMessage("en", "No prior activity to resume")).toBe("No previous job to resume");
+    expect(translateServerMessage("en", "Invalid or inactive carrierId")).toBe("Invalid or inactive carrierId");
   });
 
   it("translates every known server validation message for Spanish", () => {
     expect(translateServerMessage("es", "greenhouseRowId is required for this activity")).toBe(
-      "Se requiere una fila para esta actividad"
+      "Se requiere una fila para este trabajo"
     );
     expect(translateServerMessage("es", "carrierId is required for this activity")).toBe(
-      "Se requiere un transportador para esta actividad"
+      "Se requiere un transportador para este trabajo"
     );
     expect(translateServerMessage("es", "No prior activity to resume")).toBe(
-      "No hay una actividad anterior para reanudar"
+      "No hay un trabajo anterior para reanudar"
     );
   });
 

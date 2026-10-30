@@ -206,7 +206,7 @@ export function AddEmployeeToDayModal({ date, onClose, onCreated }: AddEmployeeT
               />
             ) : (
               <label>
-                Activity *
+                Job *
                 <select disabled value="">
                   <option value="">Select an employee first</option>
                 </select>

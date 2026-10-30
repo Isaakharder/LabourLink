@@ -66,7 +66,7 @@ async function main() {
   const employeeIds: string[] = [];
   const activityIds: string[] = [];
   const timeEntryIds: string[] = [];
-  let groupId: string | undefined;
+  let assignedJobIds: string[] = [];
 
   try {
     const teamRoleId = (await pool.query(`select id from team_roles where name = 'Team Member'`)).rows[0].id;
@@ -103,10 +103,8 @@ async function main() {
     // manually-added work start goes through that real endpoint, so only
     // its employee needs the assignment, added once that employee exists
     // below.
-    groupId = (
-      await pool.query(`insert into activity_groups (name, is_active) values ($1, true) returning id`, [`QA Workday Totals Group ${RUN_ID}`])
-    ).rows[0].id;
-    await pool.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2)`, [groupId, activityId]);
+    assignedJobIds = [];
+    assignedJobIds.push(activityId);
 
     async function insertEmployee(label: string): Promise<string> {
       const { rows } = await pool.query(
@@ -264,7 +262,7 @@ async function main() {
     // with no other entries that day — must show "Manually added"
     // (existing mechanism), and neither of the other two badges.
     const empE = await insertEmployee("Manually Added");
-    await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [empE, groupId]);
+    await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [empE, assignedJobIds]);
     {
       const manualRes = await call("POST", "/api/inputs/work-start", {
         token: adminToken,
@@ -354,13 +352,9 @@ async function main() {
       );
       await tryDelete("time_entries", () => pool.query(`delete from time_entries where employee_id = any($1::uuid[])`, [employeeIds]));
     }
-    if (groupId) {
-      await tryDelete("employee_activity_group_assignments", () =>
-        pool.query(`delete from employee_activity_group_assignments where activity_group_id = $1`, [groupId])
+      await tryDelete("employee_activity_assignments", () =>
+        pool.query(`delete from employee_activity_assignments where activity_id = any($1::uuid[])`, [assignedJobIds])
       );
-      await tryDelete("activity_group_activities", () => pool.query(`delete from activity_group_activities where activity_group_id = $1`, [groupId]));
-      await tryDelete("activity_groups", () => pool.query(`delete from activity_groups where id = $1`, [groupId]));
-    }
     if (activityIds.length) await tryDelete("activities", () => pool.query(`delete from activities where id = any($1::uuid[])`, [activityIds]));
     if (employeeIds.length) await tryDelete("employees", () => pool.query(`delete from employees where id = any($1::uuid[])`, [employeeIds]));
     server.close();

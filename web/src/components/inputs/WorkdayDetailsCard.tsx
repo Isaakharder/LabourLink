@@ -190,7 +190,7 @@ export function WorkdayDetailsCard({
                   />
                 )}
               </th>
-              <th>Activity</th>
+              <th>Job</th>
               <th>Start Time</th>
               <th>End Time</th>
               <th>Paid Time</th>

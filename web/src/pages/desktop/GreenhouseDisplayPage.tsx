@@ -195,7 +195,7 @@ export function GreenhouseDisplayPage({ displayKey }: GreenhouseDisplayPageProps
           <div className="greenhouse-tv-header-center">
             {!nothingScheduled && data && (
               <>
-                <p className="greenhouse-tv-activity">{data.activityName ?? "All activities"}</p>
+                <p className="greenhouse-tv-activity">{data.activityName ?? "All jobs"}</p>
                 <p className="greenhouse-tv-daterange">{rangeLabel}</p>
               </>
             )}

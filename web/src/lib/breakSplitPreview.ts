@@ -48,7 +48,7 @@ export function describeBreakSplitEffect(
   const rangeLabel = `${formatClockTime(breakStartIso)}–${formatClockTime(breakEndIso)}`;
 
   if (overlapping.length > 1) {
-    return `This will adjust ${overlapping.length} existing activities around the ${rangeLabel} break.`;
+    return `This will adjust ${overlapping.length} existing job entries around the ${rangeLabel} break.`;
   }
 
   const r = overlapping[0];

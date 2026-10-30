@@ -105,8 +105,8 @@ export function DashboardPage() {
       ) : cards && cards.length === 0 ? (
         <p className="placeholder-page">
           {canEdit
-            ? "No one is currently doing a Dashboard-tracked activity. Click Edit Dashboard to choose which activities to track, or check back once someone clocks in."
-            : "No one is currently doing a Dashboard-tracked activity."}
+            ? "No one is currently doing a Dashboard-tracked job. Click Edit Dashboard to choose which jobs to track, or check back once someone clocks in."
+            : "No one is currently doing a Dashboard-tracked job."}
         </p>
       ) : cards ? (
         <div className="dashboard-card-grid">

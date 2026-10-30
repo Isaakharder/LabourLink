@@ -88,7 +88,7 @@ async function main() {
   const fakePinHash = "$2a$10$QAplaceholderQAplaceholderQAplaceholderQAplaceholde";
   const employeeIds: string[] = [];
   const deviceIds: string[] = [];
-  let groupId!: string;
+  let assignedJobIds: string[] = [];
   let activityId!: string;
   let landId!: string;
   let phaseId!: string;
@@ -115,11 +115,11 @@ async function main() {
     // employee, so two independent scenarios can never safely share one
     // (a real, caught-in-testing bug: the first draft of this file reused
     // `employeeId` across several scenarios and hit that exact constraint).
-    // groupId doesn't exist yet at this point in the file, so group
-    // assignment happens after it's created, in makeEmployeeInGroup below.
+    // The Jobs don't exist yet at this point in the file, so assignment
+    // happens after they're created, in makeEmployeeInGroup below.
     async function makeEmployeeInGroup(label: string): Promise<string> {
       const id = await makeEmployee(label, "Employee");
-      await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [id, groupId]);
+      await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [id, assignedJobIds]);
       return id;
     }
 
@@ -143,9 +143,7 @@ async function main() {
       return { id: rows[0].id, identifier };
     }
 
-    groupId = (
-      await pool.query(`insert into activity_groups (name, is_active) values ($1, true) returning id`, [`QA Scenarios Group ${RUN_ID}`])
-    ).rows[0].id;
+    assignedJobIds = [];
     activityId = (
       await pool.query(`insert into activities (name, is_active, minimum_duration_minutes) values ($1, true, 0) returning id`, [
         `QA Scenarios Activity ${RUN_ID}`,
@@ -163,16 +161,10 @@ async function main() {
         [rowActivityId]
       )
     ).rows[0].id;
-    await pool.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2), ($1, $3)`, [
-      groupId,
-      activityId,
-      rowActivityId,
-    ]);
-    await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2), ($3, $2)`, [
-      employeeId,
-      groupId,
-      employee2Id,
-    ]);
+    assignedJobIds.push(activityId, rowActivityId);
+    for (const id of [employeeId, employee2Id]) {
+      await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [id, assignedJobIds]);
+    }
 
     landId = (
       await pool.query(`insert into greenhouse_lands (name, north_south_feet, east_west_feet) values ($1, 100, 100) returning id`, [
@@ -476,10 +468,7 @@ async function main() {
     // ===================================================================
     {
       const correctionEmployeeId = await makeEmployee("Correction", "Employee");
-      await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [
-        correctionEmployeeId,
-        groupId,
-      ]);
+      await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [correctionEmployeeId, assignedJobIds]);
       const device = await makeDevice("Correction", correctionEmployeeId);
 
       const shiftStart = new Date(Date.now() - 4 * 60 * 60 * 1000);
@@ -555,11 +544,9 @@ async function main() {
       await client.query(`delete from time_entries where employee_id = any($1::uuid[])`, [employeeIds]);
       await client.query(`delete from device_assignments where device_id = any($1::uuid[])`, [deviceIds]);
       await client.query(`delete from devices where id = any($1::uuid[])`, [deviceIds]);
-      await client.query(`delete from employee_activity_group_assignments where activity_group_id = $1`, [groupId ?? null]);
-      await client.query(`delete from activity_group_activities where activity_group_id = $1`, [groupId ?? null]);
+      await client.query(`delete from employee_activity_assignments where activity_id = any($1::uuid[])`, [assignedJobIds]);
       await client.query(`delete from activity_questions where id = any($1::uuid[])`, [[rowQuestionId].filter(Boolean)]);
       await client.query(`delete from activities where id = any($1::uuid[])`, [[activityId, rowActivityId].filter(Boolean)]);
-      if (groupId) await client.query(`delete from activity_groups where id = $1`, [groupId]);
       await client.query(`delete from greenhouse_rows where id = any($1::uuid[])`, [[rowId].filter(Boolean)]);
       if (phaseId) await client.query(`delete from greenhouse_phases where id = $1`, [phaseId]);
       if (landId) await client.query(`delete from greenhouse_lands where id = $1`, [landId]);

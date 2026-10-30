@@ -182,7 +182,7 @@ export function DisplaySetupPage() {
       const target = a.targetText.trim() === "" ? null : parseDecimal(a.targetText);
       if (a.targetText.trim() !== "" && (target == null || target <= 0)) return `${a.name}: target must be a positive number, or empty.`;
       const minHours = parseDecimal(a.minHoursText);
-      if (minHours == null || minHours > 168) return `${a.name}: minimum activity hours must be 0–168.`;
+      if (minHours == null || minHours > 168) return `${a.name}: minimum job hours must be 0–168.`;
       const topN = a.topNText.trim() === "" ? null : parseWhole(a.topNText);
       if (a.topNText.trim() !== "" && (topN == null || topN < 1 || topN > 200)) return `${a.name}: Top N must be 1–200, or All.`;
       const seconds = parseWhole(a.secondsText);
@@ -288,7 +288,7 @@ export function DisplaySetupPage() {
         <div>
           <h1>Display setup</h1>
           <p className="display-setup-subtitle">
-            Choose which slides this TV shows — the map and employee speed rankings per activity — and when. The{" "}
+            Choose which slides this TV shows — the map and employee speed rankings per job — and when. The{" "}
             <Link to="/display/map">map</Link>'s phases, dates, rotation and land are set on Display → Map. With no slide
             scheduled, the TV says so and resumes on its own when a schedule starts.
           </p>
@@ -425,7 +425,7 @@ export function DisplaySetupPage() {
                   <p className="display-setup-unit">
                     {a.densitySource
                       ? `Speed: ${a.speedUnit ?? `${a.densitySource}/hour`}`
-                      : "No speed calculation for this activity (no stems or plants count per row) — its slide shows a notice instead of rankings."}
+                      : "No speed calculation for this job (no stems or plants count per row) — its slide shows a notice instead of rankings."}
                   </p>
                   <div className={`display-setup-card-fields${a.sendToTv ? "" : " muted"}`}>
                     <label>
@@ -440,7 +440,7 @@ export function DisplaySetupPage() {
                       />
                     </label>
                     <label>
-                      Min. activity hours
+                      Min. job hours
                       <input
                         type="number"
                         min={0}
@@ -502,7 +502,7 @@ export function DisplaySetupPage() {
                     </label>
                   </div>
                   {a.targetText === "" && a.normalSpeed != null && (
-                    <p className="display-setup-hint">Target uses the activity's normal speed. Enter a number to override it on this TV only.</p>
+                    <p className="display-setup-hint">Target uses the job's normal speed. Enter a number to override it on this TV only.</p>
                   )}
                 </div>
               ))}
@@ -620,8 +620,8 @@ function ScheduleDialog({
           {schedule.enabled && schedule.days.length === 0 && <p className="error-text">Choose at least one day.</p>}
         </fieldset>
         <p className="display-setup-hint">
-          Times are in the organization's time zone{timezone ? ` (${timezone})` : ""}. The slide still needs Send to TV, and an
-          activity slide still needs work in the reporting period.
+          Times are in the organization's time zone{timezone ? ` (${timezone})` : ""}. The slide still needs Send to TV, and a
+          job slide still needs work in the reporting period.
         </p>
         <p className="display-setup-schedule-summary">{summarizeSchedule(schedule)}</p>
         <div className="display-setup-dialog-actions">

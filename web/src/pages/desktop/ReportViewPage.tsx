@@ -276,7 +276,7 @@ export function ReportViewPage() {
           <div>
             <h1>{report.name}</h1>
             <p className="report-view-meta">
-              {isActivity ? "Activity Report" : "Payroll Report"}
+              {isActivity ? "Job Report" : "Payroll Report"}
               {report.activity ? ` · ${report.activity.name}` : ""}
               {" · "}
               {dateRange.start} – {dateRange.end}
@@ -447,7 +447,7 @@ export function ReportViewPage() {
 
               {payrollData && metrics.includes("activityBreakdown") && payrollData.activityBreakdown.length > 0 && (
                 <div className="report-subtable">
-                  <h2>Activity breakdown</h2>
+                  <h2>Job breakdown</h2>
                   <table className="employees-table">
                     <thead>
                       <tr>

@@ -30,7 +30,7 @@ const props = { employeeId: "emp-1", employeeName: "Khen Lagto", date: "2026-10-
 
 describe("Inputs manual-entry modals: readable primary Save button", () => {
   it.each([
-    ["Add Activity", () => <AddActivityModal {...props} />],
+    ["Add Job", () => <AddActivityModal {...props} />],
     ["Add Work Start", () => <AddWorkStartModal {...props} />],
   ])("%s uses employee-form-save, not employees-add-button", async (label, renderModal) => {
     render(renderModal());

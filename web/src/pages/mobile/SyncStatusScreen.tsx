@@ -9,7 +9,7 @@ import { DiagnosticsSnapshot, getDiagnosticsSnapshot } from "../../lib/diagnosti
 
 const EVENT_TYPE_LABELS: Record<string, string> = {
   work_start: "Start work",
-  activity_switch: "Switch activity",
+  activity_switch: "Switch job",
   break_start: "Start break",
   break_end: "End break",
   end_day: "Finish work",
@@ -146,7 +146,7 @@ export function SyncStatusScreen() {
         {conflicts.length === 0 ? (
           <p className="mobile-settings-device-note">
             No conflicts. A conflict means the server could not apply one of this device's events automatically (e.g.
-            an activity or row that no longer exists) — it stays here, unresolved, until an administrator reviews it.
+            a job or row that no longer exists) — it stays here, unresolved, until an administrator reviews it.
             There is no action to take on this device; nothing here is discarded.
           </p>
         ) : (
@@ -192,7 +192,7 @@ export function SyncStatusScreen() {
             <p className="mobile-settings-device-note">API reachable: {diagnostics.apiReachable ? "Yes" : "No"}</p>
             <p className="mobile-settings-device-note">Local database ready: {diagnostics.sqliteReady ? "Yes" : "No"}</p>
             <p className="mobile-settings-device-note">
-              Reference data cached — Activities: {formatDateTime(diagnostics.referenceCache.activities)}, Rows:{" "}
+              Reference data cached — Jobs: {formatDateTime(diagnostics.referenceCache.activities)}, Rows:{" "}
               {formatDateTime(diagnostics.referenceCache.rows)}, Carriers: {formatDateTime(diagnostics.referenceCache.carriers)}
             </p>
             <p className="mobile-settings-device-note">Pending events: {diagnostics.pendingCount}</p>

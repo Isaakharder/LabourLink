@@ -279,7 +279,7 @@ export function BreakProfileEditor({ profileId, onSaved, onCancel }: BreakProfil
         <h3>Work start rounding</h3>
         <p className="field-hint">
           When enabled, an employee's very first work start of the day is rounded to the nearest scheduled interval.
-          Breaks, activity changes, work-finish times, and manual corrections on the Inputs page are never affected.
+          Breaks, job changes, work-finish times, and manual corrections on the Inputs page are never affected.
         </p>
         <div className="employee-form-grid">
           <label className="employee-form-checkbox">
@@ -344,7 +344,7 @@ export function BreakProfileEditor({ profileId, onSaved, onCancel }: BreakProfil
         <h3>Work end rounding</h3>
         <p className="field-hint">
           When enabled, an employee's Finish Work time is rounded to the nearest scheduled interval. Breaks,
-          activity changes, automatically-resumed activities, and manual corrections on the Inputs page are never
+          job changes, automatically-resumed jobs, and manual corrections on the Inputs page are never
           affected. Independent of work-start rounding above — enabling one does not enable or affect the other.
         </p>
         <div className="employee-form-grid">
@@ -409,7 +409,7 @@ export function BreakProfileEditor({ profileId, onSaved, onCancel }: BreakProfil
         <p className="field-hint">
           When enabled, both starting a break and returning from one are rounded to the nearest scheduled interval —
           for a break the employee taps somewhere inside a Fixed Break's own configured start/end time, that exact
-          schedule always applies instead (see "Fixed Break" below). Activity changes and manual corrections on the
+          schedule always applies instead (see "Fixed Break" below). Job changes and manual corrections on the
           Inputs page are never affected. Independent of work-start and work-end rounding above — enabling one does
           not enable or affect the others.
         </p>

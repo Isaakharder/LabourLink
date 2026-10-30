@@ -283,13 +283,13 @@ async function upsertQuestions(client: PoolClient, activityId: string, questions
 const SELECT_COLUMNS = `
   a.id, a.name, a.normal_speed, a.speed_unit, a.minimum_duration_minutes,
   a.is_active, a.sort_order, a.updated_at, a.density_source,
-  coalesce(grp.assigned_group_count, 0) as assigned_group_count,
+  coalesce(emp.assigned_employee_count, 0) as assigned_employee_count,
   coalesce(q.questions, '[]'::json) as questions
 `;
 
 // Both child rowsets are pulled in via LATERAL, each already collapsed to
 // at most one row per activity by its own aggregate — unlike a plain JOIN
-// to activity_group_activities (which would fan out and require a GROUP
+// to employee_activity_assignments (which would fan out and require a GROUP
 // BY), this needs no GROUP BY at all. That matters here specifically
 // because json_agg produces a plain `json` value, and plain `json` has no
 // equality operator for Postgres to GROUP BY on (jsonb would; json
@@ -298,10 +298,12 @@ const SELECT_COLUMNS = `
 const FROM_JOINS = `
   from activities a
   left join lateral (
-    select count(*) as assigned_group_count
-    from activity_group_activities aga
-    where aga.activity_id = a.id
-  ) grp on true
+    -- Active employees currently assigned this Job (migration 067).
+    select count(*) as assigned_employee_count
+    from employee_activity_assignments eaa
+    join employees e on e.id = eaa.employee_id and e.is_active = true
+    where eaa.activity_id = a.id and eaa.unassigned_at is null
+  ) emp on true
   left join lateral (
     select json_agg(json_build_object(
              'id', aq.id,
@@ -327,7 +329,7 @@ function serializeActivity(row: any) {
     minimumDurationMinutes: row.minimum_duration_minutes,
     isActive: row.is_active,
     densitySource: row.density_source,
-    assignedGroupCount: Number(row.assigned_group_count),
+    assignedEmployeeCount: Number(row.assigned_employee_count),
     updatedAt: row.updated_at,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     questions: (row.questions as any[]).map((q) => ({

@@ -163,7 +163,7 @@ async function loadAndOpenDeleteModal() {
   const user = userEvent.setup();
   await user.click(screen.getByText("Picking Peppers")); // selects the run — enables the header Delete (1)
   await user.click(screen.getByRole("button", { name: "Delete (1)" }));
-  await screen.findByText("Delete 1 activity entry?");
+  await screen.findByText("Delete 1 job entry?");
   return user;
 }
 
@@ -202,7 +202,7 @@ describe("InputsPage — activity-log delete performance/UX", () => {
     await act(async () => {
       dailyCalls[dailyCalls.length - 1].deferred.resolve(buildDaily("2026-08-24"));
     });
-    await screen.findByText("1 activity entry deleted.");
+    await screen.findByText("1 job entry deleted.");
 
     // Give any stray extra effect/timer a chance to fire before asserting
     // the call count is still exactly right — a real duplicate-refresh bug

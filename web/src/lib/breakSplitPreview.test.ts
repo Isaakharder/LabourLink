@@ -56,6 +56,6 @@ describe("describeBreakSplitEffect", () => {
     const runA = { activityName: "A", startedAt: "2026-08-10T11:00:00.000Z", endedAt: "2026-08-10T13:30:00.000Z" };
     const runB = { activityName: "B", startedAt: "2026-08-10T13:30:00.000Z", endedAt: "2026-08-10T14:30:00.000Z" };
     const msg = describeBreakSplitEffect([runA, runB], "2026-08-10T13:00:00.000Z", "2026-08-10T14:00:00.000Z");
-    expect(msg).toMatch(/2 existing activities/);
+    expect(msg).toMatch(/2 existing job entries/);
   });
 });

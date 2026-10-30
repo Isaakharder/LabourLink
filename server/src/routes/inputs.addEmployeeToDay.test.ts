@@ -78,7 +78,7 @@ async function main() {
   const fakePinHash = "$2a$10$QAplaceholderQAplaceholderQAplaceholderQAplaceholde";
   const employeeIds: string[] = [];
   const deviceIds: string[] = [];
-  let groupId: string | undefined;
+  let assignedJobIds: string[] = [];
   const activityIds: string[] = [];
   let landId: string | undefined;
   let phaseId: string | undefined;
@@ -119,11 +119,7 @@ async function main() {
     const supervisorToken = tokenFor(supervisor, "Supervisor");
     const employeeToken = tokenFor(plainEmployee, "Employee");
 
-    groupId = (
-      await pool.query(`insert into activity_groups (name, is_active) values ($1, true) returning id`, [
-        `QA Add To Day Group ${RUN_ID}`,
-      ])
-    ).rows[0].id;
+    assignedJobIds = [];
     const plainActivityId: string = (
       await pool.query(`insert into activities (name, is_active, minimum_duration_minutes) values ($1, true, 0) returning id`, [
         `QA Add To Day Cleaning ${RUN_ID}`,
@@ -149,15 +145,9 @@ async function main() {
         [pickActivityId]
       )
     ).rows[0].id;
-    await pool.query(
-      `insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2), ($1, $3)`,
-      [groupId, plainActivityId, pickActivityId]
-    );
+    assignedJobIds.push(plainActivityId, pickActivityId);
     for (const e of [forgotPhone, listed, phoneUser]) {
-      await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [
-        e.id,
-        groupId,
-      ]);
+      await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [e.id, assignedJobIds]);
     }
     landId = (
       await pool.query(
@@ -397,10 +387,7 @@ async function main() {
     const ADD_REASON = "Added manually through Inputs";
     async function worker(label: string) {
       const e = await createEmployee("Employee", label);
-      await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [
-        e.id,
-        groupId,
-      ]);
+      await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [e.id, assignedJobIds]);
       return e;
     }
     async function rawEntry(employeeId: string, opts: { start: string; end?: string | null; type?: "work" | "break"; deleted?: boolean }) {
@@ -749,12 +736,8 @@ async function main() {
       await client.query(`delete from device_assignments where device_id = any($1::uuid[])`, [deviceIds]);
       await client.query(`delete from devices where id = any($1::uuid[])`, [deviceIds]);
       await client.query(`delete from activity_questions where activity_id = any($1::uuid[])`, [activityIds]);
-      if (groupId) {
-        await client.query(`delete from employee_activity_group_assignments where activity_group_id = $1`, [groupId]);
-        await client.query(`delete from activity_group_activities where activity_group_id = $1`, [groupId]);
-      }
+        await client.query(`delete from employee_activity_assignments where activity_id = any($1::uuid[])`, [assignedJobIds]);
       await client.query(`delete from activities where id = any($1::uuid[])`, [activityIds]);
-      if (groupId) await client.query(`delete from activity_groups where id = $1`, [groupId]);
       if (rowId) await client.query(`delete from greenhouse_rows where id = $1`, [rowId]);
       if (phaseId) await client.query(`delete from greenhouse_phases where id = $1`, [phaseId]);
       if (landId) await client.query(`delete from greenhouse_lands where id = $1`, [landId]);

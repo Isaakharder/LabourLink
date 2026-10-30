@@ -28,7 +28,7 @@ interface SyncConflict {
 
 const EVENT_TYPE_LABELS: Record<string, string> = {
   work_start: "Start work",
-  activity_switch: "Switch activity",
+  activity_switch: "Switch job",
   break_start: "Start break",
   break_end: "End break",
   end_day: "Finish work",

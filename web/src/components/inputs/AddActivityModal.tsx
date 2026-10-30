@@ -65,13 +65,13 @@ export function AddActivityModal({ employeeId, employeeName, date, onClose, onCr
       });
       onCreated();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not add the activity");
+      setError(err instanceof ApiError ? err.message : "Could not add the job");
       setSubmitting(false);
     }
   }
 
   return (
-    <Modal title="Add Activity" onClose={submitting ? () => {} : onClose}>
+    <Modal title="Add Job" onClose={submitting ? () => {} : onClose}>
       <form onSubmit={handleSubmit} className="employee-form" noValidate>
         <div className="employee-form-grid">
           <label>
@@ -133,7 +133,7 @@ export function AddActivityModal({ employeeId, employeeName, date, onClose, onCr
               type="text"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
-              placeholder="e.g. Employee forgot to switch activities on their phone"
+              placeholder="e.g. Employee forgot to switch jobs on their phone"
               disabled={submitting}
               required
             />
@@ -147,7 +147,7 @@ export function AddActivityModal({ employeeId, employeeName, date, onClose, onCr
             Cancel
           </button>
           <button type="submit" className="employee-form-save" disabled={!canSubmit}>
-            {submitting ? "Adding…" : "Add Activity"}
+            {submitting ? "Adding…" : "Add Job"}
           </button>
         </div>
       </form>

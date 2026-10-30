@@ -104,6 +104,14 @@ export async function deleteOrphanedQaFixtures(pool: Pool, scope: QaFixtureScope
     await del("activity_group_activities", `delete from activity_group_activities where activity_id = any($1::uuid[])`, [scope.activityIds]);
     await del("activity_questions", `delete from activity_questions where activity_id = any($1::uuid[])`, [scope.activityIds]);
     await del(
+      "employee_activity_assignments",
+      `delete from employee_activity_assignments
+       where employee_id = any($1::uuid[]) or activity_id = any($2::uuid[])
+          or assigned_by_employee_id = any($1::uuid[]) or unassigned_by_employee_id = any($1::uuid[])`,
+      [scope.employeeIds, scope.activityIds]
+    );
+    // Legacy Activity Group tables (kept until a later migration drops them).
+    await del(
       "employee_activity_group_assignments",
       `delete from employee_activity_group_assignments where employee_id = any($1::uuid[]) or assigned_by_employee_id = any($1::uuid[])`,
       [scope.employeeIds]

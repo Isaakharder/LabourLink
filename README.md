@@ -417,8 +417,17 @@ applied identically to both the blue and green checks, so a row that only
 had *unrelated* activity completed on it is never marked green while
 filtered to a different activity.
 
-**Activity Row Questions**: an activity can be configured (Activities page →
-row action → *Questions*) to ask a Greenhouse Row question before an
+**Jobs (Basic data → Jobs)**: the configured work activities are called
+**Jobs** everywhere in the interface; the database, API and code keep the
+`activity` names. Job setup lives at `/basic-data/jobs`, the first Basic data
+tab and the one Basic data opens on. The old standalone Activities page
+address `/activities` (and `/activities/...`) redirects there, keeping any
+query string, and replaces the history entry so Back is unaffected.
+Permissions are unchanged: whoever could open Activities can open Basic data
+→ Jobs, and only Administrators can add, edit, activate or deactivate a Job.
+
+**Activity Row Questions**: an activity can be configured (Basic data → Jobs →
+*Job Questions*) to ask a Greenhouse Row question before an
 employee's phone lets them start it — configurable label (default "Where?")
 and **Required** vs **Optional**:
 - **Required** — the row picker must be used; Cancel returns to the job
@@ -632,29 +641,55 @@ environment variables.
       Break Area TV display" above
 
 Basic time tracking now exists, scoped tightly to what field testing needs:
-an `activities` table (plus `activity_groups` and the join/assignment tables
-that scope activities to employees) and a `time_entries` table recording
+an `activities` table (plus `employee_activity_assignments`, which scopes
+Jobs to employees) and a `time_entries` table recording
 work/break spans per employee, enforced server-side to allow at most one open
 entry per employee at a time and idempotent under duplicate/retried requests.
 Payroll, row tracking, greenhouse logic, full offline background sync, and
 reporting remain out of scope until explicitly scoped — see the project
 brief.
 
-**Mobile activity assignment**: an employee's phone only ever shows
-activities that are active *and* belong to *any* of their currently assigned
-active Activity Groups (`GET /api/mobile/activities`) — the deduplicated
-union across all their groups, never a hardcoded or fallback list. An
-employee with no active groups, or whose groups currently have no active
-activities between them, sees "No activities have been assigned to you.
-Please contact your supervisor." instead of any activity list, and the
-mobile job picker is disabled until that's resolved. Every job-selection
-request is revalidated server-side against the employee's current groups
-regardless of what the client sends, so an activity that's been deactivated
-or removed from every one of the employee's groups can never be newly
-selected — including on offline-queue replay. An activity an employee is
-*already* working on stays visible in their status and can still be
-ended/broken out of cleanly even after it's deactivated or removed from its
-group; it just won't be offered again as a new choice.
+**Which Jobs an employee can use**: each employee's Add/Edit form has a
+**Jobs** section listing every active Job (alphabetical, searchable, with
+Select/Clear all visible). The employee can use exactly the checked Jobs —
+on their phone (`GET /api/mobile/activities`) and in the Inputs
+manual-entry pickers (`GET /api/inputs/employee-activities`). The rule, in
+`server/src/lib/activitySelection.ts`: an open row in
+`employee_activity_assignments` (migration 067) for a Job that is active.
+No checked Jobs means no Jobs, never "all Jobs": the phone shows "No jobs
+have been assigned to you. Please contact your supervisor." and its Choose
+a job button is disabled. Only Administrators can change an employee's Jobs;
+the selection is saved in the same transaction as the employee, under the
+same per-employee lock as time-entry writes, and every id is checked to be an
+existing, active Job. Every job-selection request is revalidated
+server-side regardless of what the client sends.
+
+- **Inactive Jobs** are never offered or assignable, but deactivating a Job
+  doesn't touch anyone's assignment, so reactivating it gives it back to the
+  same employees. The Employee form lists such Jobs read-only under
+  "Inactive Jobs still assigned". Deactivating an *employee* ends all of their
+  assignments.
+- **History**: removing a Job closes the assignment row (who/when) instead of
+  deleting it; time entries are never touched.
+- **Offline phone events**: a `work_start`/`activity_switch` event recorded
+  offline and synced later is accepted if the Job was assigned either now or
+  at the moment the event happened (and is still active), and keeps its
+  original Job. An event for a Job that was never assigned at that time,
+  or that has since been deactivated, is kept as a Sync conflict for review
+  (never silently dropped). Resuming the previous Job after a break doesn't
+  re-check assignment, as before.
+- **Activity Groups were removed** (they used to grant Jobs: the active Jobs
+  in every active group an employee belonged to). Migration 067 copied that
+  exact access into direct assignments, and keeps them in step while the
+  previous application version is still running. The `activity_groups`,
+  `activity_group_activities` and `employee_activity_group_assignments`
+  tables are kept, unused, as rollback evidence until a later migration drops
+  them. The old `/api/activity-groups/*` and
+  `/api/employees/:id/activity-groups` endpoints answer **410** "Activity
+  Groups have been replaced by Jobs on each employee's form. Refresh
+  LabourLink to continue." without changing anything, so a desktop tab still
+  running the old version can't create access that disagrees with the
+  employees' Jobs.
 
 ## Known gaps
 

@@ -174,9 +174,16 @@ router.post(
       );
       const employeeId: string = employee.rows[0].id;
 
+      // The reviewer gets the same Jobs as the demo crew: every active Job
+      // already assigned to someone on this instance (what "every active
+      // Activity Group" gave them before groups were removed) — not the
+      // migration-seeded starter Jobs nobody uses.
       await client.query(
-        `insert into employee_activity_group_assignments (employee_id, activity_group_id)
-         select $1, id from activity_groups where is_active`,
+        `insert into employee_activity_assignments (employee_id, activity_id)
+         select distinct $1::uuid, eaa.activity_id
+         from employee_activity_assignments eaa
+         join activities a on a.id = eaa.activity_id and a.is_active = true
+         where eaa.unassigned_at is null`,
         [employeeId]
       );
 

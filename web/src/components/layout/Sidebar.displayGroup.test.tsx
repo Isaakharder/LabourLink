@@ -54,3 +54,13 @@ describe("Sidebar Display group", () => {
     expect(screen.queryByRole("button", { name: /Display/ })).not.toBeInTheDocument();
   });
 });
+
+describe("Sidebar: Activities moved into Basic data", () => {
+  it.each(["Administrator", "Manager", "Supervisor"])("shows Basic data and no standalone Activities item to a %s", (r) => {
+    role = r;
+    renderAt("/basic-data/jobs");
+    expect(screen.queryByRole("link", { name: "Activities" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("link").map((a) => a.getAttribute("href"))).not.toContain("/activities");
+    expect(screen.getByRole("link", { name: "Basic data" })).toHaveAttribute("href", "/basic-data");
+  });
+});

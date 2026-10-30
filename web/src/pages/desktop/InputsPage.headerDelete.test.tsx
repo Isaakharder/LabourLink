@@ -256,7 +256,7 @@ describe("table layout without an Actions column", () => {
 });
 
 describe("badges kept after removing Rounded", () => {
-  it("Activity details still shows Manually added, In progress and the below-minimum warning, with no Rounded anywhere", async () => {
+  it("Job details still shows Manually added, In progress and the below-minimum warning, with no Rounded anywhere", async () => {
     day = {
       ...freshDay(),
       runs: [
@@ -279,7 +279,7 @@ describe("badges kept after removing Rounded", () => {
   });
 });
 
-describe("Activity details — header Delete", () => {
+describe("Job details — header Delete", () => {
   it("Delete is disabled with no selection", async () => {
     await renderPage();
     expect(activityDelete()).toHaveTextContent(/^Delete$/);
@@ -293,13 +293,13 @@ describe("Activity details — header Delete", () => {
     expect(checkboxIn(runRow("Packing Bags"))).not.toBeNull();
   });
 
-  it("selecting one row shows Delete (1) and confirms 'Delete 1 activity entry?'", async () => {
+  it("selecting one row shows Delete (1) and confirms 'Delete 1 job entry?'", async () => {
     const user = userEvent.setup();
     await renderPage();
     await user.click(checkboxIn(runRow("Packing Bags"))!);
     expect(activityDelete()).toHaveTextContent("Delete (1)");
     await user.click(activityDelete());
-    const dialog = screen.getByRole("dialog", { name: "Delete 1 activity entry?" });
+    const dialog = screen.getByRole("dialog", { name: "Delete 1 job entry?" });
     expect(within(dialog).getByText(/This changes Nattawat N's Inputs record/)).toBeInTheDocument();
     expect(within(dialog).getAllByRole("listitem")).toHaveLength(1);
     expect(deleteCalls()).toHaveLength(0);
@@ -313,11 +313,11 @@ describe("Activity details — header Delete", () => {
     await user.click(checkboxIn(runRow("Winding & Pruning"))!);
     expect(activityDelete()).toHaveTextContent("Delete (3)");
     await user.click(activityDelete());
-    const dialog = screen.getByRole("dialog", { name: "Delete 3 activity entries?" });
+    const dialog = screen.getByRole("dialog", { name: "Delete 3 job entries?" });
     await act(async () => {
       await user.click(within(dialog).getByRole("button", { name: "Delete 3 entries" }));
     });
-    await screen.findByText("3 activity entries deleted.");
+    await screen.findByText("3 job entries deleted.");
     expect(deleteCalls()).toEqual([
       { path: "/api/inputs/activity-runs/bulk-delete", body: { employeeId: "emp-n", runs: [["r-pick"], ["r-wind"], ["r-bags"]] } },
     ]);
@@ -335,7 +335,7 @@ describe("Activity details — header Delete", () => {
   it("select-all picks only the visible deletable rows, and clears them again", async () => {
     const user = userEvent.setup();
     await renderPage();
-    const all = within(activityTable()).getByRole("checkbox", { name: "Select all deletable activity entries" });
+    const all = within(activityTable()).getByRole("checkbox", { name: "Select all deletable job entries" });
     await user.click(all);
     expect(activityDelete()).toHaveTextContent("Delete (3)"); // 3 finished, not the in-progress one
     expect(runRow("Picking Peppers", 1)).not.toHaveClass("inputs-log-row-selected");
@@ -353,7 +353,7 @@ describe("Activity details — header Delete", () => {
     await act(async () => {
       await user.click(screen.getByRole("button", { name: "Delete 1 entry" }));
     });
-    await screen.findByText("1 activity entry deleted.");
+    await screen.findByText("1 job entry deleted.");
     expect(within(activityTable()).queryByText("Packing Bags")).toBeNull();
     expect(screen.getByText(formatDurationHMS(3600))).toBeInTheDocument();
     expect(callsTo("/api/inputs/employees")).toBeGreaterThan(employeesBefore);
@@ -371,7 +371,7 @@ describe("Activity details — header Delete", () => {
     await act(async () => {
       await user.click(screen.getByRole("button", { name: "Delete 2 entries" }));
     });
-    const dialog = screen.getByRole("dialog", { name: "Delete 2 activity entries?" });
+    const dialog = screen.getByRole("dialog", { name: "Delete 2 job entries?" });
     expect(await within(dialog).findByText(/^Nothing was deleted\. One or more of the selected activity logs changed/)).toBeInTheDocument();
     expect(within(activityTable()).getByText("Packing Bags")).toBeInTheDocument();
     expect(within(activityTable()).getByText("Winding & Pruning")).toBeInTheDocument();

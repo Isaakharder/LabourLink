@@ -322,7 +322,7 @@ describe("arrow keys that belong to something else", () => {
     expect(selected()).toBe("emp-khen");
     await user.keyboard("{Escape}");
 
-    await user.click(screen.getByRole("button", { name: "Add activity" }));
+    await user.click(screen.getByRole("button", { name: "Add job" }));
     await screen.findByRole("dialog");
     press("ArrowDown");
     expect(selected()).toBe("emp-khen");

@@ -43,6 +43,17 @@ function formatDateTime(value: string | null | undefined) {
   });
 }
 
+// The Jobs the employee can actually use now (inactive Jobs excluded).
+function usableJobNames(employee: Employee): string[] {
+  return employee.assignedActivities.filter((a) => a.isActive).map((a) => a.name);
+}
+
+function jobsSummary(employee: Employee): string {
+  const names = usableJobNames(employee);
+  if (names.length === 0) return "No Jobs";
+  return names.length <= 2 ? names.join(", ") : `${names.length} Jobs`;
+}
+
 export function DirectoryTab() {
   const navigate = useNavigate();
   const { employee: currentEmployee } = useAuth();
@@ -295,13 +306,7 @@ export function DirectoryTab() {
                         <div className="employees-detail-hero-meta">
                           <span>{selectedEmployee.nationality}</span>
                           <span>{selectedEmployee.jobGroup ?? "No job group"}</span>
-                          <span>
-                            {selectedEmployee.activityGroups.length === 0
-                              ? "No activity groups"
-                              : selectedEmployee.activityGroups.length <= 2
-                                ? selectedEmployee.activityGroups.map((g) => g.name).join(", ")
-                                : `${selectedEmployee.activityGroups.length} activity groups`}
-                          </span>
+                          <span>{jobsSummary(selectedEmployee)}</span>
                         </div>
                         <div className="employees-detail-hero-contact">
                           <span>{selectedEmployee.email ?? "No email"}</span>
@@ -374,8 +379,8 @@ export function DirectoryTab() {
                           <dd>{selectedEmployee.jobGroup ?? "—"}</dd>
                         </div>
                         <div>
-                          <dt>Activity Groups</dt>
-                          <dd>{selectedEmployee.activityGroups.length > 0 ? selectedEmployee.activityGroups.map((group) => group.name).join(", ") : "—"}</dd>
+                          <dt>Jobs</dt>
+                          <dd>{usableJobNames(selectedEmployee).join(", ") || "—"}</dd>
                         </div>
                         <div>
                           <dt>Team Role</dt>

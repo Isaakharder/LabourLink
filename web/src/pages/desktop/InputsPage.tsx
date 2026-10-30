@@ -746,7 +746,7 @@ export function InputsPage() {
       // switch. Fire-and-forget: it manages its own employees/employeesError
       // state independently of loadDaily's.
       loadEmployees();
-      setSuccessMessage("Activity time updated.");
+      setSuccessMessage("Job time updated.");
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : "Could not save the correction");
     } finally {
@@ -892,13 +892,13 @@ export function InputsPage() {
       kind: "activity-runs",
       employeeId: daily.employee.id,
       runs: deletable,
-      title: `Delete ${plural(n, "activity entry", "activity entries")}?`,
+      title: `Delete ${plural(n, "job entry", "job entries")}?`,
       message:
         `This changes ${name}'s Inputs record for ${formatDateLong(daily.date)}: ` +
-        `${n === 1 ? "this activity is" : `these ${n} activities are`} removed from the day` +
+        `${n === 1 ? "this job entry is" : `these ${n} job entries are`} removed from the day` +
         `${n === 1 ? "" : ", all together or not at all"}. The work that follows fills each gap, ` +
         "worked time and speeds are recalculated, and every deletion stays in the audit history." +
-        (skipped > 0 ? ` ${skipped} selected in-progress ${skipped === 1 ? "activity is" : "activities are"} not included.` : ""),
+        (skipped > 0 ? ` ${skipped} selected in-progress ${skipped === 1 ? "job entry is" : "job entries are"} not included.` : ""),
       details: deletable.map(describeRun),
       confirmLabel: `Delete ${plural(n, "entry", "entries")}`,
     });
@@ -950,7 +950,7 @@ export function InputsPage() {
           method: "POST",
           body: JSON.stringify({ employeeId: pending.employeeId, runs: runs.map((r) => r.segmentIds) }),
         });
-        successMessage = `${plural(runs.length, "activity entry", "activity entries")} deleted.`;
+        successMessage = `${plural(runs.length, "job entry", "job entries")} deleted.`;
       } else {
         // Each break is sent with the times shown on screen, so a break
         // re-timed elsewhere since this page loaded refuses the request.
@@ -974,7 +974,7 @@ export function InputsPage() {
       loadEmployees();
       setSuccessMessage(successMessage);
     } catch (err) {
-      const fallback = pending.kind === "activity-runs" ? "Could not delete the selected activity entries" : "Could not delete the selected breaks";
+      const fallback = pending.kind === "activity-runs" ? "Could not delete the selected job entries" : "Could not delete the selected breaks";
       const message = err instanceof ApiError ? err.message : fallback;
       setDeletionError(/nothing was deleted/i.test(message) ? message : `Nothing was deleted. ${message}`);
     } finally {
@@ -1103,7 +1103,7 @@ export function InputsPage() {
 
           {selectedEmployeeId && (
             <div className="inputs-section-header inputs-section-header-with-status">
-              <h3>Activity details</h3>
+              <h3>Job details</h3>
               {canReviewSpeeds && (
                 <button
                   type="button"
@@ -1132,7 +1132,7 @@ export function InputsPage() {
               <div className="inputs-section-header-actions">
                 {daily?.canEdit && (
                   <button type="button" className="inputs-section-header-button" onClick={() => setAddModal("activity")}>
-                    Add activity
+                    Add job
                   </button>
                 )}
                 {daily?.canEdit && (
@@ -1140,7 +1140,7 @@ export function InputsPage() {
                     type="button"
                     className="inputs-section-header-button inputs-section-header-button-danger"
                     disabled={selectedDeletableRunCount === 0}
-                    title={selectedDeletableRunCount === 0 ? "Select one or more activity entries to delete" : undefined}
+                    title={selectedDeletableRunCount === 0 ? "Select one or more job entries to delete" : undefined}
                     onClick={handleDeleteSelectedRuns}
                   >
                     {selectedDeletableRunCount === 0 ? "Delete" : `Delete (${selectedDeletableRunCount})`}
@@ -1309,7 +1309,7 @@ export function InputsPage() {
           employeeName={`${daily.employee.firstName} ${daily.employee.lastName}`}
           date={date}
           onClose={() => setAddModal(null)}
-          onCreated={() => handleManualEntryCreated("Activity added.")}
+          onCreated={() => handleManualEntryCreated("Job added.")}
         />
       )}
     </div>

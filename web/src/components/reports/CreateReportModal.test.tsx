@@ -44,12 +44,12 @@ async function goToActivityStep3(user: ReturnType<typeof userEvent.setup>) {
   });
 
   render(<CreateReportModal onClose={vi.fn()} onSaved={vi.fn()} />);
-  await user.click(screen.getByRole("button", { name: /activity report/i }));
+  await user.click(screen.getByRole("button", { name: /job report/i }));
   await user.type(screen.getByLabelText(/name/i), "Winding — Weekly");
   await user.click(screen.getByRole("button", { name: /^next$/i }));
   await screen.findByText(/step 3 of 3/i);
-  await waitFor(() => expect(screen.getByRole("combobox", { name: /activity$/i })).toBeInTheDocument());
-  await user.selectOptions(screen.getByRole("combobox", { name: /activity$/i }), "act-1");
+  await waitFor(() => expect(screen.getByRole("combobox", { name: /job$/i })).toBeInTheDocument());
+  await user.selectOptions(screen.getByRole("combobox", { name: /job$/i }), "act-1");
 }
 
 describe("CreateReportModal — Activity Report daily metric + weekly totals", () => {
@@ -62,7 +62,7 @@ describe("CreateReportModal — Activity Report daily metric + weekly totals", (
     // labeled fieldset, distinct from the Daily metric selector.
     expect(screen.getByText(/weekly totals/i)).toBeInTheDocument();
     // Every daily-metric option is a real activity metric label.
-    expect(screen.getByRole("option", { name: "Activity hours" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Job hours" })).toBeInTheDocument();
     // Employee Paid Time is only ever a weekly total, never a daily-metric
     // option (it's a whole-shift figure, not meaningful per activity-day).
     expect(screen.queryByRole("option", { name: "Employee Paid Time" })).not.toBeInTheDocument();
@@ -73,7 +73,7 @@ describe("CreateReportModal — Activity Report daily metric + weekly totals", (
     const user = userEvent.setup();
     await goToActivityStep3(user);
 
-    const activityHoursCheckbox = screen.getByRole("checkbox", { name: "Weekly Activity Hours" });
+    const activityHoursCheckbox = screen.getByRole("checkbox", { name: "Weekly Job Hours" });
     expect(activityHoursCheckbox).toBeChecked();
 
     await user.click(activityHoursCheckbox);
@@ -107,11 +107,11 @@ describe("CreateReportModal — Activity Report daily metric + weekly totals", (
       }
       return Promise.reject(new Error(`Unhandled mock api() call: ${path}`));
     });
-    await user.click(screen.getByRole("button", { name: /activity report/i }));
+    await user.click(screen.getByRole("button", { name: /job report/i }));
     await user.type(screen.getByLabelText(/name/i), "Winding — Weekly");
     await user.click(screen.getByRole("button", { name: /^next$/i }));
-    await waitFor(() => expect(screen.getByRole("combobox", { name: /activity$/i })).toBeInTheDocument());
-    await user.selectOptions(screen.getByRole("combobox", { name: /activity$/i }), "act-1");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: /job$/i })).toBeInTheDocument());
+    await user.selectOptions(screen.getByRole("combobox", { name: /job$/i }), "act-1");
     await user.selectOptions(screen.getByRole("combobox", { name: /daily metric/i }), "averageSpeed");
     await user.click(screen.getByRole("checkbox", { name: "Employee Paid Time" }));
     await user.click(screen.getByRole("button", { name: /save report/i }));

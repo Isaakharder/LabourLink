@@ -85,7 +85,7 @@ export function exportPivotPdf(
   doc.text(report.name, 14, 24);
   doc.setFontSize(10);
   const subtitleParts = [
-    report.reportType === "activity" ? "Activity Report" : "Payroll Report",
+    report.reportType === "activity" ? "Job Report" : "Payroll Report",
     report.activity ? report.activity.name : null,
     `${dateRange.start} – ${dateRange.end}`,
     `Metric: ${metricLabel}`,

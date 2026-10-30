@@ -69,8 +69,8 @@ export function DashboardSettingsPanel({ onClose, onSaved }: DashboardSettingsPa
       }
     >
       <p className="field-hint">
-        Choose which activities appear on the Dashboard. Only employees currently doing a selected activity will show
-        as a card. Card type (Row/Stem Work or Picking) is set automatically from each activity's own density
+        Choose which jobs appear on the Dashboard. Only employees currently doing a selected job will show
+        as a card. Card type (Row/Stem Work or Picking) is set automatically from each job's own density
         configuration.
       </p>
 

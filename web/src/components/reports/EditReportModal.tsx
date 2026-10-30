@@ -95,12 +95,12 @@ export function EditReportModal({ reportId, onClose, onSaved }: EditReportModalP
 
           {report.reportType === "activity" && (
             <label>
-              Activity
+              Job
               {activities === null ? (
-                <p>Loading activities...</p>
+                <p>Loading jobs...</p>
               ) : (
                 <select value={activityId ?? ""} onChange={(e) => setActivityId(e.target.value || null)}>
-                  <option value="">Select an activity...</option>
+                  <option value="">Select a job...</option>
                   {activities.map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.name}

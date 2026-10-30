@@ -171,7 +171,7 @@ describe("Inputs header: employees working totals", () => {
     const employeeSelect = within(dialog).getByRole("combobox", { name: /Employee/ });
     await waitFor(() => expect(within(employeeSelect).getByRole("option", { name: "Mia Reyes" })).toBeInTheDocument());
     await user.selectOptions(employeeSelect, "emp-mia");
-    const activitySelect = within(dialog).getByRole("combobox", { name: /Activity/ });
+    const activitySelect = within(dialog).getByRole("combobox", { name: /Job/ });
     await waitFor(() => expect(within(activitySelect).getByRole("option", { name: "Cleaning" })).toBeInTheDocument());
     await user.selectOptions(activitySelect, "act-plain");
     await user.type(within(dialog).getByLabelText(/Work start time/), "07:00:00");

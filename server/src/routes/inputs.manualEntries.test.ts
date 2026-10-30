@@ -79,8 +79,8 @@ async function main() {
   // in explicit dependency order (declared here, outside the try, so
   // `finally` can see whatever got created even if setup fails partway
   // through). No cascade exists between most of these tables (only
-  // employee_activity_group_assignments and activity_group_activities'
-  // own activity_group_id column cascade), so the reverse-dependency
+  // employee_activity_assignments' own employee_id column cascades), so the
+  // reverse-dependency
   // order in `finally` is load-bearing, not stylistic.
   // ---------------------------------------------------------------------
   const fakePinHash = "$2a$10$QAplaceholderQAplaceholderQAplaceholderQAplaceholde";
@@ -96,7 +96,7 @@ async function main() {
   let breakProfile!: { id: string };
   let target!: { id: string; first_name: string; last_name: string };
   let unassigned!: { id: string };
-  let group!: { id: string };
+  let assignedJobIds: string[] = [];
   let plainActivity!: { id: string; name: string };
   let rowActivity!: { id: string; name: string };
   let land!: { id: string };
@@ -212,11 +212,7 @@ async function main() {
     // Activity group with two activities: a plain one (no questions) and
     // one requiring a greenhouse_row answer — covers both "just an
     // activity" and "activity-specific fields" cases.
-    group = (
-      await pool.query(`insert into activity_groups (name, is_active) values ($1, true) returning id`, [
-        `QA Manual Entries Group ${RUN_ID}`,
-      ])
-    ).rows[0];
+    assignedJobIds = [];
 
     plainActivity = (
       await pool.query(`insert into activities (name, is_active) values ($1, true) returning id, name`, [
@@ -235,15 +231,9 @@ async function main() {
       [rowActivity.id]
     );
 
-    await pool.query(
-      `insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2), ($1, $3)`,
-      [group.id, plainActivity.id, rowActivity.id]
-    );
+    assignedJobIds.push(plainActivity.id, rowActivity.id);
 
-    await pool.query(
-      `insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`,
-      [target.id, group.id]
-    );
+    await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [target.id, assignedJobIds]);
 
     // Greenhouse row for the row-question activity.
     land = (
@@ -813,25 +803,18 @@ async function main() {
       )
     );
 
-    // 2. activity_questions / activity_group_activities — reference
+    // 2. activity_questions — references
     //    activities(id) with no cascade; must go before activities.
     if (rowActivity) {
       await tryDelete("activity_questions", () =>
         pool.query("delete from activity_questions where activity_id = $1", [rowActivity.id])
       );
     }
-    if (group) {
-      await tryDelete("activity_group_activities", () =>
-        pool.query("delete from activity_group_activities where activity_group_id = $1", [group.id])
-      );
-    }
-
-    // 3. employee_activity_group_assignments — references employees(id)
-    //    and activity_groups(id), both on delete cascade, but deleted
-    //    explicitly anyway rather than relying on cascade ordering here.
-    if (group) {
-      await tryDelete("employee_activity_group_assignments", () =>
-        pool.query("delete from employee_activity_group_assignments where activity_group_id = $1", [group.id])
+    // 3. employee_activity_assignments — references activities(id) with no
+    //    cascade, so it must go before the activities below.
+    {
+      await tryDelete("employee_activity_assignments", () =>
+        pool.query(`delete from employee_activity_assignments where activity_id = any($1::uuid[])`, [assignedJobIds])
       );
     }
 
@@ -845,10 +828,6 @@ async function main() {
     }
 
     // 5. activity_groups
-    if (group) {
-      await tryDelete("activity_groups", () => pool.query("delete from activity_groups where id = $1", [group.id]));
-    }
-
     // 6. greenhouse_rows -> greenhouse_phases -> greenhouse_lands (each
     //    references the next with no cascade).
     if (row) {

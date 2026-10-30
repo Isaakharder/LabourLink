@@ -8,7 +8,14 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { revokeEmployeeWebSessions } from "../lib/webSessions";
 import { normalizePhoneNumber } from "../lib/phone";
 import { deleteEmployeePhoto, getSignedPhotoUrl, getSignedPhotoUrls, uploadEmployeePhoto } from "../lib/storage";
-import { addEmployeeToActivityGroup, removeEmployeeFromActivityGroup } from "../lib/activityGroupAssignment";
+import {
+  ActivityAssignmentError,
+  closeAllEmployeeActivityAssignments,
+  parseActivityIds,
+  setEmployeeActivityAssignments,
+} from "../lib/employeeActivityAssignments";
+import { activityGroupsRemoved } from "../lib/legacyActivityGroups";
+import { lockEmployeeForManualEntry } from "../lib/manualTimeEntries";
 import {
   DEFAULT_WORK_PERMIT_LEAD_MONTHS,
   MAX_WORK_PERMIT_LEAD_DAYS,
@@ -468,7 +475,7 @@ const SELECT_COLUMNS = `
   e.employee_group_id, eg.name as employee_group_name,
   sr.name as security_role, tr.name as team_role,
   dev.device_id, dev.device_name,
-  coalesce(agg.groups, '[]'::json) as activity_groups
+  coalesce(asg.activities, '[]'::json) as assigned_activities
 `;
 
 const FROM_JOINS = `
@@ -486,11 +493,14 @@ const FROM_JOINS = `
     limit 1
   ) dev on true
   left join lateral (
-    select json_agg(json_build_object('id', ag.id, 'name', ag.name) order by ag.name) as groups
-    from employee_activity_group_assignments eaga
-    join activity_groups ag on ag.id = eaga.activity_group_id
-    where eaga.employee_id = e.id and eaga.unassigned_at is null
-  ) agg on true
+    -- The employee's open Job assignments (migration 067), alphabetical,
+    -- inactive Jobs included and flagged so the form can show them apart.
+    select json_agg(json_build_object('id', a.id, 'name', a.name, 'isActive', a.is_active)
+                    order by lower(a.name), a.id) as activities
+    from employee_activity_assignments eaa
+    join activities a on a.id = eaa.activity_id
+    where eaa.employee_id = e.id and eaa.unassigned_at is null
+  ) asg on true
 `;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -520,7 +530,11 @@ function serializeEmployee(row: any, photoUrl: string | null, includeNotes: bool
       ? { id: row.break_profile_id, name: row.break_profile_name, isActive: row.break_profile_is_active }
       : null,
     device: row.device_id ? { id: row.device_id, name: row.device_name } : null,
-    activityGroups: row.activity_groups,
+    assignedActivities: row.assigned_activities,
+    // Always empty: Activity Groups were replaced by assignedActivities. Kept
+    // so a desktop page still running the previous version doesn't break
+    // reading it (see lib/legacyActivityGroups.ts).
+    activityGroups: [],
     // null = Ungrouped.
     employeeGroup: row.employee_group_id ? { id: row.employee_group_id, name: row.employee_group_name } : null,
     // Viewing is already Administrator/Manager-only on every route this
@@ -634,6 +648,11 @@ router.post(
     if ("errors" in result) return res.status(400).json({ errors: result.errors });
     const d = result.data;
 
+    // The new employee's Jobs, saved in the same transaction. Absent or empty
+    // means no Jobs — never "all Jobs."
+    const jobsParse = req.body?.activityIds === undefined ? { activityIds: [] } : parseActivityIds(req.body.activityIds);
+    if ("error" in jobsParse) return res.status(400).json({ errors: { activityIds: jobsParse.error } });
+
     const permitParse = parseWorkPermitFields(req.body ?? {});
     if ("errors" in permitParse) return res.status(400).json({ errors: permitParse.errors });
     // A brand-new employee has no prior row — resolveWorkPermitUpdate's
@@ -658,8 +677,10 @@ router.post(
       return res.status(400).json({ errors: { employeeGroupId: EMPLOYEE_GROUP_NOT_FOUND } });
     }
 
+    const client = await pool.connect();
     try {
-      const { rows } = await pool.query(
+      await client.query("begin");
+      const { rows } = await client.query(
         `insert into employees
            (first_name, last_name, gender, date_of_birth, email, phone_number, job_group,
             start_date, is_active, employee_number, nationality, preferred_language, notes,
@@ -697,8 +718,11 @@ router.post(
       );
 
       if (permitExpiryDate) {
-        await recordWorkPermitHistory(pool, rows[0].id, null, permitExpiryDate, req.employee!.id, null);
+        await recordWorkPermitHistory(client, rows[0].id, null, permitExpiryDate, req.employee!.id, null);
       }
+
+      await setEmployeeActivityAssignments(client, rows[0].id, jobsParse.activityIds, req.employee!.id);
+      await client.query("commit");
 
       const { rows: full } = await pool.query(
         `select ${SELECT_COLUMNS} ${FROM_JOINS} where e.id = $1`,
@@ -706,6 +730,10 @@ router.post(
       );
       res.status(201).json({ employee: serializeEmployee(full[0], null, true) });
     } catch (err) {
+      await client.query("rollback");
+      if (err instanceof ActivityAssignmentError) {
+        return res.status(400).json({ errors: { activityIds: err.message } });
+      }
       const pgErr = err as { code?: string; constraint?: string };
       if (pgErr.code === "23505") {
         const field = duplicateFieldFromConstraint(pgErr.constraint);
@@ -720,6 +748,8 @@ router.post(
         return res.status(409).json({ error: "Duplicate value" });
       }
       throw err;
+    } finally {
+      client.release();
     }
   })
 );
@@ -739,6 +769,15 @@ router.patch(
     const permitParse = parseWorkPermitFields(req.body ?? {});
     if ("errors" in permitParse) return res.status(400).json({ errors: permitParse.errors });
     const touchesWorkPermit = Object.keys(permitParse.data).length > 0;
+
+    // Present = the employee's complete set of active Jobs (empty = no Jobs);
+    // absent = leave their Jobs unchanged.
+    let activityIds: string[] | null = null;
+    if (req.body?.activityIds !== undefined) {
+      const jobsParse = parseActivityIds(req.body.activityIds);
+      if ("error" in jobsParse) return res.status(400).json({ errors: { activityIds: jobsParse.error } });
+      activityIds = jobsParse.activityIds;
+    }
 
     // A *new* break profile assignment (different from what's already
     // stored) must reference an active profile — leaving the value
@@ -810,7 +849,7 @@ router.patch(
 
     const keys = Object.keys(d) as (keyof EmployeeFields)[];
     const permitColumnNames = Object.keys(permitColumns);
-    if (keys.length === 0 && permitColumnNames.length === 0) {
+    if (keys.length === 0 && permitColumnNames.length === 0 && activityIds === null) {
       return res.status(400).json({ error: "No fields to update" });
     }
 
@@ -824,6 +863,9 @@ router.patch(
     const client = await pool.connect();
     try {
       await client.query("begin");
+      // Same per-employee lock as time-entry writes, taken first (before the
+      // row update) so Job changes and work events always lock in one order.
+      if (activityIds !== null || d.isActive === false) await lockEmployeeForManualEntry(client, id);
 
       const { rows } = await client.query(
         `update employees set ${setClauses.join(", ")} where id = $${values.length + 1} returning id`,
@@ -836,6 +878,10 @@ router.patch(
 
       if (permitHistoryWrite) {
         await recordWorkPermitHistory(client, id, permitHistoryWrite.old, permitHistoryWrite.new, req.employee!.id, null);
+      }
+
+      if (activityIds !== null) {
+        await setEmployeeActivityAssignments(client, id, activityIds, req.employee!.id);
       }
 
       // Deactivating an employee must not leave them reachable through a
@@ -853,11 +899,7 @@ router.patch(
            where employee_id = $1 and unassigned_at is null`,
           [id]
         );
-        await client.query(
-          `update employee_activity_group_assignments set unassigned_at = now()
-           where employee_id = $1 and unassigned_at is null`,
-          [id]
-        );
+        await closeAllEmployeeActivityAssignments(client, id, req.employee!.id);
         // Desktop sign-ins end here too, not just at their next renewal
         // (which also refuses an inactive employee — see lib/webSessions.ts).
         await revokeEmployeeWebSessions(client, id, "employee_deactivated");
@@ -875,6 +917,9 @@ router.patch(
       res.json({ employee: serializeEmployee(full[0], photoUrl, true) });
     } catch (err) {
       await client.query("rollback");
+      if (err instanceof ActivityAssignmentError) {
+        return res.status(400).json({ errors: { activityIds: err.message } });
+      }
       const pgErr = err as { code?: string; constraint?: string };
       if (pgErr.code === "23505") {
         const field = duplicateFieldFromConstraint(pgErr.constraint);
@@ -895,96 +940,11 @@ router.patch(
   })
 );
 
-router.get(
-  "/:id/activity-groups",
-  requireAuth,
-  requireRole("Administrator", "Manager"),
-  asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid employee id" });
-
-    const empCheck = await pool.query("select id from employees where id = $1", [id]);
-    if (!empCheck.rows[0]) return res.status(404).json({ error: "Employee not found" });
-
-    const { rows } = await pool.query(
-      `select ag.id, ag.name
-       from employee_activity_group_assignments eaga
-       join activity_groups ag on ag.id = eaga.activity_group_id
-       where eaga.employee_id = $1 and eaga.unassigned_at is null
-       order by ag.name`,
-      [id]
-    );
-    res.json({ activityGroups: rows });
-  })
-);
-
-router.put(
-  "/:id/activity-groups",
-  requireAuth,
-  requireRole("Administrator"),
-  asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid employee id" });
-
-    const raw = req.body?.activityGroupIds;
-    if (!Array.isArray(raw)) return res.status(400).json({ error: "activityGroupIds must be an array" });
-    const desired = [...new Set(raw)];
-    if (!desired.every((gid) => typeof gid === "string" && UUID_RE.test(gid))) {
-      return res.status(400).json({ error: "One or more activityGroupIds are invalid" });
-    }
-    if (desired.length) {
-      const check = await pool.query(
-        "select id from activity_groups where id = any($1::uuid[]) and is_active = true",
-        [desired]
-      );
-      if (check.rows.length !== desired.length) {
-        return res.status(400).json({ error: "One or more activityGroupIds do not match an active activity group" });
-      }
-    }
-
-    const client = await pool.connect();
-    try {
-      await client.query("begin");
-
-      const empCheck = await client.query("select id from employees where id = $1", [id]);
-      if (!empCheck.rows[0]) {
-        await client.query("rollback");
-        return res.status(404).json({ error: "Employee not found" });
-      }
-
-      const current = await client.query(
-        "select activity_group_id from employee_activity_group_assignments where employee_id = $1 and unassigned_at is null",
-        [id]
-      );
-      const currentIds = new Set(current.rows.map((r) => r.activity_group_id as string));
-      const desiredSet = new Set(desired as string[]);
-
-      for (const gid of currentIds) {
-        if (!desiredSet.has(gid)) await removeEmployeeFromActivityGroup(client, id, gid);
-      }
-      for (const gid of desiredSet) {
-        if (!currentIds.has(gid)) await addEmployeeToActivityGroup(client, id, gid, req.employee!.id);
-      }
-
-      await client.query("commit");
-    } catch (err) {
-      await client.query("rollback");
-      throw err;
-    } finally {
-      client.release();
-    }
-
-    const { rows } = await pool.query(
-      `select ag.id, ag.name
-       from employee_activity_group_assignments eaga
-       join activity_groups ag on ag.id = eaga.activity_group_id
-       where eaga.employee_id = $1 and eaga.unassigned_at is null
-       order by ag.name`,
-      [id]
-    );
-    res.json({ activityGroups: rows });
-  })
-);
+// Replaced by assignedActivities / activityIds on the employee itself
+// (see lib/legacyActivityGroups.ts) — answers 410 "refresh LabourLink" to a
+// desktop page still running the previous version, without changing
+// anything.
+router.all("/:id/activity-groups", requireAuth, activityGroupsRemoved);
 
 router.post(
   "/:id/photo",

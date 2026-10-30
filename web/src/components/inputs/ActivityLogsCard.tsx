@@ -244,7 +244,7 @@ export function ActivityLogsCard({
                     <input
                       type="checkbox"
                       className="inputs-select-checkbox"
-                      aria-label="Select all deletable activity entries"
+                      aria-label="Select all deletable job entries"
                       checked={allDeletableChecked}
                       ref={(el) => {
                         if (el) el.indeterminate = checkedDeletableCount > 0 && !allDeletableChecked;
@@ -253,7 +253,7 @@ export function ActivityLogsCard({
                     />
                   )}
                 </th>
-                <th>Activity</th>
+                <th>Job</th>
                 <th>Row</th>
                 <th>Carrier</th>
                 <th>Speed</th>

@@ -32,39 +32,25 @@ export interface EmployeeActivityOption {
   questions: ActivityQuestionOption[];
 }
 
-// Every active activity in one of the employee's currently active group
-// assignments, each with its own ordered question list — the complete set
-// a picker (mobile or admin) should offer, and the complete set the server
-// treats as "this employee may legitimately log this." An employee (or a
-// day being backfilled for one) with no active group assignment gets an
-// empty list, never a fallback to "every activity" — the group assignment
-// is what defines "available," not just "exists."
+// Every active Job the employee is directly assigned to
+// (employee_activity_assignments, migration 067), each with its own ordered
+// question list — the complete set a picker (phone or Inputs) should offer,
+// and the complete set the server treats as "this employee may
+// legitimately log this." An employee with no assignments gets an empty
+// list, never a fallback to "every Job."
+//
+// `activityGroups` is always empty now; it stays in the response only so
+// phone builds from before Activity Groups were removed keep reading it
+// without error.
 export async function loadEmployeeActivitiesWithQuestions(
   db: Queryable,
   employeeId: string
 ): Promise<{ activities: EmployeeActivityOption[]; activityGroups: { id: string; name: string }[] }> {
-  const groupRows = await db.query(
-    `select ag.id, ag.name
-     from employee_activity_group_assignments eaga
-     join activity_groups ag on ag.id = eaga.activity_group_id and ag.is_active = true
-     where eaga.employee_id = $1 and eaga.unassigned_at is null
-     order by ag.name`,
-    [employeeId]
-  );
-  const groups = groupRows.rows as { id: string; name: string }[];
-  if (groups.length === 0) {
-    return { activities: [], activityGroups: [] };
-  }
-
   const { rows } = await db.query(
     `select a.id, a.name, a.normal_speed, a.speed_unit, a.sort_order,
             coalesce(q.questions, '[]'::json) as questions
-     from (
-       select distinct aga.activity_id
-       from activity_group_activities aga
-       where aga.activity_group_id = any($1::uuid[])
-     ) x
-     join activities a on a.id = x.activity_id and a.is_active = true
+     from employee_activity_assignments eaa
+     join activities a on a.id = eaa.activity_id and a.is_active = true
      left join lateral (
        select json_agg(json_build_object(
                 'id', aq.id, 'questionType', aq.question_type,
@@ -73,8 +59,9 @@ export async function loadEmployeeActivitiesWithQuestions(
        from activity_questions aq
        where aq.activity_id = a.id and aq.is_active = true
      ) q on true
+     where eaa.employee_id = $1 and eaa.unassigned_at is null
      order by a.sort_order, a.name`,
-    [groups.map((g) => g.id)]
+    [employeeId]
   );
 
   return {
@@ -94,7 +81,7 @@ export async function loadEmployeeActivitiesWithQuestions(
         isRequired: q.isRequired as boolean,
       })),
     })),
-    activityGroups: groups.map((g) => ({ id: g.id, name: g.name })),
+    activityGroups: [],
   };
 }
 
@@ -109,16 +96,25 @@ export type ActivityAnswerValidation =
   | { ok: false; error: string };
 
 // The complete "is this a legitimate log for this employee, with a fully
-// answered question set" check — activity must be active and in one of the
-// employee's active group assignments (a client-supplied activityId is
-// never trusted just because a picker offered it), every required question
-// answered, every answered row/carrier a real active one. Identical rules
-// for a mobile work-start/activity-change and an admin-created entry.
+// answered question set" check — the Job must be active and assigned to the
+// employee (a client-supplied activityId is never trusted just because a
+// picker offered it), every required question answered, every answered
+// row/carrier a real active one. Identical rules for a mobile
+// work-start/activity-change and an admin-created entry.
+//
+// `assignedAt` is for phone events recorded offline and synced later
+// (POST /api/mobile/sync/events): such an event is also accepted when the
+// Job was assigned at the moment it happened, even if the assignment has
+// since been removed — removing a Job must not discard work done while it
+// was still assigned. The Job must still be active (deactivation has no
+// recorded time, so it can't be checked "as of" the event; such an event
+// is kept as a Sync conflict for review, as before).
 export async function validateActivityAndAnswers(
   db: Queryable,
   activityId: string,
   employeeId: string,
-  answers: AnswerInput[] | undefined
+  answers: AnswerInput[] | undefined,
+  options: { assignedAt?: Date } = {}
 ): Promise<ActivityAnswerValidation> {
   if (!activityId || !UUID_RE.test(activityId)) {
     return { ok: false, error: "A valid activityId is required" };
@@ -127,14 +123,14 @@ export async function validateActivityAndAnswers(
   const activityCheck = await db.query(
     `select a.id
      from activities a
-     join activity_group_activities aga on aga.activity_id = a.id
-     join employee_activity_group_assignments eaga
-       on eaga.activity_group_id = aga.activity_group_id
-      and eaga.employee_id = $2
-      and eaga.unassigned_at is null
-     join activity_groups ag on ag.id = aga.activity_group_id and ag.is_active = true
-     where a.id = $1 and a.is_active = true`,
-    [activityId, employeeId]
+     where a.id = $1 and a.is_active = true
+       and exists (
+         select 1 from employee_activity_assignments eaa
+         where eaa.employee_id = $2 and eaa.activity_id = a.id
+           and (eaa.unassigned_at is null
+                or ($3::timestamptz is not null and eaa.assigned_at <= $3 and eaa.unassigned_at > $3))
+       )`,
+    [activityId, employeeId, options.assignedAt ?? null]
   );
   if (!activityCheck.rows[0]) {
     return { ok: false, error: "activityId is not available to this employee" };

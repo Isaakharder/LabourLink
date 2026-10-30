@@ -59,7 +59,7 @@ async function main() {
   const employeeIds: string[] = [];
   const activityIds: string[] = [];
   const carrierIds: string[] = [];
-  let activityGroupId: string | undefined;
+  let assignedJobIds: string[] = [];
   let landId: string | undefined;
   let phaseId: string | undefined;
   let rowId: string | undefined;
@@ -86,7 +86,7 @@ async function main() {
         ])
       ).rows[0].id;
       activityIds.push(id);
-      await pool.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2)`, [activityGroupId, id]);
+      assignedJobIds.push(id);
       return id;
     }
     async function entry(
@@ -120,7 +120,7 @@ async function main() {
     const admin = await createEmployee("Admin", "Administrator");
     const adminToken = signSession({ id: admin.id, firstName: admin.first_name, lastName: admin.last_name, securityRole: "Administrator", teamRole: "Team Member" });
 
-    activityGroupId = (await pool.query(`insert into activity_groups (name, is_active) values ($1, true) returning id`, [`QA BelowMin ${RUN_ID}`])).rows[0].id;
+    assignedJobIds = [];
     const peppers = await createActivity("QA Picking Peppers", 3);
     const tomatoes = await createActivity("QA Picking Tomatoes", 10);
     const sorting = await createActivity("QA Sorting", 0);
@@ -233,7 +233,7 @@ async function main() {
     check(d5.runs[0]?.isOpen === true && d5.runs[0]?.isBelowMinimumDuration === false, "4) an in-progress run is never flagged", d5.runs);
 
     const manualWorker = await createEmployee("Manual Worker");
-    await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [manualWorker.id, activityGroupId]);
+    await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [manualWorker.id, assignedJobIds]);
     const added = await call("POST", "/api/inputs/activities", adminToken, {
       employeeId: manualWorker.id,
       date: DAY,
@@ -253,12 +253,8 @@ async function main() {
       for (const table of ["time_entry_corrections", "time_entry_deletions", "time_entries"]) {
         await client.query(`delete from ${table} where employee_id in (select id from employees where email like $1)`, [EMAIL_PATTERN]);
       }
-      if (activityGroupId) {
-        await client.query(`delete from employee_activity_group_assignments where activity_group_id = $1`, [activityGroupId]);
-        await client.query(`delete from activity_group_activities where activity_group_id = $1`, [activityGroupId]);
-      }
+        await client.query(`delete from employee_activity_assignments where activity_id = any($1::uuid[])`, [assignedJobIds]);
       await client.query(`delete from activities where id = any($1::uuid[])`, [activityIds]);
-      if (activityGroupId) await client.query(`delete from activity_groups where id = $1`, [activityGroupId]);
       if (rowId) await client.query(`delete from greenhouse_rows where id = $1`, [rowId]);
       if (phaseId) await client.query(`delete from greenhouse_phases where id = $1`, [phaseId]);
       if (landId) await client.query(`delete from greenhouse_lands where id = $1`, [landId]);

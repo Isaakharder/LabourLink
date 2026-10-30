@@ -120,6 +120,8 @@
     "test:inputs-bulk-delete": "ts-node src/routes/inputs.bulkDelete.test.ts",
     "test:inputs-break-bulk-delete": "ts-node src/routes/inputs.breakBulkDelete.test.ts",
     "test:employee-groups": "ts-node src/routes/employeeGroups.test.ts",
+    "test:employee-jobs": "ts-node src/routes/employeeJobs.test.ts",
+    "test:migration-067": "ts-node src/lib/migration067.test.ts",
     "test:reports-cross-day-completion": "ts-node src/routes/reports.crossDayCompletion.test.ts",
     "test:row-review-window": "ts-node src/routes/rowReviewWindow.test.ts",
     "test:cors-origin": "ts-node src/lib/corsOrigin.test.ts",

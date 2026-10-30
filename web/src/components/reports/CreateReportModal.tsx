@@ -158,8 +158,8 @@ export function CreateReportModal({ onClose, onSaved }: CreateReportModalProps) 
       {step === 1 && (
         <div className="report-type-options">
           <button type="button" className="report-type-option" onClick={() => chooseType("activity")}>
-            <strong>Activity Report</strong>
-            <span>Speed, quantity, and time for one activity</span>
+            <strong>Job Report</strong>
+            <span>Speed, quantity, and time for one job</span>
           </button>
           <button type="button" className="report-type-option" onClick={() => chooseType("payroll")}>
             <strong>Payroll Report</strong>
@@ -186,12 +186,12 @@ export function CreateReportModal({ onClose, onSaved }: CreateReportModalProps) 
           {reportType === "activity" && (
             <>
               <label className="report-form-label">
-                Activity
+                Job
                 {activities === null ? (
-                  <p>Loading activities...</p>
+                  <p>Loading jobs...</p>
                 ) : (
                   <select value={activityId ?? ""} onChange={(e) => setActivityId(e.target.value || null)}>
-                    <option value="">Select an activity...</option>
+                    <option value="">Select a job...</option>
                     {activities.map((a) => (
                       <option key={a.id} value={a.id}>
                         {a.name}

@@ -81,7 +81,7 @@ async function main() {
   const employeeIds: string[] = [];
   const deviceIds: string[] = [];
   const activityIds: string[] = [];
-  let groupId: string | undefined;
+  let assignedJobIds: string[] = [];
   let landId: string | undefined;
   let phaseId: string | undefined;
   let rowId: string | undefined;
@@ -110,9 +110,7 @@ async function main() {
       teamRole: "Team Member",
     });
 
-    groupId = (
-      await pool.query(`insert into activity_groups (name, is_active) values ($1, true) returning id`, [`QA Manual Protect ${RUN_ID}`])
-    ).rows[0].id;
+    assignedJobIds = [];
     const plainId: string = (
       await pool.query(`insert into activities (name, is_active, minimum_duration_minutes) values ($1, true, 0) returning id`, [
         `QA MP Cleaning ${RUN_ID}`,
@@ -138,11 +136,7 @@ async function main() {
         [pickId]
       )
     ).rows[0].id;
-    await pool.query(`insert into activity_group_activities (activity_group_id, activity_id) values ($1, $2), ($1, $3)`, [
-      groupId,
-      plainId,
-      pickId,
-    ]);
+    assignedJobIds.push(plainId, pickId);
     landId = (
       await pool.query(
         `insert into greenhouse_lands (name, north_south_feet, east_west_feet, is_active) values ($1, 100, 100, true) returning id`,
@@ -171,7 +165,7 @@ async function main() {
     // one-open-entry rule never interact across scenarios.
     async function setupWorker(label: string) {
       const e = await createEmployee("Employee", label);
-      await pool.query(`insert into employee_activity_group_assignments (employee_id, activity_group_id) values ($1, $2)`, [e.id, groupId]);
+      await pool.query(`insert into employee_activity_assignments (employee_id, activity_id) select $1, unnest($2::uuid[])`, [e.id, assignedJobIds]);
       const deviceIdentifier = randomUUID();
       const deviceId: string = (
         await pool.query(`insert into devices (device_identifier, device_name, is_active) values ($1, $2, true) returning id`, [
@@ -455,12 +449,8 @@ async function main() {
       await client.query(`delete from device_assignments where device_id = any($1::uuid[])`, [deviceIds]);
       await client.query(`delete from devices where id = any($1::uuid[])`, [deviceIds]);
       await client.query(`delete from activity_questions where activity_id = any($1::uuid[])`, [activityIds]);
-      if (groupId) {
-        await client.query(`delete from employee_activity_group_assignments where activity_group_id = $1`, [groupId]);
-        await client.query(`delete from activity_group_activities where activity_group_id = $1`, [groupId]);
-      }
+        await client.query(`delete from employee_activity_assignments where activity_id = any($1::uuid[])`, [assignedJobIds]);
       await client.query(`delete from activities where id = any($1::uuid[])`, [activityIds]);
-      if (groupId) await client.query(`delete from activity_groups where id = $1`, [groupId]);
       if (rowId) await client.query(`delete from greenhouse_rows where id = $1`, [rowId]);
       if (phaseId) await client.query(`delete from greenhouse_phases where id = $1`, [phaseId]);
       if (landId) await client.query(`delete from greenhouse_lands where id = $1`, [landId]);

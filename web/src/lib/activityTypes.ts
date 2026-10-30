@@ -74,39 +74,12 @@ export interface Activity {
   // speed on Inputs is driven by — null means no calculated speed, only the
   // configured normalSpeed above.
   densitySource: DensitySource | null;
-  assignedGroupCount: number;
+  // Active employees currently assigned this Job.
+  assignedEmployeeCount: number;
   updatedAt: string;
   // Ordered by sortOrder — zero, one, or many. Replaces v1's single
   // `question: ActivityQuestion | null` field.
   questions: ActivityQuestion[];
-}
-
-export interface ActivityGroupMember {
-  id: string;
-  name: string;
-  isActive: boolean;
-}
-
-export interface ActivityGroupEmployee {
-  id: string;
-  firstName: string;
-  lastName: string;
-}
-
-export interface ActivityGroup {
-  id: string;
-  name: string;
-  description: string | null;
-  isActive: boolean;
-  activities: ActivityGroupMember[];
-  activityCount: number;
-  assignedEmployeeCount: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface ActivityGroupDetail extends ActivityGroup {
-  assignedEmployees: ActivityGroupEmployee[];
 }
 
 // Suggestions only — the field is free text so activities using a unit not

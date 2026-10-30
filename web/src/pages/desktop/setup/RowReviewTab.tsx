@@ -77,7 +77,7 @@ export function RowReviewTab() {
     <section className="settings-section">
       <h2>Row review window</h2>
       <p className="settings-section-description">
-        Visits to the same row for the same activity that are fewer than this many calendar days apart are reviewed
+        Visits to the same row for the same job that are fewer than this many calendar days apart are reviewed
         together, whoever worked them: if a window has more than one unfinished-review visit, it shows “Needs review” on
         Inputs and its stems aren’t counted until it’s resolved. A gap of this many days or more starts a new window,
         with its own stems and time. Days are calendar dates in the organization’s time zone. Changing this regroups
