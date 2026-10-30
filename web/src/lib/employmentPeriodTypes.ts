@@ -27,6 +27,8 @@ export const DATE_FIELD_LABELS = {
   startDate: "Employment Start Date",
   workPermitExpiryDate: "Work Permit Expiry Date",
   endDifferentDate: "End Different Date",
+  vacationStartDate: "Start Vacation",
+  vacationEndDate: "End Vacation",
 } as const;
 
 // Computed server-side once (employmentTimelineView.ts) so the Graph,
@@ -62,6 +64,10 @@ export interface EmploymentTimelineEmployee {
   employmentStartDate: string | null;
   workPermitExpiryDate: string | null;
   endDifferentDate: string | null;
+  // One planned vacation (both set or both null) — timeline planning only,
+  // drawn as an orange overlay on the bar. Same employee record.
+  vacationStartDate: string | null;
+  vacationEndDate: string | null;
   workPermit: EmploymentTimelineWorkPermit | null;
   // From the employee's latest employment period — shown and filterable,
   // no longer edited from the timeline.

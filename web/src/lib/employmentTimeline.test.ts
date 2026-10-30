@@ -6,6 +6,7 @@ import {
   computeBarPosition,
   computeFitAllPxPerDay,
   computeFittedRange,
+  computeVacationPosition,
   daysBetweenDateStrs,
   EMPLOYMENT_TIMELINE_COLUMNS,
   employmentTimelineRowCells,
@@ -31,6 +32,8 @@ function emp(overrides: Partial<EmploymentTimelineEmployee> = {}): EmploymentTim
     employmentStartDate: "2026-01-05",
     workPermitExpiryDate: "2026-09-30",
     endDifferentDate: null,
+    vacationStartDate: null,
+    vacationEndDate: null,
     workPermit: null,
     employmentType: "Seasonal",
     workGroup: "Greenhouse",
@@ -275,6 +278,8 @@ describe("table/CSV/PDF/Print rows", () => {
       "Employment Start Date",
       "Work Permit Expiry Date",
       "End Different Date",
+      "Start Vacation",
+      "End Vacation",
       "Timeline ends",
       "Status",
     ]);
@@ -293,6 +298,8 @@ describe("table/CSV/PDF/Print rows", () => {
       "Greenhouse",
       "2026-01-05",
       "2026-09-30",
+      "",
+      "",
       "",
       "2026-09-30 (Work Permit Expiry Date)",
       "Employed",
@@ -317,5 +324,67 @@ describe("pinned year while scrolled", () => {
   it("hides just before the next year's label arrives (no overlap)", () => {
     const beforeJan1 = daysBetweenDateStrs(range.start, "2026-01-01") * 10 - 20; // 20px before
     expect(pinnedYearLabel(range, 10, beforeJan1)).toBeNull();
+  });
+});
+
+describe("vacation overlay", () => {
+  const vac = (s: string, e: string, extra: Partial<EmploymentTimelineEmployee> = {}) =>
+    emp({ employmentStartDate: "2025-01-06", workPermitExpiryDate: "2027-12-31", timelineEndDate: "2027-12-31", vacationStartDate: s, vacationEndDate: e, ...extra });
+  const slotPct = (range: TimelineRange) => 100 / rangeDayCount(range);
+
+  it("starts on Start Vacation's day and ends after End Vacation's day, in the bar's day slots", () => {
+    const range = { start: "2026-01-01", end: "2026-12-31" };
+    const v = computeVacationPosition(vac("2026-07-01", "2026-07-14"), range)!;
+    expect(v.leftPercent).toBeCloseTo(percentInRange("2026-07-01", range), 10);
+    expect(v.leftPercent + v.widthPercent).toBeCloseTo(percentInRange("2026-07-15", range), 10);
+    expect(v.widthPercent).toBeCloseTo(14 * slotPct(range), 10);
+    expect(v.monthLines).toEqual([]);
+  });
+
+  it("across a month and a year boundary: the month lines inside it sit exactly on the timeline's month gridlines", () => {
+    const range = { start: "2026-10-01", end: "2027-03-31" };
+    const v = computeVacationPosition(vac("2026-12-20", "2027-01-10"), range)!;
+    const scale = buildTimelineScale(range, 5);
+    const jan1 = scale.months.find((s) => s.key === "2027-01-01")!;
+    expect(v.monthLines.map((l) => l.key)).toEqual(["2027-01-01"]);
+    expect(v.leftPercent + (v.monthLines[0].leftPercentOfSegment / 100) * v.widthPercent).toBeCloseTo(jan1.leftPercent, 10);
+    expect(v.widthPercent).toBeCloseTo(22 * slotPct(range), 10);
+  });
+
+  it("is exact across both Toronto DST days (2026-03-08 spring forward, 2026-11-01 fall back) and a leap day", () => {
+    const range = { start: "2026-01-01", end: "2028-12-31" };
+    const spring = computeVacationPosition(vac("2026-03-07", "2026-03-09"), range)!;
+    const fall = computeVacationPosition(vac("2026-10-31", "2026-11-02"), range)!;
+    const leap = computeVacationPosition(vac("2028-02-28", "2028-03-01", { workPermitExpiryDate: "2028-12-31", timelineEndDate: "2028-12-31" }), range)!;
+    for (const v of [spring, fall, leap]) expect(v.widthPercent).toBeCloseTo(3 * slotPct(range), 10); // 3 whole days each
+    expect(fall.monthLines.map((l) => l.key)).toEqual(["2026-11-01"]);
+    expect(fall.leftPercent + (fall.monthLines[0].leftPercentOfSegment / 100) * fall.widthPercent).toBeCloseTo(percentInRange("2026-11-01", range), 10);
+    expect(leap.monthLines.map((l) => l.key)).toEqual(["2028-03-01"]);
+  });
+
+  it("is clipped to the visible range and to the bar; nothing when outside or absent", () => {
+    const range = { start: "2026-07-05", end: "2026-07-31" };
+    const clipped = computeVacationPosition(vac("2026-07-01", "2026-07-14"), range)!;
+    expect(clipped.leftPercent).toBe(0);
+    expect(clipped.widthPercent).toBeCloseTo(10 * slotPct(range), 10);
+    expect(computeVacationPosition(vac("2026-06-01", "2026-06-10"), range)).toBeNull();
+    expect(computeVacationPosition(emp(), range)).toBeNull();
+    // Never past the bar's end (e.g. a later-shortened permit) or before its start.
+    const bar = { start: "2026-01-01", end: "2026-12-31" };
+    const short = computeVacationPosition(vac("2026-07-01", "2026-07-14", { timelineEndDate: "2026-07-10" }), bar)!;
+    expect(short.leftPercent + short.widthPercent).toBeCloseTo(percentInRange("2026-07-11", bar), 10);
+  });
+
+  it("an ongoing bar keeps a future vacation", () => {
+    const range = { start: "2026-01-01", end: "2031-12-31" };
+    const v = computeVacationPosition(vac("2031-07-01", "2031-07-21", { workPermitExpiryDate: null, timelineEndDate: null, timelineLabel: "ongoing" }), range)!;
+    expect(v.widthPercent).toBeCloseTo(21 * slotPct(range), 10);
+  });
+
+  it("Table/CSV/PDF/Print rows carry the same vacation dates", () => {
+    const [row] = buildEmploymentTimelineRows([vac("2026-07-01", "2026-07-14")]);
+    const cells = employmentTimelineRowCells(row);
+    expect(cells[EMPLOYMENT_TIMELINE_COLUMNS.indexOf("Start Vacation")]).toBe("2026-07-01");
+    expect(cells[EMPLOYMENT_TIMELINE_COLUMNS.indexOf("End Vacation")]).toBe("2026-07-14");
   });
 });

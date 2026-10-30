@@ -7797,6 +7797,27 @@ input {
   white-space: nowrap;
 }
 
+.employment-dates-vacation {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0.75rem;
+  border: 1px solid rgba(249, 115, 22, 0.6);
+  border-radius: 6px;
+  background: rgba(249, 115, 22, 0.06);
+}
+
+.employment-dates-vacation legend {
+  padding: 0 0.3rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.employment-dates-clear-vacation {
+  align-self: flex-start;
+}
+
 .employment-dates-optional {
   font-weight: 400;
   color: var(--color-muted);
@@ -8191,7 +8212,38 @@ input {
   z-index: 2;
 }
 
+/* Vacation: translucent orange over the blue bar, inset so a strip of the
+   bar stays visible above and below (still employed). Lives inside the bar
+   button, so a click on it still opens the editor; the label stays above
+   it, and month lines continue through it. */
+.employment-timeline-vacation {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  border-radius: 2px;
+  background: rgba(249, 115, 22, 0.85);
+  pointer-events: auto;
+}
+
+.employment-timeline-vacation-gridline {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.75);
+}
+
+.employment-timeline-legend-swatch.employment-timeline-vacation {
+  position: static;
+  display: inline-block;
+  background-color: var(--color-primary);
+  background-image: linear-gradient(rgba(249, 115, 22, 0.85), rgba(249, 115, 22, 0.85));
+  box-shadow: inset 0 0 0 2px var(--color-primary);
+}
+
 .employment-timeline-bar-label {
+  position: relative;
+  z-index: 1;
   width: 100%;
   white-space: nowrap;
   overflow: hidden;
@@ -8348,7 +8400,18 @@ input {
    so printing renders the accessible table instead. Scoped via :has() the
    same way the Reports print block is (index.css's body:has(.report-view)
    block above), so printing from anywhere else is unaffected. */
+/* Printed table only: explains the vacation columns (no bars on paper). */
+.employment-timeline-print-legend {
+  display: none;
+}
+
 @media print {
+  .employment-timeline-print-legend {
+    display: block;
+    margin: 0 0 0.5rem;
+    font-size: 0.75rem;
+  }
+
   body:has(.employment-timeline-view) .sidebar,
   body:has(.employment-timeline-view) .sidebar-restore-tab,
   .employment-timeline-toolbar,

@@ -13,6 +13,7 @@ import {
   buildTimelineScale,
   computeBarPosition,
   computeFitAllPxPerDay,
+  computeVacationPosition,
   describeTimelineEnd,
   MAX_PX_PER_DAY,
   percentInRange,
@@ -57,7 +58,12 @@ const LEGEND: { className: string; label: string }[] = [
   { className: "employment-timeline-bar-ongoing", label: "Ongoing (no end date)" },
   { className: "employment-timeline-bar-permit-expired", label: "Permit expired" },
   { className: "employment-timeline-bar-completed", label: "Finished (End Different Date reached)" },
+  { className: "employment-timeline-vacation", label: "Vacation (still employed)" },
 ];
+
+function vacationText(emp: EmploymentTimelineEmployee): string {
+  return `Vacation: ${emp.vacationStartDate} – ${emp.vacationEndDate}`;
+}
 
 function barTooltip(number: number, emp: EmploymentTimelineEmployee, clipped: boolean): string {
   const name = `${emp.firstName} ${emp.lastName}`;
@@ -66,6 +72,7 @@ function barTooltip(number: number, emp: EmploymentTimelineEmployee, clipped: bo
     `${DATE_FIELD_LABELS.startDate}: ${emp.employmentStartDate}${clipped ? " (before the displayed range)" : ""}`,
     `${DATE_FIELD_LABELS.workPermitExpiryDate}: ${emp.workPermitExpiryDate ?? "—"}`,
     `${DATE_FIELD_LABELS.endDifferentDate}: ${emp.endDifferentDate ?? "—"}`,
+    emp.vacationStartDate ? vacationText(emp) : null,
     `Timeline ends: ${describeTimelineEnd(emp)}`,
     emp.employmentType ? `Type: ${emp.employmentType}` : null,
   ]
@@ -368,6 +375,7 @@ export const EmploymentTimelineGraph = forwardRef<EmploymentTimelineGraphHandle,
               const number = i + 1;
               const name = `${emp.firstName} ${emp.lastName}`;
               const pos = computeBarPosition(emp, range);
+              const vacation = pos?.inRange ? computeVacationPosition(emp, range) : null;
               return (
                 <div key={emp.id} className="employment-timeline-track" data-employee-id={emp.id}>
                   {!pos ? (
@@ -405,6 +413,29 @@ export const EmploymentTimelineGraph = forwardRef<EmploymentTimelineGraphHandle,
                           data-start={emp.employmentStartDate ?? undefined}
                           data-end={emp.timelineEndDate ?? "ongoing"}
                         >
+                          {vacation && (
+                            // Translucent orange over the blue bar (still employed), in the
+                            // bar's own day slots; month lines continue through it.
+                            <span
+                              className="employment-timeline-vacation"
+                              style={{
+                                left: `${((vacation.leftPercent - pos.leftPercent) / pos.widthPercent) * 100}%`,
+                                width: `${(vacation.widthPercent / pos.widthPercent) * 100}%`,
+                              }}
+                              title={`${vacationText(emp)} (still employed)`}
+                              data-vacation-start={emp.vacationStartDate ?? undefined}
+                              data-vacation-end={emp.vacationEndDate ?? undefined}
+                            >
+                              {vacation.monthLines.map((line) => (
+                                <span
+                                  key={line.key}
+                                  className="employment-timeline-vacation-gridline"
+                                  style={{ left: `${line.leftPercentOfSegment}%` }}
+                                  aria-hidden="true"
+                                />
+                              ))}
+                            </span>
+                          )}
                           {pos.clippedStart && (
                             <span className="employment-timeline-bar-clip-notch" aria-hidden="true">
                               ◀

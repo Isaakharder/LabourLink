@@ -78,6 +78,8 @@ function emp(overrides: Partial<EmploymentTimelineEmployee> = {}): EmploymentTim
     employmentStartDate: "2024-08-01",
     workPermitExpiryDate: null,
     endDifferentDate: null,
+    vacationStartDate: null,
+    vacationEndDate: null,
     workPermit: null,
     employmentType: "Permanent",
     workGroup: "Greenhouse",
@@ -242,7 +244,7 @@ describe("EmploymentTimelineTab — simplified employment-dates editor", () => {
     return screen.getByRole("dialog");
   }
 
-  it("shows only Employment Start Date, Work Permit Expiry Date and End Different Date — no type, group, notes, add or delete", async () => {
+  it("shows the three employment dates and the two vacation dates — no type, group, notes, add or delete", async () => {
     timelineResponse = { employees: [emp({ workPermitExpiryDate: "2027-02-04", timelineEndDate: "2027-02-04", timelineEndSource: "workPermitExpiry", timelineLabel: "employed" })] };
     const user = userEvent.setup();
     renderTab();
@@ -250,26 +252,33 @@ describe("EmploymentTimelineTab — simplified employment-dates editor", () => {
     expect(within(dialog).getByLabelText(/^Employment Start Date/)).toHaveValue("2024-08-01");
     expect(within(dialog).getByLabelText(/^Work Permit Expiry Date/)).toHaveValue("2027-02-04");
     expect(within(dialog).getByLabelText(/^End Different Date/)).toHaveValue("");
-    expect(dialog.querySelectorAll("input")).toHaveLength(3);
+    expect(within(dialog).getByLabelText(/^Start Vacation/)).toHaveValue("");
+    expect(within(dialog).getByLabelText(/^End Vacation/)).toHaveValue("");
+    expect(dialog.querySelectorAll("input")).toHaveLength(5);
     expect(dialog.querySelectorAll("select, textarea")).toHaveLength(0);
     for (const gone of [/Employment type/i, /Work group/i, /Notes/i, /Add another period/i, /Delete period/i]) {
       expect(within(dialog).queryByText(gone)).not.toBeInTheDocument();
     }
   });
 
-  it("saves the three dates to the employee record (the same PATCH the Directory uses) and reloads the timeline", async () => {
+  it("saves the dates to the employee record (the same PATCH the Directory uses) and reloads the timeline", async () => {
     const user = userEvent.setup();
     renderTab();
     const dialog = await openEditor(user);
     fireEvent.change(within(dialog).getByLabelText(/^Employment Start Date/), { target: { value: "2024-07-15" } });
     fireEvent.change(within(dialog).getByLabelText(/^Work Permit Expiry Date/), { target: { value: "2027-02-04" } });
     fireEvent.change(within(dialog).getByLabelText(/^End Different Date/), { target: { value: "2026-12-15" } });
+    fireEvent.change(within(dialog).getByLabelText(/^Start Vacation/), { target: { value: "2026-07-01" } });
+    fireEvent.change(within(dialog).getByLabelText(/^End Vacation/), { target: { value: "2026-07-14" } });
     const loadsBefore = timelineLoads;
     await user.click(within(dialog).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(patches).toHaveLength(1));
-    expect(patches[0]).toEqual({ path: "/api/employees/emp-1", body: { startDate: "2024-07-15", workPermitExpiryDate: "2027-02-04", employmentEndDate: "2026-12-15" } });
+    expect(patches[0]).toEqual({
+      path: "/api/employees/emp-1",
+      body: { startDate: "2024-07-15", workPermitExpiryDate: "2027-02-04", employmentEndDate: "2026-12-15", vacationStartDate: "2026-07-01", vacationEndDate: "2026-07-14" },
+    });
     // Never isActive or anything else — saving can't deactivate or clock out.
-    expect(Object.keys(patches[0].body).sort()).toEqual(["employmentEndDate", "startDate", "workPermitExpiryDate"]);
+    expect(Object.keys(patches[0].body).sort()).toEqual(["employmentEndDate", "startDate", "vacationEndDate", "vacationStartDate", "workPermitExpiryDate"]);
     await waitFor(() => expect(timelineLoads).toBeGreaterThan(loadsBefore));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
@@ -283,7 +292,59 @@ describe("EmploymentTimelineTab — simplified employment-dates editor", () => {
     fireEvent.change(within(dialog).getByLabelText(/^End Different Date/), { target: { value: "" } });
     await user.click(within(dialog).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(patches).toHaveLength(1));
-    expect(patches[0].body).toEqual({ startDate: "2024-08-01", workPermitExpiryDate: null, employmentEndDate: null });
+    expect(patches[0].body).toEqual({ startDate: "2024-08-01", workPermitExpiryDate: null, employmentEndDate: null, vacationStartDate: null, vacationEndDate: null });
+  });
+
+  it("Clear vacation empties both vacation dates, and saving removes the vacation", async () => {
+    timelineResponse = { employees: [emp({ workPermitExpiryDate: "2027-02-04", vacationStartDate: "2026-07-01", vacationEndDate: "2026-07-14" })] };
+    const user = userEvent.setup();
+    renderTab();
+    const dialog = await openEditor(user);
+    expect(within(dialog).getByLabelText(/^Start Vacation/)).toHaveValue("2026-07-01");
+    await user.click(within(dialog).getByRole("button", { name: "Clear vacation" }));
+    expect(within(dialog).getByLabelText(/^Start Vacation/)).toHaveValue("");
+    expect(within(dialog).getByLabelText(/^End Vacation/)).toHaveValue("");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0].body).toMatchObject({ vacationStartDate: null, vacationEndDate: null, workPermitExpiryDate: "2027-02-04" });
+  });
+
+  it.each([
+    ["only Start Vacation", { start: "2026-07-01", end: "" }, "Enter both Start Vacation and End Vacation, or leave both empty"],
+    ["End before Start", { start: "2026-07-10", end: "2026-07-01" }, "End Vacation can't be before Start Vacation"],
+    ["before the Employment Start Date", { start: "2024-07-20", end: "2024-08-10" }, "Start Vacation can't be before the Employment Start Date"],
+    ["past the Work Permit Expiry Date", { start: "2027-01-20", end: "2027-02-10" }, "End Vacation can't be after the Work Permit Expiry Date (2027-02-04)"],
+  ])("rejects a vacation %s, saving nothing", async (_label, v, message) => {
+    timelineResponse = { employees: [emp({ workPermitExpiryDate: "2027-02-04" })] };
+    const user = userEvent.setup();
+    renderTab();
+    const dialog = await openEditor(user);
+    fireEvent.change(within(dialog).getByLabelText(/^Start Vacation/), { target: { value: v.start } });
+    fireEvent.change(within(dialog).getByLabelText(/^End Vacation/), { target: { value: v.end } });
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(within(dialog).getByText(message)).toBeInTheDocument();
+    expect(patches).toHaveLength(0);
+  });
+
+  it("an End Different Date limits the vacation instead of the later permit; an ongoing employee may plan any future vacation", async () => {
+    timelineResponse = { employees: [emp({ workPermitExpiryDate: "2027-02-04", endDifferentDate: "2026-10-31" })] };
+    const user = userEvent.setup();
+    renderTab();
+    let dialog = await openEditor(user);
+    fireEvent.change(within(dialog).getByLabelText(/^Start Vacation/), { target: { value: "2026-10-25" } });
+    fireEvent.change(within(dialog).getByLabelText(/^End Vacation/), { target: { value: "2026-11-05" } });
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(within(dialog).getByText("End Vacation can't be after the End Different Date (2026-10-31)")).toBeInTheDocument();
+    cleanup();
+
+    timelineResponse = { employees: [emp()] }; // ongoing: no permit, no End Different Date
+    renderTab();
+    dialog = await openEditor(user);
+    fireEvent.change(within(dialog).getByLabelText(/^Start Vacation/), { target: { value: "2031-07-01" } });
+    fireEvent.change(within(dialog).getByLabelText(/^End Vacation/), { target: { value: "2031-07-21" } });
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0].body).toMatchObject({ vacationStartDate: "2031-07-01", vacationEndDate: "2031-07-21" });
   });
 
   it("rejects an ending date earlier than the Employment Start Date with a clear message, saving nothing", async () => {

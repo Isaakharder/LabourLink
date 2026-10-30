@@ -1,4 +1,4 @@
-import { buildEmploymentTimelineRows, EMPLOYMENT_TIMELINE_COLUMNS, employmentTimelineRowCells } from "../../lib/employmentTimeline";
+import { buildEmploymentTimelineRows, EMPLOYMENT_TIMELINE_COLUMNS, employmentTimelineRowCells, VACATION_LEGEND_TEXT } from "../../lib/employmentTimeline";
 import { EmploymentTimelineEmployee } from "../../lib/employmentPeriodTypes";
 
 interface EmploymentTimelineTableProps {
@@ -17,26 +17,29 @@ export function EmploymentTimelineTable({ employees }: EmploymentTimelineTablePr
   }
 
   return (
-    <table className="employment-timeline-table">
-      <caption className="sr-only">Employment timeline</caption>
-      <thead>
-        <tr>
-          {EMPLOYMENT_TIMELINE_COLUMNS.map((c) => (
-            <th key={c} scope="col">
-              {c}
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row) => (
-          <tr key={row.number}>
-            {employmentTimelineRowCells(row).map((cell, i) => (
-              <td key={i}>{cell || "—"}</td>
+    <>
+      <p className="employment-timeline-print-legend">{VACATION_LEGEND_TEXT}</p>
+      <table className="employment-timeline-table">
+        <caption className="sr-only">Employment timeline</caption>
+        <thead>
+          <tr>
+            {EMPLOYMENT_TIMELINE_COLUMNS.map((c) => (
+              <th key={c} scope="col">
+                {c}
+              </th>
             ))}
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.number}>
+              {employmentTimelineRowCells(row).map((cell, i) => (
+                <td key={i}>{cell || "—"}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
   );
 }
