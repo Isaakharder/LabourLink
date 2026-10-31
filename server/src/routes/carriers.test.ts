@@ -4,9 +4,9 @@
 // inputs.manualEntries.test.ts: real router over real HTTP against the real
 // database (no test-DB harness exists in this repo), disposable
 // RUN_ID-suffixed QA fixtures, cleanup in a `finally` block regardless of
-// pass/fail. requireAuth only verifies the JWT signature (no DB lookup), so
-// unlike inputs.manualEntries.test.ts no real employee row is needed for
-// the session tokens below.
+// pass/fail. requireAuth only verifies the JWT signature (no DB lookup), but
+// tag and tare changes write carrier_registration_audit rows naming who made
+// them (071), so the administrator is a real QA employee row.
 //
 // Run with: npm run test:carriers
 import "dotenv/config";
@@ -64,8 +64,16 @@ async function main() {
     return { status: res.status, body };
   }
 
+  const roleId = (await pool.query(`select id from security_roles where name = 'Administrator'`)).rows[0].id;
+  const teamRoleId = (await pool.query(`select id from team_roles where name = 'Team Member'`)).rows[0].id;
+  const adminId = (
+    await pool.query(
+      `insert into employees (first_name, last_name, security_role_id, team_role_id) values ('QA', $1, $2, $3) returning id`,
+      [`Carriers Admin ${RUN_ID}`, roleId, teamRoleId]
+    )
+  ).rows[0].id as string;
   const adminToken = signSession({
-    id: randomUUID(),
+    id: adminId,
     firstName: "QA",
     lastName: `Carriers Admin ${RUN_ID}`,
     securityRole: "Administrator",
@@ -335,12 +343,14 @@ async function main() {
     const client = await pool.connect();
     try {
       await client.query("begin");
+      await client.query(`delete from carrier_registration_audit where performed_by_employee_id = $1`, [adminId]);
       if (carrierIds.length > 0) {
         await client.query(`delete from carriers where id = any($1::uuid[])`, [carrierIds]);
       }
       // Belt-and-suspenders: also scope-delete by the RUN_ID-suffixed name
       // prefixes, in case a step above failed before an id was captured.
       await client.query(`delete from carriers where name like $1 or name like $2`, [`${NAME_PREFIX}%`, `${BULK_PREFIX}%`]);
+      await client.query(`delete from employees where id = $1`, [adminId]);
       await client.query("commit");
     } catch (err) {
       await client.query("rollback");

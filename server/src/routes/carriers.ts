@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { PoolClient } from "pg";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
@@ -62,6 +63,36 @@ function serializeCarrier(row: any) {
 
 const SELECT = `select id, name, notes, tare_weight_kg, rfid_tag, is_active, created_at, updated_at from carriers`;
 
+// Every tag or tare change made here is recorded in
+// carrier_registration_audit (071), in the same transaction as the change,
+// alongside the weighing station's own registrations.
+async function auditPageChange(
+  db: PoolClient,
+  e: { carrierId: string; action: "page_create" | "page_edit"; oldTag: string | null; newTag: string | null; oldTare: number | null; newTare: number; by: string }
+) {
+  await db.query(
+    `insert into carrier_registration_audit
+       (carrier_id, source, action, old_rfid_tag, new_rfid_tag, old_tare_weight_kg, new_tare_weight_kg, performed_by_employee_id)
+     values ($1, 'carriers_page', $2, $3, $4, $5, $6, $7)`,
+    [e.carrierId, e.action, e.oldTag, e.newTag, e.oldTare, e.newTare, e.by]
+  );
+}
+
+async function inTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const result = await fn(client);
+    await client.query("commit");
+    return result;
+  } catch (err) {
+    await client.query("rollback").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 router.get(
   "/",
   requireAuth,
@@ -123,12 +154,27 @@ router.post(
     if (Object.keys(errors).length > 0) return res.status(400).json({ errors });
     const rfidTag = (rfidResult as { ok: true; value: string | null }).value;
 
+    const tare = (tareResult as { ok: true; value: number }).value;
     try {
-      const { rows } = await pool.query(
-        `insert into carriers (name, notes, is_active, tare_weight_kg, rfid_tag) values ($1, $2, $3, $4, $5) returning id`,
-        [name, notes, isActive, (tareResult as { ok: true; value: number }).value, rfidTag]
-      );
-      const { rows: full } = await pool.query(`${SELECT} where id = $1`, [rows[0].id]);
+      const id = await inTransaction(async (client) => {
+        const { rows } = await client.query(
+          `insert into carriers (name, notes, is_active, tare_weight_kg, rfid_tag) values ($1, $2, $3, $4, $5) returning id`,
+          [name, notes, isActive, tare, rfidTag]
+        );
+        if (rfidTag !== null || tare > 0) {
+          await auditPageChange(client, {
+            carrierId: rows[0].id,
+            action: "page_create",
+            oldTag: null,
+            newTag: rfidTag,
+            oldTare: null,
+            newTare: tare,
+            by: req.employee!.id,
+          });
+        }
+        return rows[0].id as string;
+      });
+      const { rows: full } = await pool.query(`${SELECT} where id = $1`, [id]);
       res.status(201).json({ carrier: serializeCarrier(full[0]) });
     } catch (err) {
       const dupErrors = await duplicateErrors(err, rfidTag);
@@ -165,13 +211,24 @@ router.post(
       return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`;
     });
 
-    const { rows: created } = await pool.query(
-      `insert into carriers (name, notes, is_active, tare_weight_kg)
-       values ${rowsSql.join(", ")}
-       on conflict ((lower(trim(name)))) do nothing
-       returning id, name, notes, tare_weight_kg, rfid_tag, is_active, created_at, updated_at`,
-      values
-    );
+    const created = await inTransaction(async (client) => {
+      const { rows } = await client.query(
+        `insert into carriers (name, notes, is_active, tare_weight_kg)
+         values ${rowsSql.join(", ")}
+         on conflict ((lower(trim(name)))) do nothing
+         returning id, name, notes, tare_weight_kg, rfid_tag, is_active, created_at, updated_at`,
+        values
+      );
+      if (tareWeightKg > 0 && rows.length > 0) {
+        await client.query(
+          `insert into carrier_registration_audit
+             (carrier_id, source, action, old_rfid_tag, new_rfid_tag, old_tare_weight_kg, new_tare_weight_kg, performed_by_employee_id)
+           select id, 'carriers_page', 'page_create', null, null, null, $2, $3 from unnest($1::uuid[]) as id`,
+          [rows.map((r) => r.id), tareWeightKg, req.employee!.id]
+        );
+      }
+      return rows;
+    });
 
     const createdNormalized = new Set(created.map((r) => normalizeCarrierName(r.name)));
     const skippedNames = candidateNames.filter((n) => !createdNormalized.has(normalizeCarrierName(n)));
@@ -232,11 +289,29 @@ router.patch(
 
     try {
       values.push(id);
-      const { rows } = await pool.query(
-        `update carriers set ${columns.join(", ")} where id = $${values.length} returning id`,
-        values
-      );
-      if (!rows[0]) return res.status(404).json({ error: "Carrier not found" });
+      const found = await inTransaction(async (client) => {
+        const { rows: before } = await client.query(`select rfid_tag, tare_weight_kg from carriers where id = $1 for update`, [id]);
+        if (!before[0]) return false;
+        const { rows } = await client.query(
+          `update carriers set ${columns.join(", ")} where id = $${values.length} returning rfid_tag, tare_weight_kg`,
+          values
+        );
+        const oldTare = Number(before[0].tare_weight_kg);
+        const newTare = Number(rows[0].tare_weight_kg);
+        if (before[0].rfid_tag !== rows[0].rfid_tag || oldTare !== newTare) {
+          await auditPageChange(client, {
+            carrierId: id,
+            action: "page_edit",
+            oldTag: before[0].rfid_tag,
+            newTag: rows[0].rfid_tag,
+            oldTare,
+            newTare,
+            by: req.employee!.id,
+          });
+        }
+        return true;
+      });
+      if (!found) return res.status(404).json({ error: "Carrier not found" });
 
       const { rows: full } = await pool.query(`${SELECT} where id = $1`, [id]);
       res.json({ carrier: serializeCarrier(full[0]) });
@@ -245,6 +320,53 @@ router.patch(
       if (dupErrors) return res.status(409).json({ errors: dupErrors });
       throw err;
     }
+  })
+);
+
+// Every tag and tare change for one bin, newest first: registrations at the
+// weighing station and edits on this page.
+router.get(
+  "/:id/history",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid carrier id" });
+    const { rows } = await pool.query(
+      `select a.id, a.source, a.action, a.old_rfid_tag, a.new_rfid_tag, a.old_tare_weight_kg, a.new_tare_weight_kg,
+              a.measured_gross_kg, a.overwrite_confirmed, a.reason, a.performed_at,
+              trim(e.first_name || ' ' || coalesce(e.last_name, '')) as performed_by,
+              s.name as station_name, mt.name as moved_to_name, mf.name as moved_from_name
+       from carrier_registration_audit a
+       join employees e on e.id = a.performed_by_employee_id
+       left join scale_stations s on s.id = a.station_id
+       left join carriers mt on mt.id = a.moved_to_carrier_id
+       left join carriers mf on mf.id = a.moved_from_carrier_id
+       where a.carrier_id = $1
+       order by a.performed_at desc, a.id
+       limit 200`,
+      [id]
+    );
+    const kg = (v: string | null) => (v === null ? null : Number(v));
+    res.json({
+      history: rows.map((r) => ({
+        id: r.id,
+        source: r.source,
+        action: r.action,
+        oldRfidTag: r.old_rfid_tag,
+        newRfidTag: r.new_rfid_tag,
+        oldTareWeightKg: kg(r.old_tare_weight_kg),
+        newTareWeightKg: kg(r.new_tare_weight_kg),
+        measuredGrossKg: kg(r.measured_gross_kg),
+        overwriteConfirmed: r.overwrite_confirmed,
+        reason: r.reason,
+        performedAt: r.performed_at,
+        performedBy: r.performed_by,
+        stationName: r.station_name,
+        movedToName: r.moved_to_name,
+        movedFromName: r.moved_from_name,
+      })),
+    });
   })
 );
 

@@ -567,6 +567,33 @@ update scale_stations set credits_enabled = true where name = 'Weigh station 1';
 
 **Station token.** Only its sha256 hash is stored. `npm run scale:station-token -- "Weigh station 1"` prints the token once, plus the SQL to run in the Supabase SQL Editor. If the token is lost, set `is_active = false` on that station and create a new one.
 
+### Register Bins at the scale
+
+**What it does.** A bin's RFID tag and tare are set at the station by measuring the empty bin. They are written to that bin's **existing** carrier record; Register Bins never creates a carrier and never creates a weighing.
+
+**Who and where.** Any signed-in LabourLink user can register, at a registered station. Each request carries both the station token and the user's session, so the audit records who did it and where. The routes are in `server/src/routes/scale.ts` and the rules in `server/src/lib/binRegistration.ts`.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/scale/registration/bins?q=77` | Active bins by the number at the end of the name ("77" finds "Bin 77" and "Bin 077"), or by name |
+| `GET /api/scale/registration/tags/:tag` | The bin a tag is registered to, if any |
+| `POST /api/scale/registration` | Sets an empty bin's tag and tare |
+| `POST /api/scale/registration/remove-tag` | Takes a tag off a bin (a correction). The tare is kept |
+
+**Checks the server repeats** (it doesn't rely on the station alone)
+- **The reading:**
+  - a stable gross reading of at least 2 kg;
+  - the tare must equal the measured gross weight;
+  - the person must confirm the bin is completely empty.
+- **The bin:** it must exist and be active, and the request must carry the tag and tare the person saw. If the bin changed in the meantime, the request is refused as stale.
+- **One tag, one bin:**
+  - A tag already on another bin is refused, and the reply names that bin.
+  - The only way past this is an explicit move (`moveFromCarrierId`) for a bin registered by mistake. The move takes the tag off the wrong bin and, if that mistaken registration also set the wrong bin's tare, puts its previous tare back.
+- **Replacing** an existing tag or tare needs `confirmOverwrite`.
+- **Repeats:** a retried request is applied once.
+
+**Audit trail.** Every tag or tare change, whether made at the station or on Basic Data > Carriers, writes a row to `carrier_registration_audit` in the same transaction. The Edit Carrier dialog shows that history: `GET /api/carriers/:id/history`, Administrators and Managers.
+
 ## Testing from a real phone on the same Wi-Fi
 
 The dev server binds all network interfaces (`server: { host: true }` in
