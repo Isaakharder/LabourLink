@@ -61,7 +61,7 @@ Register Bins sign-in in simulation: `picker@sim.local` / `1234`. Any user can r
 ```sh
 # Service: 99 tests (parsers, state machine, Register Bins, matching rule incl. the server's shared cases, store, end to end in simulation and hardware test)
 docker run --rm -v "$PWD":/work -w /work/scale/service labourlink-scale-build cargo test
-# Display: 34 tests
+# Display: 35 tests
 cd scale/app && npx vitest run
 # Hardware-test mode end to end: the real binary, virtual serial ports named like the NUC's, no network.
 # Needs an image with socat, curl and jq (see the script's header).
@@ -76,13 +76,13 @@ docker run --rm -v "$PWD":/work -v /path/to/e2e.json:/e2e/e2e.json -e E2E_SERVER
 
 ```sh
 docker run --rm -v "$PWD":/work labourlink-scale-build sh /work/scale/docker/build-deb.sh
-# → scale/dist/labourlink-scale_0.3.0_amd64.deb (~4 MB)
+# → scale/dist/labourlink-scale_0.3.1_amd64.deb (~4 MB)
 ```
 
 To install on the NUC:
 
 ```sh
-sudo apt install ./labourlink-scale_0.3.0_amd64.deb
+sudo apt install ./labourlink-scale_0.3.1_amd64.deb
 ```
 
 The package starts `labourlink-scaled` in **simulation** mode and adds the display to XFCE autostart. Then run `sh /usr/share/labourlink-scale/setup-kiosk.sh` as the station user and enable automatic login.
@@ -113,7 +113,7 @@ The rules that run are the 10 s settle, the stable weight, tare and net, duplica
 
 ```sh
 # 1. Install 0.2.1. The existing /etc/labourlink-scale/config.json is kept, so the service restarts in simulation.
-sudo apt install ./labourlink-scale_0.3.0_amd64.deb
+sudo apt install ./labourlink-scale_0.3.1_amd64.deb
 
 # 2. Both devices must have stable names.
 ls -l /dev/serial/by-id/ /dev/labourlink/
@@ -219,7 +219,7 @@ Every change appears in the bin's history on Basic Data > Carriers.
 3. **On the NUC:**
 
    ```sh
-   sudo apt install ./labourlink-scale_0.3.0_amd64.deb
+   sudo apt install ./labourlink-scale_0.3.1_amd64.deb
    sudo install -m 0644 /usr/share/labourlink-scale/config.live.example.json /etc/labourlink-scale/config.json
    sudo nano /etc/labourlink-scale/config.json          # apiBaseUrl: the LabourLink API's https:// address
    sudo sh -c 'umask 077; printf "%s" "PASTE-TOKEN-HERE" > /etc/labourlink-scale/station-token'

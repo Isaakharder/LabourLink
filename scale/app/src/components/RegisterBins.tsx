@@ -284,6 +284,13 @@ function Confirm({ proposal, saving, token, onAuthError }: { proposal: Proposal;
   const replacesTag = !!bin && bin.rfidTag !== null && bin.rfidTag !== proposal.tag;
   const replacesTare = !!bin && bin.tareWeightKg > 0 && Math.abs(bin.tareWeightKg - tareKg) >= 0.005;
   const ready = !!bin && empty && (!replacesTag && !replacesTare ? true : overwrite) && (!ownedElsewhere || move);
+  // What still has to be ticked, shown beside the button so nothing that
+  // blocks registering can be off screen unnoticed.
+  const missing = [
+    ownedElsewhere && !move ? "move the tag" : null,
+    (replacesTag || replacesTare) && !overwrite ? `replace the ${[replacesTag ? "tag" : null, replacesTare ? "tare" : null].filter(Boolean).join(" and ")}` : null,
+    !empty ? "completely empty" : null,
+  ].filter(Boolean);
 
   function pick(b: RegBin) {
     setBin(b);
@@ -322,56 +329,67 @@ function Confirm({ proposal, saving, token, onAuthError }: { proposal: Proposal;
     }
   }
 
+  // The confirmation controls are a fixed footer of this card: they stay
+  // on screen whatever the display size; only the details above them
+  // scroll (WebKitGTK's overlay scrollbars are invisible, so content below
+  // a scroll edge can look like it isn't there).
   return (
-    <section className="card">
+    <section className="card reg-card">
       <div className="label">2. Bin number</div>
       {!bin ? (
         <BinSearch token={token} onPick={pick} onAuthError={onAuthError} />
       ) : (
-        <div className="reg-confirm">
-          <dl className="reg-measured">
-            <dt>Bin</dt>
-            <dd className="bin-name small">{bin.name}</dd>
-            <dt>RFID tag</dt>
-            <dd className="mono">{proposal.tag}</dd>
-            <dt>Tare</dt>
-            <dd className="mono">{kgText(tareKg)}</dd>
-            <dt>Now in LabourLink</dt>
-            <dd className="mono muted">
-              {bin.rfidTag ?? "No tag"} · {kgText(bin.tareWeightKg)}
-            </dd>
-          </dl>
+        <>
+        <dl className="reg-measured reg-summary">
+          <dt>Bin</dt>
+          <dd className="reg-summary-bin">{bin.name}</dd>
+          <dt>RFID tag</dt>
+          <dd className="mono">{proposal.tag}</dd>
+          <dt>Tare</dt>
+          <dd className="mono">{kgText(tareKg)}</dd>
+          <dt>Now in LabourLink</dt>
+          <dd className="mono muted">
+            {bin.rfidTag ?? "No tag"} · {kgText(bin.tareWeightKg)}
+          </dd>
+        </dl>
+        <div className="reg-actions" role="group" aria-label="Confirm registration">
           {ownedElsewhere && (
             <label className="warn-check">
               <input type="checkbox" checked={move} onChange={(e) => setMove(e.target.checked)} />
-              This tag is registered to <strong>{ownedElsewhere.name}</strong>. Move it to {bin.name} — only if {ownedElsewhere.name} was registered
-              by mistake.
+              <span>
+                This tag is registered to <strong>{ownedElsewhere.name}</strong>. Move it to {bin.name}, only if {ownedElsewhere.name} was registered
+                by mistake.
+              </span>
             </label>
           )}
           {(replacesTag || replacesTare) && (
             <label className="warn-check">
               <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} />
-              Replace {bin.name}&apos;s {[replacesTag ? `tag ${bin.rfidTag}` : null, replacesTare ? `tare ${kgText(bin.tareWeightKg)}` : null].filter(Boolean).join(" and ")}
+              <span>
+                Replace {bin.name}&apos;s {[replacesTag ? `tag ${bin.rfidTag}` : null, replacesTare ? `tare ${kgText(bin.tareWeightKg)}` : null].filter(Boolean).join(" and ")}
+              </span>
             </label>
           )}
           <label className="check">
             <input type="checkbox" checked={empty} onChange={(e) => setEmpty(e.target.checked)} />
-            This bin is completely empty
+            <span>This bin is completely empty</span>
           </label>
           {message && (
             <div className="form-error" role="alert">
               {message}
             </div>
           )}
-          <div className="row">
-            <button type="button" className="btn btn-ghost" onClick={() => setBin(null)} disabled={busy || saving}>
-              Choose another bin
-            </button>
-            <button type="button" className="btn btn-primary" disabled={!ready || busy || saving} onClick={confirm}>
-              {busy || saving ? "Saving…" : `Register ${bin.name}`}
-            </button>
-          </div>
         </div>
+        <div className="row reg-buttons">
+          <button type="button" className="btn btn-ghost" onClick={() => setBin(null)} disabled={busy || saving}>
+            Choose another bin
+          </button>
+          <button type="button" className="btn btn-primary" disabled={!ready || busy || saving} onClick={confirm}>
+            {busy || saving ? "Saving…" : `Register ${bin.name}`}
+          </button>
+          {missing.length > 0 && <span className="reg-missing">To register, tick: {missing.join(", ")}</span>}
+        </div>
+        </>
       )}
     </section>
   );
@@ -408,29 +426,37 @@ function Corrections({ token, onAuthError }: { token: string; onAuthError: (e: u
 
   return (
     <div className="register-grid">
-      <section className="card">
+      <section className="card reg-card">
         <div className="label">Remove a tag from a bin</div>
-        <p className="muted">
-          To fix a wrong tare, register the bin again. To fix a tag registered to the wrong bin, register the right bin: you will be asked to
-          move the tag. Every change is recorded with your name.
-        </p>
         {!bin ? (
-          <BinSearch token={token} onPick={(b) => { setBin(b); setMessage(null); }} onAuthError={onAuthError} />
+          <>
+            <p className="muted">
+              To fix a wrong tare, register the bin again. To fix a tag registered to the wrong bin, register the right bin: you will be asked to
+              move the tag. Every change is recorded with your name.
+            </p>
+            <BinSearch token={token} onPick={(b) => { setBin(b); setMessage(null); }} onAuthError={onAuthError} />
+          </>
         ) : (
           <>
-            <div className="bin-name small">{bin.name}</div>
-            <div className="muted mono">
-              {bin.rfidTag ?? "No tag"} · {kgText(bin.tareWeightKg)}
-            </div>
-            {bin.rfidTag ? (
-              <>
+            <div className="reg-scroll">
+              <div className="bin-name small">{bin.name}</div>
+              <div className="muted mono">
+                {bin.rfidTag ?? "No tag"} · {kgText(bin.tareWeightKg)}
+              </div>
+              {bin.rfidTag && (
                 <label>
                   Reason (optional)
                   <input value={reason} onChange={(e) => setReason(e.target.value)} maxLength={200} />
                 </label>
+              )}
+            </div>
+            {bin.rfidTag ? (
+              <div className="reg-actions" role="group" aria-label="Confirm removal">
                 <label className="warn-check">
                   <input type="checkbox" checked={sure} onChange={(e) => setSure(e.target.checked)} />
-                  Remove tag {bin.rfidTag} from {bin.name}. The bin can&apos;t be weighed until it has a tag again.
+                  <span>
+                    Remove tag {bin.rfidTag} from {bin.name}. The bin can&apos;t be weighed until it has a tag again.
+                  </span>
                 </label>
                 <div className="row">
                   <button type="button" className="btn btn-ghost" onClick={() => setBin(null)}>
@@ -440,9 +466,16 @@ function Corrections({ token, onAuthError }: { token: string; onAuthError: (e: u
                     Remove tag
                   </button>
                 </div>
-              </>
+              </div>
             ) : (
-              <div className="muted">This bin has no tag.</div>
+              <div className="reg-actions">
+                <div className="muted">This bin has no tag.</div>
+                <div className="row">
+                  <button type="button" className="btn btn-ghost" onClick={() => setBin(null)}>
+                    Choose another bin
+                  </button>
+                </div>
+              </div>
             )}
           </>
         )}
