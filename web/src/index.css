@@ -9554,3 +9554,233 @@ input {
 .carrier-history-who {
   margin: 0.1rem 0 0;
 }
+
+/* Scale Weighings page (pages/desktop/ScaleWeighingsPage.tsx) */
+.scale-weighings-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.scale-weighings-toolbar select,
+.scale-weighings-toolbar input[type="date"] {
+  min-height: 2.25rem;
+}
+
+.scale-weighings-date {
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.scale-weighings-date button {
+  min-height: 2.25rem;
+  min-width: 2.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.scale-weighings-day {
+  margin: 0 0 0.75rem;
+}
+
+.scale-weighings-totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.scale-weighings-total {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.75rem 0.9rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.scale-weighings-total.is-attention {
+  border-color: #f59e0b;
+}
+
+.scale-weighings-total-label {
+  font-size: 0.75rem;
+  color: var(--color-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.scale-weighings-total-value {
+  font-size: 1.35rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Tablet and narrow windows: the table scrolls inside its own box, never the page. */
+.scale-weighings-table-wrap {
+  overflow-x: auto;
+  margin-top: 0.75rem;
+  -webkit-overflow-scrolling: touch;
+}
+
+.scale-weighings-table {
+  /* Same reasoning as .inputs-logs-table: this page has no card-list
+     fallback, so it must not inherit the Employees page's
+     `.employees-table { display: none }` at <=900px. On a tablet the table
+     keeps its columns and scrolls sideways inside its own box. */
+  display: table;
+  min-width: 760px;
+}
+
+.scale-weighings-table tbody tr {
+  cursor: pointer;
+}
+
+.scale-weighings-table tbody tr:hover,
+.scale-weighings-table tbody tr:focus {
+  background: var(--color-bg);
+  outline: none;
+}
+
+.scale-weighings-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.scale-weighing-not-counted td {
+  color: var(--color-muted);
+}
+
+.scale-weighing-tag {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+}
+
+.scale-weighing-status {
+  display: inline-flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.scale-status {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: #e5e7eb;
+  color: #374151;
+}
+
+.scale-status-credited {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.scale-status-pending {
+  background: #e0e7ff;
+  color: #3730a3;
+}
+
+.scale-status-needs_review {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.scale-status-voided {
+  background: #fee2e2;
+  color: #991b1b;
+  text-decoration: line-through;
+}
+
+.scale-status-note {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-muted);
+  font-weight: 500;
+}
+
+.scale-weighing-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.4rem 1rem;
+  margin: 0 0 1rem;
+}
+
+.scale-weighing-facts dt {
+  color: var(--color-muted);
+  font-size: 0.8rem;
+}
+
+.scale-weighing-facts dd {
+  margin: 0;
+}
+
+.scale-weighing-detail h3 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-muted);
+  margin: 1rem 0 0.5rem;
+}
+
+.scale-weighing-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.scale-weighing-samples {
+  margin-top: 1rem;
+  font-size: 0.85rem;
+}
+
+.scale-weighing-void {
+  margin-top: 1rem;
+  padding: 0.85rem;
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius);
+}
+
+.scale-weighing-void label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+}
+
+.scale-void-button {
+  background: var(--color-danger);
+  border-color: var(--color-danger);
+  color: #fff;
+}
+
+.scale-void-button:disabled {
+  opacity: 0.6;
+}
+
+/* Tablets (portrait and landscape): the tag and station are in the detail dialog. */
+@media (max-width: 1240px) {
+  .scale-weighings-table .scale-col-optional {
+    display: none;
+  }
+
+  .scale-weighings-table {
+    min-width: 560px;
+  }
+}
+
+@media (max-width: 700px) {
+  .scale-weighing-facts {
+    grid-template-columns: 1fr;
+  }
+}
