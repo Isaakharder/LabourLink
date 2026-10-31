@@ -64,7 +64,9 @@ async function main() {
     await client.query("begin");
     await client.query(`
       drop index if exists idx_mobile_time_events_scale_claims;
-      drop table if exists scale_weighing_events, scale_weighing_flags, scale_weighing_claims, scale_weighings, scale_stations;
+      -- cascade: on a database that also has 071/072, their objects depend
+      -- on these tables. Everything is rolled back at the end.
+      drop table if exists scale_weighing_events, scale_weighing_flags, scale_weighing_claims, scale_weighings, scale_stations cascade;
     `);
     const before = await fingerprint(client);
     await client.query(MIGRATION_SQL);
