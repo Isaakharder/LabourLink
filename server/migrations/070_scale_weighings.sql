@@ -118,7 +118,9 @@ create table scale_weighing_events (
   actor_employee_id uuid references employees(id),
   reason text,
   detail jsonb,
-  created_at timestamptz not null default now()
+  -- clock_timestamp(), not now(): several events written in one transaction
+  -- (received, then credited) must keep their order.
+  created_at timestamptz not null default clock_timestamp()
 );
 create index idx_scale_weighing_events_weighing on scale_weighing_events (weighing_id, created_at);
 
