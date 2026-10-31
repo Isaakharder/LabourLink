@@ -1,0 +1,26 @@
+# Build/test image for LabourLink Scale.
+#
+# Linux Mint 22.x is based on Ubuntu 24.04 ("noble"), so building and testing
+# here produces binaries and a .deb linked against the same glibc/WebKitGTK
+# the NUC has. Used for both `cargo test` of the service and `tauri build`.
+#
+#   docker build -t labourlink-scale-build -f scale/docker/Dockerfile.build scale/docker
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential pkg-config curl ca-certificates file xz-utils \
+      libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libssl-dev \
+      sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pinned toolchain so local and CI builds agree.
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.90.0
+
+# Node for the React frontend (tauri build runs `npm run build`).
+ARG NODE_VERSION=22.20.0
+RUN curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
+      | tar -xJ -C /usr/local --strip-components=1
+
+WORKDIR /work

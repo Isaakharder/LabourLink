@@ -1,0 +1,10 @@
+# Stable device names for LabourLink Scale (/dev/labourlink/*), and keep
+# ModemManager from probing either port (it sends AT commands on open).
+
+# PROTAGD RFID reader: FTDI FT230X (0403:6015).
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6015", SYMLINK+="labourlink/rfid", GROUP="dialout", MODE="0660", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# Rinstrum R300 via Waveshare USB-RS232 adapter: FTDI FT232R (0403:6001),
+# matched by its serial number so another FTDI cable can't take the name.
+# Also at /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG0427FU-if00-port0.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="BG0427FU", SYMLINK+="labourlink/scale", GROUP="dialout", MODE="0660", ENV{ID_MM_DEVICE_IGNORE}="1"
