@@ -520,6 +520,53 @@ plain `BrowserRouter` (not a data router), and `useBlocker`/
 `createBrowserRouter`/`RouterProvider`, a separate, larger routing change
 left out of this milestone rather than faked.
 
+## LabourLink Scale (weighing station)
+
+The weighing station (the NUC beside the scale, code on the `scale/` branch) uploads every weighing it records to `/api/scale/*`. The server decides who gets the credit, from phone evidence only.
+
+**Station API** (`server/src/routes/scale.ts`). Every route needs the station's own token, sent as `Authorization: Bearer <token>`.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/scale/station` | Station name, and whether its credits are live |
+| `GET /api/scale/carriers` | Bins with an RFID tag: id, name, tag, tare, active |
+| `POST /api/scale/weighings` | One weighing, in whole grams. Idempotent on the station's own weighing id; the same id with different contents gets 409 |
+| `POST /api/scale/weighings/status` | Current outcome of up to 100 of the station's own weighings |
+
+**Who gets the credit** (`server/src/lib/scaleMatchingRule.ts`, shared cases in `scaleMatching.vectors.json`)
+- **Bin-use cycle:** a weighing of bin X closes the cycle that began at the bin's previous weighing. A bin's first-ever weighing looks back 24 hours.
+- **Claim:** an accepted phone bin choice (NFC scan or picked by hand) of bin X inside that cycle.
+- **What doesn't count:**
+  - a choice whose phone clock was flagged;
+  - a choice the server received after the 24-hour deadline;
+  - a choice already used for another weighing (enforced by the database).
+- **Outcomes:**
+  - one employee → **credited**;
+  - two or more → **needs review**, nobody credited;
+  - none yet → **pending**;
+  - still none 24 hours after the weighing → **expired**, never credited.
+- **Final outcomes:** credited, needs review and expired never change. A different employee's late choice inside a credited cycle is only flagged.
+- **Held for review on arrival:**
+  - the same bin weighed again within five minutes (a duplicate);
+  - a weighing older than one already received for that bin;
+  - a station clock running ahead of the server.
+
+**When matching runs**
+- When a weighing arrives.
+- After a phone sync that contains bin choices. This runs after the sync response has been sent and can never fail the sync.
+- On a status request from the station.
+- Every 5 minutes in the API process.
+
+`SCALE_MATCHING_ENABLED=false` switches all of it off: weighings are still stored, but stay pending.
+
+**Trial first: credits are off for every new station.** While `scale_stations.credits_enabled` is false, weighings are stored and matched exactly as in production but recorded as trial (`credits_live = false`). They never count as an employee credit. Turning credits on is a deliberate one-row update, made only with the owner's approval:
+
+```sql
+update scale_stations set credits_enabled = true where name = 'Weigh station 1';
+```
+
+**Station token.** Only its sha256 hash is stored. `npm run scale:station-token -- "Weigh station 1"` prints the token once, plus the SQL to run in the Supabase SQL Editor. If the token is lost, set `is_active = false` on that station and create a new one.
+
 ## Testing from a real phone on the same Wi-Fi
 
 The dev server binds all network interfaces (`server: { host: true }` in
