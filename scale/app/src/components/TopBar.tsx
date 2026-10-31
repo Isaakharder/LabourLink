@@ -22,6 +22,8 @@ function stateText(state: string): string {
       return "Simulated";
     case "simulated-offline":
       return "Sim offline";
+    case "unrecognized":
+      return "Data not recognised";
     case "offline":
       return "Offline";
     default:
@@ -38,7 +40,7 @@ export function TopBar({ snapshot: s, serviceConnected, view, onToggleView }: { 
 
   // The indicator port can be open while the indicator sends nothing.
   const sc = s.connections.scale;
-  const scale = s.scaleOnline
+  const scale = s.scaleOnline || sc.state === "unrecognized"
     ? sc
     : { state: sc.state === "simulated" ? "simulated-offline" : "offline", detail: sc.state === "connected" ? "Port open, but no readings" : sc.detail };
 

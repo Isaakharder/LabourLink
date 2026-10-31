@@ -166,14 +166,20 @@ That window runs on the server, because only the server sees phone syncs. The st
 4. **Database-level guard.** A trigger rejects simulated rows in a live database (and real rows in a simulation database), even through raw SQL. The fake server also rejects non-simulated rows.
 5. **The upload contract has no `simulated` flag.** The only route to the real API is the live outbox, which can only contain live rows.
 6. **The simulator can't be reached in live mode.** `/api/sim/*` returns 404. The UI shows a striped "SIMULATION MODE" banner and a dashed outline the whole time.
+7. **Hardware-test mode keeps rules 2–5.**
+   - It reads the real serial ports.
+   - Its backend is the in-process test server, holding only the bins listed in `testCarriers`. No HTTP client is built.
+   - Its database is `scale-hwtest.sqlite3`, stamped `hardware-test`, and its rows are test data (`simulated = 1`).
+   - `/api/sim/*` returns 404, because there is no simulator rig.
+   - The UI shows a striped "HARDWARE TEST MODE" banner.
 
 ## 7. Needs the real hardware to verify
 
-- **R300 output format** (protocol, rate, units, decimals, stable/motion flag, gross/net indicator). Run `labourlink-scaled capture --port /dev/ttyUSB1 --seconds 120 --out r300.txt` and confirm `rinstrum-auto-a`, or switch to `generic-line`, or add a parser from the capture. Auto-transmit must already be enabled on the indicator. The station will not change indicator settings.
+- **R300 output format** (protocol, rate, units, decimals, stable/motion flag, gross/net indicator). The indicator is set to TYPE=AUTO, AUT.FMT=FMT_1; stable readings of 93.0 kg and 110.2 kg have been seen, but the frames and status letters haven't been captured yet. `capture` ends with a summary of frame shapes, status letters and runs over time for this (README, "Hardware test mode"). Run `labourlink-scaled capture --port /dev/ttyUSB1 --seconds 120 --out r300.txt` and confirm `rinstrum-auto-a`, or switch to `generic-line`, or add a parser from the capture. Auto-transmit must already be enabled on the indicator. The station will not change indicator settings.
 - **PROTAGD behaviour:** does it repeat reads while a tag is in range, what happens with two tags, what is the read range, and is the 4-digit field constant? Run `capture` on `/dev/ttyUSB0`.
 - **Antenna placement** compared with the scale platform, which affects `tagWindowMs`.
 - **Real scale division and noise,** which affect `stableToleranceKg` and `minLoadKg`.
-- **The RS-232 adapter's USB ids,** to fill in the udev rule.
+- **The RS-232 adapter's USB ids:** Waveshare FT232R, 0403:6001, serial BG0427FU (in the udev rule).
 - **WebKitGTK rendering on Intel HD 400.** `WEBKIT_DISABLE_DMABUF_RENDERER=1` is set in the autostart entry.
 - **Station clock:** NTP sync and the condition of the CMOS battery.
 - **Power-cut test** while a weighing is being recorded.

@@ -18,11 +18,17 @@ export function App() {
     );
   }
 
+  const hardwareTest = snapshot.mode === "hardware-test";
   return (
-    <div className={`app${snapshot.simulated ? " is-sim" : ""}`}>
+    <div className={`app${snapshot.simulated || hardwareTest ? " is-sim" : ""}`}>
       {snapshot.simulated && (
         <div className="sim-banner" role="status">
           SIMULATION MODE: no real scale, RFID reader or LabourLink server. Weighings here are test data and are never sent to LabourLink.
+        </div>
+      )}
+      {hardwareTest && (
+        <div className="sim-banner" role="status">
+          HARDWARE TEST MODE: real scale and RFID reader, test bins only. Weighings here are test data and are never sent to LabourLink.
         </div>
       )}
       <TopBar snapshot={snapshot} serviceConnected={connected} view={view} onToggleView={() => setView(view === "weigh" ? "register" : "weigh")} />

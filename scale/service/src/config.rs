@@ -3,18 +3,25 @@
 //! Simulation is the default. Live mode must be chosen explicitly and needs
 //! an API base URL and a station token file; simulation mode never builds an
 //! HTTP client at all, so simulated weighings cannot reach any server.
+//!
+//! Hardware-test mode reads the real scale and RFID reader but, like
+//! simulation, uses the in-process test server and never builds an HTTP
+//! client. Its bins (`testCarriers`) come from this file, and its weighings
+//! are test data in their own database.
 
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use crate::machine::Params;
+use crate::machine::{CarrierInfo, Params};
+use crate::rfid::{is_valid_rfid_tag, normalize_rfid_tag};
 use crate::scale_proto::ScaleProtocol;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum Mode {
     Simulation,
+    HardwareTest,
     Live,
 }
 
@@ -22,9 +29,38 @@ impl Mode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Mode::Simulation => "simulation",
+            Mode::HardwareTest => "hardware-test",
             Mode::Live => "live",
         }
     }
+
+    /// Weighings are test data (stored with `simulated = 1`) and only ever
+    /// reach the in-process test server.
+    pub fn is_test(&self) -> bool {
+        *self != Mode::Live
+    }
+
+    /// Readings and tags come from the serial ports, not the simulator rig.
+    pub fn uses_hardware(&self) -> bool {
+        *self != Mode::Simulation
+    }
+}
+
+/// A bin for hardware-test mode: a real RFID tag with the bin's real tare,
+/// copied by hand from the Carriers page. Never sent anywhere.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TestCarrier {
+    pub name: String,
+    #[serde(default)]
+    pub rfid_tag: Option<String>,
+    pub tare_kg: f64,
+    #[serde(default = "active")]
+    pub is_active: bool,
+}
+
+fn active() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -91,6 +127,7 @@ pub struct Config {
     pub weighing: WeighingOverrides,
     pub pending_poll_seconds: u64,
     pub carrier_refresh_seconds: u64,
+    pub test_carriers: Vec<TestCarrier>,
 }
 
 impl Default for Config {
@@ -107,6 +144,7 @@ impl Default for Config {
             weighing: WeighingOverrides::default(),
             pending_poll_seconds: 60,
             carrier_refresh_seconds: 300,
+            test_carriers: vec![],
         }
     }
 }
@@ -145,7 +183,46 @@ impl Config {
                 return Err("live mode needs apiBaseUrl (https://…)".into());
             }
         }
+        if self.mode == Mode::HardwareTest {
+            self.test_carrier_infos()?;
+        }
         Ok(())
+    }
+
+    /// `testCarriers` as the test server's bins. Tags are normalized with the
+    /// server's rule; a malformed or repeated tag, a blank name or a tare
+    /// that isn't positive is a config error rather than a silently
+    /// unusable bin.
+    pub fn test_carrier_infos(&self) -> Result<Vec<CarrierInfo>, String> {
+        let mut out: Vec<CarrierInfo> = vec![];
+        for (i, c) in self.test_carriers.iter().enumerate() {
+            let at = format!("testCarriers[{i}]");
+            if c.name.trim().is_empty() {
+                return Err(format!("{at}.name is empty"));
+            }
+            if !(c.tare_kg.is_finite() && c.tare_kg > 0.0 && c.tare_kg < 1000.0) {
+                return Err(format!("{at}.tareKg must be the bin's real tare in kg (more than 0)"));
+            }
+            let tag = match c.rfid_tag.as_deref().map(normalize_rfid_tag) {
+                None => None,
+                Some(t) if t.is_empty() => None,
+                Some(t) if !is_valid_rfid_tag(&t) => return Err(format!("{at}.rfidTag {t:?} may only contain letters and digits (max 64)")),
+                Some(t) => Some(t),
+            };
+            if let Some(t) = &tag {
+                if let Some(other) = out.iter().find(|o| o.rfid_tag.as_ref() == Some(t)) {
+                    return Err(format!("{at}.rfidTag {t} is already used by {:?}", other.name));
+                }
+            }
+            out.push(CarrierInfo {
+                id: format!("test-carrier-{:02}", i + 1),
+                name: c.name.trim().to_string(),
+                rfid_tag: tag,
+                tare_g: kg(c.tare_kg),
+                is_active: c.is_active,
+            });
+        }
+        Ok(out)
     }
 
     /// Separate database files per mode, so simulated weighings never share
@@ -153,6 +230,7 @@ impl Config {
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join(match self.mode {
             Mode::Simulation => "scale-sim.sqlite3",
+            Mode::HardwareTest => "scale-hwtest.sqlite3",
             Mode::Live => "scale.sqlite3",
         })
     }
@@ -196,6 +274,56 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"mode":"live","apiBaseUrl":"https://api.example.com"}"#).unwrap();
         assert!(c.validate().is_ok());
         assert!(c.db_path().ends_with("scale.sqlite3"));
+    }
+
+    #[test]
+    fn hardware_test_mode_has_its_own_db_and_validated_test_bins() {
+        let c: Config = serde_json::from_str(
+            r#"{"mode":"hardware-test","testCarriers":[
+                {"name":"Bin 23","rfidTag":" 0000 0001 8222 5750 ","tareKg":27.5},
+                {"name":"Bin 24","tareKg":27.25,"isActive":false}]}"#,
+        )
+        .unwrap();
+        assert_eq!(c.mode, Mode::HardwareTest);
+        assert!(c.mode.is_test() && c.mode.uses_hardware());
+        assert!(c.validate().is_ok(), "no apiBaseUrl needed: it never contacts a server");
+        assert!(c.db_path().ends_with("scale-hwtest.sqlite3"));
+        let bins = c.test_carrier_infos().unwrap();
+        assert_eq!(bins[0].rfid_tag.as_deref(), Some("0000000182225750"));
+        assert_eq!((bins[0].tare_g, bins[1].tare_g), (27_500, 27_250));
+        assert_eq!((bins[0].id.as_str(), bins[1].is_active, &bins[1].rfid_tag), ("test-carrier-01", false, &None));
+        assert!(!Mode::Simulation.uses_hardware() && Mode::Simulation.is_test());
+        assert!(Mode::Live.uses_hardware() && !Mode::Live.is_test());
+    }
+
+    #[test]
+    fn hardware_test_mode_rejects_bad_test_bins() {
+        for (bins, msg) in [
+            (r#"[{"name":"A","tareKg":0}]"#, "tareKg"),
+            (r#"[{"name":"A"}]"#, "tareKg"),
+            (r#"[{"name":" ","tareKg":27}]"#, "name"),
+            (r#"[{"name":"A","rfidTag":"AB-12","tareKg":27}]"#, "letters and digits"),
+            (r#"[{"name":"A","rfidTag":"12","tareKg":27},{"name":"B","rfidTag":" 12","tareKg":27}]"#, "already used"),
+            (r#"[{"name":"A","tare":27}]"#, "tare"),
+        ] {
+            let parsed: Result<Config, _> = serde_json::from_str(&format!(r#"{{"mode":"hardware-test","testCarriers":{bins}}}"#));
+            let e = match parsed {
+                Ok(c) => c.validate().unwrap_err(),
+                Err(e) => e.to_string(),
+            };
+            assert!(e.contains(msg), "{bins}: {e}");
+        }
+    }
+
+    #[test]
+    fn packaged_hardware_test_config_is_valid_and_uses_stable_device_paths() {
+        let c: Config = serde_json::from_str(include_str!("../../packaging/config.hardware-test.json")).unwrap();
+        assert_eq!(c.mode, Mode::HardwareTest);
+        assert!(c.validate().is_ok());
+        assert_eq!(c.scale.port, "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG0427FU-if00-port0");
+        assert_eq!((c.scale.baud, c.scale.protocol, c.rfid.baud), (9600, ScaleProtocol::RinstrumAutoA, 9600));
+        assert!(!c.rfid.port.contains("ttyUSB") && !c.scale.port.contains("ttyUSB"), "never the ttyUSB numbering");
+        assert!(c.api_base_url.is_none());
     }
 
     #[test]

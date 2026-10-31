@@ -49,6 +49,13 @@ function blockedHeadline(p: Extract<Phase, { phase: "blocked" }>): Headline {
 export const WAIT_FOR_ZERO = "WAIT — Scale must return to zero before next bin.";
 
 export function headline(s: Snapshot): Headline {
+  if (!s.scaleOnline && s.connections.scale.state === "unrecognized") {
+    return {
+      tone: "error",
+      title: "Scale data not recognised",
+      detail: "The indicator is sending data in a format the station can't read. Weighing is paused. Check the indicator's serial output settings.",
+    };
+  }
   if (!s.scaleOnline && s.phase.phase !== "starting") {
     return { tone: "error", title: "Scale not responding", detail: "No data from the scale indicator. Weighing is paused." };
   }

@@ -150,7 +150,7 @@ impl Store {
                 .map_err(|e| e.to_string())?;
             }
         }
-        let forbidden = if mode == Mode::Live { 1 } else { 0 };
+        let forbidden = if mode.is_test() { 0 } else { 1 };
         conn.execute_batch(&format!(
             "create trigger if not exists weighings_mode_guard before insert on weighings
              when new.simulated = {forbidden}
@@ -198,7 +198,7 @@ impl Store {
     }
 
     pub fn insert_weighing(&mut self, w: &Weighing) -> Result<(), String> {
-        if w.simulated != (self.mode == Mode::Simulation) {
+        if w.simulated != self.mode.is_test() {
             return Err("weighing simulated flag does not match this database's mode".into());
         }
         self.conn

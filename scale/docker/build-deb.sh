@@ -29,5 +29,9 @@ npx vitest run
 npx tauri build --bundles deb
 
 mkdir -p /work/scale/dist
-cp "$CARGO_TARGET_DIR"/release/bundle/deb/*.deb /work/scale/dist/
+# Tauri names the bundle after productName ("LabourLink Scale_…"); ship it
+# under the package name instead, without the space.
+for f in "$CARGO_TARGET_DIR"/release/bundle/deb/*.deb; do
+  cp "$f" "/work/scale/dist/$(basename "$f" | sed 's/^LabourLink Scale_/labourlink-scale_/')"
+done
 ls -l /work/scale/dist

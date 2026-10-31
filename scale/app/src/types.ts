@@ -59,7 +59,8 @@ export interface Weighing {
 }
 
 export interface LinkStatus {
-  state: "connected" | "disconnected" | "simulated" | "simulated-offline" | "online" | "offline";
+  /** unrecognized: the scale port is sending data the configured protocol can't parse. */
+  state: "connected" | "disconnected" | "unrecognized" | "simulated" | "simulated-offline" | "online" | "offline";
   detail: string;
 }
 
@@ -77,7 +78,9 @@ export interface RigView {
 }
 
 export interface Snapshot {
-  mode: "simulation" | "live";
+  /** hardware-test: real scale and RFID reader, test bins and the in-process test server. */
+  mode: "simulation" | "hardware-test" | "live";
+  /** True only in simulation mode (fake scale and reader, simulator drawer). */
   simulated: boolean;
   stationName: string;
   phase: Phase;

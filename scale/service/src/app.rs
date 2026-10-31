@@ -87,6 +87,19 @@ const ADMIN_IDLE: Duration = Duration::from_secs(15 * 60);
 /// Longer than the 24-hour pending window, so every outcome is seen.
 const VERIFY_WINDOW_HOURS: i64 = 48;
 
+/// The LabourLink link in the test modes, where the "server" is the
+/// in-process test server and nothing goes over the network.
+fn test_server_status(mode: Mode) -> Option<LinkStatus> {
+    match mode {
+        Mode::Simulation => Some(LinkStatus::new("simulated", "In-process simulator — no network")),
+        Mode::HardwareTest => Some(LinkStatus::new(
+            "simulated",
+            "Hardware test: in-process test server, no network. Nothing is sent to LabourLink",
+        )),
+        Mode::Live => None,
+    }
+}
+
 pub fn utc_now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
@@ -101,6 +114,7 @@ impl App {
         let (wake_tx, wake_rx) = std::sync::mpsc::channel();
         let (snapshot_tx, snapshot_rx) = watch::channel(Arc::new(String::from("{}")));
         let simulated = sim.is_some();
+        let test_server = test_server_status(cfg.mode);
         let link = |what: &str| {
             if simulated {
                 LinkStatus::new("simulated", format!("Simulated {what}"))
@@ -117,8 +131,8 @@ impl App {
             last_recorded_id: None,
         };
         let server = ServerLink {
-            status: if simulated {
-                LinkStatus::new("simulated", "In-process simulator — no network")
+            status: if let Some(s) = test_server.clone() {
+                s
             } else {
                 LinkStatus::new("offline", "Not contacted yet")
             },
@@ -255,7 +269,7 @@ impl App {
             net_g: d.net_g,
             recorded_at: self.wall_now(),
             samples_g: d.samples_g,
-            simulated: self.mode() == Mode::Simulation,
+            simulated: self.mode().is_test(),
             upload_state: "queued".into(),
             upload_attempts: 0,
             last_error: None,
@@ -289,17 +303,13 @@ impl App {
     fn server_ok(&self) {
         let mut s = self.server.lock().unwrap();
         s.last_ok_at = Some(utc_now());
-        if self.sim.is_none() {
-            s.status = LinkStatus::new("online", "Connected");
-        } else {
-            s.status = LinkStatus::new("simulated", "In-process simulator — no network");
-        }
+        s.status = test_server_status(self.mode()).unwrap_or_else(|| LinkStatus::new("online", "Connected"));
     }
 
     fn server_failed(&self, err: &BackendError) {
         let mut s = self.server.lock().unwrap();
         let detail = err.message();
-        s.status = LinkStatus::new(if self.sim.is_some() { "simulated-offline" } else { "offline" }, detail);
+        s.status = LinkStatus::new(if self.mode().is_test() { "simulated-offline" } else { "offline" }, detail);
     }
 
     pub fn refresh_carriers(&self) -> bool {
@@ -331,7 +341,7 @@ impl App {
                 return true;
             }
             for w in batch {
-                if w.simulated != (self.mode() == Mode::Simulation) {
+                if w.simulated != self.mode().is_test() {
                     // Can't happen (DB trigger + mode stamp); never send it anyway.
                     let _ = self.store.lock().unwrap().mark_rejected(&w.id, "mode mismatch");
                     continue;
@@ -527,7 +537,7 @@ impl App {
 /// Uploader loop: carrier cache refresh, outbox upload with backoff, and
 /// pending-assignment polling. Runs on its own OS thread.
 pub fn run_uploader(app: Arc<App>, rx: Receiver<Wake>) {
-    let poll_every = if app.sim.is_some() {
+    let poll_every = if app.mode().is_test() {
         Duration::from_secs(2)
     } else {
         Duration::from_secs(app.cfg.pending_poll_seconds.max(10))
@@ -640,6 +650,98 @@ mod tests {
         assert_eq!(w.employee_name.as_deref(), Some("Picker Charlie"));
         assert_eq!(w.net_g, 64_000 - 27_500);
         assert_eq!(app.snapshot()["currentWeighing"]["employeeName"], "Picker Charlie");
+    }
+
+    /// Hardware-test mode as main.rs builds it: the test server holding the
+    /// configured bins, no simulator rig, readings from the serial parsers.
+    fn hardware_test_app(store: Store) -> Arc<App> {
+        let cfg: Config = serde_json::from_str(
+            r#"{"mode":"hardware-test","testCarriers":[{"name":"Bin 23","rfidTag":"0000000182225750","tareKg":27.5}]}"#,
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        let server = Arc::new(SimServer::with_carriers(cfg.test_carrier_infos().unwrap()));
+        let (app, _rx, _snap) = App::new(cfg, store, server, None);
+        app
+    }
+
+    /// One R300 frame through the same framer and parser as the serial port.
+    fn r300(app: &App, body: &str, secs: u64) {
+        let mut framer = crate::scale_proto::ScaleFramer::default();
+        let frame = framer.push(format!("\x02{body}\x03").as_bytes()).pop().unwrap();
+        let reading = crate::scale_proto::parse_frame(crate::scale_proto::ScaleProtocol::RinstrumAutoA, &frame).unwrap();
+        for _ in 0..secs * 10 {
+            app.skip_clock(100);
+            app.handle(Input::Reading(reading.clone()));
+        }
+    }
+
+    #[test]
+    fn hardware_test_mode_weighs_real_frames_against_test_bins_and_sends_nothing_real() {
+        let app = hardware_test_app(Store::open_in_memory(Mode::HardwareTest).unwrap());
+        assert!(app.sim.is_none(), "no simulator rig or /api/sim controls in hardware-test mode");
+        let snap = app.snapshot();
+        assert_eq!((snap["mode"].as_str(), snap["simulated"].as_bool()), (Some("hardware-test"), Some(false)));
+        assert_eq!(snap["connections"]["scale"]["state"], "disconnected", "real ports, not simulated");
+        assert_eq!(snap["connections"]["server"]["state"], "simulated");
+        assert!(snap["connections"]["server"]["detail"].as_str().unwrap().contains("Nothing is sent to LabourLink"));
+        assert!(app.refresh_carriers());
+        assert_eq!(app.snapshot()["carrierCount"], 1);
+
+        // Empty, then the bin with its tag, then a stable 110.2 kg from the indicator.
+        r300(&app, "     0.0G", 3);
+        app.handle(Input::Tag("0000000182225750".into()));
+        r300(&app, "   110.2M", 2); // motion while it's put down
+        r300(&app, "   110.2G", 13);
+        let snap = app.snapshot();
+        assert_eq!(snap["phase"]["phase"], "awaitingRemoval", "{snap}");
+        let w = app.recent.lock().unwrap()[0].clone();
+        assert_eq!((w.gross_g, w.tare_g, w.net_g), (110_200, 27_500, 82_700));
+        assert!(w.simulated, "hardware-test weighings are stored as test data");
+
+        // The test server holds it pending: nobody is credited without a scan.
+        assert!(app.upload_queued());
+        let w = app.recent.lock().unwrap()[0].clone();
+        assert_eq!((w.upload_state.as_str(), w.assignment_status.as_str(), w.employee_name.as_deref()), ("sent", "pending", None));
+        assert_eq!(app.snapshot()["outbox"]["pending"], 1);
+
+        // Duplicate prevention: lifted and put straight back is not recorded again.
+        r300(&app, "     0.0G", 3);
+        app.handle(Input::Tag("0000000182225750".into()));
+        r300(&app, "   110.2G", 13);
+        assert_eq!(app.snapshot()["phase"]["reason"]["code"], "recentlyWeighed");
+        assert_eq!(app.recent.lock().unwrap().len(), 1);
+
+        // A real tag that isn't in testCarriers is never weighed.
+        r300(&app, "     0.0G", 3);
+        app.handle(Input::Tag("0000000155555555".into()));
+        r300(&app, "    93.0G", 13);
+        assert_eq!(app.snapshot()["phase"]["reason"]["code"], "unknownTag");
+        assert_eq!(app.recent.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn hardware_test_mode_has_its_own_database() {
+        let dir = tempfile::tempdir().unwrap();
+        // A simulation or live database can't be opened in hardware-test mode, or vice versa.
+        let sim_db = dir.path().join("scale-sim.sqlite3");
+        drop(Store::open(&sim_db, Mode::Simulation).unwrap());
+        assert!(Store::open(&sim_db, Mode::HardwareTest).is_err());
+        let hw_db = dir.path().join("scale-hwtest.sqlite3");
+        drop(Store::open(&hw_db, Mode::HardwareTest).unwrap());
+        assert!(Store::open(&hw_db, Mode::Live).is_err());
+        assert!(Store::open(&hw_db, Mode::Simulation).is_err());
+        // Its rows are test data: the store refuses a real one.
+        let app = hardware_test_app(Store::open(&hw_db, Mode::HardwareTest).unwrap());
+        assert!(app.refresh_carriers());
+        r300(&app, "     0.0G", 3);
+        app.handle(Input::Tag("0000000182225750".into()));
+        r300(&app, "    93.0G", 13);
+        let mut w = app.recent.lock().unwrap()[0].clone();
+        assert_eq!(w.net_g, 93_000 - 27_500);
+        w.id = "another".into();
+        w.simulated = false;
+        assert!(app.store.lock().unwrap().insert_weighing(&w).is_err());
     }
 
     #[test]

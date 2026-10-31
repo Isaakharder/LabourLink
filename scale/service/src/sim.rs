@@ -158,6 +158,13 @@ impl SimServer {
                 is_active: true,
             });
         }
+        Self::with_carriers(carriers)
+    }
+
+    /// The test server for hardware-test mode: the same in-process fake
+    /// (assignment rule, pending window, registration checks), holding only
+    /// the bins from `testCarriers`.
+    pub fn with_carriers(carriers: Vec<CarrierInfo>) -> Self {
         let employees = ["Picker Alpha", "Picker Bravo", "Picker Charlie", "Picker Delta"]
             .iter()
             .enumerate()

@@ -87,6 +87,32 @@ async fn serve(cfg: Config) -> Result<(), String> {
             let rig = Arc::new(sim::SimRig::new());
             (server.clone() as Arc<dyn Backend>, Some((server, rig)))
         }
+        Mode::HardwareTest => {
+            // Real serial ports, but the same in-process test server as
+            // simulation: no HTTP client exists, so nothing can be uploaded.
+            if cfg.api_base_url.is_some() {
+                eprintln!("hardware-test mode: apiBaseUrl is ignored, no network calls are made");
+            }
+            let bins = cfg.test_carrier_infos()?;
+            eprintln!(
+                "hardware-test mode: scale {} @ {}, RFID {} @ {}, {} test bin(s)",
+                cfg.scale.port,
+                cfg.scale.baud,
+                cfg.rfid.port,
+                cfg.rfid.baud,
+                bins.len()
+            );
+            for b in &bins {
+                eprintln!(
+                    "  test bin {:?} tag {} tare {} g{}",
+                    b.name,
+                    b.rfid_tag.as_deref().unwrap_or("(none)"),
+                    b.tare_g,
+                    if b.is_active { "" } else { " (inactive)" }
+                );
+            }
+            (Arc::new(sim::SimServer::with_carriers(bins)) as Arc<dyn Backend>, None)
+        }
         Mode::Live => {
             // Under systemd the root-only token file is passed in via
             // LoadCredential; fall back to the configured path otherwise.
@@ -115,7 +141,7 @@ async fn serve(cfg: Config) -> Result<(), String> {
     let (app, wake_rx, snapshots) = App::new(cfg, store, backend, sim);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Input>();
 
-    if app.sim.is_none() {
+    if app.mode().uses_hardware() {
         serial::spawn_reader(
             serial::Device::Scale(app.cfg.scale.protocol),
             app.cfg.scale.port.clone(),

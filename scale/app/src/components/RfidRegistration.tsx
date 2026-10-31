@@ -34,12 +34,12 @@ export function RfidRegistration({ s, onDone }: { s: Snapshot; onDone: () => voi
   }, [token]);
 
   if (!token) {
-    return <Login simulated={s.simulated} onCancel={onDone} onLoggedIn={(t, n) => { setToken(t); setAdminName(n); }} />;
+    return <Login mode={s.mode} onCancel={onDone} onLoggedIn={(t, n) => { setToken(t); setAdminName(n); }} />;
   }
   return <Registrar token={token} adminName={adminName} onLogout={async () => { await logout(); onDone(); }} onExpired={() => setToken(null)} />;
 }
 
-function Login({ simulated, onLoggedIn, onCancel }: { simulated: boolean; onLoggedIn: (token: string, name: string) => void; onCancel: () => void }) {
+function Login({ mode, onLoggedIn, onCancel }: { mode: Snapshot["mode"]; onLoggedIn: (token: string, name: string) => void; onCancel: () => void }) {
   const [email, setEmail] = useState("");
   const [pin, setPin] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -74,7 +74,13 @@ function Login({ simulated, onLoggedIn, onCancel }: { simulated: boolean; onLogg
           <input type="password" inputMode="numeric" autoComplete="off" value={pin} onChange={(e) => setPin(e.target.value)} required />
         </label>
         {error && <div className="form-error" role="alert">{error}</div>}
-        {simulated && <p className="sim-hint">Simulation logins: admin@sim.local / 1234 (Administrator), manager@sim.local / 1234 (Manager, refused)</p>}
+        {mode === "simulation" && <p className="sim-hint">Simulation logins: admin@sim.local / 1234 (Administrator), manager@sim.local / 1234 (Manager, refused)</p>}
+        {mode === "hardware-test" && (
+          <p className="sim-hint">
+            Hardware test: sign in to the test server with admin@sim.local / 1234. A tag registered here is linked to a test bin until the service restarts.
+            To keep it, add it to testCarriers in /etc/labourlink-scale/config.json.
+          </p>
+        )}
         <div className="row">
           <button type="button" className="btn btn-ghost" onClick={onCancel}>Cancel</button>
           <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>

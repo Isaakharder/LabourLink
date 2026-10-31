@@ -1,0 +1,13 @@
+{
+  "mode": "hardware-test",
+  "stationName": "Packhouse scale (hardware test)",
+  "dataDir": "/var/lib/labourlink-scale",
+  "listen": "127.0.0.1:47800",
+  "scale": {
+    "port": "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG0427FU-if00-port0",
+    "baud": 9600,
+    "protocol": "rinstrum-auto-a"
+  },
+  "rfid": { "port": "/dev/labourlink/rfid", "baud": 9600 },
+  "testCarriers": []
+}
