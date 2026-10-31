@@ -594,6 +594,33 @@ update scale_stations set credits_enabled = true where name = 'Weigh station 1';
 
 **Audit trail.** Every tag or tare change, whether made at the station or on Basic Data > Carriers, writes a row to `carrier_registration_audit` in the same transaction. The Edit Carrier dialog shows that history: `GET /api/carriers/:id/history`, Administrators and Managers.
 
+### Scale Weighings page and credit corrections
+
+**Scale Weighings** (sidebar; Administrators and Managers, like Reports) lists every weighing for one day in the app timezone. It opens on today, and a date picker goes back to earlier days.
+- **Each row:** time, bin, RFID tag, gross / tare / net kg, credited employee, status and station. On a tablet, the tag and station columns move into the detail view.
+- **Filters:** bin, employee and status, including "Not credited".
+- **Day totals:**
+  - net produce and bins weighed;
+  - credited kg;
+  - pending, needs-review and never-credited counts.
+- **Detail view:** clicking a row shows its stable readings, the phone bin choices behind the credit, any competing or late claims, and the full history.
+
+**Voiding a credit** (Administrators only, `POST /api/scale-weighings/:id/void`)
+- Only a credit can be voided, and a reason is required.
+- The weighing, its weights, the original employee and the phone claims all stay on record.
+- The status becomes `voided`, and `scale_weighing_corrections` records who, when, why and what it was before.
+- A repeated request (same `correctionId`) is applied once, and a credit can be voided only once.
+- A voided bin use is not re-assigned to anyone.
+
+**What counts toward totals.** Two views are the one definition of what counts, and any report or payroll calculation that uses scale weighings must read them, never the table:
+
+| View | Contains | Excludes |
+|---|---|---|
+| `scale_production_weighings` | Production totals (kg harvested, bins weighed) | Voided weighings and duplicates |
+| `scale_employee_credits` | Employee credits: credited weighings from a station whose credits were live | Trial, voided, pending, needs-review and expired weighings |
+
+Today nothing else (Reports, Dashboard, payroll exports) reads scale weighings, so there is nothing else to keep consistent yet.
+
 ## Testing from a real phone on the same Wi-Fi
 
 The dev server binds all network interfaces (`server: { host: true }` in

@@ -21,6 +21,8 @@
     "test:scale-station-api": "ts-node src/routes/scale.test.ts",
     "test:migration-070-scale-weighings": "ts-node src/scripts/migration070ScaleWeighings.test.ts",
     "test:scale-registration": "ts-node src/routes/scaleRegistration.test.ts",
+    "test:scale-weighings": "ts-node src/routes/scaleWeighings.test.ts",
+    "test:migration-072-scale-weighing-corrections": "ts-node src/scripts/migration072ScaleWeighingCorrections.test.ts",
     "test:migration-071-carrier-registration-audit": "ts-node src/scripts/migration071CarrierRegistrationAudit.test.ts",
     "cutoff:run": "ts-node src/cli/dailyCutoffRun.ts",
     "cutoff:repair": "ts-node src/cli/repairStaleEntries.ts",
