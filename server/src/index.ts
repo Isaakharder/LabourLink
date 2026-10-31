@@ -30,6 +30,8 @@ import mobileStatsRoutes from "./routes/mobileStats";
 import mobileSyncConflictsRoutes from "./routes/mobileSyncConflicts";
 import mobileTimeRoutes from "./routes/mobileTime";
 import integrationsRoutes from "./routes/integrations";
+import scaleRoutes from "./routes/scale";
+import { startScaleMatchingSweep } from "./lib/scaleMatching";
 import nfcTagsRoutes from "./routes/nfcTags";
 import pairingRoutes from "./routes/pairing";
 import reviewerPairingRoutes from "./routes/reviewerPairing";
@@ -87,6 +89,7 @@ app.use("/api/messages", messagesRoutes);
 app.use("/api/inputs", inputsRoutes);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/integrations", integrationsRoutes);
+app.use("/api/scale", scaleRoutes);
 
 // Safety net: any error forwarded via next(err) (see asyncHandler) lands
 // here instead of crashing the process. Logged server-side; the client only
@@ -102,6 +105,10 @@ app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`LabourLink API listening on port ${PORT}`);
 });
+
+// Re-evaluates pending scale weighings every few minutes (expiry, and any
+// phone sync whose follow-up matching was cut short). See lib/scaleMatching.ts.
+startScaleMatchingSweep();
 
 // Graceful shutdown (lib/gracefulShutdown.ts): on SIGTERM from a Railway
 // deploy, finish in-flight requests before exiting (2026-10-10: a deploy

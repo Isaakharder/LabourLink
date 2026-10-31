@@ -27,6 +27,7 @@ import {
   resolveDensitySnapshot,
   validateActivityAndAnswers,
 } from "../lib/activitySelection";
+import { carrierIdsInAnswers, reconcileAfterPhoneSync } from "../lib/scaleMatching";
 
 const router = Router();
 router.use(asyncHandler(requireDevice));
@@ -1893,6 +1894,9 @@ router.post(
       [d.id]
     );
     let lastAcceptedOccurredAtUtc: Date | null = lastAcceptedRows[0] ? new Date(lastAcceptedRows[0].occurred_at_utc) : null;
+    // Accepted bin choices in this batch, for scale weighing matching once
+    // the response is sent (see the end of this handler).
+    const acceptedBinChoices: string[] = [];
 
     for (const event of valid) {
       const existing = await pool.query(
@@ -1982,6 +1986,7 @@ router.post(
           acceptedDetail = { ...((acceptedDetail as Record<string, unknown> | null) ?? {}), reason: acceptedReason };
         }
         await recordSyncedEvent(d.id, d.employeeId, event, "accepted", outcome.timeEntryId ?? null, acceptedReason, acceptedDetail);
+        if (carrierIdsInAnswers(event.answers).length > 0) acceptedBinChoices.push(event.clientEventId);
         lastAcceptedOccurredAtUtc = new Date(event.occurredAtUtc);
         lastProcessedSeq = event.deviceSeq;
         await pool.query(
@@ -2032,6 +2037,11 @@ router.post(
     // a device whose local event log was reset can't reuse a seq the
     // server has already consumed (see localSequenceAssignment.ts).
     res.json({ results, deviceLastProcessedSeq: lastProcessedSeq });
+
+    // A bin chosen on a phone may settle a pending scale weighing. Runs after
+    // the response, in its own transactions, and never throws: matching can
+    // never affect phone sync (lib/scaleMatching.ts).
+    if (acceptedBinChoices.length > 0) void reconcileAfterPhoneSync(d.id, acceptedBinChoices);
   })
 );
 
