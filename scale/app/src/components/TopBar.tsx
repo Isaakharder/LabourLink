@@ -67,7 +67,7 @@ export function TopBar({ snapshot: s, serviceConnected, view, onToggleView }: { 
       <div className="topbar-right">
         <time className="clock">{now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</time>
         <button type="button" className="btn btn-ghost" onClick={onToggleView}>
-          {view === "weigh" ? "Register tags" : "Back to weighing"}
+          {view === "weigh" ? "Register Bins" : "Back to weighing"}
         </button>
       </div>
     </header>

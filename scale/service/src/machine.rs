@@ -506,29 +506,21 @@ impl Machine {
 
     /// True when the last `stable_window_ms` of readings are steady enough.
     pub fn stable_window(&self, now: u64) -> Option<Vec<i64>> {
-        let from = now.saturating_sub(self.params.stable_window_ms);
-        let window: Vec<&(u64, Reading)> = self.samples.iter().filter(|(t, _)| *t >= from).collect();
-        if window.len() < self.params.stable_min_samples {
-            return None;
-        }
-        // The window must actually span (most of) the period, not just be
-        // a burst of readings that arrived in the last few hundred ms.
-        let span = now.saturating_sub(window[0].0);
-        if span * 10 < self.params.stable_window_ms * 8 {
-            return None;
-        }
-        let mut weights = Vec::with_capacity(window.len());
-        for (_, r) in window {
-            if r.motion || r.overload || r.underload || r.error || r.mode == IndicatorMode::Net {
-                return None;
-            }
-            weights.push(r.weight_g?);
-        }
-        let (min, max) = (*weights.iter().min()?, *weights.iter().max()?);
-        if max - min > self.params.stable_tolerance_g {
-            return None;
-        }
-        Some(weights)
+        stable_weights(&self.samples, now, &self.params)
+    }
+
+    /// Weighing resumes after Register Bins: start over as if the service
+    /// had just started (so a bin still on the scale must be removed first),
+    /// keeping the duplicate guard.
+    pub fn resume(&mut self) {
+        self.phase = Phase::Starting;
+        self.samples.clear();
+        self.tags.clear();
+        self.latched = None;
+        self.wait_for_zero = false;
+        self.last_reading = None;
+        self.last_reading_ms = None;
+        self.scale_online = false;
     }
 
     fn try_record(&mut self, now: u64) -> Option<RecordDraft> {
@@ -559,6 +551,36 @@ impl Machine {
             samples_g: weights,
         })
     }
+}
+
+/// The stable-window rule shared by weighing and Register Bins: the last
+/// `stable_window_ms` of readings span most of the window, number at least
+/// `stable_min_samples`, show no motion, overload, underload, error or net
+/// mode, and agree within `stable_tolerance_g`.
+pub fn stable_weights(samples: &VecDeque<(u64, Reading)>, now: u64, params: &Params) -> Option<Vec<i64>> {
+    let from = now.saturating_sub(params.stable_window_ms);
+    let window: Vec<&(u64, Reading)> = samples.iter().filter(|(t, _)| *t >= from).collect();
+    if window.len() < params.stable_min_samples {
+        return None;
+    }
+    // The window must actually span (most of) the period, not just be
+    // a burst of readings that arrived in the last few hundred ms.
+    let span = now.saturating_sub(window[0].0);
+    if span * 10 < params.stable_window_ms * 8 {
+        return None;
+    }
+    let mut weights = Vec::with_capacity(window.len());
+    for (_, r) in window {
+        if r.motion || r.overload || r.underload || r.error || r.mode == IndicatorMode::Net {
+            return None;
+        }
+        weights.push(r.weight_g?);
+    }
+    let (min, max) = (*weights.iter().min()?, *weights.iter().max()?);
+    if max - min > params.stable_tolerance_g {
+        return None;
+    }
+    Some(weights)
 }
 
 #[cfg(test)]

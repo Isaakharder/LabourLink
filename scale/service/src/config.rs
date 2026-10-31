@@ -179,7 +179,7 @@ impl Config {
         }
         if self.mode == Mode::Live {
             let url = self.api_base_url.as_deref().unwrap_or("");
-            if !(url.starts_with("https://") || url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost")) {
+            if !(url.starts_with("https://") || is_loopback_http(url)) {
                 return Err("live mode needs apiBaseUrl (https://…)".into());
             }
         }
@@ -254,6 +254,15 @@ impl Config {
     }
 }
 
+/// Plain http is accepted only for a server on this machine (a local test
+/// server); anything that leaves the station must be https.
+fn is_loopback_http(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else { return false };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +280,16 @@ mod tests {
     fn live_mode_requires_api_url_and_uses_its_own_db() {
         let c: Config = serde_json::from_str(r#"{"mode":"live"}"#).unwrap();
         assert!(c.validate().is_err());
+        for (url, ok) in [
+            ("http://127.0.0.1:4050", true),
+            ("http://localhost/", true),
+            ("http://localhost.example.com", false),
+            ("http://127.0.0.1.example.com:80", false),
+            ("http://api.example.com", false),
+        ] {
+            let c: Config = serde_json::from_str(&format!(r#"{{"mode":"live","apiBaseUrl":"{url}"}}"#)).unwrap();
+            assert_eq!(c.validate().is_ok(), ok, "{url}");
+        }
         let c: Config = serde_json::from_str(r#"{"mode":"live","apiBaseUrl":"https://api.example.com"}"#).unwrap();
         assert!(c.validate().is_ok());
         assert!(c.db_path().ends_with("scale.sqlite3"));

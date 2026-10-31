@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { employeeLine, headline, kg } from "./format";
+import { employeeLine, headline, kg, registrationHeadline, statusLabel } from "./format";
+import type { RegistrationView } from "./types";
 import { makeSnapshot, makeWeighing } from "./testFixtures";
 
 describe("kg", () => {
@@ -71,5 +72,45 @@ describe("headline", () => {
   it("asks for removal after recording, and after a restart with load on the scale", () => {
     expect(headline(makeSnapshot({ phase: { phase: "awaitingRemoval", reason: "recorded", bin: null, emptySinceMs: null } })).title).toBe("Weight recorded");
     expect(headline(makeSnapshot({ phase: { phase: "awaitingRemoval", reason: "startupLoad", bin: null, emptySinceMs: null } })).title).toBe("Remove the bin to begin");
+  });
+});
+
+describe("trial credits", () => {
+  it("never shows a trial match as a credit", () => {
+    const w = makeWeighing({ uploadState: "sent", assignmentStatus: "credited", employeeName: "Ruben Ortiz", creditsLive: false });
+    const e = employeeLine(w, { phase: "idle" });
+    expect(e.name).toBe("Trial: Ruben Ortiz");
+    expect(e.tone).toBe("pending");
+    expect(e.note).toMatch(/Credits are off/);
+    expect(statusLabel(w).tone).not.toBe("credited");
+  });
+
+  it("shows a live credit as a credit", () => {
+    const w = makeWeighing({ uploadState: "sent", assignmentStatus: "credited", employeeName: "Ruben Ortiz", creditsLive: true });
+    expect(employeeLine(w, { phase: "idle" })).toMatchObject({ name: "Ruben Ortiz", tone: "credited" });
+  });
+});
+
+describe("registrationHeadline", () => {
+  const view = (phase: RegistrationView["phase"], scaleOnline = true): RegistrationView => ({
+    person: "Pia",
+    phase,
+    reading: null,
+    scaleOnline,
+    settleRemainingMs: 0,
+    clearRemainingMs: 0,
+  });
+
+  it("walks through clearing, measuring, problems and success", () => {
+    expect(registrationHeadline(view({ phase: "clearScale", emptySinceMs: null })).title).toBe("Clear the scale");
+    expect(registrationHeadline(view({ phase: "ready" })).title).toBe("Place one completely empty bin on the scale");
+    expect(registrationHeadline(view({ phase: "measuring", sinceMs: 0 })).tone).toBe("working");
+    expect(registrationHeadline(view({ phase: "problem", reason: { code: "noTag" }, emptySinceMs: null })).title).toBe("No RFID tag read");
+    expect(registrationHeadline(view({ phase: "problem", reason: { code: "multipleTags", tags: ["a", "b"] }, emptySinceMs: null })).tone).toBe("error");
+    expect(registrationHeadline(view({ phase: "problem", reason: { code: "indicatorNotGross" }, emptySinceMs: null })).title).toMatch(/gross/);
+    const saved = registrationHeadline(view({ phase: "saved", binName: "Bin 77", rfidTag: "t", tareG: 154_400, emptySinceMs: null }));
+    expect(saved).toMatchObject({ tone: "done", title: "Bin 77 registered" });
+    expect(saved.detail).toMatch(/return to zero/);
+    expect(registrationHeadline(view({ phase: "ready" }, false)).title).toBe("Scale not responding");
   });
 });

@@ -56,6 +56,8 @@ export interface Weighing {
   assignmentStatus: AssignmentStatus;
   employeeName: string | null;
   pendingUntil: string | null;
+  /** From the server: false while the station's credits were off (trial). */
+  creditsLive: boolean | null;
 }
 
 export interface LinkStatus {
@@ -75,6 +77,50 @@ export interface RigView {
   };
   tagOnScale: string | null;
   targetGrossG: number;
+}
+
+export interface Proposal {
+  id: string;
+  tag: string;
+  grossG: number;
+  samplesG: number[];
+  stableMs: number;
+}
+
+export type RegProblem =
+  | { code: "noTag" }
+  | { code: "multipleTags"; tags: string[] }
+  | { code: "indicatorNotGross" }
+  | { code: "overload" }
+  | { code: "underload" }
+  | { code: "indicatorError" };
+
+export type RegPhase =
+  | { phase: "clearScale"; emptySinceMs: number | null }
+  | { phase: "ready" }
+  | { phase: "measuring"; sinceMs: number }
+  | { phase: "problem"; reason: RegProblem; emptySinceMs: number | null }
+  | { phase: "proposed"; proposal: Proposal }
+  | { phase: "saving"; proposal: Proposal }
+  | { phase: "saved"; binName: string; rfidTag: string; tareG: number; emptySinceMs: number | null };
+
+/** Register Bins, while it is open (weighing is paused). */
+export interface RegistrationView {
+  person: string;
+  phase: RegPhase;
+  reading: Reading | null;
+  scaleOnline: boolean;
+  settleRemainingMs: number;
+  clearRemainingMs: number;
+}
+
+/** An existing LabourLink bin, as Register Bins sees it. */
+export interface RegBin {
+  id: string;
+  name: string;
+  rfidTag: string | null;
+  tareWeightKg: number;
+  isActive: boolean;
 }
 
 export interface Snapshot {
@@ -100,4 +146,7 @@ export interface Snapshot {
   carrierCount: number;
   params: { settleMs: number; removalMs: number; minLoadG: number; duplicateGuardMs: number };
   rig: RigView | null;
+  registration: RegistrationView | null;
+  /** The station's credit switch on the server; false = trial (no credits). null until known. */
+  creditsEnabled: boolean | null;
 }

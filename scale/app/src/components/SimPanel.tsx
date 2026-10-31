@@ -11,6 +11,8 @@ interface World {
   claims: SimClaim[];
   serverWeighings: SimWeighing[];
   serverOnline: boolean;
+  /** The test server's station credit switch (off = trial). */
+  creditsEnabled: boolean;
   unregisteredTag: string;
 }
 
@@ -156,6 +158,10 @@ export function SimPanel({ s }: { s: Snapshot }) {
                 <label className="toggle">
                   <input type="checkbox" checked={world.serverOnline} onChange={(e) => act("/api/sim/flags", { serverOnline: e.target.checked })} />
                   LabourLink server reachable
+                </label>
+                <label className="toggle">
+                  <input type="checkbox" checked={world.creditsEnabled} onChange={(e) => act("/api/sim/flags", { creditsEnabled: e.target.checked })} />
+                  Station credits on (off = trial)
                 </label>
               </div>
             )}

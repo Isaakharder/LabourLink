@@ -5,7 +5,7 @@
   "listen": "127.0.0.1:47800",
   "apiBaseUrl": "https://REPLACE-WITH-LABOURLINK-API-HOST",
   "stationTokenFile": "/etc/labourlink-scale/station-token",
-  "scale": { "port": "/dev/labourlink/scale", "baud": 9600, "protocol": "rinstrum-auto-a" },
+  "scale": { "port": "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG0427FU-if00-port0", "baud": 9600, "protocol": "rinstrum-auto-a" },
   "rfid": { "port": "/dev/labourlink/rfid", "baud": 9600 },
   "weighing": {
     "settleSeconds": 10,

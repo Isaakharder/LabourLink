@@ -10,6 +10,7 @@ mod capture;
 mod config;
 mod machine;
 mod matching;
+mod registration;
 mod rfid;
 mod scale_proto;
 mod serial;

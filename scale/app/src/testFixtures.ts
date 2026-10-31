@@ -19,6 +19,7 @@ export function makeWeighing(over: Partial<Weighing> = {}): Weighing {
     assignmentStatus: "credited",
     employeeName: "Picker Alpha",
     pendingUntil: null,
+    creditsLive: true,
     ...over,
   };
 }
@@ -49,6 +50,8 @@ export function makeSnapshot(over: Partial<Snapshot> = {}): Snapshot {
     carrierCount: 15,
     params: { settleMs: 10_000, removalMs: 2_000, minLoadG: 2_000, duplicateGuardMs: 300_000 },
     rig: null,
+    registration: null,
+    creditsEnabled: true,
     ...over,
   };
 }

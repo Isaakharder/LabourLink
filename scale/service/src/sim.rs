@@ -1,9 +1,11 @@
 //! Simulation mode: a fake LabourLink server and fake hardware.
 //!
 //! Nothing here touches the network. `SimServer` implements `Backend` in
-//! memory with clearly fake bins and pickers, runs the reference assignment
-//! rule (matching.rs) and mirrors the real Carriers API's RFID validation
-//! and duplicate-tag message. `SimRig` produces indicator frames and RFID
+//! memory with clearly fake bins and pickers, runs the assignment rule
+//! (matching.rs, the same cases as the server) and applies Register Bins
+//! with the server's rules (server/src/lib/binRegistration.ts): one tag per
+//! bin, stale views refused, overwrites confirmed, explicit tag moves, and a
+//! registration applied once. `SimRig` produces indicator frames and RFID
 //! lines as raw bytes that go through the same framers and parsers as the
 //! serial ports, so the parsing path is exercised too.
 
@@ -12,10 +14,12 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
-use crate::backend::{AdminCarrier, AdminSession, AssignmentResult, Backend, BackendError};
+use crate::backend::{
+    AssignmentResult, Backend, BackendError, Expected, MovedFrom, RegBin, RegistrationOutcome, RegistrationRequest, RemoveTagRequest, StationInfo, UserSession,
+};
 use crate::machine::CarrierInfo;
 use crate::matching::{decide, AssignmentStatus, Claim, WeighingFacts};
-use crate::rfid::{is_valid_rfid_tag, normalize_rfid_tag, LineFramer, MAX_RFID_TAG_LENGTH};
+use crate::rfid::{is_valid_rfid_tag, normalize_rfid_tag, LineFramer};
 use crate::scale_proto::{encode_rinstrum_auto_a, IndicatorMode, Reading, ScaleFramer};
 use crate::store::Weighing;
 
@@ -70,6 +74,8 @@ pub enum ScanTiming {
 struct SimWeighing {
     facts: WeighingFacts,
     status: AssignmentStatus,
+    /// The station's credit switch when the weighing arrived.
+    credits_live: bool,
 }
 
 struct Inner {
@@ -77,10 +83,17 @@ struct Inner {
     employees: Vec<SimEmployee>,
     claims: Vec<Claim>,
     weighings: Vec<SimWeighing>,
-    sessions: HashMap<String, AdminSession>,
+    sessions: HashMap<String, UserSession>,
+    /// Register Bins history: (registration id, carrier id, old tag, old
+    /// tare g, new tag, new tare g). Used for replays and for restoring a
+    /// bin's tare when a mistakenly registered tag is moved off it.
+    registrations: Vec<(String, String, Option<String>, i64, Option<String>, i64)>,
     /// claim id -> credited weighing id it conflicts with (flag only).
     conflicts: HashMap<String, String>,
     online: bool,
+    /// The station's credit switch (scale_stations.credits_enabled). Off
+    /// means trial: weighings are matched but never count as credits.
+    credits_enabled: bool,
     next_id: u64,
 }
 
@@ -99,18 +112,44 @@ fn rfc3339_to_ms(s: &str) -> Option<i64> {
 }
 
 fn http(status: u16, message: &str) -> BackendError {
+    BackendError::http(status, message)
+}
+
+/// A refusal shaped like the server's: `{ code, error, ...data }`.
+fn refused(status: u16, code: &str, message: String, data: serde_json::Value) -> BackendError {
+    let mut body = if data.is_object() { data } else { serde_json::json!({}) };
+    body["code"] = serde_json::json!(code);
+    body["error"] = serde_json::json!(message);
     BackendError::Http {
         status,
-        message: message.into(),
+        message,
         errors: BTreeMap::new(),
+        code: Some(code.into()),
+        body,
     }
 }
 
-fn field(status: u16, field: &str, message: String) -> BackendError {
-    BackendError::Http {
-        status,
-        message: "Validation failed".into(),
-        errors: BTreeMap::from([(field.to_string(), message)]),
+fn reg_bin(c: &CarrierInfo) -> RegBin {
+    RegBin {
+        id: c.id.clone(),
+        name: c.name.clone(),
+        rfid_tag: c.rfid_tag.clone(),
+        tare_weight_kg: c.tare_g as f64 / 1000.0,
+        is_active: c.is_active,
+    }
+}
+
+fn kg2(kg: f64) -> f64 {
+    (kg * 100.0).round() / 100.0
+}
+
+/// The number at the end of a bin's name ("Bin 077" -> 77).
+fn trailing_number(name: &str) -> Option<u64> {
+    let digits: String = name.trim_end().chars().rev().take_while(|c| c.is_ascii_digit()).collect::<String>().chars().rev().collect();
+    if digits.is_empty() || digits.len() > 9 {
+        None
+    } else {
+        digits.parse().ok()
     }
 }
 
@@ -180,8 +219,10 @@ impl SimServer {
                 claims: vec![],
                 weighings: vec![],
                 sessions: HashMap::new(),
+                registrations: vec![],
                 conflicts: HashMap::new(),
                 online: true,
+                credits_enabled: true,
                 next_id: 1,
             }),
         }
@@ -198,6 +239,10 @@ impl SimServer {
 
     pub fn set_online(&self, online: bool) {
         self.inner.lock().unwrap().online = online;
+    }
+
+    pub fn set_credits_enabled(&self, on: bool) {
+        self.inner.lock().unwrap().credits_enabled = on;
     }
 
     /// Applies the 24-hour rule as if `ms` had passed, once. There is no
@@ -246,6 +291,7 @@ impl SimServer {
             employee_id: employee_id.into(),
             carrier_id: carrier_id.clone(),
             occurred_at,
+            received_at: now,
             clock_trusted,
             consumed_by: None,
         });
@@ -299,6 +345,8 @@ impl SimServer {
             status: w.status.as_str().into(),
             employee_name,
             pending_until,
+            // "Live" within the test only: nothing leaves this process.
+            credits_live: Some(w.credits_live),
         })
     }
 
@@ -315,8 +363,8 @@ impl SimServer {
         Self::result_for(&g, id)
     }
 
-    /// Simulates a future, explicit and audited administrator correction
-    /// (not built yet) so tests can prove the station follows the server.
+    /// Simulates a server-side administrator correction (a void on the
+    /// Scale Weighings page) so tests can prove the station follows the server.
     #[cfg(test)]
     pub fn force_status(&self, id: &str, status: AssignmentStatus) {
         let mut g = self.inner.lock().unwrap();
@@ -393,10 +441,11 @@ impl SimServer {
             "claims": claims,
             "serverWeighings": weighings,
             "serverOnline": g.online,
+            "creditsEnabled": g.credits_enabled,
             "unregisteredTag": UNREGISTERED_TAG,
-            "adminLogins": [
-                { "email": "admin@sim.local", "pin": "1234", "role": "Administrator" },
-                { "email": "manager@sim.local", "pin": "1234", "role": "Manager" }
+            "logins": [
+                { "email": "picker@sim.local", "pin": "1234", "role": "Employee" },
+                { "email": "admin@sim.local", "pin": "1234", "role": "Administrator" }
             ],
         })
     }
@@ -409,25 +458,26 @@ impl SimServer {
         }
     }
 
-    fn session(&self, s: &AdminSession, roles: &[&str]) -> Result<(), BackendError> {
-        let g = self.inner.lock().unwrap();
-        let Some(live) = g.sessions.get(&s.cookie) else {
-            return Err(http(401, "Not authenticated"));
-        };
-        if !roles.contains(&live.role.as_str()) {
-            return Err(http(403, "Insufficient permissions"));
+    /// Any signed-in user may register bins (the server's rule).
+    fn session(&self, s: &UserSession) -> Result<(), BackendError> {
+        if self.inner.lock().unwrap().sessions.contains_key(&s.cookie) {
+            Ok(())
+        } else {
+            Err(http(401, "Not authenticated"))
         }
-        Ok(())
     }
 
-    fn admin_view(c: &CarrierInfo) -> AdminCarrier {
-        AdminCarrier {
-            id: c.id.clone(),
-            name: c.name.clone(),
-            rfid_tag: c.rfid_tag.clone(),
-            tare_weight_kg: c.tare_g as f64 / 1000.0,
-            is_active: c.is_active,
-        }
+    fn same_as_expected(c: &CarrierInfo, e: &Expected) -> bool {
+        c.rfid_tag == e.rfid_tag && kg2(c.tare_g as f64 / 1000.0) == kg2(e.tare_weight_kg)
+    }
+
+    fn stale(c: &CarrierInfo) -> BackendError {
+        refused(
+            409,
+            "stale",
+            format!("{} was changed while you were registering. Check its current tag and tare and try again.", c.name),
+            serde_json::json!({ "current": reg_bin(c) }),
+        )
     }
 }
 
@@ -450,6 +500,7 @@ impl Backend for SimServer {
         }
         // Idempotent on the station's UUID.
         if g.weighings.iter().all(|x| x.facts.id != w.id) {
+            let credits_live = g.credits_enabled;
             g.weighings.push(SimWeighing {
                 facts: WeighingFacts {
                     id: w.id.clone(),
@@ -460,6 +511,7 @@ impl Backend for SimServer {
                     current_employee: None,
                 },
                 status: AssignmentStatus::Pending,
+                credits_live,
             });
             Self::reevaluate(&mut g, &w.carrier_id, Self::now());
         }
@@ -471,17 +523,27 @@ impl Backend for SimServer {
         Ok(ids.iter().filter_map(|id| self.status(id).map(|r| (id.clone(), r))).collect())
     }
 
-    fn admin_login(&self, email: &str, pin: &str) -> Result<AdminSession, BackendError> {
+    fn station_info(&self) -> Result<StationInfo, BackendError> {
+        self.check_online()?;
+        Ok(StationInfo {
+            name: "Test station".into(),
+            credits_enabled: self.inner.lock().unwrap().credits_enabled,
+        })
+    }
+
+    fn user_login(&self, email: &str, pin: &str) -> Result<UserSession, BackendError> {
         self.check_online()?;
         let email = email.trim().to_lowercase();
         let (name, role) = match (email.as_str(), pin) {
+            ("picker@sim.local", "1234") => ("Sim Picker", "Employee"),
             ("admin@sim.local", "1234") => ("Sim Admin", "Administrator"),
             ("manager@sim.local", "1234") => ("Sim Manager", "Manager"),
             _ => return Err(http(401, "Invalid email or PIN")),
         };
         let mut g = self.inner.lock().unwrap();
-        let s = AdminSession {
+        let s = UserSession {
             cookie: format!("sim-session-{}", uuid::Uuid::new_v4()),
+            refresh_cookie: None,
             name: name.into(),
             role: role.into(),
         };
@@ -489,49 +551,156 @@ impl Backend for SimServer {
         Ok(s)
     }
 
-    fn admin_carriers(&self, s: &AdminSession, search: &str) -> Result<Vec<AdminCarrier>, BackendError> {
+    fn user_logout(&self, s: &UserSession) {
+        self.inner.lock().unwrap().sessions.remove(&s.cookie);
+    }
+
+    fn find_bins(&self, s: &UserSession, query: &str) -> Result<Vec<RegBin>, BackendError> {
         self.check_online()?;
-        self.session(s, &["Administrator", "Manager"])?;
-        let q = search.trim().to_lowercase();
-        let qt = normalize_rfid_tag(search);
+        self.session(s)?;
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Ok(vec![]);
+        }
+        let number: Option<u64> = (q.len() <= 9 && q.chars().all(|c| c.is_ascii_digit())).then(|| q.parse().unwrap());
         Ok(self
             .carriers()
             .iter()
-            .filter(|c| q.is_empty() || c.name.to_lowercase().contains(&q) || c.rfid_tag.as_deref().is_some_and(|t| t.contains(&qt)))
-            .map(Self::admin_view)
+            .filter(|c| c.is_active)
+            .filter(|c| match number {
+                Some(n) => trailing_number(&c.name) == Some(n),
+                None => c.name.to_lowercase().contains(&q),
+            })
+            .map(reg_bin)
             .collect())
     }
 
-    fn admin_set_rfid(&self, s: &AdminSession, carrier_id: &str, rfid_tag: Option<&str>) -> Result<AdminCarrier, BackendError> {
+    fn bin_for_tag(&self, s: &UserSession, tag: &str) -> Result<Option<RegBin>, BackendError> {
         self.check_online()?;
-        self.session(s, &["Administrator"])?;
-        // Same rule and messages as server/src/lib/rfidTag.ts + carriers.ts.
-        let tag = match rfid_tag.map(normalize_rfid_tag) {
-            None => None,
-            Some(t) if t.is_empty() => None,
-            Some(t) if t.len() > MAX_RFID_TAG_LENGTH => {
-                return Err(field(400, "rfidTag", format!("RFID tag must be {MAX_RFID_TAG_LENGTH} characters or fewer")))
-            }
-            Some(t) if !is_valid_rfid_tag(&t) => return Err(field(400, "rfidTag", "RFID tag may only contain letters and digits".into())),
-            Some(t) => Some(t),
-        };
+        self.session(s)?;
+        let tag = normalize_rfid_tag(tag);
+        Ok(self.carriers().iter().find(|c| c.rfid_tag.as_deref() == Some(tag.as_str())).map(reg_bin))
+    }
+
+    fn register_bin(&self, s: &UserSession, r: &RegistrationRequest) -> Result<RegistrationOutcome, BackendError> {
+        self.check_online()?;
+        self.session(s)?;
+        let tag = normalize_rfid_tag(&r.rfid_tag);
+        if tag.is_empty() || !is_valid_rfid_tag(&tag) {
+            return Err(http(400, "No RFID tag was read. Every bin needs its tag."));
+        }
+        if r.measured.gross_kg < 2.0 || r.measured.status != "gross" || !r.empty_confirmed || kg2(r.tare_kg) != kg2(r.measured.gross_kg) {
+            return Err(http(400, "The measurement or the empty-bin confirmation is missing."));
+        }
+        let tare_g = crate::backend::kg_to_g(kg2(r.tare_kg));
         let mut g = self.inner.lock().unwrap();
-        if let Some(t) = &tag {
-            if let Some(owner) = g.carriers.iter().find(|c| c.id != carrier_id && c.rfid_tag.as_deref() == Some(t)) {
-                return Err(field(
+        let Some(ti) = g.carriers.iter().position(|c| c.id == r.carrier_id) else {
+            return Err(refused(404, "binNotFound", "That bin doesn't exist in LabourLink.".into(), serde_json::Value::Null));
+        };
+        // A retried request is answered, never applied twice.
+        if let Some(prev) = g.registrations.iter().find(|x| x.0 == r.registration_id) {
+            if prev.1 != r.carrier_id {
+                return Err(refused(409, "registrationIdReused", "This registration was already used for another bin.".into(), serde_json::Value::Null));
+            }
+            return Ok(RegistrationOutcome {
+                carrier: reg_bin(&g.carriers[ti]),
+                previous: None,
+                moved_from: None,
+                replay: true,
+            });
+        }
+        let target = g.carriers[ti].clone();
+        if !target.is_active {
+            return Err(refused(409, "binInactive", format!("{} is inactive.", target.name), serde_json::Value::Null));
+        }
+        if !Self::same_as_expected(&target, &r.expected) {
+            return Err(Self::stale(&target));
+        }
+        let holder = g.carriers.iter().position(|c| c.id != target.id && c.rfid_tag.as_deref() == Some(tag.as_str()));
+        if let Some(hi) = holder {
+            if r.move_from_carrier_id.as_deref() != Some(g.carriers[hi].id.as_str()) {
+                let h = &g.carriers[hi];
+                return Err(refused(
                     409,
-                    "rfidTag",
-                    format!("RFID tag {t} is already assigned to \"{}\". Clear it there first.", owner.name),
+                    "tagOnOtherBin",
+                    format!("This tag is registered to {}. Move it only if {} was registered by mistake.", h.name, h.name),
+                    serde_json::json!({ "holder": reg_bin(h) }),
                 ));
             }
+        } else if r.move_from_carrier_id.is_some() {
+            return Err(Self::stale(&target));
         }
-        let c = g
-            .carriers
-            .iter_mut()
-            .find(|c| c.id == carrier_id)
-            .ok_or_else(|| http(404, "Carrier not found"))?;
-        c.rfid_tag = tag;
-        Ok(Self::admin_view(c))
+        let replaces_tag = target.rfid_tag.is_some() && target.rfid_tag.as_deref() != Some(tag.as_str());
+        let replaces_tare = target.tare_g > 0 && target.tare_g != tare_g;
+        if (replaces_tag || replaces_tare) && !r.confirm_overwrite {
+            return Err(refused(
+                409,
+                "needsConfirmation",
+                format!("{} already has a tag or tare. Confirm to replace.", target.name),
+                serde_json::json!({ "current": reg_bin(&target), "replacesTag": replaces_tag, "replacesTare": replaces_tare }),
+            ));
+        }
+        let mut moved_from = None;
+        if let Some(hi) = holder {
+            let h = g.carriers[hi].clone();
+            // Restore the holder's previous tare if its last registration set this tag and tare.
+            let last = g.registrations.iter().rev().find(|x| x.1 == h.id).cloned();
+            let restore = match last {
+                Some((_, _, _, old_tare, Some(new_tag), new_tare)) if new_tag == tag && new_tare == h.tare_g => old_tare,
+                _ => h.tare_g,
+            };
+            g.carriers[hi].rfid_tag = None;
+            g.carriers[hi].tare_g = restore;
+            g.registrations.push((r.registration_id.clone(), h.id.clone(), h.rfid_tag.clone(), h.tare_g, None, restore));
+            moved_from = Some(MovedFrom {
+                id: h.id.clone(),
+                name: h.name.clone(),
+                tare_weight_kg: restore as f64 / 1000.0,
+                tare_restored: restore != h.tare_g,
+            });
+        }
+        g.carriers[ti].rfid_tag = Some(tag.clone());
+        g.carriers[ti].tare_g = tare_g;
+        g.registrations.push((r.registration_id.clone(), target.id.clone(), target.rfid_tag.clone(), target.tare_g, Some(tag), tare_g));
+        Ok(RegistrationOutcome {
+            carrier: reg_bin(&g.carriers[ti]),
+            previous: Some(Expected {
+                rfid_tag: target.rfid_tag.clone(),
+                tare_weight_kg: target.tare_g as f64 / 1000.0,
+            }),
+            moved_from,
+            replay: false,
+        })
+    }
+
+    fn remove_tag(&self, s: &UserSession, r: &RemoveTagRequest) -> Result<RegistrationOutcome, BackendError> {
+        self.check_online()?;
+        self.session(s)?;
+        if !r.confirm {
+            return Err(http(400, "Confirm removing the tag."));
+        }
+        let mut g = self.inner.lock().unwrap();
+        let Some(ti) = g.carriers.iter().position(|c| c.id == r.carrier_id) else {
+            return Err(refused(404, "binNotFound", "That bin doesn't exist in LabourLink.".into(), serde_json::Value::Null));
+        };
+        let c = g.carriers[ti].clone();
+        if !Self::same_as_expected(&c, &r.expected) {
+            return Err(Self::stale(&c));
+        }
+        if c.rfid_tag.is_none() {
+            return Err(refused(409, "noTag", format!("{} has no tag to remove.", c.name), serde_json::Value::Null));
+        }
+        g.carriers[ti].rfid_tag = None;
+        g.registrations.push((r.registration_id.clone(), c.id.clone(), c.rfid_tag.clone(), c.tare_g, None, c.tare_g));
+        Ok(RegistrationOutcome {
+            carrier: reg_bin(&g.carriers[ti]),
+            previous: Some(Expected {
+                rfid_tag: c.rfid_tag.clone(),
+                tare_weight_kg: c.tare_g as f64 / 1000.0,
+            }),
+            moved_from: None,
+            replay: false,
+        })
     }
 }
 
@@ -721,6 +890,7 @@ mod tests {
             assignment_status: "unknown".into(),
             employee_name: None,
             pending_until: None,
+            credits_live: None,
         }
     }
 
@@ -907,28 +1077,100 @@ mod tests {
         assert!(matches!(s.fetch_carriers(), Err(BackendError::Offline(_))));
     }
 
+    fn req(id: &str, carrier: &str, tag: &str, kg: f64, expected: Expected) -> RegistrationRequest {
+        RegistrationRequest {
+            registration_id: id.into(),
+            carrier_id: carrier.into(),
+            rfid_tag: tag.into(),
+            tare_kg: kg,
+            measured: crate::backend::Measured {
+                gross_kg: kg,
+                samples_kg: vec![kg; 6],
+                status: "gross",
+                stable_ms: 2000,
+            },
+            expected,
+            empty_confirmed: true,
+            confirm_overwrite: false,
+            move_from_carrier_id: None,
+        }
+    }
+
+    fn code(e: BackendError) -> String {
+        match e {
+            BackendError::Http { code, .. } => code.unwrap_or_default(),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
-    fn rfid_registration_mirrors_carriers_api_rules() {
+    fn register_bins_follows_the_servers_rules() {
         let s = SimServer::new();
-        let mgr = s.admin_login("manager@sim.local", "1234").unwrap();
-        assert!(matches!(
-            s.admin_set_rfid(&mgr, "sim-carrier-13", Some("1")),
-            Err(BackendError::Http { status: 403, .. })
-        ));
-        assert!(matches!(s.admin_login("admin@sim.local", "0000"), Err(BackendError::Http { status: 401, .. })));
-        let admin = s.admin_login("Admin@Sim.Local ", "1234").unwrap();
-        let c = s.admin_set_rfid(&admin, "sim-carrier-13", Some(" 0000 0001 2345 ")).unwrap();
-        assert_eq!(c.rfid_tag.as_deref(), Some("000000012345"));
-        let err = s.admin_set_rfid(&admin, "sim-carrier-14", Some("0000000182225750")).unwrap_err();
-        assert_eq!(
-            err.message(),
-            "RFID tag 0000000182225750 is already assigned to \"Sim Bin 1\". Clear it there first."
-        );
-        assert!(matches!(
-            s.admin_set_rfid(&admin, "sim-carrier-14", Some("AB-12")),
-            Err(BackendError::Http { status: 400, .. })
-        ));
-        assert_eq!(s.admin_set_rfid(&admin, "sim-carrier-13", None).unwrap().rfid_tag, None);
+        assert!(matches!(s.user_login("picker@sim.local", "0000"), Err(BackendError::Http { status: 401, .. })));
+        // Any signed-in user, not only administrators.
+        let p = s.user_login(" Picker@Sim.Local", "1234").unwrap();
+        assert_eq!(p.role, "Employee");
+        let fresh = Expected {
+            rfid_tag: None,
+            tare_weight_kg: 27.2,
+        };
+        assert_eq!(s.find_bins(&p, "13").unwrap()[0].id, "sim-carrier-13");
+        assert!(s.find_bins(&p, "12").unwrap().is_empty(), "inactive bins are not offered");
+
+        // Replacing the existing 27.2 kg tare needs confirmation.
+        let r1 = req("r1", "sim-carrier-13", "0000000000001313", 26.4, fresh.clone());
+        assert_eq!(code(s.register_bin(&p, &r1).unwrap_err()), "needsConfirmation");
+        let ok = s.register_bin(&p, &RegistrationRequest { confirm_overwrite: true, ..r1.clone() }).unwrap();
+        assert_eq!((ok.carrier.rfid_tag.as_deref(), ok.carrier.tare_weight_kg), (Some("0000000000001313"), 26.4));
+        assert!(s.register_bin(&p, &RegistrationRequest { confirm_overwrite: true, ..r1.clone() }).unwrap().replay);
+        // A stale view is refused.
+        assert_eq!(code(s.register_bin(&p, &req("r2", "sim-carrier-13", "0000000000001313", 26.4, fresh.clone())).unwrap_err()), "stale");
+
+        // One tag, one bin; moving it off a bin registered by mistake restores that bin's tare.
+        let r3 = req("r3", "sim-carrier-14", "0000000000001313", 26.4, fresh.clone());
+        let e = s.register_bin(&p, &r3).unwrap_err();
+        assert_eq!(code(e.clone()), "tagOnOtherBin");
+        if let BackendError::Http { body, .. } = e {
+            assert_eq!(body["holder"]["id"], "sim-carrier-13");
+        }
+        let moved = s
+            .register_bin(
+                &p,
+                &RegistrationRequest {
+                    move_from_carrier_id: Some("sim-carrier-13".into()),
+                    confirm_overwrite: true,
+                    ..r3
+                },
+            )
+            .unwrap();
+        let from = moved.moved_from.unwrap();
+        assert!(from.tare_restored);
+        assert_eq!(from.tare_weight_kg, 27.2);
+        let bins = s.carriers();
+        assert_eq!(bins.iter().find(|c| c.id == "sim-carrier-13").unwrap().rfid_tag, None);
+        assert_eq!(bins.iter().filter(|c| c.rfid_tag.as_deref() == Some("0000000000001313")).count(), 1);
+
+        // Removing a tag keeps the tare.
+        let out = s
+            .remove_tag(
+                &p,
+                &RemoveTagRequest {
+                    registration_id: "r4".into(),
+                    carrier_id: "sim-carrier-14".into(),
+                    expected: Expected {
+                        rfid_tag: Some("0000000000001313".into()),
+                        tare_weight_kg: 26.4,
+                    },
+                    confirm: true,
+                    reason: None,
+                },
+            )
+            .unwrap();
+        assert_eq!((out.carrier.rfid_tag, out.carrier.tare_weight_kg), (None, 26.4));
+
+        // Signed out: refused.
+        s.user_logout(&p);
+        assert!(matches!(s.find_bins(&p, "13"), Err(BackendError::Http { status: 401, .. })));
     }
 
     #[test]

@@ -2,7 +2,9 @@
 
 Weighing station for the packhouse. It runs on an Intel NUC5CPYH with Linux Mint 22.3, a PROTAGD RFID reader and a Rinstrum R300 indicator. When a bin is placed on the scale, its RFID tag identifies the carrier. The station waits for a stable gross weight, subtracts the carrier's tare and records the net weight. The LabourLink server then credits the picker who verifiably scanned that bin in the same use cycle.
 
-For the design, the 24-hour pending rule and the proposed server contract, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Bins are registered at the station itself: **Register Bins** measures an empty bin and writes its tag and tare to its LabourLink carrier record.
+
+For the design, the 24-hour pending rule and the server contract, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The server side is in `server/src/routes/scale.ts` (station API and Register Bins), `server/src/lib/scaleMatching*.ts` (who gets credit) and `server/src/routes/scaleWeighings.ts` (the Scale Weighings page).
 
 ```
 scale/
@@ -19,12 +21,13 @@ scale/
 | Weighing state machine (10 s settle, stable weight, duplicate and next-bin rules) | Done, unit-tested |
 | SQLite outbox, offline queue, restart recovery | Done, unit-tested |
 | Display: weighing screen, status bar, recent weighings | Done, tested in a browser and with component tests |
-| RFID registration using the existing login and Carriers API | Done. Tested against the simulator only |
+| Register Bins (any signed-in user; empty bin measured on the scale; tag and tare saved to the existing carrier, audited) | Done. Tested against the simulator and end to end against a local LabourLink server |
 | Simulation mode (fake scale, reader, server, phones) | Done |
-| Hardware-test mode (real scale and reader, test bins, test server, nothing sent) | Done, tested with recorded R300-style frames. Needs a run on the NUC |
+| Hardware-test mode (real scale and reader, test bins, test server, nothing sent) | Done. Run on the NUC with 0.2.1: real R300 and PROTAGD data, Bin 77 weighed |
 | `.deb` (service + display + systemd + udev + autostart) | Builds and installs on Ubuntu 24.04. Not yet installed on the NUC |
-| Server `/api/scale/*` endpoints, migration, matching, expiry | **Not built.** Contract proposed in ARCHITECTURE §5 |
-| R300 and PROTAGD protocols | **Unverified on the NUC.** Use `capture` (it now summarises frame shapes and status letters) before trusting hardware-test results |
+| Server `/api/scale/*` endpoints, migrations 070–072, matching, expiry, Scale Weighings page | Built on branches (PRs). **Not merged or deployed** |
+| Live mode against a LabourLink server | Tested end to end against a local test server. Credits start off (trial) |
+| R300 and PROTAGD protocols | Confirmed on the NUC with 0.2.1 hardware-test mode (gross readings, tags, duplicate guard) |
 
 ## Run it locally (simulation)
 
@@ -51,31 +54,35 @@ In simulation, use the **Simulator** drawer to:
 
 The **Simulated server** list shows each weighing's status, and each scan is labelled with what happened to it: credited this use, conflict (flagged, credit unchanged), waiting for the bin's next weighing, too late (that use expired), or ignored (clock flagged).
 
-Registration logins: `admin@sim.local` / `1234` (Administrator) and `manager@sim.local` / `1234` (refused).
+Register Bins sign-in in simulation: `picker@sim.local` / `1234`. Any user can register bins. The drawer's **Station credits on** switch shows what a trial station looks like.
 
 ## Tests
 
 ```sh
-# Service: 90 tests (parsers, state machine, matching rule, store, end to end in simulation and hardware test)
+# Service: 99 tests (parsers, state machine, Register Bins, matching rule incl. the server's shared cases, store, end to end in simulation and hardware test)
 docker run --rm -v "$PWD":/work -w /work/scale/service labourlink-scale-build cargo test
-# Display: 27 tests
+# Display: 34 tests
 cd scale/app && npx vitest run
 # Hardware-test mode end to end: the real binary, virtual serial ports named like the NUC's, no network.
 # Needs an image with socat, curl and jq (see the script's header).
 docker run --rm --network none -v "$PWD":/work -v llscale-cargo:/usr/local/cargo/registry   labourlink-scale-hwtest sh /work/scale/docker/hwtest-pty.sh
+# Live mode end to end against a LOCAL LabourLink test server (see the script's header): Register Bins,
+# a phone bin choice through the real phone-sync route, the weighing credited (as a trial), the duplicate guard.
+docker run --rm -v "$PWD":/work -v /path/to/e2e.json:/e2e/e2e.json -e E2E_SERVER=host.docker.internal:4050 \
+  -v llscale-cargo:/usr/local/cargo/registry labourlink-scale-hwtest sh /work/scale/docker/live-e2e.sh
 ```
 
 ## Build the .deb
 
 ```sh
 docker run --rm -v "$PWD":/work labourlink-scale-build sh /work/scale/docker/build-deb.sh
-# → scale/dist/labourlink-scale_0.2.1_amd64.deb (~4 MB)
+# → scale/dist/labourlink-scale_0.3.0_amd64.deb (~4 MB)
 ```
 
 To install on the NUC:
 
 ```sh
-sudo apt install ./labourlink-scale_0.2.1_amd64.deb
+sudo apt install ./labourlink-scale_0.3.0_amd64.deb
 ```
 
 The package starts `labourlink-scaled` in **simulation** mode and adds the display to XFCE autostart. Then run `sh /usr/share/labourlink-scale/setup-kiosk.sh` as the station user and enable automatic login.
@@ -106,7 +113,7 @@ The rules that run are the 10 s settle, the stable weight, tare and net, duplica
 
 ```sh
 # 1. Install 0.2.1. The existing /etc/labourlink-scale/config.json is kept, so the service restarts in simulation.
-sudo apt install ./labourlink-scale_0.2.1_amd64.deb
+sudo apt install ./labourlink-scale_0.3.0_amd64.deb
 
 # 2. Both devices must have stable names.
 ls -l /dev/serial/by-id/ /dev/labourlink/
@@ -167,11 +174,72 @@ sudo systemctl restart labourlink-scaled
 
 Hardware-test weighings stay in `/var/lib/labourlink-scale/scale-hwtest.sqlite3` until that file is deleted. Delete it only with the service stopped.
 
-## Going live (not yet possible)
+## Register Bins
 
-Live mode needs the server endpoints from ARCHITECTURE §5 and a station token. Once those exist, the steps are:
-1. Copy `/usr/share/labourlink-scale/config.live.example.json` to `/etc/labourlink-scale/config.json` and set `apiBaseUrl`.
-2. Put the token in `/etc/labourlink-scale/station-token` with mode 0600.
-3. Restart the service with `systemctl restart labourlink-scaled`.
+**Weighing pauses while Register Bins is open.** Readings and tags go to the registration machine, so registering can never create a weighing or credit anyone. When it closes, weighing starts over as if the station had just started: a bin left on the scale must be removed before anything is weighed.
 
-Live mode uses its own database. Simulated weighings can never be uploaded.
+1. **Sign in.** Press **Register Bins** and sign in with any LabourLink email and PIN.
+2. **Clear the scale.** It must read zero for 2 seconds, on entry and after every bin.
+3. **Roll on one completely empty bin.** The station:
+   - reads its tag;
+   - waits the 10-second settle and a stable gross reading;
+   - proposes that weight as the tare.
+
+   It refuses when:
+   - no tag or more than one tag is read;
+   - the weight is near zero or unstable;
+   - the indicator is not in gross mode.
+4. **Enter the bin's LabourLink number** (on-screen keypad) and pick the bin.
+5. **Check the bin, RFID tag and tare.**
+   - Replacing an existing tag or tare must be ticked explicitly.
+   - So must moving a tag that is registered to another bin. Use that only to fix a bin registered by mistake; the wrong bin gets its previous tare back.
+6. **Tick "This bin is completely empty" and register.**
+   - Just before saving, the station checks the bin, weight and tag are unchanged.
+   - The server checks everything again and records who registered it, at which station, and what was measured.
+7. **Remove the bin.** The scale must return to zero before the next one.
+
+**Corrections.**
+- **Wrong tare:** register the bin again.
+- **Tag on the wrong bin:** register the right bin and move the tag.
+- **Tag no longer wanted:** Corrections → Remove a tag.
+
+Every change appears in the bin's history on Basic Data > Carriers.
+
+**When Register Bins closes by itself.** The person is signed out after 15 idle minutes, which also closes Register Bins.
+
+## Going live
+
+**Nothing goes live without the owner's approval.** That covers merging the server PRs, running migrations 070–072, creating the station token and turning credits on.
+
+1. **Server.** Apply migrations 070, 071 and 072 in that order, each before its PR is merged and deployed.
+2. **Station token.** On a development machine, run `npm run scale:station-token -- "Packhouse scale"`.
+   - It prints a token and an `insert` statement.
+   - Run the statement in the Supabase SQL Editor.
+   - The station starts with credits **off** (trial).
+3. **On the NUC:**
+
+   ```sh
+   sudo apt install ./labourlink-scale_0.3.0_amd64.deb
+   sudo install -m 0644 /usr/share/labourlink-scale/config.live.example.json /etc/labourlink-scale/config.json
+   sudo nano /etc/labourlink-scale/config.json          # apiBaseUrl: the LabourLink API's https:// address
+   sudo sh -c 'umask 077; printf "%s" "PASTE-TOKEN-HERE" > /etc/labourlink-scale/station-token'
+   sudo systemctl restart labourlink-scaled
+   journalctl -u labourlink-scaled -n 30 --no-pager      # LIVE mode, carriers fetched
+   sudo reboot                                          # the display picks up 0.3.0
+   ```
+
+4. **Register every bin** with Register Bins (empty, on the scale).
+5. **Trial run.** While credits are off:
+   - a striped **TRIAL** banner shows on the station;
+   - weighings are uploaded and matched exactly as in production, but show "Trial: <name>" and never count as credits.
+
+   Check them on the LabourLink **Scale Weighings** page.
+6. **Turn credits on**, only with the owner's approval:
+
+   ```sql
+   update scale_stations set credits_enabled = true where name = 'Packhouse scale';
+   ```
+
+**Separate databases.** Live mode uses its own database (`scale.sqlite3`). Simulation and hardware-test weighings are in other files and can never be uploaded.
+
+**Going back to hardware test:** install `config.hardware-test.json` again and restart the service. Weighings already queued in live mode stay in `scale.sqlite3` and are sent the next time live mode runs.

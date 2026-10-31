@@ -1,5 +1,5 @@
 // Presentation rules for the weighing screen, kept pure so they're unit-testable.
-import type { Phase, Snapshot, Weighing } from "./types";
+import type { Phase, RegistrationView, Snapshot, Weighing } from "./types";
 
 export function kg(grams: number | null | undefined): string {
   if (grams === null || grams === undefined) return "—";
@@ -108,6 +108,10 @@ export function employeeLine(w: Weighing | null, phase: Phase): EmployeeLine {
   }
   switch (w.assignmentStatus) {
     case "credited":
+      if (w.creditsLive === false) {
+        // Trial: the server matched it, but credits are off at this station.
+        return { name: `Trial: ${w.employeeName ?? "matched"}`, note: "Credits are off at this station. Not counted as a credit.", tone: "pending" };
+      }
       return { name: w.employeeName ?? "Credited", note: "Verified bin scan", tone: "credited" };
     case "pending":
       return { name: "Awaiting employee assignment", note: `No verified bin scan yet. Held until ${shortTime(w.pendingUntil)} (24 h).`, tone: "pending" };
@@ -116,7 +120,7 @@ export function employeeLine(w: Weighing | null, phase: Phase): EmployeeLine {
     case "expired":
       return { name: "Not credited", note: "No verified bin scan within 24 hours. This weighing was discarded.", tone: "review" };
     case "voided":
-      return { name: "Voided", note: "", tone: "review" };
+      return { name: "Credit voided", note: "An administrator voided this credit.", tone: "review" };
     default:
       return { name: "Checking assignment…", note: "", tone: "neutral" };
   }
@@ -140,4 +144,51 @@ export function statusLabel(w: Weighing): { text: string; tone: EmployeeLine["to
   if (e.tone === "credited") return { text: e.name, tone: "credited" };
   if (w.assignmentStatus === "pending") return { text: "Awaiting assignment", tone: "pending" };
   return { text: e.name, tone: e.tone };
+}
+
+/** What Register Bins is doing, for its status panel. */
+export function registrationHeadline(r: RegistrationView): Headline {
+  if (!r.scaleOnline) {
+    return { tone: "error", title: "Scale not responding", detail: "No data from the scale indicator." };
+  }
+  const p = r.phase;
+  switch (p.phase) {
+    case "clearScale":
+      return {
+        tone: "warn",
+        title: "Clear the scale",
+        detail: "Remove everything from the scale. It must read zero for 2 seconds before a bin can be registered.",
+      };
+    case "ready":
+      return { tone: "ready", title: "Place one completely empty bin on the scale", detail: "Roll it on so its tag passes the reader." };
+    case "measuring":
+      return { tone: "working", title: "Measuring the empty bin…", detail: "Keep the bin still; do not touch the scale." };
+    case "problem":
+      switch (p.reason.code) {
+        case "noTag":
+          return { tone: "warn", title: "No RFID tag read", detail: "Every bin needs its tag. Take the bin off and roll it on again past the reader." };
+        case "multipleTags":
+          return { tone: "error", title: "More than one tag read", detail: "Register one bin at a time. Clear the scale." };
+        case "indicatorNotGross":
+          return { tone: "error", title: "Indicator is not showing gross weight", detail: "Registration only uses gross weight." };
+        case "overload":
+          return { tone: "error", title: "Scale overload", detail: "Remove weight from the scale." };
+        case "underload":
+          return { tone: "error", title: "Scale underload", detail: "Check the scale is clear and zeroed." };
+        case "indicatorError":
+          return { tone: "error", title: "Indicator error", detail: "Check the scale indicator display." };
+      }
+      break;
+    case "proposed":
+      return { tone: "ready", title: "Measured", detail: "Enter the bin's number and confirm." };
+    case "saving":
+      return { tone: "working", title: "Saving…", detail: "Keep the bin on the scale." };
+    case "saved":
+      return {
+        tone: "done",
+        title: `${p.binName} registered`,
+        detail: "Remove the bin. The scale must return to zero before the next bin.",
+      };
+  }
+  return { tone: "working", title: "", detail: "" };
 }

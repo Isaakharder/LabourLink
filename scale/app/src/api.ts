@@ -8,17 +8,23 @@ export const SERVICE_URL = (import.meta.env.VITE_SCALE_SERVICE_URL as string | u
 export class ServiceError extends Error {
   status: number;
   errors: Record<string, string>;
-  constructor(status: number, message: string, errors: Record<string, string> = {}) {
+  /** Machine-readable reason from the server or station (e.g. "tagOnOtherBin"). */
+  code: string | null;
+  /** The whole response body, for refusals that carry data. */
+  data: Record<string, unknown>;
+  constructor(status: number, message: string, errors: Record<string, string> = {}, code: string | null = null, data: Record<string, unknown> = {}) {
     super(message);
     this.status = status;
     this.errors = errors;
+    this.code = code;
+    this.data = data;
   }
 }
 
-export async function call<T>(path: string, init: { method?: string; body?: unknown; adminToken?: string } = {}): Promise<T> {
+export async function call<T>(path: string, init: { method?: string; body?: unknown; sessionToken?: string } = {}): Promise<T> {
   const headers: Record<string, string> = {};
   if (init.body !== undefined) headers["Content-Type"] = "application/json";
-  if (init.adminToken) headers["X-Admin-Token"] = init.adminToken;
+  if (init.sessionToken) headers["X-Session-Token"] = init.sessionToken;
   let res: Response;
   try {
     res = await fetch(`${SERVICE_URL}${path}`, {
@@ -32,7 +38,7 @@ export async function call<T>(path: string, init: { method?: string; body?: unkn
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const errors = (data.errors ?? {}) as Record<string, string>;
-    throw new ServiceError(res.status, Object.values(errors)[0] ?? data.error ?? `Error ${res.status}`, errors);
+    throw new ServiceError(res.status, Object.values(errors)[0] ?? data.error ?? `Error ${res.status}`, errors, data.code ?? null, data);
   }
   return data as T;
 }

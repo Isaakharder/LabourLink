@@ -784,3 +784,102 @@ select {
 .sim-log li {
   padding: 2px 0;
 }
+
+/* Trial: the station's credits are off on the server */
+.trial-banner {
+  background: repeating-linear-gradient(45deg, #fff4d6, #fff4d6 12px, #ffe9a8 12px, #ffe9a8 24px);
+  color: #6b4a00;
+  font-weight: 700;
+  text-align: center;
+  padding: 6px 12px;
+  border-bottom: 1px solid #e0b84c;
+}
+
+/* Register Bins */
+.register-bins {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+/* The bin and confirmation card scrolls inside itself on a short screen. */
+.register-bins .card {
+  overflow-y: auto;
+}
+
+.reg-status .reg-title {
+  font-size: 1.6rem;
+  font-weight: 700;
+  margin: 6px 0;
+}
+
+.reg-status.tone-error .reg-title {
+  color: #b42318;
+}
+
+.reg-status.tone-warn .reg-title {
+  color: #9a6700;
+}
+
+.reg-status.tone-done .reg-title {
+  color: #1a7f37;
+}
+
+.reg-weight {
+  font-size: 2.6rem;
+  font-weight: 700;
+  margin: 4px 0;
+}
+
+.reg-measured {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 4px 0;
+  font-size: 1.15rem;
+}
+
+.reg-measured dt {
+  color: var(--muted);
+}
+
+.reg-measured dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 10px 0;
+  max-width: 320px;
+}
+
+.keypad .btn {
+  font-size: 1.4rem;
+  min-height: 56px;
+}
+
+.warn-check,
+.check {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  align-items: center;
+  margin: 4px 0;
+  font-size: 1.05rem;
+  color: var(--text);
+}
+
+.warn-check {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid var(--warn);
+}
+
+.warn-check input,
+.check input {
+  width: 26px;
+  height: 26px;
+  flex: none;
+}

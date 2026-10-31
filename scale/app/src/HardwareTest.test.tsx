@@ -9,7 +9,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { TopBar } from "./components/TopBar";
-import { RfidRegistration } from "./components/RfidRegistration";
+import { RegisterBins } from "./components/RegisterBins";
 import { headline } from "./format";
 import { makeSnapshot } from "./testFixtures";
 import type { Snapshot } from "./types";
@@ -76,9 +76,28 @@ describe("hardware-test mode", () => {
     expect(within(pill("Scale")).getByText("Offline")).toBeInTheDocument();
   });
 
-  it("explains that tag registration goes to the test bins", () => {
-    render(<RfidRegistration s={hardwareTest()} onDone={() => {}} />);
-    expect(screen.getByText(/Hardware test: sign in to the test server with admin@sim.local/)).toBeInTheDocument();
-    expect(screen.queryByText(/Simulation logins/)).toBeNull();
+  it("explains that Register Bins goes to the test bins", () => {
+    render(<RegisterBins s={hardwareTest()} onDone={() => {}} />);
+    expect(screen.getByText(/Hardware test: sign in to the test server with picker@sim.local/)).toBeInTheDocument();
+    expect(screen.queryByText(/Simulation:/)).toBeNull();
+  });
+
+  it("shows the trial banner when the station's credits are off, and nothing when they are on", () => {
+    current = makeSnapshot({ creditsEnabled: false });
+    render(<App />);
+    expect(screen.getByText(/TRIAL: credits are off for this station/)).toBeInTheDocument();
+    cleanup();
+    current = makeSnapshot({ creditsEnabled: true });
+    render(<App />);
+    expect(screen.queryByText(/TRIAL: credits are off/)).toBeNull();
+  });
+
+  it("keeps weighing paused and offers to close Register Bins when it was left open", () => {
+    current = makeSnapshot({
+      registration: { person: "Pia Picker", phase: { phase: "ready" }, reading: null, scaleOnline: true, settleRemainingMs: 0, clearRemainingMs: 0 },
+    });
+    render(<App />);
+    expect(screen.getByText(/Opened by Pia Picker. Weighing is paused/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close Register Bins and resume weighing" })).toBeInTheDocument();
   });
 });

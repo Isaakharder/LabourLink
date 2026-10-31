@@ -1,10 +1,12 @@
 //! Local API for the display (127.0.0.1 only).
 //!
 //! * `GET  /api/health`, `GET /api/state`, `GET /api/ws` (snapshot stream)
-//! * `GET  /api/rfid/last` — latest tag read, for registration
-//! * `POST /api/admin/login|logout`, `GET /api/admin/carriers`,
-//!   `POST /api/admin/rfid` — RFID registration through the LabourLink
-//!   server's own login, permissions and carrier validation
+//! * `GET  /api/rfid/last` — latest tag read
+//! * `POST /api/session/login|logout` — a LabourLink user (any role) signs in
+//!   with their own email and PIN, through the server's own login
+//! * `/api/register/*` — Register Bins: start/stop (weighing pauses while it
+//!   is open), bin lookup, the measured tag's current bin, confirm, remove a
+//!   tag. Every change is checked again and audited by the server
 //! * `/api/sim/*` — simulation controls; 404 unless in simulation mode
 //!
 //! Requests whose Host header isn't loopback are refused (DNS-rebinding
@@ -24,8 +26,8 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
-use crate::app::{App, Wake};
-use crate::backend::BackendError;
+use crate::app::{App, ConfirmChoice, RegisterError};
+use crate::backend::{BackendError, Expected};
 
 #[derive(Clone)]
 struct Ctx {
@@ -39,16 +41,35 @@ fn err(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Valu
     (status, Json(json!({ "error": message.into() })))
 }
 
+/// Passes a server refusal through with its data (code, the bin that holds
+/// a tag, the bin's current tag and tare), so the display can explain it.
 fn backend_err(e: BackendError) -> (StatusCode, Json<Value>) {
     match e {
         BackendError::Offline(m) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": format!("LabourLink server unreachable: {m}") })),
         ),
-        BackendError::Http { status, message, errors } => (
-            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-            Json(json!({ "error": message, "errors": errors })),
-        ),
+        BackendError::Http {
+            status,
+            message,
+            errors,
+            code,
+            body,
+        } => {
+            let mut out = if body.is_object() { body } else { json!({}) };
+            out["error"] = json!(message);
+            out["errors"] = json!(errors);
+            out["code"] = json!(code);
+            (StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), Json(out))
+        }
+    }
+}
+
+fn register_err(e: RegisterError) -> (StatusCode, Json<Value>) {
+    match e {
+        RegisterError::Session => err(StatusCode::UNAUTHORIZED, "Signed out. Sign in again."),
+        RegisterError::Refused(m) => (StatusCode::CONFLICT, Json(json!({ "error": m, "code": "stationRefused" }))),
+        RegisterError::Server(e) => backend_err(e),
     }
 }
 
@@ -70,10 +91,14 @@ pub fn router(app: Arc<App>, snapshots: watch::Receiver<Arc<String>>) -> Router 
         .route("/api/state", get(state))
         .route("/api/ws", get(ws))
         .route("/api/rfid/last", get(rfid_last))
-        .route("/api/admin/login", post(admin_login))
-        .route("/api/admin/logout", post(admin_logout))
-        .route("/api/admin/carriers", get(admin_carriers))
-        .route("/api/admin/rfid", post(admin_rfid))
+        .route("/api/session/login", post(session_login))
+        .route("/api/session/logout", post(session_logout))
+        .route("/api/register/start", post(register_start))
+        .route("/api/register/stop", post(register_stop))
+        .route("/api/register/bins", get(register_bins))
+        .route("/api/register/tag-owner", get(register_tag_owner))
+        .route("/api/register/confirm", post(register_confirm))
+        .route("/api/register/remove-tag", post(register_remove_tag))
         .route("/api/sim/world", get(sim_world))
         .route("/api/sim/place", post(sim_place))
         .route("/api/sim/remove", post(sim_remove))
@@ -140,66 +165,88 @@ struct LoginBody {
     pin: String,
 }
 
-async fn admin_login(State(c): State<Ctx>, Json(b): Json<LoginBody>) -> ApiResult {
+/// Any LabourLink user can sign in to register bins; the server's own login
+/// checks the email and PIN.
+async fn session_login(State(c): State<Ctx>, Json(b): Json<LoginBody>) -> ApiResult {
     let app = c.app.clone();
-    let s = blocking(move || app.backend.admin_login(&b.email, &b.pin)).await.map_err(backend_err)?;
-    // Tag assignment is Administrator-only on the server (PATCH /api/carriers/:id);
-    // refuse other roles up front instead of failing at save time.
-    if s.role != "Administrator" {
-        return Err(err(
-            StatusCode::FORBIDDEN,
-            format!("{} is a {}. Only LabourLink Administrators can register RFID tags.", s.name, s.role),
-        ));
-    }
-    let name = s.name.clone();
-    let token = c.app.admin_put(s);
-    Ok(Json(json!({ "token": token, "name": name })))
+    let s = blocking(move || app.backend.user_login(&b.email, &b.pin)).await.map_err(backend_err)?;
+    let (name, role) = (s.name.clone(), s.role.clone());
+    let token = c.app.session_put(s);
+    Ok(Json(json!({ "token": token, "name": name, "role": role })))
 }
 
-fn admin_token(h: &HeaderMap) -> Option<String> {
-    h.get("x-admin-token").and_then(|v| v.to_str().ok()).map(str::to_string)
+fn session_token(h: &HeaderMap) -> Result<String, (StatusCode, Json<Value>)> {
+    h.get("x-session-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Signed out. Sign in again."))
 }
 
-async fn admin_logout(State(c): State<Ctx>, h: HeaderMap) -> Json<Value> {
-    if let Some(t) = admin_token(&h) {
-        c.app.admin_drop(&t);
+async fn session_logout(State(c): State<Ctx>, h: HeaderMap) -> Json<Value> {
+    if let Ok(t) = session_token(&h) {
+        let app = c.app.clone();
+        blocking(move || app.session_drop(&t)).await;
     }
     Json(json!({ "ok": true }))
 }
 
-#[derive(Deserialize)]
-struct SearchQuery {
-    #[serde(default)]
-    search: String,
+async fn register_start(State(c): State<Ctx>, h: HeaderMap) -> ApiResult {
+    let t = session_token(&h)?;
+    c.app.start_registration(&t).map_err(register_err)?;
+    Ok(Json(json!({ "ok": true })))
 }
 
-async fn admin_carriers(State(c): State<Ctx>, h: HeaderMap, Query(q): Query<SearchQuery>) -> ApiResult {
-    let s = admin_token(&h)
-        .and_then(|t| c.app.admin_get(&t))
-        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Admin session expired — log in again"))?;
+async fn register_stop(State(c): State<Ctx>, h: HeaderMap) -> ApiResult {
+    session_token(&h)?;
+    c.app.stop_registration();
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct BinQuery {
+    #[serde(default)]
+    q: String,
+}
+
+async fn register_bins(State(c): State<Ctx>, h: HeaderMap, Query(q): Query<BinQuery>) -> ApiResult {
+    let t = session_token(&h)?;
     let app = c.app.clone();
-    let list = blocking(move || app.backend.admin_carriers(&s, &q.search)).await.map_err(backend_err)?;
-    Ok(Json(json!({ "carriers": list })))
+    let bins = blocking(move || app.find_bins(&t, &q.q)).await.map_err(register_err)?;
+    Ok(Json(json!({ "bins": bins })))
+}
+
+async fn register_tag_owner(State(c): State<Ctx>, h: HeaderMap) -> ApiResult {
+    let t = session_token(&h)?;
+    let app = c.app.clone();
+    Ok(Json(blocking(move || app.proposal_tag_owner(&t)).await.map_err(register_err)?))
+}
+
+async fn register_confirm(State(c): State<Ctx>, h: HeaderMap, Json(b): Json<ConfirmChoice>) -> ApiResult {
+    let t = session_token(&h)?;
+    let app = c.app.clone();
+    let outcome = blocking(move || app.confirm_registration(&t, b)).await.map_err(register_err)?;
+    Ok(Json(json!(outcome)))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RfidBody {
+struct RemoveTagBody {
     carrier_id: String,
-    rfid_tag: Option<String>,
+    expected: Expected,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    confirm: bool,
 }
 
-async fn admin_rfid(State(c): State<Ctx>, h: HeaderMap, Json(b): Json<RfidBody>) -> ApiResult {
-    let s = admin_token(&h)
-        .and_then(|t| c.app.admin_get(&t))
-        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Admin session expired — log in again"))?;
+async fn register_remove_tag(State(c): State<Ctx>, h: HeaderMap, Json(b): Json<RemoveTagBody>) -> ApiResult {
+    let t = session_token(&h)?;
+    if !b.confirm {
+        return Err(err(StatusCode::BAD_REQUEST, "Confirm removing the tag."));
+    }
     let app = c.app.clone();
-    let carrier = blocking(move || app.backend.admin_set_rfid(&s, &b.carrier_id, b.rfid_tag.as_deref()))
-        .await
-        .map_err(backend_err)?;
-    // Pick the new mapping up immediately for weighing.
-    c.app.wake(Wake::RefreshCarriers);
-    Ok(Json(json!({ "carrier": carrier })))
+    let outcome = blocking(move || app.remove_tag(&t, b.carrier_id, b.expected, b.reason)).await.map_err(register_err)?;
+    Ok(Json(json!(outcome)))
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +306,8 @@ struct FlagsBody {
     indicator_net: Option<bool>,
     overload: Option<bool>,
     server_online: Option<bool>,
+    /// The test server's station credit switch (off = trial).
+    credits_enabled: Option<bool>,
 }
 
 async fn sim_flags(State(c): State<Ctx>, Json(b): Json<FlagsBody>) -> ApiResult {
@@ -285,7 +334,11 @@ async fn sim_flags(State(c): State<Ctx>, Json(b): Json<FlagsBody>) -> ApiResult 
     });
     if let Some(v) = b.server_online {
         server.set_online(v);
-        c.app.wake(Wake::Upload);
+        c.app.wake(crate::app::Wake::Upload);
+    }
+    if let Some(v) = b.credits_enabled {
+        server.set_credits_enabled(v);
+        c.app.wake(crate::app::Wake::RefreshCarriers);
     }
     c.app.publish();
     Ok(Json(json!({ "ok": true })))
@@ -321,7 +374,7 @@ async fn sim_claim(State(c): State<Ctx>, Json(b): Json<ClaimBody>) -> ApiResult 
     server
         .add_claim(&b.employee_id, timing, b.clock_trusted)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    c.app.wake(Wake::Upload);
+    c.app.wake(crate::app::Wake::Upload);
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -337,6 +390,6 @@ async fn sim_advance(State(c): State<Ctx>, Json(b): Json<AdvanceBody>) -> ApiRes
     }
     // One-off: applies the 24-hour rule as if this much time had passed.
     server.expire_as_if((b.hours * 3_600_000.0) as i64);
-    c.app.wake(Wake::Upload);
+    c.app.wake(crate::app::Wake::Upload);
     Ok(Json(json!({ "ok": true })))
 }

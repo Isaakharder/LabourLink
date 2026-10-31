@@ -10,12 +10,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
-use crate::backend::{normalize_status, AdminSession, Backend, BackendError};
+use crate::backend::{
+    g_to_kg, normalize_status, Backend, BackendError, Expected, Measured, RegistrationOutcome, RegistrationRequest, RemoveTagRequest, UserSession,
+};
 use crate::config::{Config, Mode};
 use crate::machine::{CarrierInfo, Machine, Phase, RecordDraft};
+use crate::registration::{RegPhase, Registration};
 use crate::scale_proto::Reading;
 use crate::sim::{SimRig, SimServer};
-use crate::store::{Store, Weighing};
+use crate::store::{Assignment, Store, Weighing};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +60,40 @@ struct Engine {
     scale_link: LinkStatus,
     rfid_link: LinkStatus,
     last_recorded_id: Option<String>,
+    /// Register Bins is open. While it is, every reading and tag goes to the
+    /// registration machine and none to the weighing machine, so
+    /// registration can never record a weighing.
+    registering: Option<RegisterSession>,
+}
+
+struct RegisterSession {
+    reg: Registration,
+    /// The local session token of the person who opened Register Bins.
+    token: String,
+    person: String,
+}
+
+/// What the person chose for the measured bin (POST /api/register/confirm).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmChoice {
+    pub carrier_id: String,
+    pub expected: Expected,
+    pub empty_confirmed: bool,
+    #[serde(default)]
+    pub confirm_overwrite: bool,
+    #[serde(default)]
+    pub move_from_carrier_id: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum RegisterError {
+    /// Not signed in, or the session ran out.
+    Session,
+    /// The station refused before asking the server (no measurement, the
+    /// weight changed, the bin isn't confirmed empty).
+    Refused(String),
+    Server(BackendError),
 }
 
 struct ServerLink {
@@ -75,13 +112,17 @@ pub struct App {
     counts: Mutex<(i64, i64, i64)>,
     snapshot_tx: watch::Sender<Arc<String>>,
     wake_tx: Mutex<Sender<Wake>>,
-    admin: Mutex<HashMap<String, (AdminSession, Instant)>>,
+    sessions: Mutex<HashMap<String, (UserSession, Instant)>>,
+    /// The station's own credits switch on the server (None until known).
+    /// While it is false every weighing is a trial.
+    credits_enabled: Mutex<Option<bool>>,
     epoch: Instant,
     /// Added to the monotonic clock; only tests move it.
     clock_skip_ms: std::sync::atomic::AtomicU64,
 }
 
-const ADMIN_IDLE: Duration = Duration::from_secs(15 * 60);
+/// A signed-in person is signed out after this long without using the station.
+const SESSION_IDLE: Duration = Duration::from_secs(15 * 60);
 
 /// How far back the station keeps re-checking weighings with the server.
 /// Longer than the 24-hour pending window, so every outcome is seen.
@@ -129,6 +170,7 @@ impl App {
             scale_link: link("indicator"),
             rfid_link: link("RFID reader"),
             last_recorded_id: None,
+            registering: None,
         };
         let server = ServerLink {
             status: if let Some(s) = test_server.clone() {
@@ -149,7 +191,8 @@ impl App {
             counts: Mutex::new((0, 0, 0)),
             snapshot_tx,
             wake_tx: Mutex::new(wake_tx),
-            admin: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
+            credits_enabled: Mutex::new(None),
             epoch: Instant::now(),
             clock_skip_ms: std::sync::atomic::AtomicU64::new(0),
         });
@@ -224,11 +267,20 @@ impl App {
             let now = self.now_ms();
             match input {
                 Input::Reading(r) => {
-                    if let Some(draft) = e.machine.on_reading(r, now, &e.carriers_by_tag) {
+                    if let Some(rs) = e.registering.as_mut() {
+                        rs.reg.on_reading(r, now);
+                    } else if let Some(draft) = e.machine.on_reading(r, now, &e.carriers_by_tag) {
                         recorded = self.record(e, draft);
                     }
                 }
-                Input::Tag(t) => e.machine.on_tag(&t, now),
+                Input::Tag(t) => {
+                    e.machine.last_tag = Some((t.clone(), now));
+                    if let Some(rs) = e.registering.as_mut() {
+                        rs.reg.on_tag(&t, now);
+                    } else {
+                        e.machine.on_tag(&t, now);
+                    }
+                }
                 Input::Link(LinkKind::Scale, s) => e.scale_link = s,
                 Input::Link(LinkKind::Rfid, s) => e.rfid_link = s,
             }
@@ -241,11 +293,21 @@ impl App {
     }
 
     pub fn tick(&self) {
+        // Register Bins closes by itself when its person's session runs out.
+        let token = self.engine.lock().unwrap().registering.as_ref().map(|r| r.token.clone());
+        if let Some(t) = token {
+            if self.session_get_quiet(&t).is_none() {
+                self.stop_registration();
+            }
+        }
         let mut recorded = false;
         {
             let mut guard = self.engine.lock().unwrap();
             let e = &mut *guard;
-            if let Some(draft) = e.machine.tick(self.now_ms(), &e.carriers_by_tag) {
+            let now = self.now_ms();
+            if let Some(rs) = e.registering.as_mut() {
+                rs.reg.tick(now);
+            } else if let Some(draft) = e.machine.tick(now, &e.carriers_by_tag) {
                 recorded = self.record(e, draft);
             }
         }
@@ -276,6 +338,7 @@ impl App {
             assignment_status: "unknown".into(),
             employee_name: None,
             pending_until: None,
+            credits_live: None,
         };
         match self.store.lock().unwrap().insert_weighing(&w) {
             Ok(()) => {
@@ -331,6 +394,18 @@ impl App {
         }
     }
 
+    /// Whether the server counts this station's weighings as employee
+    /// credits yet (trial until an administrator turns them on).
+    pub fn refresh_station_info(&self) {
+        match self.backend.station_info() {
+            Ok(info) => {
+                *self.credits_enabled.lock().unwrap() = Some(info.credits_enabled);
+                self.publish();
+            }
+            Err(e) => eprintln!("could not read the station's credit setting: {}", e.message()),
+        }
+    }
+
     /// Sends queued weighings oldest-first. Stops at the first connectivity
     /// failure so ordering is preserved. Returns false if the server could
     /// not be reached.
@@ -349,13 +424,7 @@ impl App {
                 match self.backend.submit_weighing(&w) {
                     Ok(r) => {
                         self.server_ok();
-                        let status = normalize_status(&r.status);
-                        let employee = if status == "credited" { r.employee_name.as_deref() } else { None };
-                        let _ = self
-                            .store
-                            .lock()
-                            .unwrap()
-                            .mark_sent(&w.id, &utc_now(), status, employee, r.pending_until.as_deref());
+                        let _ = self.store.lock().unwrap().mark_sent(&w.id, &utc_now(), &assignment_of(&r));
                     }
                     Err(e) if e.is_permanent_rejection() => {
                         let _ = self.store.lock().unwrap().mark_rejected(&w.id, &e.message());
@@ -390,9 +459,7 @@ impl App {
                     for id in &ids {
                         match statuses.get(id) {
                             Some(r) => {
-                                let status = normalize_status(&r.status);
-                                let employee = if status == "credited" { r.employee_name.as_deref() } else { None };
-                                if let Err(e) = store.update_assignment(id, &utc_now(), status, employee, r.pending_until.as_deref()) {
+                                if let Err(e) = store.update_assignment(id, &utc_now(), &assignment_of(r)) {
                                     eprintln!("could not store status for {id}: {e}");
                                 }
                             }
@@ -415,24 +482,172 @@ impl App {
     }
 
     // ------------------------------------------------------------------
-    // Admin (RFID registration)
+    // Signed-in person (Register Bins)
 
-    pub fn admin_put(&self, s: AdminSession) -> String {
+    pub fn session_put(&self, s: UserSession) -> String {
         let token = uuid::Uuid::new_v4().to_string();
-        self.admin.lock().unwrap().insert(token.clone(), (s, Instant::now()));
+        self.sessions.lock().unwrap().insert(token.clone(), (s, Instant::now()));
         token
     }
 
-    pub fn admin_get(&self, token: &str) -> Option<AdminSession> {
-        let mut m = self.admin.lock().unwrap();
-        m.retain(|_, (_, at)| at.elapsed() < ADMIN_IDLE);
+    /// The session behind a local token; using it keeps it alive.
+    pub fn session_get(&self, token: &str) -> Option<UserSession> {
+        let mut m = self.sessions.lock().unwrap();
+        m.retain(|_, (_, at)| at.elapsed() < SESSION_IDLE);
         let entry = m.get_mut(token)?;
         entry.1 = Instant::now();
         Some(entry.0.clone())
     }
 
-    pub fn admin_drop(&self, token: &str) {
-        self.admin.lock().unwrap().remove(token);
+    fn session_get_quiet(&self, token: &str) -> Option<UserSession> {
+        let m = self.sessions.lock().unwrap();
+        m.get(token).filter(|(_, at)| at.elapsed() < SESSION_IDLE).map(|(s, _)| s.clone())
+    }
+
+    /// Signs the person out here and on the server.
+    pub fn session_drop(&self, token: &str) {
+        let removed = self.sessions.lock().unwrap().remove(token);
+        let open = self.engine.lock().unwrap().registering.as_ref().is_some_and(|r| r.token == token);
+        if open {
+            self.stop_registration();
+        }
+        if let Some((s, _)) = removed {
+            self.backend.user_logout(&s);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Register Bins
+
+    pub fn start_registration(&self, token: &str) -> Result<(), RegisterError> {
+        let s = self.session_get(token).ok_or(RegisterError::Session)?;
+        {
+            let mut e = self.engine.lock().unwrap();
+            if e.registering.as_ref().is_some_and(|r| r.token != token) {
+                return Err(RegisterError::Refused("Someone else is registering bins on this station.".into()));
+            }
+            if e.registering.is_none() {
+                eprintln!("Register Bins opened by {}; weighing paused", s.name);
+                let params = e.machine.params.clone();
+                e.registering = Some(RegisterSession {
+                    reg: Registration::new(params),
+                    token: token.to_string(),
+                    person: s.name.clone(),
+                });
+            }
+        }
+        self.publish();
+        Ok(())
+    }
+
+    /// Back to weighing, which starts over: a bin still on the scale must be
+    /// removed before anything is weighed.
+    pub fn stop_registration(&self) {
+        {
+            let mut e = self.engine.lock().unwrap();
+            if e.registering.take().is_some() {
+                eprintln!("Register Bins closed; weighing resumes");
+                e.machine.resume();
+            }
+        }
+        self.wake(Wake::RefreshCarriers);
+        self.publish();
+    }
+
+    fn registering_session(&self, token: &str) -> Result<UserSession, RegisterError> {
+        let s = self.session_get(token).ok_or(RegisterError::Session)?;
+        let open = self.engine.lock().unwrap().registering.as_ref().is_some_and(|r| r.token == token);
+        if !open {
+            return Err(RegisterError::Refused("Register Bins is not open.".into()));
+        }
+        Ok(s)
+    }
+
+    pub fn find_bins(&self, token: &str, query: &str) -> Result<Vec<crate::backend::RegBin>, RegisterError> {
+        let s = self.registering_session(token)?;
+        self.backend.find_bins(&s, query).map_err(RegisterError::Server)
+    }
+
+    /// The bin the measured tag is already registered to, if any, so the
+    /// person sees it before confirming.
+    pub fn proposal_tag_owner(&self, token: &str) -> Result<serde_json::Value, RegisterError> {
+        let s = self.registering_session(token)?;
+        let tag = match &self.engine.lock().unwrap().registering.as_ref().map(|r| r.reg.phase.clone()) {
+            Some(RegPhase::Proposed { proposal }) => proposal.tag.clone(),
+            _ => return Ok(serde_json::json!({ "tag": null, "bin": null })),
+        };
+        let bin = self.backend.bin_for_tag(&s, &tag).map_err(RegisterError::Server)?;
+        Ok(serde_json::json!({ "tag": tag, "bin": bin }))
+    }
+
+    /// Registers the measured bin. The station re-checks the measurement at
+    /// this moment (still on the scale, same stable gross, one tag); the
+    /// server re-checks everything else and writes the audit trail.
+    pub fn confirm_registration(&self, token: &str, choice: ConfirmChoice) -> Result<RegistrationOutcome, RegisterError> {
+        let s = self.registering_session(token)?;
+        if !choice.empty_confirmed {
+            return Err(RegisterError::Refused("Confirm that the bin is completely empty.".into()));
+        }
+        let proposal = {
+            let mut e = self.engine.lock().unwrap();
+            let now = self.now_ms();
+            let rs = e.registering.as_mut().ok_or_else(|| RegisterError::Refused("Register Bins is not open.".into()))?;
+            rs.reg.confirm(now).map_err(RegisterError::Refused)?
+        };
+        self.publish();
+        let tare_kg = round_kg(g_to_kg(proposal.gross_g));
+        let req = RegistrationRequest {
+            registration_id: proposal.id.clone(),
+            carrier_id: choice.carrier_id.clone(),
+            rfid_tag: proposal.tag.clone(),
+            tare_kg,
+            measured: Measured {
+                gross_kg: tare_kg,
+                samples_kg: proposal.samples_g.iter().map(|g| g_to_kg(*g)).collect(),
+                status: "gross",
+                stable_ms: proposal.stable_ms,
+            },
+            expected: choice.expected.clone(),
+            empty_confirmed: true,
+            confirm_overwrite: choice.confirm_overwrite,
+            move_from_carrier_id: choice.move_from_carrier_id.clone(),
+        };
+        let result = self.backend.register_bin(&s, &req);
+        {
+            let mut e = self.engine.lock().unwrap();
+            if let Some(rs) = e.registering.as_mut() {
+                match &result {
+                    Ok(o) => {
+                        eprintln!(
+                            "{} registered {} with tag {} and tare {:.2} kg",
+                            rs.person, o.carrier.name, proposal.tag, o.carrier.tare_weight_kg
+                        );
+                        rs.reg.saved(o.carrier.name.clone(), proposal.tag.clone(), crate::backend::kg_to_g(o.carrier.tare_weight_kg));
+                    }
+                    Err(_) => rs.reg.save_failed(),
+                }
+            }
+        }
+        if result.is_ok() {
+            self.wake(Wake::RefreshCarriers);
+        }
+        self.publish();
+        result.map_err(RegisterError::Server)
+    }
+
+    /// Takes a tag off a bin (a correction).
+    pub fn remove_tag(&self, token: &str, carrier_id: String, expected: Expected, reason: Option<String>) -> Result<RegistrationOutcome, RegisterError> {
+        let s = self.registering_session(token)?;
+        let req = RemoveTagRequest {
+            registration_id: uuid::Uuid::new_v4().to_string(),
+            carrier_id,
+            expected,
+            confirm: true,
+            reason,
+        };
+        let r = self.backend.remove_tag(&s, &req).map_err(RegisterError::Server)?;
+        self.wake(Wake::RefreshCarriers);
+        Ok(r)
     }
 
     pub fn last_tag(&self) -> serde_json::Value {
@@ -457,6 +672,17 @@ impl App {
     pub fn snapshot(&self) -> serde_json::Value {
         let e = self.engine.lock().unwrap();
         let now = self.now_ms();
+        let registration = e.registering.as_ref().map(|rs| {
+            let reading = rs.reg.last_reading();
+            serde_json::json!({
+                "person": rs.person,
+                "phase": rs.reg.phase,
+                "reading": reading,
+                "scaleOnline": rs.reg.scale_online,
+                "settleRemainingMs": rs.reg.settle_remaining_ms(now),
+                "clearRemainingMs": rs.reg.clear_remaining_ms(now),
+            })
+        });
         let p = &e.machine.params;
         let settle_remaining_ms = match &e.machine.phase {
             Phase::Settling { started_ms, .. } => {
@@ -471,7 +697,14 @@ impl App {
             }
             _ => 0,
         };
-        let reading = e.machine.last_reading().cloned();
+        let reading = match &e.registering {
+            Some(rs) => rs.reg.last_reading().cloned(),
+            None => e.machine.last_reading().cloned(),
+        };
+        let scale_online = match &e.registering {
+            Some(rs) => rs.reg.scale_online,
+            None => e.machine.scale_online,
+        };
         let bin = e.machine.current_bin().cloned();
         let live_net_g = match (&bin, reading.as_ref().and_then(|r| r.weight_g)) {
             (Some(b), Some(w)) => Some(w - b.tare_g),
@@ -501,7 +734,7 @@ impl App {
             "settleRemainingMs": settle_remaining_ms,
             "removalRemainingMs": removal_remaining_ms,
             "waitForZero": e.machine.wait_for_zero,
-            "scaleOnline": e.machine.scale_online,
+            "scaleOnline": scale_online,
             "reading": reading,
             "bin": bin,
             "liveNetG": live_net_g,
@@ -518,6 +751,8 @@ impl App {
             "carrierCount": e.carrier_count,
             "params": p,
             "rig": self.sim.as_ref().map(|(_, rig)| rig.view()),
+            "registration": registration,
+            "creditsEnabled": *self.credits_enabled.lock().unwrap(),
         })
     }
 
@@ -532,6 +767,21 @@ impl App {
             }
         });
     }
+}
+
+fn assignment_of(r: &crate::backend::AssignmentResult) -> Assignment<'_> {
+    let status = normalize_status(&r.status);
+    Assignment {
+        status,
+        // Only a credit (or a voided credit) names an employee.
+        employee: if status == "credited" || status == "voided" { r.employee_name.as_deref() } else { None },
+        pending_until: r.pending_until.as_deref(),
+        credits_live: r.credits_live,
+    }
+}
+
+fn round_kg(kg: f64) -> f64 {
+    (kg * 100.0).round() / 100.0
 }
 
 /// Uploader loop: carrier cache refresh, outbox upload with backoff, and
@@ -562,7 +812,11 @@ pub fn run_uploader(app: Arc<App>, rx: Receiver<Wake>) {
         }
         let now = Instant::now();
         if now >= next_carriers {
-            next_carriers = now + if app.refresh_carriers() { refresh_every } else { Duration::from_secs(15) };
+            let ok = app.refresh_carriers();
+            if ok {
+                app.refresh_station_info();
+            }
+            next_carriers = now + if ok { refresh_every } else { Duration::from_secs(15) };
         }
         if now >= next_upload {
             if app.upload_queued() {
@@ -971,4 +1225,121 @@ mod tests {
         assert_eq!(app.recent.lock().unwrap().len(), 2);
         assert_eq!(latest(&app).carrier_name, "Sim Bin 2");
     }
+
+    // ------------------------------------------------------------------
+    // Register Bins
+
+    fn sign_in(app: &App) -> String {
+        let s = app.backend.user_login("picker@sim.local", "1234").unwrap();
+        app.session_put(s)
+    }
+
+    fn reg_phase(app: &App) -> String {
+        app.snapshot()["registration"]["phase"]["phase"].as_str().unwrap_or("none").to_string()
+    }
+
+    fn choice(carrier: &str, tag: Option<&str>, tare_kg: f64, overwrite: bool) -> ConfirmChoice {
+        ConfirmChoice {
+            carrier_id: carrier.into(),
+            expected: Expected {
+                rfid_tag: tag.map(str::to_string),
+                tare_weight_kg: tare_kg,
+            },
+            empty_confirmed: true,
+            confirm_overwrite: overwrite,
+            move_from_carrier_id: None,
+        }
+    }
+
+    const NEW_TAG: &str = "0000000000005555";
+
+    #[test]
+    fn register_bins_saves_an_empty_bins_tag_and_tare_and_never_weighs() {
+        let app = sim_app();
+        assert!(app.refresh_carriers());
+        let t = sign_in(&app);
+
+        // A full, registered bin is on the scale when Register Bins opens.
+        hold(&app, 0, 3);
+        app.handle(Input::Tag("0000000182225750".into()));
+        app.start_registration(&t).unwrap();
+        hold(&app, 64_000, 15);
+        assert_eq!(reg_phase(&app), "clearScale", "nothing is measured until the scale is cleared");
+
+        hold(&app, 0, 3);
+        assert_eq!(reg_phase(&app), "ready");
+        app.handle(Input::Tag(NEW_TAG.into()));
+        hold(&app, 26_400, 13);
+        assert_eq!(reg_phase(&app), "proposed");
+        let snap = app.snapshot();
+        assert_eq!(snap["registration"]["phase"]["proposal"]["grossG"], 26_400);
+        assert_eq!(snap["registration"]["phase"]["proposal"]["tag"], NEW_TAG);
+        assert_eq!(app.proposal_tag_owner(&t).unwrap()["bin"], serde_json::Value::Null);
+
+        // Never assumed empty.
+        let mut not_empty = choice("sim-carrier-13", None, 27.2, false);
+        not_empty.empty_confirmed = false;
+        assert!(matches!(app.confirm_registration(&t, not_empty), Err(RegisterError::Refused(_))));
+        // Sim Bin 13 already has a 27.2 kg tare: replacing it needs confirmation.
+        match app.confirm_registration(&t, choice("sim-carrier-13", None, 27.2, false)) {
+            Err(RegisterError::Server(BackendError::Http { code, .. })) => assert_eq!(code.as_deref(), Some("needsConfirmation")),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(reg_phase(&app), "proposed", "a refused save keeps the measurement");
+        let out = app.confirm_registration(&t, choice("sim-carrier-13", None, 27.2, true)).unwrap();
+        assert_eq!((out.carrier.rfid_tag.as_deref(), out.carrier.tare_weight_kg), (Some(NEW_TAG), 26.4));
+        assert_eq!(reg_phase(&app), "saved");
+
+        // Still on the scale: nothing else happens, and nothing was weighed.
+        hold(&app, 26_400, 15);
+        assert_eq!(reg_phase(&app), "saved");
+        assert!(app.store.lock().unwrap().recent(10).unwrap().is_empty(), "registration never creates a weighing");
+
+        // Back to weighing: the bin still on the scale must come off first.
+        app.stop_registration();
+        assert!(app.snapshot()["registration"].is_null());
+        hold(&app, 26_400, 15);
+        assert_eq!(app.snapshot()["phase"]["phase"], "awaitingRemoval");
+        assert!(app.store.lock().unwrap().recent(10).unwrap().is_empty());
+
+        // The newly registered bin now weighs with its measured tare.
+        assert!(app.refresh_carriers());
+        weigh(&app, NEW_TAG, 60_000);
+        let w = app.store.lock().unwrap().recent(1).unwrap()[0].clone();
+        assert_eq!((w.carrier_id.as_str(), w.tare_g, w.net_g), ("sim-carrier-13", 26_400, 33_600));
+    }
+
+    #[test]
+    fn register_bins_needs_a_signed_in_person_and_closes_when_they_sign_out() {
+        let app = sim_app();
+        assert!(matches!(app.start_registration("nobody"), Err(RegisterError::Session)));
+        let t = sign_in(&app);
+        app.start_registration(&t).unwrap();
+        assert_eq!(app.snapshot()["registration"]["person"], "Sim Picker");
+        let other = sign_in(&app);
+        assert!(matches!(app.start_registration(&other), Err(RegisterError::Refused(_))), "one person at a time");
+        assert!(matches!(app.find_bins(&other, "13"), Err(RegisterError::Refused(_))));
+        app.session_drop(&t);
+        assert!(app.snapshot()["registration"].is_null(), "signing out closes Register Bins");
+        assert_eq!(app.snapshot()["phase"]["phase"], "starting", "weighing starts over");
+    }
+
+    #[test]
+    fn trial_credits_are_stored_as_trial_and_the_station_knows_its_credits_are_off() {
+        let app = sim_app();
+        assert!(app.refresh_carriers());
+        let server = sim_server(&app);
+        server.set_credits_enabled(false);
+        app.refresh_station_info();
+        assert_eq!(app.snapshot()["creditsEnabled"], false);
+        server
+            .add_claim("sim-employee-1", crate::sim::ScanTiming::MinutesAgo("sim-carrier-01".into(), 20), true)
+            .unwrap();
+        weigh(&app, "0000000182225750", 64_000);
+        assert!(app.upload_queued());
+        let w = latest(&app);
+        assert_eq!((w.assignment_status.as_str(), w.credits_live), ("credited", Some(false)));
+        assert_eq!(app.snapshot()["currentWeighing"]["creditsLive"], false);
+    }
+
 }

@@ -1,6 +1,8 @@
 # LabourLink Scale: architecture
 
-Status: phase 1 (local service, display and simulation). Nothing on the LabourLink server has changed yet. The station endpoints in §5 are a **proposal**.
+Status: 0.3.0.
+- **Station:** live mode and Register Bins are built.
+- **Server side:** the §5 contract, migrations 070–072 and the Scale Weighings page are built on branches/PRs. They are **not merged or deployed**.
 
 ## 1. Components
 
@@ -31,14 +33,17 @@ The API binds to loopback only. Requests whose `Host` header is not loopback are
 | GET | `/api/health` | `{ ok, mode }` |
 | GET | `/api/state` | Full snapshot (see `App::snapshot`, `app/src/types.ts`) |
 | GET | `/api/ws` | WebSocket. Sends the snapshot, then every change (up to 10 Hz) |
-| GET | `/api/rfid/last` | Latest tag read, for registration |
-| POST | `/api/admin/login` | `{ email, pin }`, passed to the server's `POST /api/auth/login`. Only the Administrator role is accepted. Returns a local token (15 min idle) |
-| POST | `/api/admin/logout` | Drops the local admin session |
-| GET | `/api/admin/carriers?search=` | Passed to `GET /api/carriers` with the admin's session |
-| POST | `/api/admin/rfid` | `{ carrierId, rfidTag \| null }`, passed to `PATCH /api/carriers/:id` |
+| GET | `/api/rfid/last` | Latest tag read |
+| POST | `/api/session/login` | `{ email, pin }`, passed to the server's `POST /api/auth/login`. Any role. Returns a local token (`X-Session-Token`, 15 min idle) |
+| POST | `/api/session/logout` | Signs out here and on the server (revokes the web session); closes Register Bins |
+| POST | `/api/register/start` · `/stop` | Opens or closes Register Bins. Weighing is paused while it is open |
+| GET | `/api/register/bins?q=` | `GET /api/scale/registration/bins` (existing active bins by number or name) |
+| GET | `/api/register/tag-owner` | The bin the measured tag is already registered to, if any |
+| POST | `/api/register/confirm` | `{ carrierId, expected, emptyConfirmed, confirmOverwrite, moveFromCarrierId }`. The station re-checks the measurement, then `POST /api/scale/registration` |
+| POST | `/api/register/remove-tag` | `POST /api/scale/registration/remove-tag` (a correction) |
 | * | `/api/sim/*` | Simulator controls. Return **404 unless the service is in simulation mode** |
 
-**RFID registration reuses the server as-is.** It uses the same login, the same Administrator check (`requireRole("Administrator")`), the same `parseRfidTag` validation and the same duplicate-tag 409 message as the Carriers page. Only `rfidTag` is sent in the PATCH, so no other carrier field can change. The admin's PIN is never stored. The server session cookie stays in service memory only.
+**Register Bins uses the person's own LabourLink login.** The PIN is never stored, and the server session cookies stay in service memory only. Every registration request carries both the station token and the person's session. The server (`server/src/lib/binRegistration.ts`) re-checks every rule and writes `carrier_registration_audit` in the same transaction as the carrier change. See §3a.
 
 ## 3. Weighing state machine (`service/src/machine.rs`)
 
@@ -87,6 +92,22 @@ The recorded gross is the median of the stable window. Net is gross minus the ca
 
 **Calibration is never touched.** The indicator port is opened and read and never written, so the station cannot zero, tare or recalibrate it. If the indicator is in NET mode, weighing is blocked rather than adjusted.
 
+## 3a. Register Bins (`service/src/registration.rs`)
+
+```
+ClearScale ──empty ≥ 2 s──▶ Ready ──load──▶ Measuring (10 s settle, stable window) ──one tag, gross──▶ Proposed
+Proposed ──confirm (re-checked now)──▶ Saving ──server saved──▶ Saved ──empty ≥ 2 s──▶ Ready
+any loaded phase ──no tag / two tags / not gross / overload──▶ Problem ──resolved, or scale cleared──▶ …
+```
+
+- **No weighings while it runs.** Readings and tags go to the registration machine instead of the weighing machine, so registration can never record a weighing or credit anyone.
+- **Weighing restarts afterwards.** When Register Bins closes, the weighing machine starts over as at service start: the duplicate guard is kept, and a bin still on the scale must be removed first.
+- **An empty scale first.** Nothing is measured until the scale has read zero for `removalMs`, on entry and after every bin. A full bin left on the scale is never taken for an empty one.
+- **The proposed tare** is the median of the stable gross window. It uses the same stable-window rule as weighing (`machine::stable_weights`), never net mode, and only a single tag read for this load (tags seen before the scale was cleared are forgotten).
+- **Re-checked on confirm.** At confirm, the station checks the bin is still on the scale with the same stable weight and no other tag.
+- **One registration id per measurement.** A retried confirm is applied once by the server.
+- **The person must tick "completely empty."** Replacing a tag or tare, or moving a tag from another bin, must also be ticked. The server refuses otherwise (`needsConfirmation`, `tagOnOtherBin`), and refuses a stale view of the bin (`stale`).
+
 ## 4. Station SQLite schema (`service/src/store.rs`)
 
 - **`carriers_cache`:** `id, name, rfid_tag (unique), tare_g, is_active, synced_at`. Refreshed every 5 minutes and right after a tag registration. Weighing keeps working offline from this cache.
@@ -95,9 +116,9 @@ The recorded gross is the median of the stable window. Net is gross minus the ca
   - Weights: `gross_g`, `tare_g`, `net_g` (integer grams), `samples_json`.
   - Timing and mode: `recorded_at` (UTC), `simulated`.
   - Upload: `upload_state` (`queued`/`sent`/`rejected`), `upload_attempts`, `last_error`, `sent_at`.
-  - Assignment: `assignment_status` (`unknown`/`credited`/`pending`/`needs_review`/`expired`/`voided`), `employee_name`, `pending_until`, `status_checked_at`.
+  - Assignment: `assignment_status` (`unknown`/`credited`/`pending`/`needs_review`/`expired`/`voided`), `employee_name`, `pending_until`, `credits_live` (false = trial: matched but not a credit), `status_checked_at`.
   - Checks: `net_g = gross_g − tare_g` and `tare_g > 0`.
-- **`meta`:** stores `mode`, `schema_version` and the time carriers were last synced.
+- **`meta`:** stores `mode`, `schema_version` (2; a schema-1 database from 0.2.x is upgraded in place) and the time carriers were last synced.
 
 **Durability:** WAL with `synchronous=FULL`. A weighing is committed before it's shown as recorded or uploaded.
 
@@ -106,11 +127,19 @@ The recorded gross is the median of the stable window. Net is gross minus the ca
 - A 4xx response other than auth marks the weighing `rejected`. It's kept and counted under "attention".
 - A weighing the server says it has never seen is re-queued and sent again.
 
-**Credit display follows the server.** The station never decides or keeps a credit of its own. Every poll it asks the server for the current status of every weighing sent in the last 48 hours, including credited and under-review ones. It stores exactly what the server answers, so a credit the server no longer holds (for example after a future, audited correction) disappears from the screen on the next poll. A status the station doesn't recognise is stored as `unknown`, which is never displayed as credited.
+**Credit display follows the server.** The station never decides or keeps a credit of its own. Every poll it asks the server for the current status of every weighing sent in the last 48 hours, including credited and under-review ones. It stores exactly what the server answers, so a credit the server no longer holds (for example after an administrator voids it on the Scale Weighings page) disappears from the screen on the next poll. A status the station doesn't recognise is stored as `unknown`, which is never displayed as credited.
 
-## 5. Server contract (PROPOSED: not implemented)
+## 5. Server contract (built; not yet deployed)
 
-The station's live mode is written against this contract. **None of these endpoints or tables exist yet.** Building them is the next phase, with its own additive migration and review.
+Implemented on the server branches:
+- `server/src/routes/scale.ts`;
+- migrations 070 (stations, weighings, claims, flags, history), 071 (registration audit) and 072 (corrections and the totals views).
+
+Changes from the original proposal:
+- `GET /api/scale/station` reports the station's credit switch.
+- Every weighing result carries `creditsLive`.
+- Register Bins has its own routes (README).
+- The rule gained the first-weighing lookback and the receipt deadline (below).
 
 **Station authentication**
 - A new `scale_stations` table holds `id, name, token_hash, is_active, last_seen_at`. The station sends `Authorization: Bearer <token>`.
@@ -118,8 +147,9 @@ The station's live mode is written against this contract. **None of these endpoi
 
 | Method | Path | Body / response |
 |---|---|---|
+| GET | `/api/scale/station` | `{ station: { id, name, creditsEnabled } }`. While `creditsEnabled` is false (the default) every weighing is a trial |
 | GET | `/api/scale/carriers` | `{ carriers: [{ id, name, rfidTag, tareWeightKg, isActive }] }` |
-| POST | `/api/scale/weighings` | `{ stationWeighingId, carrierId, rfidTag, grossG, tareG, netG, weighedAt, samplesG }` → `{ status, employeeName, pendingUntil }`. Idempotent on `(station, stationWeighingId)` |
+| POST | `/api/scale/weighings` | `{ stationWeighingId, carrierId, rfidTag, grossG, tareG, netG, weighedAt, samplesG }` → `{ status, employeeName, pendingUntil, creditsLive }`. Idempotent on `(station, stationWeighingId)` |
 | POST | `/api/scale/weighings/status` | `{ ids: [stationWeighingId…] }` → `{ statuses: { [id]: { status, employeeName, pendingUntil } } }`. Ids the server has never seen are omitted. Up to 100 ids per call |
 
 **Proposed tables**
@@ -132,7 +162,13 @@ The station's live mode is written against this contract. **None of these endpoi
 
 **The assignment rule** (executable spec: `service/src/matching.rs`, plus multi-weighing cases in `sim.rs` and `app.rs`)
 
-A bin-use cycle for carrier X weighed at T is **(previous weighing of X, T]**. Every weighing closes a cycle, whatever its outcome, so consecutive uses of the same bin (Bin 1 → Bin 1, or Bin 1 → Bin 2 → Bin 1) are independent: an earlier credit never blocks a later one, and a scan can only ever count for the use it happened in. A *claim* is an accepted `mobile_time_events` row, inside the cycle, in which the employee switched to X. Claims whose phone clock was flagged (backwards jump, or future time clamped) never count.
+Both implementations, the server's and the test server's `matching.rs`, run the same shared cases (`server/src/lib/scaleMatching.vectors.json`).
+
+A bin-use cycle for carrier X weighed at T is **(previous weighing of X, T]**. A bin's first-ever weighing looks back 24 hours. Every weighing closes a cycle, whatever its outcome, so consecutive uses of the same bin (Bin 1 → Bin 1, or Bin 1 → Bin 2 → Bin 1) are independent: an earlier credit never blocks a later one, and a scan can only ever count for the use it happened in. A *claim* is an accepted `work_start`/`activity_switch` phone event, inside the cycle, whose answers chose bin X. The bin may have been scanned by NFC or picked by hand.
+
+A claim never counts when:
+- its phone clock was flagged (backwards jump, or future time clamped);
+- the server received it more than 24 hours after the weighing. This makes the outcome independent of when matching runs.
 
 | Claims in the cycle | Result |
 |---|---|
@@ -140,9 +176,9 @@ A bin-use cycle for carrier X weighed at T is **(previous weighing of X, T]**. E
 | None yet | **pending**, re-evaluated whenever a phone syncs bin changes |
 | Still none 24 h after `weighed_at` | **expired**: permanently discarded. Never credited and never assignable; there is no manual assignment for it. Only its time is kept, as the boundary of the bin's next cycle |
 | Two or more employees | **needs review**. Nobody is credited |
-| A later claim from a *different* employee inside an already credited cycle | **Credit unchanged.** The claim is flagged as a conflict for supervisor review. Any correction must be an explicit, authorized and audited action (not built) |
+| A later claim from a *different* employee inside an already credited cycle | **Credit unchanged.** The claim is flagged as a conflict for supervisor review. A correction is an administrator void on the Scale Weighings page: reason required, original kept, audited |
 
-**Final states.** Credited, needs review and expired never change because of a phone sync. Historical credits are therefore stable; only a future, audited administrator action could alter one.
+**Final states.** Credited, needs review and expired never change because of a phone sync. Historical credits are therefore stable; only an administrator void (Scale Weighings page, audited, reason required) can take one back. The original weighing, employee and claims are kept.
 
 **The 24-hour pending recovery rule.** A weighing without a verified assignment stays pending for 24 hours after it was weighed. Any phone sync in that time that delivers a claim inside that bin use's cycle resolves it. A sync that arrives after expiry changes nothing and the claim cannot spill into the bin's next use. After 24 hours the weighing expires uncredited and is discarded.
 

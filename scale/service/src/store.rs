@@ -16,7 +16,7 @@ use std::path::Path;
 use crate::config::Mode;
 use crate::machine::CarrierInfo;
 
-const SCHEMA_VERSION: &str = "1";
+const SCHEMA_VERSION: &str = "2";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,11 +37,23 @@ pub struct Weighing {
     pub assignment_status: String,
     pub employee_name: Option<String>,
     pub pending_until: Option<String>,
+    /// From the server: false while the station's credits were off (trial),
+    /// so a "credited" outcome is never shown as a real credit. None until
+    /// the server has answered.
+    pub credits_live: Option<bool>,
 }
 
 pub struct Store {
     conn: Connection,
     mode: Mode,
+}
+
+/// The server's answer for one weighing, as stored.
+pub struct Assignment<'a> {
+    pub status: &'a str,
+    pub employee: Option<&'a str>,
+    pub pending_until: Option<&'a str>,
+    pub credits_live: Option<bool>,
 }
 
 const SCHEMA: &str = r#"
@@ -82,6 +94,7 @@ create table if not exists weighings (
   employee_name     text,
   pending_until     text,
   status_checked_at text,
+  credits_live      integer check (credits_live in (0, 1)),
   check (net_g = gross_g - tare_g),
   check (tare_g > 0)
 );
@@ -110,7 +123,28 @@ fn row_to_weighing(r: &rusqlite::Row) -> rusqlite::Result<Weighing> {
         assignment_status: r.get("assignment_status")?,
         employee_name: r.get("employee_name")?,
         pending_until: r.get("pending_until")?,
+        credits_live: r.get::<_, Option<i64>>("credits_live")?.map(|v| v == 1),
     })
+}
+
+/// Schema 1 (0.2.x) had no credits_live column. Added in place, so the
+/// simulation and hardware-test databases already on a station keep their
+/// history.
+fn upgrade(conn: &Connection) -> Result<(), String> {
+    let has: bool = conn
+        .query_row("select count(*) from pragma_table_info('weighings') where name = 'credits_live'", [], |r| r.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        > 0;
+    if !has {
+        conn.execute_batch("alter table weighings add column credits_live integer check (credits_live in (0, 1));")
+            .map_err(|e| e.to_string())?;
+    }
+    conn.execute(
+        "insert into meta (key, value) values ('schema_version', ?1) on conflict(key) do update set value = excluded.value",
+        params![SCHEMA_VERSION],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 impl Store {
@@ -150,6 +184,7 @@ impl Store {
                 .map_err(|e| e.to_string())?;
             }
         }
+        upgrade(&conn)?;
         let forbidden = if mode.is_test() { 0 } else { 1 };
         conn.execute_batch(&format!(
             "create trigger if not exists weighings_mode_guard before insert on weighings
@@ -270,13 +305,13 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
 
-    pub fn mark_sent(&mut self, id: &str, at: &str, status: &str, employee: Option<&str>, pending_until: Option<&str>) -> Result<(), String> {
+    pub fn mark_sent(&mut self, id: &str, at: &str, a: &Assignment) -> Result<(), String> {
         self.conn
             .execute(
                 "update weighings set upload_state = 'sent', sent_at = ?2, upload_attempts = upload_attempts + 1, last_error = null,
-                   assignment_status = ?3, employee_name = ?4, pending_until = ?5, status_checked_at = ?2
+                   assignment_status = ?3, employee_name = ?4, pending_until = ?5, credits_live = ?6, status_checked_at = ?2
                  where id = ?1",
-                params![id, at, status, employee, pending_until],
+                params![id, at, a.status, a.employee, a.pending_until, a.credits_live.map(|v| v as i64)],
             )
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -309,18 +344,18 @@ impl Store {
     pub fn requeue(&mut self, id: &str) -> Result<(), String> {
         self.conn
             .execute(
-                "update weighings set upload_state = 'queued', assignment_status = 'unknown', employee_name = null, pending_until = null where id = ?1",
+                "update weighings set upload_state = 'queued', assignment_status = 'unknown', employee_name = null, pending_until = null, credits_live = null where id = ?1",
                 params![id],
             )
             .map_err(|e| e.to_string())?;
         Ok(())
     }
 
-    pub fn update_assignment(&mut self, id: &str, at: &str, status: &str, employee: Option<&str>, pending_until: Option<&str>) -> Result<(), String> {
+    pub fn update_assignment(&mut self, id: &str, at: &str, a: &Assignment) -> Result<(), String> {
         self.conn
             .execute(
-                "update weighings set assignment_status = ?3, employee_name = ?4, pending_until = ?5, status_checked_at = ?2 where id = ?1",
-                params![id, at, status, employee, pending_until],
+                "update weighings set assignment_status = ?3, employee_name = ?4, pending_until = ?5, credits_live = ?6, status_checked_at = ?2 where id = ?1",
+                params![id, at, a.status, a.employee, a.pending_until, a.credits_live.map(|v| v as i64)],
             )
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -363,6 +398,16 @@ mod tests {
             assignment_status: "unknown".into(),
             employee_name: None,
             pending_until: None,
+            credits_live: None,
+        }
+    }
+
+    fn a<'x>(status: &'x str, employee: Option<&'x str>, pending_until: Option<&'x str>, credits_live: Option<bool>) -> Assignment<'x> {
+        Assignment {
+            status,
+            employee,
+            pending_until,
+            credits_live,
         }
     }
 
@@ -374,19 +419,21 @@ mod tests {
         assert!(s.insert_weighing(&w("a", true)).is_err(), "same UUID twice is rejected");
         s.mark_attempt_failed("a", "offline").unwrap();
         assert_eq!(s.queued(10).unwrap()[0].upload_attempts, 1);
-        s.mark_sent("a", "2026-10-27T10:01:00Z", "pending", None, Some("2026-10-28T10:00:00Z")).unwrap();
+        s.mark_sent("a", "2026-10-27T10:01:00Z", &a("pending", None, Some("2026-10-28T10:00:00Z"), Some(false))).unwrap();
+        assert_eq!(s.get("a").unwrap().unwrap().credits_live, Some(false));
         assert!(s.queued(10).unwrap().is_empty());
         let since = "2026-10-25T00:00:00Z";
         assert_eq!(s.to_verify(since).unwrap().len(), 1);
         assert_eq!(s.counts().unwrap(), (0, 1, 0));
-        s.update_assignment("a", "2026-10-27T11:00:00Z", "credited", Some("Picker Alpha"), None)
+        s.update_assignment("a", "2026-10-27T11:00:00Z", &a("credited", Some("Picker Alpha"), None, Some(true)))
             .unwrap();
+        assert_eq!(s.get("a").unwrap().unwrap().credits_live, Some(true));
         // Credited weighings keep being re-checked against the server...
         assert_eq!(s.to_verify(since).unwrap().len(), 1);
         assert_eq!(s.get("a").unwrap().unwrap().employee_name.as_deref(), Some("Picker Alpha"));
         // ...expired ones are final and aren't, and nothing older than the window is.
         assert!(s.to_verify("2026-10-28T00:00:00Z").unwrap().is_empty());
-        s.update_assignment("a", "2026-10-28T11:00:00Z", "expired", None, None).unwrap();
+        s.update_assignment("a", "2026-10-28T11:00:00Z", &a("expired", None, None, Some(true))).unwrap();
         assert!(s.to_verify(since).unwrap().is_empty());
     }
 
@@ -416,6 +463,35 @@ mod tests {
         live.insert_weighing(&w("r", false)).unwrap();
         let mut sim = Store::open_in_memory(Mode::Simulation).unwrap();
         assert!(sim.insert_weighing(&w("r", false)).is_err());
+    }
+
+    #[test]
+    fn a_schema_1_database_is_upgraded_in_place_and_keeps_its_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scale-hwtest.sqlite3");
+        {
+            // The 0.2.x weighings table, with one row in it.
+            let c = Connection::open(&path).unwrap();
+            let old = SCHEMA.replace("  credits_live      integer check (credits_live in (0, 1)),
+", "");
+            assert!(!old.contains("credits_live"));
+            c.execute_batch(&old).unwrap();
+            c.execute("insert into meta (key, value) values ('mode', 'hardware-test'), ('schema_version', '1')", []).unwrap();
+            c.execute(
+                "insert into weighings (id, carrier_id, carrier_name, rfid_tag, gross_g, tare_g, net_g, recorded_at, samples_json, simulated)
+                 values ('old', 'c', 'Bin 77', 't', 172500, 154400, 18100, '2026-10-30T10:00:00Z', '[]', 1)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path, Mode::HardwareTest).unwrap();
+        let old = s.get("old").unwrap().unwrap();
+        assert_eq!((old.net_g, old.credits_live), (18_100, None));
+        let v: String = s.conn.query_row("select value from meta where key = 'schema_version'", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, "2");
+        drop(s);
+        // Opening again is a no-op.
+        Store::open(&path, Mode::HardwareTest).unwrap();
     }
 
     #[test]
