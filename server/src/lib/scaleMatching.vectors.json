@@ -1,5 +1,5 @@
 {
-  "comment": "Shared cases for the weighing assignment rule. Run by server/src/lib/scaleMatching.test.ts and by the station's scale/service/src/matching.rs (a copy of this file lives at scale/service/src/matching.vectors.json; keep them identical). Times are minutes. receivedAt defaults to occurredAt, clockTrusted to true, consumedBy to null; previous null means the bin's first weighing.",
+  "comment": "Shared cases for the weighing assignment rule. Run by server/src/lib/scaleMatchingRule.test.ts and by the station's scale/service/src/matching.rs (a copy of this file lives at scale/service/src/matching.vectors.json; keep them identical). Times are minutes. receivedAt defaults to occurredAt, clockTrusted to true, consumedBy to null; previous null means the bin's first weighing.",
   "cases": [
     {
       "name": "one employee's bin choice in the cycle credits that employee",
