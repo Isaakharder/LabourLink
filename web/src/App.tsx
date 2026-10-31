@@ -20,6 +20,7 @@ import { ResetPinPage } from "./pages/desktop/ResetPinPage";
 import { SettingsPage } from "./pages/desktop/SettingsPage";
 import { SetupPage } from "./pages/desktop/SetupPage";
 import { SyncConflictsPage } from "./pages/desktop/SyncConflictsPage";
+import { ScaleWeighingsPage } from "./pages/desktop/ScaleWeighingsPage";
 import { RequireRole } from "./components/auth/RequireRole";
 import { DeviceDeactivatedScreen } from "./pages/mobile/DeviceDeactivatedScreen";
 import { EmployeesScreen } from "./pages/mobile/EmployeesScreen";
@@ -118,6 +119,14 @@ function DesktopApp() {
           element={
             <RequireRole roles={["Administrator", "Manager"]}>
               <ReportViewPage />
+            </RequireRole>
+          }
+        />
+        <Route
+          path="scale-weighings"
+          element={
+            <RequireRole roles={["Administrator", "Manager"]}>
+              <ScaleWeighingsPage />
             </RequireRole>
           }
         />

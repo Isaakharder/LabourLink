@@ -13,6 +13,7 @@ import {
   Smartphone,
   TriangleAlert,
   Users,
+  Weight,
   Wrench,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
@@ -49,6 +50,7 @@ const PRIMARY_NAV: NavEntry[] = [
   },
   { to: "/inputs", icon: ClipboardList, label: "Inputs" },
   { to: "/reports", icon: FileBarChart, label: "Reports", roles: ["Administrator", "Manager"] },
+  { to: "/scale-weighings", icon: Weight, label: "Scale Weighings", roles: ["Administrator", "Manager"] },
   { to: "/employees", icon: Users, label: "Employees" },
   { to: "/basic-data", icon: Database, label: "Basic data" },
   { to: "/devices", icon: Smartphone, label: "Devices" },
