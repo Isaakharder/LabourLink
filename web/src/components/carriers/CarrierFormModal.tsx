@@ -2,6 +2,7 @@ import { FormEvent, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { api, ApiError } from "../../lib/api";
 import { Carrier } from "../../lib/carrierTypes";
+import { CarrierHistory } from "./CarrierHistory";
 
 interface CarrierFormModalProps {
   carrier: Carrier | null; // null = create mode
@@ -156,6 +157,8 @@ export function CarrierFormModal({ carrier, onClose, onSaved }: CarrierFormModal
             </label>
           </div>
         </section>
+
+        {carrier && <CarrierHistory carrierId={carrier.id} />}
 
         <div className="employee-form-actions">
           <button type="button" onClick={onClose} disabled={submitting}>

@@ -20,6 +20,8 @@
     "test:scale-matching-rule": "ts-node src/lib/scaleMatchingRule.test.ts",
     "test:scale-station-api": "ts-node src/routes/scale.test.ts",
     "test:migration-070-scale-weighings": "ts-node src/scripts/migration070ScaleWeighings.test.ts",
+    "test:scale-registration": "ts-node src/routes/scaleRegistration.test.ts",
+    "test:migration-071-carrier-registration-audit": "ts-node src/scripts/migration071CarrierRegistrationAudit.test.ts",
     "cutoff:run": "ts-node src/cli/dailyCutoffRun.ts",
     "cutoff:repair": "ts-node src/cli/repairStaleEntries.ts",
     "midnight-cutoff:run": "ts-node src/cli/midnightCutoffRun.ts",

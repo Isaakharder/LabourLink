@@ -9534,3 +9534,23 @@ input {
   font-weight: 800;
   color: var(--color-muted);
 }
+
+/* Carriers > Edit: tag and tare history (CarrierHistory.tsx) */
+.carrier-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 14rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.carrier-history-what {
+  font-size: 0.85rem;
+}
+
+.carrier-history-who {
+  margin: 0.1rem 0 0;
+}

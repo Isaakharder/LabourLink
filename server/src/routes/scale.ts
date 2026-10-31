@@ -7,6 +7,15 @@
 //   POST /api/scale/weighings          upload one weighing (idempotent on the station's id)
 //   POST /api/scale/weighings/status   current outcome of up to 100 of this station's weighings
 //
+// Register Bins (lib/binRegistration.ts) also needs a signed-in LabourLink
+// user, any role, sent as the normal session cookie from POST
+// /api/auth/login. The station token proves where it happened; the session
+// proves who did it.
+//   GET  /api/scale/registration/bins?q=77     existing active bins by number or name
+//   GET  /api/scale/registration/tags/:tag     the bin a tag is registered to, if any
+//   POST /api/scale/registration               set an empty bin's tag and tare
+//   POST /api/scale/registration/remove-tag    take a tag off a bin (a correction)
+//
 // Who gets credit is decided here, never on the station: see
 // lib/scaleMatching.ts.
 import { Router } from "express";
@@ -14,6 +23,8 @@ import { PoolClient } from "pg";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { parseRfidTag } from "../lib/rfidTag";
+import { binForTag, findBins, parseRegistration, parseRemoveTag, registerBin, removeTag } from "../lib/binRegistration";
+import { requireAuth } from "../middleware/auth";
 import {
   DUPLICATE_GUARD_MS,
   lockCarrier,
@@ -271,6 +282,47 @@ router.post(
       await reconcileWeighings(rows.map((r) => r.id));
     }
     res.json({ statuses: await outcome(pool, station.id, wanted) });
+  })
+);
+
+router.get(
+  "/registration/bins",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const q = typeof req.query.q === "string" ? req.query.q.slice(0, 100) : "";
+    res.json({ bins: await findBins(q) });
+  })
+);
+
+router.get(
+  "/registration/tags/:tag",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const tag = parseRfidTag(req.params.tag);
+    if (!tag.ok || tag.value === null) return res.status(400).json({ error: "Invalid RFID tag" });
+    res.json({ bin: await binForTag(tag.value) });
+  })
+);
+
+router.post(
+  "/registration",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const parsed = parseRegistration(req.body);
+    if (!parsed.ok) return res.status(400).json({ error: Object.values(parsed.errors)[0], errors: parsed.errors });
+    const result = await registerBin(parsed.value, req.scaleStation!.id, req.employee!.id);
+    res.status(result.status).json(result.body);
+  })
+);
+
+router.post(
+  "/registration/remove-tag",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const parsed = parseRemoveTag(req.body);
+    if (!parsed.ok) return res.status(400).json({ error: Object.values(parsed.errors)[0], errors: parsed.errors });
+    const result = await removeTag(parsed.value, req.scaleStation!.id, req.employee!.id);
+    res.status(result.status).json(result.body);
   })
 );
 
