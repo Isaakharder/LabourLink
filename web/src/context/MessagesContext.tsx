@@ -2,6 +2,10 @@ import { createContext, ReactNode, useCallback, useContext, useEffect, useState 
 import { useDevicePairing } from "./DevicePairingContext";
 import { api, ApiError, getPermanentDeviceAuthErrorCode } from "../lib/api";
 import { OutstandingMessage } from "../lib/messageTypes";
+import { onSyncSettled } from "../lib/syncEngine";
+
+// How often a phone left open in the foreground re-checks for messages.
+export const FOREGROUND_MESSAGE_CHECK_MS = 2 * 60 * 1000;
 
 interface MessagesContextValue {
   // Every unacknowledged message for the paired employee, oldest first.
@@ -25,9 +29,8 @@ const MessagesContext = createContext<MessagesContextValue | undefined>(undefine
 // WorkSessionContext: messaging is unrelated to time-tracking state, and
 // this keeps that existing, sensitive context untouched.
 //
-// Event-driven refresh only (mount, `online`, tab/app foreground) — the
-// same convention HomeScreen already uses for activities/rows/carriers, no
-// new interval-polling framework.
+// Refreshes on mount, `online`, tab/app foreground, every settled sync, and
+// a light timer while the app stays visible (see the effect below).
 export function MessagesProvider({ children }: { children: ReactNode }) {
   const { markUnpaired, setServerReachable } = useDevicePairing();
   const [pending, setPending] = useState<OutstandingMessage[]>([]);
@@ -65,9 +68,22 @@ export function MessagesProvider({ children }: { children: ReactNode }) {
     }
     window.addEventListener("online", onOnline);
     document.addEventListener("visibilitychange", onVisibilityChange);
+    // Every settled sync is a moment the phone just talked to the server,
+    // so it also picks up any message saved since the last fetch.
+    const unsubscribeSync = onSyncSettled(refresh);
+    // A phone left open on one screen fires none of the events above. On
+    // 2026-11-10 a message saved at 15:37 was not fetched until 16:08 for
+    // exactly that reason (the employee had no push registration either).
+    // A cheap check every few minutes while visible covers that phone
+    // whether or not push works.
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") refresh();
+    }, FOREGROUND_MESSAGE_CHECK_MS);
     return () => {
       window.removeEventListener("online", onOnline);
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      unsubscribeSync();
+      window.clearInterval(timer);
     };
   }, [refresh]);
 

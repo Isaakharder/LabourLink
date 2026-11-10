@@ -3,15 +3,10 @@ import { api, ApiError } from "../../../lib/api";
 import { MessageSummary } from "../../../lib/messageTypes";
 import { SendMessageModal } from "../../../components/messages/SendMessageModal";
 import { MessageDetailsModal } from "../../../components/messages/MessageDetailsModal";
+import { messageListStatusLabel, notificationSummaryLabel } from "../../../lib/messageStatus";
 
 function truncate(text: string, max = 80): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
-
-function statusLabel(status: MessageSummary["status"]): string {
-  if (status === "acknowledged") return "All acknowledged";
-  if (status === "pending") return "Pending";
-  return "Sent";
 }
 
 export function MessagesTab() {
@@ -57,9 +52,10 @@ export function MessagesTab() {
           <thead>
             <tr>
               <th>Message</th>
-              <th>Sent</th>
+              <th>Saved</th>
               <th>Recipients</th>
               <th>Acknowledged</th>
+              <th>Notifications</th>
               <th>Status</th>
               <th></th>
             </tr>
@@ -73,7 +69,8 @@ export function MessagesTab() {
                 <td>
                   {m.acknowledgedCount} / {m.recipientCount}
                 </td>
-                <td>{statusLabel(m.status)}</td>
+                <td>{notificationSummaryLabel(m)}</td>
+                <td>{messageListStatusLabel(m)}</td>
                 <td>
                   <div className="employee-row-actions">
                     <button type="button" onClick={() => setDetailsId(m.id)}>

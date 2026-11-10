@@ -3,6 +3,11 @@
 
 export type MessageStatus = "sent" | "pending" | "acknowledged";
 
+// employee_message_recipients.push_status — null = not recorded (still in
+// progress, or sent before migration 073). "accepted" means the push
+// service accepted the request, never that the phone displayed it.
+export type PushStatus = "accepted" | "no_device" | "failed";
+
 export interface MessageSummary {
   id: string;
   messageText: string;
@@ -12,6 +17,11 @@ export interface MessageSummary {
   createdAt: string;
   recipientCount: number;
   acknowledgedCount: number;
+  // Optional: absent from servers older than migration 073.
+  retrievedCount?: number;
+  pushAcceptedCount?: number;
+  pushNoDeviceCount?: number;
+  pushFailedCount?: number;
   status: MessageStatus;
 }
 
@@ -19,6 +29,9 @@ export interface MessageRecipientDetail {
   employeeId: string;
   employeeName: string;
   employeeActive: boolean;
+  savedAt?: string;
+  pushStatus?: PushStatus | null;
+  pushAttemptedAt?: string | null;
   pushSentAt: string | null;
   deliveredAt: string | null;
   acknowledgedAt: string | null;
@@ -47,6 +60,9 @@ export interface MobileMessageRecipient {
   firstName: string;
   lastName: string;
   photoUrl: string | null;
+  // True only when the employee has an assigned device with an active push
+  // registration. A paired phone without notifications enabled is false,
+  // and still gets the message the next time LabourLink opens or syncs.
   hasActiveDevice: boolean;
 }
 
@@ -58,6 +74,13 @@ export interface MobileMessageRecipient {
 export interface MobileMessageSendResult {
   messageId: string;
   recipientCount: number;
+  // Present from servers with migration 073; counts are employees.
+  notificationStatus?: "sent" | "no_device" | "failed" | "partial" | "in_progress";
+  pushAcceptedCount?: number;
+  pushFailedCount?: number;
+  noDeviceCount?: number;
+  inProgressCount?: number;
+  replayed?: boolean;
   pushSucceeded: number;
   pushFailed: number;
   noActiveDeviceCount: number;

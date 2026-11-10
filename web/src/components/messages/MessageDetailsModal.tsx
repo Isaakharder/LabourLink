@@ -2,16 +2,11 @@ import { useEffect, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { api, ApiError } from "../../lib/api";
 import { MessageDetail } from "../../lib/messageTypes";
+import { pushStatusLabel, recipientProgressLabel } from "../../lib/messageStatus";
 
 interface MessageDetailsModalProps {
   messageId: string;
   onClose: () => void;
-}
-
-function recipientStatus(deliveredAt: string | null, acknowledgedAt: string | null): string {
-  if (acknowledgedAt) return "Acknowledged";
-  if (deliveredAt) return "Delivered / Seen";
-  return "Sent";
 }
 
 export function MessageDetailsModal({ messageId, onClose }: MessageDetailsModalProps) {
@@ -38,7 +33,12 @@ export function MessageDetailsModal({ messageId, onClose }: MessageDetailsModalP
               {detail.allEmployees ? "All active employees at the time" : "Selected employees"}
             </p>
             <p className="message-detail-meta">
+              Saved for {detail.recipientCount} · {detail.retrievedCount ?? "?"} retrieved by phone ·{" "}
               {detail.acknowledgedCount} of {detail.recipientCount} acknowledged
+            </p>
+            <p className="message-detail-meta">
+              A notification accepted by the push service is not confirmation that the phone showed it. Every saved
+              message appears on the employee's phone the next time LabourLink opens or syncs.
             </p>
           </section>
 
@@ -49,6 +49,8 @@ export function MessageDetailsModal({ messageId, onClose }: MessageDetailsModalP
                 <tr>
                   <th>Employee</th>
                   <th>Status</th>
+                  <th>Notification</th>
+                  <th>Retrieved by phone</th>
                   <th>Acknowledged</th>
                 </tr>
               </thead>
@@ -59,7 +61,9 @@ export function MessageDetailsModal({ messageId, onClose }: MessageDetailsModalP
                       {r.employeeName}
                       {!r.employeeActive && <span className="message-recipient-inactive"> (inactive)</span>}
                     </td>
-                    <td>{recipientStatus(r.deliveredAt, r.acknowledgedAt)}</td>
+                    <td>{recipientProgressLabel(r)}</td>
+                    <td>{pushStatusLabel(r.pushStatus ?? null)}</td>
+                    <td>{r.deliveredAt ? new Date(r.deliveredAt).toLocaleString() : "—"}</td>
                     <td>{r.acknowledgedAt ? new Date(r.acknowledgedAt).toLocaleString() : "—"}</td>
                   </tr>
                 ))}

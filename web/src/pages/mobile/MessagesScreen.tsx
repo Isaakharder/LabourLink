@@ -5,6 +5,7 @@ import { api, ApiError } from "../../lib/api";
 import { uuid } from "../../lib/uuid";
 import { Avatar } from "../../components/employees/Avatar";
 import { MobileMessageRecipient, MobileMessageSendResult } from "../../lib/messageTypes";
+import { sendResultHeadline } from "../../lib/messageStatus";
 
 type RecipientMode = "all" | "selected";
 type Step = "compose" | "confirm" | "result";
@@ -210,7 +211,7 @@ export function MessagesScreen() {
                       <span>
                         {emp.firstName} {emp.lastName}
                       </span>
-                      {!emp.hasActiveDevice && <span className="mobile-message-no-device">No device</span>}
+                      {!emp.hasActiveDevice && <span className="mobile-message-no-device">No notifications</span>}
                     </label>
                   ))
                 )}
@@ -244,7 +245,7 @@ export function MessagesScreen() {
               {selectedRecipients.map((e) => (
                 <li key={e.id}>
                   {e.firstName} {e.lastName}
-                  {!e.hasActiveDevice && " (no device)"}
+                  {!e.hasActiveDevice && " (notifications off; sees it when LabourLink next opens)"}
                 </li>
               ))}
             </ul>
@@ -283,18 +284,30 @@ export function MessagesScreen() {
 
       {!forbidden && step === "result" && result && (
         <section className="mobile-settings-device-section mobile-messages-result">
-          <h2>Message sent</h2>
+          <h2>Message saved</h2>
+          <p className="mobile-settings-device-note">{sendResultHeadline(result)}</p>
           <p className="mobile-settings-device-note">
-            Stored for {result.recipientCount} recipient{result.recipientCount === 1 ? "" : "s"}.
+            Saved for {result.recipientCount} recipient{result.recipientCount === 1 ? "" : "s"}. Every recipient will see
+            it the next time LabourLink opens or syncs on their phone.
           </p>
-          <p className="mobile-settings-device-note">
-            Push notification delivered to {result.pushSucceeded} device{result.pushSucceeded === 1 ? "" : "s"}
-            {result.pushFailed > 0 ? `, failed for ${result.pushFailed}` : ""}.
-          </p>
-          {result.noActiveDeviceCount > 0 && (
+          {(result.pushAcceptedCount ?? result.pushSucceeded) > 0 && (
             <p className="mobile-settings-device-note">
-              {result.noActiveDeviceCount} recipient{result.noActiveDeviceCount === 1 ? "" : "s"} with no assigned
-              device will still see this message the next time LabourLink is open.
+              Notification accepted for {result.pushAcceptedCount ?? result.pushSucceeded} recipient
+              {(result.pushAcceptedCount ?? result.pushSucceeded) === 1 ? "" : "s"} (this does not confirm the phone
+              showed it).
+            </p>
+          )}
+          {(result.pushFailedCount ?? result.pushFailed) > 0 && (
+            <p className="mobile-settings-device-note">
+              Notification failed for {result.pushFailedCount ?? result.pushFailed} recipient
+              {(result.pushFailedCount ?? result.pushFailed) === 1 ? "" : "s"}.
+            </p>
+          )}
+          {(result.noDeviceCount ?? result.noActiveDeviceCount) > 0 && (
+            <p className="mobile-settings-device-note">
+              {result.noDeviceCount ?? result.noActiveDeviceCount} recipient
+              {(result.noDeviceCount ?? result.noActiveDeviceCount) === 1 ? " has" : "s have"} no phone registered for
+              notifications.
             </p>
           )}
           <button type="button" className="mobile-action-button mobile-action-primary" onClick={composeAnother}>

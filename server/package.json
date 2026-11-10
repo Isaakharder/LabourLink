@@ -109,6 +109,7 @@
     "test:employee-blocks": "ts-node src/routes/employeeBlocks.test.ts",
     "test:greenhouse-live-block-colors": "ts-node src/routes/greenhouseLive.blockColors.test.ts",
     "test:mobile-messages": "ts-node src/routes/mobileMessages.test.ts",
+    "test:message-push-status": "ts-node src/routes/messagePushStatus.test.ts",
     "test:mobile-employees": "ts-node src/routes/mobileEmployees.test.ts",
     "test:mobile-time-sync-events": "ts-node src/routes/mobileTime.syncEvents.test.ts",
     "test:mobile-sync-conflicts": "ts-node src/routes/mobileSyncConflicts.test.ts",

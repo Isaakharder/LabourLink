@@ -6,6 +6,47 @@ import { getSignedPhotoUrls } from "../lib/storage";
 import { loadActiveRegistrations, sendPushForRecipients } from "../lib/pushDelivery";
 import { resolveRecipients, createEmployeeMessage } from "../lib/employeeMessages";
 
+// The mobile send screen's result. Counts are EMPLOYEES, not registrations.
+// "Accepted" means the push service (FCM/APNs/Web Push) accepted the
+// request — never that the phone showed it. Every recipient's message is
+// saved either way and appears the next time their LabourLink opens or
+// syncs. pushSucceeded/pushFailed/noActiveDeviceCount are kept for app
+// builds that predate notificationStatus.
+function sendSummary(
+  messageId: string,
+  recipientCount: number,
+  pushAcceptedCount: number,
+  pushFailedCount: number,
+  noDeviceCount: number,
+  replayed: boolean
+) {
+  const inProgressCount = recipientCount - pushAcceptedCount - pushFailedCount - noDeviceCount;
+  const notificationStatus =
+    inProgressCount > 0
+      ? "in_progress"
+      : pushAcceptedCount === recipientCount
+      ? "sent"
+      : pushAcceptedCount === 0 && pushFailedCount === 0
+        ? "no_device"
+        : pushAcceptedCount === 0 && noDeviceCount === 0
+          ? "failed"
+          : "partial";
+  return {
+    messageId,
+    saved: true,
+    replayed,
+    recipientCount,
+    notificationStatus,
+    pushAcceptedCount,
+    pushFailedCount,
+    noDeviceCount,
+    inProgressCount,
+    pushSucceeded: pushAcceptedCount,
+    pushFailed: pushFailedCount,
+    noActiveDeviceCount: noDeviceCount,
+  };
+}
+
 const router = Router();
 router.use(asyncHandler(requireDevice));
 
@@ -124,7 +165,12 @@ router.get(
         firstName: r.first_name,
         lastName: r.last_name,
         photoUrl: r.profile_photo_path ? photoUrlByPath.get(r.profile_photo_path) ?? null : null,
+        // "Has a device that can receive a push notification right now" —
+        // an assigned, active device with an active push registration. A
+        // paired, clocked-in phone with notifications never enabled is
+        // false here, yet still receives the message on its next fetch.
         hasActiveDevice: reachableIds.has(r.id),
+        pushRegistered: reachableIds.has(r.id),
       })),
     });
   })
@@ -166,7 +212,7 @@ router.post(
       return res.status(400).json({ error: "No active employees to send to" });
     }
 
-    const { messageId } = await createEmployeeMessage({
+    const { messageId, created } = await createEmployeeMessage({
       messageText: trimmed,
       createdByEmployeeId: d.employeeId,
       recipientMode,
@@ -174,15 +220,35 @@ router.post(
       idempotencyKey,
     });
 
+    // A replay of an already-saved send (lost response, retry tap) must not
+    // notify anyone a second time — and it usually arrives while the
+    // original request is still pushing — so it only reports what has been
+    // recorded so far. Recipients not yet recorded count as in progress.
+    if (!created) {
+      const { rows } = await pool.query(
+        `select push_status from employee_message_recipients where message_id = $1`,
+        [messageId]
+      );
+      const count = (s: string | null) => rows.filter((r) => r.push_status === s).length;
+      // 201 like the original response, so a retry looks identical to
+      // every app build; `replayed: true` marks it.
+      return res
+        .status(201)
+        .json(sendSummary(messageId, rows.length, count("accepted"), count("failed"), count("no_device"), true));
+    }
+
     const push = await sendPushForRecipients(messageId, resolved.employeeIds);
 
-    res.status(201).json({
-      messageId,
-      recipientCount: resolved.employeeIds.length,
-      pushSucceeded: push.succeeded,
-      pushFailed: push.failed,
-      noActiveDeviceCount: push.noActiveDeviceEmployeeIds.length,
-    });
+    res.status(201).json(
+      sendSummary(
+        messageId,
+        resolved.employeeIds.length,
+        push.acceptedEmployeeIds.length,
+        push.failedEmployeeIds.length,
+        push.noActiveDeviceEmployeeIds.length,
+        false
+      )
+    );
   })
 );
 

@@ -21,7 +21,11 @@ const MESSAGE_BASE_SELECT = `
   select em.id, em.message_text, em.created_by_employee_id, em.all_employees, em.created_at,
          ce.first_name as creator_first_name, ce.last_name as creator_last_name,
          count(emr.id) as recipient_count,
-         count(emr.id) filter (where emr.acknowledged_at is not null) as acknowledged_count
+         count(emr.id) filter (where emr.acknowledged_at is not null) as acknowledged_count,
+         count(emr.id) filter (where emr.delivered_at is not null) as retrieved_count,
+         count(emr.id) filter (where emr.push_status = 'accepted') as push_accepted_count,
+         count(emr.id) filter (where emr.push_status = 'no_device') as push_no_device_count,
+         count(emr.id) filter (where emr.push_status = 'failed') as push_failed_count
   from employee_messages em
   join employees ce on ce.id = em.created_by_employee_id
   left join employee_message_recipients emr on emr.message_id = em.id
@@ -44,6 +48,13 @@ function serializeSummary(row: any) {
     createdAt: row.created_at,
     recipientCount,
     acknowledgedCount,
+    retrievedCount: Number(row.retrieved_count),
+    pushAcceptedCount: Number(row.push_accepted_count),
+    pushNoDeviceCount: Number(row.push_no_device_count),
+    pushFailedCount: Number(row.push_failed_count),
+    // "pending" = saved for every recipient, not yet acknowledged by all of
+    // them. It says nothing about notification delivery; see the push*
+    // counts and each recipient's pushStatus for that.
     status: recipientCount === 0 ? "sent" : acknowledgedCount >= recipientCount ? "acknowledged" : "pending",
   };
 }
@@ -72,6 +83,7 @@ router.get(
 
     const recipients = await pool.query(
       `select emr.employee_id, e.first_name, e.last_name, e.is_active,
+              emr.created_at as saved_at, emr.push_status, emr.push_attempted_at,
               emr.push_sent_at, emr.delivered_at, emr.acknowledged_at
        from employee_message_recipients emr
        join employees e on e.id = emr.employee_id
@@ -87,6 +99,13 @@ router.get(
           employeeId: r.employee_id,
           employeeName: `${r.first_name} ${r.last_name}`,
           employeeActive: r.is_active,
+          // Recipient row committed: the message is waiting for this
+          // employee and appears the next time their phone fetches.
+          savedAt: r.saved_at,
+          // 'accepted' | 'no_device' | 'failed' | null (not recorded yet,
+          // or a message sent before 073_message_push_outcome.sql).
+          pushStatus: r.push_status,
+          pushAttemptedAt: r.push_attempted_at,
           pushSentAt: r.push_sent_at,
           deliveredAt: r.delivered_at,
           acknowledgedAt: r.acknowledged_at,
