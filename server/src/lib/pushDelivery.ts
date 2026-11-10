@@ -114,12 +114,41 @@ export async function loadActiveRegistrations(employeeIds: string[]): Promise<Pu
 const PUSH_TITLE = "LabourLink";
 const PUSH_BODY = "You have a new message. Open LabourLink to read it.";
 
-async function markPushSent(messageId: string, employeeId: string): Promise<void> {
+export type RecipientPushStatus = "accepted" | "no_device" | "failed";
+
+// One batched write of every recipient's outcome. Never downgrades: once a
+// recipient is 'accepted' (a retry or a later re-send already got through),
+// a later 'failed'/'no_device' for the same message leaves it accepted.
+async function recordPushOutcomes(
+  messageId: string,
+  outcomes: Map<string, RecipientPushStatus>
+): Promise<void> {
+  if (outcomes.size === 0) return;
+  const employeeIds = [...outcomes.keys()];
+  const statuses = employeeIds.map((id) => outcomes.get(id)!);
   await pool.query(
-    `update employee_message_recipients set push_sent_at = coalesce(push_sent_at, now())
-     where message_id = $1 and employee_id = $2`,
-    [messageId, employeeId]
+    `update employee_message_recipients emr
+     set push_status = case when emr.push_status = 'accepted' then emr.push_status else o.status end,
+         push_attempted_at = now(),
+         push_sent_at = case when o.status = 'accepted' then coalesce(emr.push_sent_at, now()) else emr.push_sent_at end
+     from unnest($2::uuid[], $3::text[]) as o(employee_id, status)
+     where emr.message_id = $1 and emr.employee_id = o.employee_id`,
+    [messageId, employeeIds, statuses]
   );
+}
+
+// Test seam only: lets the integration tests stand in for FCM (accept, or
+// reject with a specific firebase-admin error code) without real
+// credentials or network. Never set outside tests.
+type FcmSender = (message: { token: string; notification: { title: string; body: string }; data: Record<string, string> }) => Promise<unknown>;
+let fcmSenderOverride: FcmSender | null = null;
+export function setFcmSenderForTesting(sender: FcmSender | null): void {
+  fcmSenderOverride = sender;
+}
+function getFcmSender(): FcmSender | null {
+  if (fcmSenderOverride) return fcmSenderOverride;
+  const messaging = getFirebaseMessaging();
+  return messaging ? (m) => messaging.send(m) : null;
 }
 
 async function rememberApnsEnvironment(registrationId: string, environment: ApnsEnvironment): Promise<void> {
@@ -150,6 +179,12 @@ export interface PushDeliverySummary {
   // registered/has since disabled push) — distinct from a registration that
   // was attempted and failed.
   noActiveDeviceEmployeeIds: string[];
+  // Per-employee outcome, the same value written to
+  // employee_message_recipients.push_status. An employee is 'accepted' when
+  // at least one of their registrations was accepted by the push service
+  // (FCM/APNs/Web Push) — never proof the phone displayed anything.
+  acceptedEmployeeIds: string[];
+  failedEmployeeIds: string[];
 }
 
 // Best-effort fan-out to every currently-registered device for the given
@@ -161,24 +196,27 @@ export interface PushDeliverySummary {
 // future sends stop retrying against it; any other failure just logs and
 // leaves the registration alone for the next message to try again.
 export async function sendPushForRecipients(messageId: string, employeeIds: string[]): Promise<PushDeliverySummary> {
-  if (employeeIds.length === 0) return { attempted: 0, succeeded: 0, failed: 0, noActiveDeviceEmployeeIds: [] };
+  if (employeeIds.length === 0) {
+    return { attempted: 0, succeeded: 0, failed: 0, noActiveDeviceEmployeeIds: [], acceptedEmployeeIds: [], failedEmployeeIds: [] };
+  }
   const registrations = await loadActiveRegistrations(employeeIds);
   const reachableEmployeeIds = new Set(registrations.map((r) => r.employeeId));
   const noActiveDeviceEmployeeIds = employeeIds.filter((id) => !reachableEmployeeIds.has(id));
 
   let succeeded = 0;
   let failed = 0;
+  const acceptedEmployees = new Set<string>();
 
   await Promise.all(
     registrations.map(async (reg) => {
       try {
         if (reg.platform === "android_fcm") {
-          const messaging = getFirebaseMessaging();
-          if (!messaging || !reg.fcmToken) {
+          const sendFcm = getFcmSender();
+          if (!sendFcm || !reg.fcmToken) {
             failed++; // push not configured on this server — no notification will arrive
             return;
           }
-          await messaging.send({
+          await sendFcm({
             token: reg.fcmToken,
             notification: { title: PUSH_TITLE, body: PUSH_BODY },
             data: { type: "message" },
@@ -215,7 +253,7 @@ export async function sendPushForRecipients(messageId: string, employeeIds: stri
             JSON.stringify({ title: PUSH_TITLE, body: PUSH_BODY, type: "message" })
           );
         }
-        await markPushSent(messageId, reg.employeeId);
+        acceptedEmployees.add(reg.employeeId);
         succeeded++;
       } catch (err) {
         failed++;
@@ -236,5 +274,18 @@ export async function sendPushForRecipients(messageId: string, employeeIds: stri
     })
   );
 
-  return { attempted: registrations.length, succeeded, failed, noActiveDeviceEmployeeIds };
+  const outcomes = new Map<string, RecipientPushStatus>();
+  for (const id of employeeIds) {
+    outcomes.set(id, !reachableEmployeeIds.has(id) ? "no_device" : acceptedEmployees.has(id) ? "accepted" : "failed");
+  }
+  await recordPushOutcomes(messageId, outcomes);
+
+  return {
+    attempted: registrations.length,
+    succeeded,
+    failed,
+    noActiveDeviceEmployeeIds,
+    acceptedEmployeeIds: employeeIds.filter((id) => outcomes.get(id) === "accepted"),
+    failedEmployeeIds: employeeIds.filter((id) => outcomes.get(id) === "failed"),
+  };
 }

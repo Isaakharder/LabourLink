@@ -5,10 +5,9 @@ import { initAndroidPush } from "../../lib/push";
 // No UI of its own — silently re-establishes native push registration and
 // the notification-tap listener on every app start AND every time the app
 // returns to the foreground, but only if the employee already granted
-// permission in an earlier session (requestPermission: false, see
-// push.ts). Never prompts on its own; first-time opt-in only ever happens
-// via SettingsScreen's explicit "Enable notifications" button. A no-op
-// entirely outside the Android app.
+// permission. On start it may also ask for permission once per install
+// (see the comment on the first call below). A no-op entirely outside the
+// Android app.
 //
 // Re-checking on every resume (not just mount) is what catches an FCM token
 // rotated while the app process was killed or backgrounded — Android's
@@ -22,11 +21,19 @@ export function NativePushBridge() {
   const { refresh } = useMessages();
 
   useEffect(() => {
-    initAndroidPush(false, refresh).catch(() => {});
+    // Start: may ask Android for notification permission once per install
+    // ("askOnce", push.ts). This bridge mounts only inside the paired app,
+    // so the prompt comes after pairing, never on the pairing screen.
+    // Every new install or reinstall starts with notifications off on
+    // Android 13+, and before this an employee who never found Settings >
+    // Enable notifications could never be notified (2026-11-10: 20 of 36
+    // paired phones were in that state). A refusal is respected; Settings'
+    // button can ask again.
+    initAndroidPush("askOnce", refresh).catch(() => {});
 
     function onVisibilityChange() {
       if (document.visibilityState === "visible") {
-        initAndroidPush(false, refresh).catch(() => {});
+        initAndroidPush("silent", refresh).catch(() => {});
       }
     }
     document.addEventListener("visibilitychange", onVisibilityChange);

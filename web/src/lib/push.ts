@@ -1,6 +1,7 @@
 import { isNativePlatform, isWebPushSupported } from "./platform";
 import { api } from "./api";
 import { singleFlight } from "./singleFlight";
+import { DEVICE_ID_KEY } from "./device";
 
 export type PushSetupResult = { ok: true } | { ok: false; reason: string };
 
@@ -11,13 +12,22 @@ export type PushSetupResult = { ok: true } | { ok: false; reason: string };
 // on every visit to Settings after it already succeeded once.
 const PUSH_ENABLED_KEY = "labourlink_push_enabled";
 
-// The FCM token this device last successfully registered with the server —
-// compared against what the SDK hands back on every re-registration
-// (mount, resume) so an unchanged token never triggers a redundant POST
-// /api/mobile/push/register. The server's own convention there (disable the
-// old row, insert a fresh one) is correct for a *real* token rotation, but
-// is pure churn when nothing actually changed.
+// The FCM token this device last successfully registered with the server,
+// and the device identifier it was registered under, stored as JSON
+// {token, deviceIdentifier}. Builds before this stored the bare token;
+// that still parses (with no identifier), so such a phone re-registers
+// once. Never trusted on its own: see shouldSkipPushRegistration.
 const PUSH_TOKEN_KEY = "labourlink_last_fcm_token";
+
+// Set once the app has asked for notification permission by itself after
+// pairing, so a "Don't allow" is respected and never re-prompted
+// automatically. Settings' button can still ask again.
+const PUSH_AUTO_ASKED_KEY = "labourlink_push_auto_asked";
+
+export interface LastPushRegistration {
+  token: string;
+  deviceIdentifier: string | null;
+}
 
 export function isPushMarkedEnabled(): boolean {
   return localStorage.getItem(PUSH_ENABLED_KEY) === "true";
@@ -31,20 +41,83 @@ function clearPushEnabled(): void {
   localStorage.removeItem(PUSH_ENABLED_KEY);
 }
 
-function getLastRegisteredToken(): string | null {
-  return localStorage.getItem(PUSH_TOKEN_KEY);
+export function parseLastRegistration(raw: string | null): LastPushRegistration | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<LastPushRegistration> | null;
+    if (parsed && typeof parsed === "object" && typeof parsed.token === "string") {
+      return {
+        token: parsed.token,
+        deviceIdentifier: typeof parsed.deviceIdentifier === "string" ? parsed.deviceIdentifier : null,
+      };
+    }
+  } catch {
+    // Legacy format: the bare token string.
+  }
+  return { token: raw, deviceIdentifier: null };
 }
 
-function setLastRegisteredToken(token: string): void {
-  localStorage.setItem(PUSH_TOKEN_KEY, token);
+function getLastRegistration(): LastPushRegistration | null {
+  return parseLastRegistration(localStorage.getItem(PUSH_TOKEN_KEY));
+}
+
+function setLastRegistration(token: string, deviceIdentifier: string | null): void {
+  localStorage.setItem(PUSH_TOKEN_KEY, JSON.stringify({ token, deviceIdentifier }));
+}
+
+function clearLastRegistration(): void {
+  localStorage.removeItem(PUSH_TOKEN_KEY);
 }
 
 // Pure decision, split out so it's unit-testable without the native
-// plugin: given what this device last registered and what the SDK just
-// handed back, should this call skip the POST to the server? Only a
-// genuinely different token needs to reach the server at all.
-export function shouldSkipPushRegistration(lastRegisteredToken: string | null, newToken: string): boolean {
-  return lastRegisteredToken === newToken;
+// plugin. This used to rest on the local cache alone, which left a phone
+// unreachable for good whenever the server no longer held its registration
+// (disabled after an FCM rejection, or recorded under an older device row)
+// while the token itself hadn't changed. A skip now needs all three: the
+// same token, the same device identifier, and the server confirming it
+// holds an active registration for this device.
+//
+// serverRegistered null = the status check couldn't reach the server. The
+// cache is trusted then (a POST would fail offline too), and the next
+// launch or resume checks again. Re-posting is always safe: the server
+// treats an unchanged token as a no-op.
+export function shouldSkipPushRegistration(
+  last: LastPushRegistration | null,
+  newToken: string,
+  deviceIdentifier: string | null,
+  serverRegistered: boolean | null
+): boolean {
+  if (!last || last.token !== newToken) return false;
+  if (last.deviceIdentifier !== deviceIdentifier) return false;
+  return serverRegistered !== false;
+}
+
+async function fetchServerRegistered(): Promise<boolean | null> {
+  try {
+    const res = await api<{ registered: boolean }>("/api/mobile/push/status");
+    return !!res.registered;
+  } catch {
+    return null;
+  }
+}
+
+// When the app may prompt for notification permission by itself:
+//   "silent"  never prompt; re-register only if permission is already granted
+//   "askOnce" prompt only if Android has never been asked on this install and
+//             the app hasn't auto-asked before. Android 13+ starts every
+//             install, a reinstall included, with notifications off.
+//   "ask"     prompt if not yet decided (Settings' explicit button)
+export type PushPermissionMode = "silent" | "askOnce" | "ask";
+
+export function shouldRequestPermission(
+  mode: PushPermissionMode,
+  receive: string,
+  alreadyAutoAsked: boolean
+): boolean {
+  if (receive === "granted" || receive === "denied") return false;
+  if (mode === "ask") return true;
+  if (mode === "askOnce") return receive === "prompt" && !alreadyAutoAsked;
+  return false;
 }
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
@@ -98,23 +171,35 @@ export async function subscribeWebPush(): Promise<PushSetupResult> {
 // imported so this module still loads fine in a plain browser/PWA context
 // where the native plugin is irrelevant.
 //
-// `requestPermission: false` (used by NativePushBridge on every app start,
-// and again on every foreground resume) only silently re-registers — and
-// re-wires the tap listener — if permission was already granted in a
-// previous session; it never prompts. `requestPermission: true` (used by
-// SettingsScreen's explicit "Enable notifications" button) prompts if not
-// yet decided.
+// NativePushBridge calls this with "askOnce" on start (it only mounts once
+// the phone is paired) and "silent" on every resume; SettingsScreen's
+// button uses "ask". Booleans are still accepted: true = "ask",
+// false = "silent".
 async function doInitAndroidPush(
-  requestPermission: boolean,
+  modeOrRequest: PushPermissionMode | boolean,
   onNotificationTapped: () => void
 ): Promise<PushSetupResult | null> {
   if (!isNativePlatform()) return null;
+  const mode: PushPermissionMode =
+    modeOrRequest === true ? "ask" : modeOrRequest === false ? "silent" : modeOrRequest;
 
   const { PushNotifications } = await import("@capacitor/push-notifications");
 
   let status = await PushNotifications.checkPermissions();
   if (status.receive !== "granted") {
-    if (!requestPermission) return null;
+    if (status.receive === "denied" && isPushMarkedEnabled()) {
+      // Notifications were turned off in Android settings after being
+      // enabled. Tell the server, so senders see "no registered device"
+      // instead of a push this phone will never show.
+      await unregisterPush();
+    }
+    const autoAsked = localStorage.getItem(PUSH_AUTO_ASKED_KEY) === "true";
+    if (!shouldRequestPermission(mode, status.receive, autoAsked)) {
+      return mode === "ask" && status.receive === "denied"
+        ? { ok: false, reason: "Notifications are blocked for LabourLink in Android settings." }
+        : null;
+    }
+    if (mode === "askOnce") localStorage.setItem(PUSH_AUTO_ASKED_KEY, "true");
     status = await PushNotifications.requestPermissions();
   }
   if (status.receive !== "granted") {
@@ -127,12 +212,16 @@ async function doInitAndroidPush(
   await PushNotifications.removeAllListeners();
 
   return new Promise((resolve) => {
-    PushNotifications.addListener("registration", (token) => {
-      if (shouldSkipPushRegistration(getLastRegisteredToken(), token.value)) {
-        // Same token as last time — every resume re-registers to catch a
-        // real rotation, but posting an unchanged token would just churn a
-        // fresh device_push_registrations row for no reason (see
-        // server/src/routes/mobilePush.ts's register route).
+    PushNotifications.addListener("registration", async (token) => {
+      const deviceIdentifier = localStorage.getItem(DEVICE_ID_KEY);
+      const last = getLastRegistration();
+      // The server is only asked when the cache would otherwise skip; a
+      // changed token or identifier always posts.
+      const serverRegistered =
+        last && last.token === token.value && last.deviceIdentifier === deviceIdentifier
+          ? await fetchServerRegistered()
+          : null;
+      if (shouldSkipPushRegistration(last, token.value, deviceIdentifier, serverRegistered)) {
         markPushEnabled();
         resolve({ ok: true });
         return;
@@ -142,7 +231,7 @@ async function doInitAndroidPush(
         body: JSON.stringify({ platform: "android_fcm", fcmToken: token.value }),
       })
         .then(() => {
-          setLastRegisteredToken(token.value);
+          setLastRegistration(token.value, deviceIdentifier);
           markPushEnabled();
           resolve({ ok: true });
         })
@@ -173,5 +262,6 @@ export const initAndroidPush = singleFlight(doInitAndroidPush);
 
 export async function unregisterPush(): Promise<void> {
   clearPushEnabled();
+  clearLastRegistration();
   await api("/api/mobile/push/unregister", { method: "POST" }).catch(() => {});
 }
