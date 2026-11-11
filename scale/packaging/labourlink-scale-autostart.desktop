@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=LabourLink Scale
+Comment=Full-screen weighing station display
+# DMA-BUF renderer off: avoids blank WebKitGTK windows on older Intel GPUs
+# (the NUC5CPYH has Intel HD 400). Verify on the NUC.
+Exec=env WEBKIT_DISABLE_DMABUF_RENDERER=1 /usr/bin/labourlink-scale
+X-GNOME-Autostart-enabled=true
+NoDisplay=false
+Terminal=false

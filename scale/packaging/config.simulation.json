@@ -1,0 +1,6 @@
+{
+  "mode": "simulation",
+  "stationName": "Packhouse scale (simulation)",
+  "dataDir": "/var/lib/labourlink-scale",
+  "listen": "127.0.0.1:47800"
+}
