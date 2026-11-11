@@ -133,6 +133,14 @@ describe("Display → Map phase checkboxes", () => {
     expect(publishButton()).toBeDisabled(); // nothing changed yet
   });
 
+  it("places 'Phases on the TV map' above the date controls", async () => {
+    await renderPage();
+    const phases = screen.getByRole("group", { name: "Phases on the TV map" });
+    const quickRange = screen.getByRole("combobox", { name: "Quick range" });
+    expect(phases.compareDocumentPosition(quickRange) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(phases.contains(quickRange)).toBe(false);
+  });
+
   it("multiple phases: checking another shows both on the preview and publishes both for this display only", async () => {
     const user = userEvent.setup();
     await renderPage();
