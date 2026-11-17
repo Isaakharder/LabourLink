@@ -148,7 +148,7 @@ async function main() {
       ["not confirmed empty", { emptyConfirmed: false }],
       ["near zero", { tareKg: 1.2, measured: { grossKg: 1.2, samplesKg: [1.2, 1.2, 1.2, 1.2, 1.2], status: "gross", stableMs: 2000 } }],
       ["net mode", { measured: { grossKg: 154.4, samplesKg: [154.4, 154.4, 154.4, 154.4, 154.4], status: "net", stableMs: 2000 } }],
-      ["unstable", { measured: { grossKg: 154.4, samplesKg: [154.0, 154.4, 154.9, 154.4, 154.4], status: "gross", stableMs: 2000 } }],
+      ["varied by more than 0.9 kg", { measured: { grossKg: 154.4, samplesKg: [153.9, 154.4, 154.9, 154.4, 154.4], status: "gross", stableMs: 2000 } }],
       ["not stable long enough", { measured: { grossKg: 154.4, samplesKg: [154.4, 154.4, 154.4, 154.4, 154.4], status: "gross", stableMs: 500 } }],
       ["tare isn't the measured weight", { tareKg: 150 }],
       ["no RFID tag", { rfidTag: "" }],
@@ -164,9 +164,12 @@ async function main() {
     // D) A fresh bin registers; no weighing is created
     // -----------------------------------------------------------------
     const weighingsBefore = (await pool.query(`select count(*)::int as n from scale_weighings`)).rows[0].n;
-    const d = registration(bin77, tag(1), 154.4, fresh);
+    // Readings that varied by exactly 0.9 kg during the 10 s measurement are accepted.
+    const d = registration(bin77, tag(1), 154.4, fresh, {
+      measured: { grossKg: 154.4, samplesKg: [154.0, 154.4, 154.4, 154.6, 154.9], status: "gross", stableMs: 2000 },
+    });
     const r1 = await register(d);
-    check(r1.status === 201 && r1.body.carrier.rfidTag === tag(1) && r1.body.carrier.tareWeightKg === 154.4, "D) tag and tare are saved", r1.body);
+    check(r1.status === 201 && r1.body.carrier.rfidTag === tag(1) && r1.body.carrier.tareWeightKg === 154.4, "D) tag and tare are saved (0.9 kg variation)", r1.body);
     const a1 = await audit(bin77);
     check(
       a1.length === 1 &&
