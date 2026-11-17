@@ -69,6 +69,17 @@ describe("headline", () => {
     expect(headline(makeSnapshot({ waitForZero: false, phase: { phase: "idle" } })).title).toBe("Ready");
   });
 
+  it("counts down while the tag is read, and refuses an invalid weight instead of waiting", () => {
+    expect(headline(makeSnapshot({ phase: { phase: "identifying", startedMs: 0 } })).title).toBe("Reading the bin's tag…");
+    const moving = makeSnapshot({
+      phase: { phase: "blocked", reason: { code: "weightNotCaptured", why: { code: "moving" } }, bin: null, emptySinceMs: null },
+    });
+    expect(headline(moving)).toMatchObject({ tone: "error", title: "Weight not valid. Not recorded" });
+    expect(headline(moving).detail).toMatch(/still showed motion/);
+    const noTag = makeSnapshot({ phase: { phase: "blocked", reason: { code: "noTag" }, bin: null, emptySinceMs: null } });
+    expect(headline(noTag).detail).toMatch(/during the 10-second measurement/);
+  });
+
   it("asks for removal after recording, and after a restart with load on the scale", () => {
     expect(headline(makeSnapshot({ phase: { phase: "awaitingRemoval", reason: "recorded", bin: null, emptySinceMs: null } })).title).toBe("Weight recorded");
     expect(headline(makeSnapshot({ phase: { phase: "awaitingRemoval", reason: "startupLoad", bin: null, emptySinceMs: null } })).title).toBe("Remove the bin to begin");
@@ -104,8 +115,15 @@ describe("registrationHeadline", () => {
   it("walks through clearing, measuring, problems and success", () => {
     expect(registrationHeadline(view({ phase: "clearScale", emptySinceMs: null })).title).toBe("Clear the scale");
     expect(registrationHeadline(view({ phase: "ready" })).title).toBe("Place one completely empty bin on the scale");
-    expect(registrationHeadline(view({ phase: "measuring", sinceMs: 0 })).tone).toBe("working");
-    expect(registrationHeadline(view({ phase: "problem", reason: { code: "noTag" }, emptySinceMs: null })).title).toBe("No RFID tag read");
+    expect(registrationHeadline(view({ phase: "measuring", sinceMs: 0, tag: null })).tone).toBe("working");
+    const noTag = registrationHeadline(view({ phase: "problem", reason: { code: "noTag" }, emptySinceMs: null }));
+    expect(noTag.title).toBe("RFID tag missing");
+    expect(noTag.detail).toMatch(/No RFID tag was read for this bin during the 10-second measurement/);
+    const swing = registrationHeadline(
+      view({ phase: "problem", reason: { code: "weightNotCaptured", why: { code: "unsteady", spreadG: 600 } }, emptySinceMs: null })
+    );
+    expect(swing).toMatchObject({ tone: "error", title: "Weight not valid" });
+    expect(swing.detail).toMatch(/kept changing by 0.60 kg.*Nothing was registered/);
     expect(registrationHeadline(view({ phase: "problem", reason: { code: "multipleTags", tags: ["a", "b"] }, emptySinceMs: null })).tone).toBe("error");
     expect(registrationHeadline(view({ phase: "problem", reason: { code: "indicatorNotGross" }, emptySinceMs: null })).title).toMatch(/gross/);
     const saved = registrationHeadline(view({ phase: "saved", binName: "Bin 77", rfidTag: "t", tareG: 154_400, emptySinceMs: null }));

@@ -101,6 +101,13 @@ impl Default for SerialConfig {
 #[serde(rename_all = "camelCase", default)]
 pub struct WeighingOverrides {
     pub settle_seconds: Option<u64>,
+    pub capture_window_ms: Option<u64>,
+    pub capture_min_samples: Option<usize>,
+    pub capture_tolerance_kg: Option<f64>,
+    pub capture_grace_seconds: Option<u64>,
+    /// Before 0.4.0 the weight had to hold still for a stable window. These
+    /// keys are still accepted so an older config.json loads, but ignored
+    /// (see `ignored_keys`).
     pub stable_window_ms: Option<u64>,
     pub stable_min_samples: Option<usize>,
     pub stable_tolerance_kg: Option<f64>,
@@ -186,6 +193,12 @@ impl Config {
         if self.mode == Mode::HardwareTest {
             self.test_carrier_infos()?;
         }
+        // A Register Bins tare is refused by the LabourLink server unless it
+        // spans at least 2 s and 5 readings within 0.2 kg.
+        let p = self.params();
+        if p.capture_window_ms < 2_000 || p.capture_min_samples < 5 || !(1..200).contains(&p.capture_tolerance_g) {
+            return Err("weighing: captureWindowMs must be at least 2000, captureMinSamples at least 5 and captureToleranceKg under 0.2".into());
+        }
         Ok(())
     }
 
@@ -235,14 +248,31 @@ impl Config {
         })
     }
 
+    /// Weighing keys in config.json that no longer do anything.
+    pub fn ignored_keys(&self) -> Vec<&'static str> {
+        let o = &self.weighing;
+        let mut v = vec![];
+        if o.stable_window_ms.is_some() {
+            v.push("weighing.stableWindowMs (use captureWindowMs)");
+        }
+        if o.stable_min_samples.is_some() {
+            v.push("weighing.stableMinSamples (use captureMinSamples)");
+        }
+        if o.stable_tolerance_kg.is_some() {
+            v.push("weighing.stableToleranceKg (use captureToleranceKg)");
+        }
+        v
+    }
+
     pub fn params(&self) -> Params {
         let d = Params::default();
         let o = &self.weighing;
         Params {
             settle_ms: o.settle_seconds.map(|s| s * 1000).unwrap_or(d.settle_ms),
-            stable_window_ms: o.stable_window_ms.unwrap_or(d.stable_window_ms),
-            stable_min_samples: o.stable_min_samples.unwrap_or(d.stable_min_samples),
-            stable_tolerance_g: o.stable_tolerance_kg.map(kg).unwrap_or(d.stable_tolerance_g),
+            capture_window_ms: o.capture_window_ms.unwrap_or(d.capture_window_ms),
+            capture_min_samples: o.capture_min_samples.unwrap_or(d.capture_min_samples),
+            capture_tolerance_g: o.capture_tolerance_kg.map(kg).unwrap_or(d.capture_tolerance_g),
+            capture_grace_ms: o.capture_grace_seconds.map(|s| s * 1000).unwrap_or(d.capture_grace_ms),
             min_load_g: o.min_load_kg.map(kg).unwrap_or(d.min_load_g),
             zero_threshold_g: o.zero_threshold_kg.map(kg).unwrap_or(d.zero_threshold_g),
             removal_ms: o.removal_ms.unwrap_or(d.removal_ms),
@@ -353,8 +383,19 @@ mod tests {
 
     #[test]
     fn overrides_convert_kg_to_grams() {
-        let c: Config = serde_json::from_str(r#"{"weighing":{"stableToleranceKg":0.02,"settleSeconds":12}}"#).unwrap();
+        let c: Config = serde_json::from_str(r#"{"weighing":{"captureToleranceKg":0.1,"captureGraceSeconds":5,"settleSeconds":12}}"#).unwrap();
         let p = c.params();
-        assert_eq!((p.stable_tolerance_g, p.settle_ms), (20, 12_000));
+        assert_eq!((p.capture_tolerance_g, p.capture_grace_ms, p.settle_ms), (100, 5_000, 12_000));
+        assert!(c.ignored_keys().is_empty());
+        assert!(c.validate().is_ok());
+        // Values the server would refuse a tare for are a config error.
+        for w in [r#"{"captureToleranceKg":0.2}"#, r#"{"captureWindowMs":1000}"#, r#"{"captureMinSamples":3}"#] {
+            let bad: Config = serde_json::from_str(&format!(r#"{{"weighing":{w}}}"#)).unwrap();
+            assert!(bad.validate().unwrap_err().contains("captureWindowMs"), "{w}");
+        }
+        // A pre-0.4.0 config still loads; its stable-window keys are ignored.
+        let old: Config = serde_json::from_str(r#"{"weighing":{"stableToleranceKg":0.05,"stableWindowMs":2000}}"#).unwrap();
+        assert_eq!(old.params().capture_tolerance_g, Params::default().capture_tolerance_g);
+        assert_eq!(old.ignored_keys().len(), 2);
     }
 }

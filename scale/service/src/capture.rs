@@ -173,7 +173,7 @@ impl FrameSummary {
             ));
         }
         if self.rate().is_some_and(|r| r < 2.5) {
-            out.push("# WARNING: under 2.5 frames/s. The stable window needs stableMinSamples readings within stableWindowMs".into());
+            out.push("# WARNING: under 2.5 frames/s. The 10 s capture needs captureMinSamples readings within captureWindowMs".into());
         }
         out
     }

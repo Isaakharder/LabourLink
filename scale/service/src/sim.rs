@@ -592,6 +592,12 @@ impl Backend for SimServer {
         if r.measured.gross_kg < 2.0 || r.measured.status != "gross" || !r.empty_confirmed || kg2(r.tare_kg) != kg2(r.measured.gross_kg) {
             return Err(http(400, "The measurement or the empty-bin confirmation is missing."));
         }
+        // The LabourLink server's measurement rules (server/src/lib/binRegistration.ts).
+        let m = &r.measured;
+        let spread = m.samples_kg.iter().cloned().fold(f64::MIN, f64::max) - m.samples_kg.iter().cloned().fold(f64::MAX, f64::min);
+        if m.samples_kg.len() < 5 || m.samples_kg.len() > 500 || spread > 0.2 || m.stable_ms < 2000 {
+            return Err(http(400, "The weight was not stable."));
+        }
         let tare_g = crate::backend::kg_to_g(kg2(r.tare_kg));
         let mut g = self.inner.lock().unwrap();
         let Some(ti) = g.carriers.iter().position(|c| c.id == r.carrier_id) else {
@@ -1120,6 +1126,15 @@ mod tests {
         // Replacing the existing 27.2 kg tare needs confirmation.
         let r1 = req("r1", "sim-carrier-13", "0000000000001313", 26.4, fresh.clone());
         assert_eq!(code(s.register_bin(&p, &r1).unwrap_err()), "needsConfirmation");
+        // Measurements the LabourLink server refuses are refused here too.
+        for m in [
+            crate::backend::Measured { samples_kg: vec![26.4; 4], ..r1.measured.clone() },
+            crate::backend::Measured { samples_kg: vec![26.3, 26.4, 26.4, 26.4, 26.6], ..r1.measured.clone() },
+            crate::backend::Measured { stable_ms: 1000, ..r1.measured.clone() },
+        ] {
+            let bad = RegistrationRequest { confirm_overwrite: true, measured: m, ..r1.clone() };
+            assert!(matches!(s.register_bin(&p, &bad), Err(BackendError::Http { status: 400, .. })));
+        }
         let ok = s.register_bin(&p, &RegistrationRequest { confirm_overwrite: true, ..r1.clone() }).unwrap();
         assert_eq!((ok.carrier.rfid_tag.as_deref(), ok.carrier.tare_weight_kg), (Some("0000000000001313"), 26.4));
         assert!(s.register_bin(&p, &RegistrationRequest { confirm_overwrite: true, ..r1.clone() }).unwrap().replay);

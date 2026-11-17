@@ -1,6 +1,6 @@
 # LabourLink Scale
 
-Weighing station for the packhouse. It runs on an Intel NUC5CPYH with Linux Mint 22.3, a PROTAGD RFID reader and a Rinstrum R300 indicator. When a bin is placed on the scale, its RFID tag identifies the carrier. The station waits for a stable gross weight, subtracts the carrier's tare and records the net weight. The LabourLink server then credits the picker who verifiably scanned that bin in the same use cycle.
+Weighing station for the packhouse. It runs on an Intel NUC5CPYH with Linux Mint 22.3, a PROTAGD RFID reader and a Rinstrum R300 indicator. When a bin is placed on the scale, its RFID tag identifies the carrier. Exactly 10 seconds after the bin arrives, the station takes the gross weight, subtracts the carrier's tare and records the net weight. The LabourLink server then credits the picker who verifiably scanned that bin in the same use cycle.
 
 Bins are registered at the station itself: **Register Bins** measures an empty bin and writes its tag and tare to its LabourLink carrier record.
 
@@ -18,7 +18,7 @@ scale/
 
 | Area | State |
 |---|---|
-| Weighing state machine (10 s settle, stable weight, duplicate and next-bin rules) | Done, unit-tested |
+| Weighing state machine (fixed 10 s cycle, duplicate and next-bin rules) | Done, unit-tested |
 | SQLite outbox, offline queue, restart recovery | Done, unit-tested |
 | Display: weighing screen, status bar, recent weighings | Done, tested in a browser and with component tests |
 | Register Bins (any signed-in user; empty bin measured on the scale; tag and tare saved to the existing carrier, audited) | Done. Tested against the simulator and end to end against a local LabourLink server |
@@ -91,7 +91,7 @@ The package starts `labourlink-scaled` in **simulation** mode and adds the displ
 
 Hardware-test mode reads the **real** scale indicator and RFID reader at the same time and runs the normal weighing rules on them. Nothing goes to LabourLink.
 
-The rules that run are the 10 s settle, the stable weight, tare and net, duplicate prevention, return to zero, and the pending assignment.
+The rules that run are the fixed 10 s cycle, tare and net, duplicate prevention, return to zero, and the pending assignment.
 
 - **Bins** come from `testCarriers` in the config file: a real tag and that bin's real tare, copied from the Carriers page. Tags that aren't listed show "Unregistered RFID tag" with the tag number, which is the easiest way to read a bin's tag.
 - **The "server"** is the same in-process test server as simulation. The service builds no HTTP client, so nothing can be uploaded and no credit can be created. Weighings show "Awaiting assignment" because no phone scans exist.
@@ -181,13 +181,14 @@ Hardware-test weighings stay in `/var/lib/labourlink-scale/scale-hwtest.sqlite3`
 1. **Sign in.** Press **Register Bins** and sign in with any LabourLink email and PIN.
 2. **Clear the scale.** It must read zero for 2 seconds, on entry and after every bin.
 3. **Roll on one completely empty bin.** The station:
-   - reads its tag;
-   - waits the 10-second settle and a stable gross reading;
-   - proposes that weight as the tare.
+   - counts down 10 seconds from the moment the bin arrives, showing the RFID tag it has read for this bin (a single read is enough);
+   - at 10 seconds takes the current gross weight from the 2 seconds before, accepting a one-division flicker or a stray motion frame;
+   - proposes that weight as the tare, and Step 2 opens.
 
-   It refuses when:
-   - no tag or more than one tag is read;
-   - the weight is near zero or unstable;
+   It refuses, and says why in both steps, when:
+   - no tag was read by the end of the 10 seconds (*RFID tag missing*). Hold the tag near the reader while the bin is on the scale: a fresh 10-second measurement starts;
+   - more than one tag is read;
+   - the weight is near zero, or still moving or swinging more than 0.15 kg after the 10 seconds (*Weight not valid*). Take the bin off and place it again;
    - the indicator is not in gross mode.
 4. **Enter the bin's LabourLink number** (on-screen keypad) and pick the bin.
 5. **Check the bin, RFID tag and tare.**

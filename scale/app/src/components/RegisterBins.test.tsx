@@ -188,6 +188,26 @@ describe("RegisterBins", () => {
     expect(screen.getByLabelText(/Replace Bin 77's tag 0000000000000099/)).not.toBeChecked();
   });
 
+  it("shows the countdown and the tag remembered for this bin while measuring, and what step 2 waits for", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<RegisterBins s={snap(null)} onDone={() => {}} />);
+    await signIn(user, rerender, { ...reg({ phase: "measuring", sinceMs: 0, tag: "0000000137480620" }, 143_600), settleRemainingMs: 3_200 });
+    expect(screen.getByText("Weight taken in 4 s")).toBeInTheDocument();
+    expect(screen.getByText("RFID tag").nextElementSibling).toHaveTextContent("0000000137480620");
+    expect(screen.getByText(/Opens when the 10-second measurement ends \(4 s\)/)).toBeInTheDocument();
+    rerender(<RegisterBins s={snap(reg({ phase: "measuring", sinceMs: 0, tag: null }, 143_600))} onDone={() => {}} />);
+    expect(screen.getByText("RFID tag").nextElementSibling).toHaveTextContent("Not read yet");
+  });
+
+  it("explains a missing tag in both steps instead of waiting", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<RegisterBins s={snap(null)} onDone={() => {}} />);
+    await signIn(user, rerender, reg({ phase: "problem", reason: { code: "noTag" }, emptySinceMs: null }, 143_600));
+    expect(screen.getByText("RFID tag missing")).toBeInTheDocument();
+    expect(screen.getByText(/Not available: RFID tag missing. Nothing is registered for this bin./)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Bin number")).toBeNull();
+  });
+
   it("confirms success and asks for the bin to be removed before the next one", async () => {
     const user = userEvent.setup();
     const { rerender } = render(<RegisterBins s={snap(null)} onDone={() => {}} />);

@@ -129,6 +129,22 @@ function Login({
 
 const kgText = (v: number) => `${v.toFixed(2)} kg`;
 
+/** Step 2 before there is a measurement: say exactly what it waits for. */
+function stepTwoWaiting(r: RegistrationView): string {
+  switch (r.phase.phase) {
+    case "measuring":
+      return r.settleRemainingMs > 0
+        ? `Opens when the 10-second measurement ends (${Math.ceil(r.settleRemainingMs / 1000)} s).`
+        : "Opens as soon as the weight is taken.";
+    case "problem":
+      return `Not available: ${registrationHeadline(r).title}. Nothing is registered for this bin.`;
+    case "saved":
+      return "Remove the bin. The next bin can go on once the scale reads zero.";
+    default:
+      return "Waiting for a measured empty bin.";
+  }
+}
+
 function Registrar({ r, session, onDone, onExpired }: { r: RegistrationView; session: Session; onDone: () => void; onExpired: () => void }) {
   const h = registrationHeadline(r);
   const proposal = r.phase.phase === "proposed" || r.phase.phase === "saving" ? r.phase.proposal : null;
@@ -163,8 +179,16 @@ function Registrar({ r, session, onDone, onExpired }: { r: RegistrationView; ses
             <div className="reg-title">{h.title}</div>
             <div className="muted">{h.detail}</div>
             <div className="reg-weight mono">{r.reading?.weightG != null ? `${kg(r.reading.weightG)} kg` : "—"}</div>
-            {r.phase.phase === "measuring" && r.settleRemainingMs > 0 && (
-              <div className="muted">Settling: {Math.ceil(r.settleRemainingMs / 1000)} s</div>
+            {r.phase.phase === "measuring" && (
+              <>
+                <div className="muted">
+                  {r.settleRemainingMs > 0 ? `Weight taken in ${Math.ceil(r.settleRemainingMs / 1000)} s` : "Taking the weight…"}
+                </div>
+                <dl className="reg-measured">
+                  <dt>RFID tag</dt>
+                  <dd className="mono">{r.phase.tag ?? "Not read yet"}</dd>
+                </dl>
+              </>
             )}
             {r.clearRemainingMs > 0 && <div className="muted">Reading zero: {Math.ceil(r.clearRemainingMs / 1000)} s</div>}
             {proposal && (
@@ -191,7 +215,7 @@ function Registrar({ r, session, onDone, onExpired }: { r: RegistrationView; ses
           ) : (
             <section className="card">
               <div className="label">2. Bin number</div>
-              <div className="muted">Waiting for a measured empty bin.</div>
+              <div className="muted">{stepTwoWaiting(r)}</div>
             </section>
           )}
         </div>

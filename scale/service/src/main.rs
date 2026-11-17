@@ -78,6 +78,9 @@ async fn serve(cfg: Config) -> Result<(), String> {
         cfg.mode.as_str().to_uppercase(),
         cfg.db_path().display()
     );
+    for key in cfg.ignored_keys() {
+        eprintln!("config: {key} is no longer used and is ignored");
+    }
 
     let (backend, sim): (Arc<dyn Backend>, _) = match cfg.mode {
         Mode::Simulation => {

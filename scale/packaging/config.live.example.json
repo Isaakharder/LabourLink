@@ -9,8 +9,10 @@
   "rfid": { "port": "/dev/labourlink/rfid", "baud": 9600 },
   "weighing": {
     "settleSeconds": 10,
-    "stableWindowMs": 2000,
-    "stableToleranceKg": 0.05,
+    "captureWindowMs": 2000,
+    "captureMinSamples": 5,
+    "captureToleranceKg": 0.15,
+    "captureGraceSeconds": 3,
     "minLoadKg": 2,
     "zeroThresholdKg": 1,
     "minNetKg": 0.5,

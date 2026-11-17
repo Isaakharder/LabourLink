@@ -1,5 +1,5 @@
 // Presentation rules for the weighing screen, kept pure so they're unit-testable.
-import type { Phase, RegistrationView, Snapshot, Weighing } from "./types";
+import type { CaptureFail, Phase, RegistrationView, Snapshot, Weighing } from "./types";
 
 export function kg(grams: number | null | undefined): string {
   if (grams === null || grams === undefined) return "—";
@@ -15,12 +15,32 @@ export interface Headline {
   detail: string;
 }
 
+/** Why the weight could not be taken at the end of the 10 s cycle. */
+export function captureFailText(why: CaptureFail): string {
+  switch (why.code) {
+    case "moving":
+      return "The indicator still showed motion after the 10-second measurement.";
+    case "unsteady":
+      return `The weight kept changing by ${kg(why.spreadG)} kg after the 10-second measurement.`;
+    case "notGross":
+      return "The indicator was not showing gross weight.";
+    case "indicatorFault":
+      return "The indicator reported overload, underload or an error.";
+    case "tooFewReadings":
+      return `The scale sent only ${why.readings} reading(s) in the last second.`;
+  }
+}
+
 function blockedHeadline(p: Extract<Phase, { phase: "blocked" }>): Headline {
   const r = p.reason;
   const bin = p.bin?.carrierName;
   switch (r.code) {
     case "noTag":
-      return { tone: "warn", title: "Bin tag not detected", detail: "Hold the bin's RFID tag near the reader" };
+      return {
+        tone: "warn",
+        title: "Bin tag not detected",
+        detail: "No RFID tag was read for this bin during the 10-second measurement. Hold the bin's tag near the reader. Not recorded.",
+      };
     case "unknownTag":
       return { tone: "error", title: "Unregistered RFID tag", detail: `Tag ${r.tag} is not linked to a bin. An administrator can register it.` };
     case "multipleTags":
@@ -43,6 +63,8 @@ function blockedHeadline(p: Extract<Phase, { phase: "blocked" }>): Headline {
       return { tone: "warn", title: `${bin} looks empty`, detail: `Net ${kg(r.netG)} kg is below the minimum. Not recorded.` };
     case "saveFailed":
       return { tone: "error", title: "Weighing NOT saved", detail: "The station could not store this weighing. Remove the bin and call a supervisor." };
+    case "weightNotCaptured":
+      return { tone: "error", title: "Weight not valid. Not recorded", detail: `${captureFailText(r.why)} Remove the bin and place it again.` };
   }
 }
 
@@ -72,10 +94,12 @@ export function headline(s: Snapshot): Headline {
       return { tone: "working", title: "Connecting to scale…", detail: "Waiting for the first reading" };
     case "idle":
       return { tone: "ready", title: "Ready", detail: "Place one bin on the scale" };
+    case "identifying":
+      return { tone: "working", title: "Reading the bin's tag…", detail: "Keep the bin on the scale. The weight is taken 10 seconds after it arrived." };
     case "settling":
       return { tone: "working", title: "Settling…", detail: "Keep the bin still on the scale" };
     case "stabilizing":
-      return { tone: "working", title: "Waiting for a stable weight", detail: "Keep the bin still; do not touch the scale" };
+      return { tone: "working", title: "Taking the weight…", detail: "Keep the bin still; do not touch the scale" };
     case "awaitingRemoval":
       if (p.reason === "startupLoad") {
         return { tone: "warn", title: "Remove the bin to begin", detail: "The scale had weight on it when the station started" };
@@ -95,7 +119,7 @@ export interface EmployeeLine {
 /** What to show for "Employee": only a server-verified assignment is a name. */
 export function employeeLine(w: Weighing | null, phase: Phase): EmployeeLine {
   if (!w) {
-    if (phase.phase === "settling" || phase.phase === "stabilizing") {
+    if (phase.phase === "identifying" || phase.phase === "settling" || phase.phase === "stabilizing") {
       return { name: "Verified after weighing", note: "Credit comes from the picker's own bin scan", tone: "neutral" };
     }
     return { name: "—", note: "", tone: "neutral" };
@@ -162,11 +186,20 @@ export function registrationHeadline(r: RegistrationView): Headline {
     case "ready":
       return { tone: "ready", title: "Place one completely empty bin on the scale", detail: "Roll it on so its tag passes the reader." };
     case "measuring":
-      return { tone: "working", title: "Measuring the empty bin…", detail: "Keep the bin still; do not touch the scale." };
+      return {
+        tone: "working",
+        title: "Measuring the empty bin…",
+        detail: "Keep the bin still; do not touch the scale. The weight is taken 10 seconds after the bin arrived.",
+      };
     case "problem":
       switch (p.reason.code) {
         case "noTag":
-          return { tone: "warn", title: "No RFID tag read", detail: "Every bin needs its tag. Take the bin off and roll it on again past the reader." };
+          return {
+            tone: "warn",
+            title: "RFID tag missing",
+            detail:
+              "No RFID tag was read for this bin during the 10-second measurement, so it cannot be registered. Check the bin has a tag, then hold the tag near the reader or roll the bin on again.",
+          };
         case "multipleTags":
           return { tone: "error", title: "More than one tag read", detail: "Register one bin at a time. Clear the scale." };
         case "indicatorNotGross":
@@ -177,6 +210,8 @@ export function registrationHeadline(r: RegistrationView): Headline {
           return { tone: "error", title: "Scale underload", detail: "Check the scale is clear and zeroed." };
         case "indicatorError":
           return { tone: "error", title: "Indicator error", detail: "Check the scale indicator display." };
+        case "weightNotCaptured":
+          return { tone: "error", title: "Weight not valid", detail: `${captureFailText(p.reason.why)} Nothing was registered. Remove the bin and place it again.` };
       }
       break;
     case "proposed":
