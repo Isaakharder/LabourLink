@@ -373,12 +373,17 @@ export async function getActivityDensityAttribution(
     );
     const completionIds: string[] = candidateIdRows.map((r) => r.completion_id);
     if (!completionIds.length) return [];
+    // Deleted segments are left out, exactly as Inputs leaves them out of
+    // the same completion's speed (inputs.ts densityContributions...). A
+    // deleted run keeps its row_completion_segments link, so without this
+    // filter its time still counted toward the completion's duration (and
+    // its employee still received a share of the quantity).
     const { rows } = await pool.query(
       `select rc.id as completion_id, rc.quantity_per_row, te.employee_id, te.activity_id, te.started_at, te.ended_at
        from row_completions rc
        join row_completion_segments rcs on rcs.row_completion_id = rc.id
        join time_entries te on te.id = rcs.time_entry_id
-       where rc.id = any($1::uuid[])
+       where rc.id = any($1::uuid[]) and te.deleted_at is null
        order by rc.id, te.started_at`,
       [completionIds]
     );
@@ -661,7 +666,7 @@ export async function getActivityDensityAudit(
        from row_completions rc
        join row_completion_segments rcs on rcs.row_completion_id = rc.id
        join time_entries te on te.id = rcs.time_entry_id
-       where rc.id = any($1::uuid[])`,
+       where rc.id = any($1::uuid[]) and te.deleted_at is null`,
       [completionIds]
     );
     for (const r of groupRows) {
