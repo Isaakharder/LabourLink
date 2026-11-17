@@ -771,13 +771,16 @@ export async function getActivityDensityAudit(
 
     if (r.row_completion_id) {
       const group = completionGroups.get(r.row_completion_id)!;
-      const employeeIdsInGroup = new Set(group.segs.map((s) => s.employeeId));
       const activityIdsInGroup = new Set(group.segs.map((s) => s.activityId));
       const groupDurationSeconds = group.segs.reduce((s, seg) => s + (seg.endedAt.getTime() - seg.startedAt.getTime()) / 1000, 0);
+      // A completion shared by several employees IS counted by the report:
+      // each employee gets the share of the quantity matching their share of
+      // the completion's time. So this segment's own share (time-proportional
+      // below) is what the report credits. This used to be reported as
+      // excluded, contradicting the report. Only a completion mixing
+      // activities is excluded.
       let reason: string | null = null;
-      if (employeeIdsInGroup.size !== 1) {
-        reason = "This completion's segments span more than one employee — not cleanly attributable";
-      } else if (activityIdsInGroup.size !== 1 || [...activityIdsInGroup][0] !== activityId) {
+      if (activityIdsInGroup.size !== 1 || [...activityIdsInGroup][0] !== activityId) {
         reason = "This completion's segments span more than one activity — not cleanly attributable";
       }
       // A completion partly outside the audited range still counts this
