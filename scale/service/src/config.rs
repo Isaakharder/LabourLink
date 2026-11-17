@@ -194,10 +194,10 @@ impl Config {
             self.test_carrier_infos()?;
         }
         // A Register Bins tare is refused by the LabourLink server unless it
-        // spans at least 2 s and 5 readings within 0.2 kg.
+        // spans at least 2 s and 5 readings within 0.9 kg.
         let p = self.params();
-        if p.capture_window_ms < 2_000 || p.capture_min_samples < 5 || !(1..200).contains(&p.capture_tolerance_g) {
-            return Err("weighing: captureWindowMs must be at least 2000, captureMinSamples at least 5 and captureToleranceKg under 0.2".into());
+        if p.capture_window_ms < 2_000 || p.capture_min_samples < 5 || !(1..=900).contains(&p.capture_tolerance_g) {
+            return Err("weighing: captureWindowMs must be at least 2000, captureMinSamples at least 5 and captureToleranceKg at most 0.9".into());
         }
         Ok(())
     }
@@ -389,7 +389,11 @@ mod tests {
         assert!(c.ignored_keys().is_empty());
         assert!(c.validate().is_ok());
         // Values the server would refuse a tare for are a config error.
-        for w in [r#"{"captureToleranceKg":0.2}"#, r#"{"captureWindowMs":1000}"#, r#"{"captureMinSamples":3}"#] {
+        let d = Params::default();
+        assert_eq!((d.capture_tolerance_g, d.capture_grace_ms), (900, 0), "0.9 kg, no wait after 10 s");
+        let max: Config = serde_json::from_str(r#"{"weighing":{"captureToleranceKg":0.9}}"#).unwrap();
+        assert!(max.validate().is_ok());
+        for w in [r#"{"captureToleranceKg":0.95}"#, r#"{"captureWindowMs":1000}"#, r#"{"captureMinSamples":3}"#] {
             let bad: Config = serde_json::from_str(&format!(r#"{{"weighing":{w}}}"#)).unwrap();
             assert!(bad.validate().unwrap_err().contains("captureWindowMs"), "{w}");
         }

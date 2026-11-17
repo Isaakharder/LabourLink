@@ -594,8 +594,9 @@ impl Backend for SimServer {
         }
         // The LabourLink server's measurement rules (server/src/lib/binRegistration.ts).
         let m = &r.measured;
-        let spread = m.samples_kg.iter().cloned().fold(f64::MIN, f64::max) - m.samples_kg.iter().cloned().fold(f64::MAX, f64::min);
-        if m.samples_kg.len() < 5 || m.samples_kg.len() > 500 || spread > 0.2 || m.stable_ms < 2000 {
+        // Spread compared in whole grams, at most 0.9 kg.
+        let spread_g = ((m.samples_kg.iter().cloned().fold(f64::MIN, f64::max) - m.samples_kg.iter().cloned().fold(f64::MAX, f64::min)) * 1000.0).round();
+        if m.samples_kg.len() < 5 || m.samples_kg.len() > 500 || spread_g > 900.0 || m.stable_ms < 2000 {
             return Err(http(400, "The weight was not stable."));
         }
         let tare_g = crate::backend::kg_to_g(kg2(r.tare_kg));
@@ -1129,12 +1130,17 @@ mod tests {
         // Measurements the LabourLink server refuses are refused here too.
         for m in [
             crate::backend::Measured { samples_kg: vec![26.4; 4], ..r1.measured.clone() },
-            crate::backend::Measured { samples_kg: vec![26.3, 26.4, 26.4, 26.4, 26.6], ..r1.measured.clone() },
+            crate::backend::Measured { samples_kg: vec![25.9, 26.4, 26.4, 26.4, 26.9], ..r1.measured.clone() },
             crate::backend::Measured { stable_ms: 1000, ..r1.measured.clone() },
         ] {
             let bad = RegistrationRequest { confirm_overwrite: true, measured: m, ..r1.clone() };
             assert!(matches!(s.register_bin(&p, &bad), Err(BackendError::Http { status: 400, .. })));
         }
+        // Exactly 0.9 kg passes the measurement rules (checked on a bin that
+        // does not exist: reaching "binNotFound" means the measurement passed).
+        let wide = crate::backend::Measured { samples_kg: vec![26.0, 26.4, 26.4, 26.6, 26.9], ..r1.measured.clone() };
+        let wide = RegistrationRequest { registration_id: "r-wide".into(), carrier_id: "no-such-bin".into(), confirm_overwrite: true, measured: wide, ..r1.clone() };
+        assert_eq!(code(s.register_bin(&p, &wide).unwrap_err()), "binNotFound");
         let ok = s.register_bin(&p, &RegistrationRequest { confirm_overwrite: true, ..r1.clone() }).unwrap();
         assert_eq!((ok.carrier.rfid_tag.as_deref(), ok.carrier.tare_weight_kg), (Some("0000000000001313"), 26.4));
         assert!(s.register_bin(&p, &RegistrationRequest { confirm_overwrite: true, ..r1.clone() }).unwrap().replay);

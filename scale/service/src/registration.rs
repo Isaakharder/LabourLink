@@ -9,7 +9,7 @@
 //! ClearScale ──empty for removal_ms──▶ Ready ──load──▶ Measuring (fixed 10 s cycle)
 //! Measuring ──10 s: one tag, weight captured──▶ Proposed ──confirm──▶ Saving ──saved──▶ Saved
 //! Measuring ──10 s: no tag──▶ Problem(NoTag) ──tag read while the bin is on──▶ Measuring (fresh 10 s)
-//! Measuring ──no valid weight within capture_grace_ms──▶ Problem(WeightNotCaptured)
+//! Measuring ──10 s: no valid weight──▶ Problem(WeightNotCaptured)
 //! Saved ──empty for removal_ms──▶ Ready (next bin)
 //! any loaded phase ──problem──▶ Problem(reason) ──resolved, or bin removed──▶ …
 //! ```
@@ -18,15 +18,15 @@
 //! the countdown starts when the bin arrives; a tag read up to
 //! `tag_window_ms` before that or at any time during the cycle is remembered
 //! for it, even if the reader reports it only once; at 10 s the current
-//! weight is captured with `capture_weight` (a flicker of a division or two
-//! is accepted, nothing waits for a perfectly constant weight).
+//! weight is captured with `capture_weight` (fluctuations up to 0.9 kg and
+//! indicator motion are accepted, nothing waits for the weight to settle).
 //!
 //! What it refuses, whatever the person does:
 //! * nothing is measured until the scale has read empty for `removal_ms`,
 //!   on entry and after every bin, so a bin left on the scale (perhaps
 //!   full) is never taken as a new empty bin;
-//! * a weight below `min_load_g`, a weight that is not a steady gross weight
-//!   at 10 s (or within `capture_grace_ms` after), or any indicator fault;
+//! * a weight below `min_load_g`, no valid weight at 10 s (see
+//!   `capture_weight`), or any indicator fault;
 //! * no tag, or more than one tag, read for the bin;
 //! * the previous bin's tag, unless it is read again while a bin is on the
 //!   scale (a read as the previous bin is rolled away never names the next);
@@ -35,7 +35,7 @@
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 
-use crate::machine::{capture_weight, median, reading_ok, CaptureFail, Params};
+use crate::machine::{capture_weight, measurable_weight, median, reading_ok, CaptureFail, Params};
 use crate::scale_proto::{IndicatorMode, Reading};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -162,7 +162,8 @@ impl Registration {
         self.last_reading_ms = Some(now);
         self.scale_online = true;
         self.samples.push_back((now, reading.clone()));
-        let keep_from = now.saturating_sub(self.params.capture_window_ms + 1_000);
+        // The whole cycle is kept: capture_weight needs its latest gross/net frame.
+        let keep_from = now.saturating_sub(self.params.settle_ms + self.params.capture_window_ms + 1_000);
         while matches!(self.samples.front(), Some((t, _)) if *t < keep_from) {
             self.samples.pop_front();
         }
@@ -417,10 +418,11 @@ impl Registration {
         if self.indicator_problem().is_some() {
             return Err("The indicator must be in gross mode with no error.".into());
         }
-        let Some(r) = self.last_reading.clone().filter(reading_ok) else {
-            return Err("The scale shows motion. Keep the bin still and press Register again.".into());
+        // Motion is accepted here too, as in the measurement itself.
+        let Some(w) = self.last_reading.as_ref().and_then(measurable_weight) else {
+            return Err("The scale is not showing a valid weight. Check the indicator and press Register again.".into());
         };
-        if (r.weight_g.unwrap() - proposal.gross_g).abs() > self.params.capture_tolerance_g {
+        if (w - proposal.gross_g).abs() > self.params.capture_tolerance_g {
             self.phase = RegPhase::Measuring {
                 since_ms: now,
                 tag: Some(proposal.tag.clone()),
@@ -624,46 +626,86 @@ mod tests {
     }
 
     fn moving_frame() -> Reading {
-        // An R300 Format A "M" frame: motion, and no mode.
+        moving_at(154_400)
+    }
+
+    /// An R300 Format A "M" frame: the weight, motion, and no mode.
+    fn moving_at(g: i64) -> Reading {
         Reading {
             mode: IndicatorMode::Unknown,
             motion: true,
-            ..r(154_400)
+            ..r(g)
         }
     }
 
     #[test]
-    fn a_real_swing_or_motion_is_refused_with_a_reason_not_left_waiting() {
+    fn a_swing_over_point_nine_kg_is_refused_at_ten_seconds_not_left_waiting() {
         let mut t = T::new();
         t.hold(r(0), 2.5);
         t.tag(TAG);
-        for i in 0..120 {
+        for i in 0..101 {
             t.now += 100;
-            t.reg.on_reading(r(154_400 + if i % 2 == 0 { 150 } else { -150 }), t.now);
-        }
-        assert_eq!(t.phase(), "measuring", "inside the 3 s grace after 10 s");
-        for i in 0..40 {
-            t.now += 100;
-            t.reg.on_reading(r(154_400 + if i % 2 == 0 { 150 } else { -150 }), t.now);
+            t.reg.on_reading(r(154_400 + if i % 2 == 0 { 500 } else { -500 }), t.now);
         }
         assert_eq!(
             t.problem(),
             RegProblem::WeightNotCaptured {
-                why: CaptureFail::Unsteady { spread_g: 300 }
-            }
+                why: CaptureFail::Unsteady { spread_g: 1_000 }
+            },
+            "refused at 10 s, no extra wait"
         );
         assert!(t.reg.confirm(t.now).is_err());
         // Sticky until the bin is taken off.
         t.hold(r(154_400), 15.0);
         assert_eq!(t.phase(), "problem");
+    }
 
+    #[test]
+    fn fluctuations_up_to_point_nine_kg_are_proposed_at_ten_seconds() {
+        for spread in [100i64, 500, 900] {
+            let mut t = T::new();
+            t.hold(r(0), 2.5);
+            t.tag(TAG);
+            let steps = spread / 100;
+            for i in 0..101i64 {
+                t.now += 100;
+                let p = i % (2 * steps);
+                let off = if p <= steps { p } else { 2 * steps - p };
+                t.reg.on_reading(r(143_600 + off * 100), t.now);
+            }
+            let p = t.proposal();
+            let (lo, hi) = (*p.samples_g.iter().min().unwrap(), *p.samples_g.iter().max().unwrap());
+            assert!(hi - lo <= spread && (lo..=hi).contains(&p.gross_g), "{spread} g");
+            assert!(p.samples_g.len() >= 5 && p.stable_ms >= 2_000, "what the server requires");
+        }
+    }
+
+    #[test]
+    fn motion_at_ten_seconds_is_proposed_and_can_be_confirmed() {
         let mut t = T::new();
         t.hold(r(0), 2.5);
         t.tag(TAG);
-        t.hold(moving_frame(), 9.0);
+        t.hold(r(154_400), 8.5);
+        t.hold(moving_frame(), 1.4);
         assert_eq!(t.phase(), "measuring", "motion frames do not restart the 10 s");
-        t.hold(moving_frame(), 5.0);
-        assert_eq!(t.problem(), RegProblem::WeightNotCaptured { why: CaptureFail::Moving });
+        t.hold(moving_frame(), 0.2);
+        assert_eq!(t.proposal().gross_g, 154_400, "taken at 10 s despite the motion flag");
+        assert_eq!(t.reg.confirm(t.now).unwrap().tag, TAG, "confirming during motion works");
+        // Motion frames only for the whole 2 s window, gross before: accepted.
+        let mut t = T::new();
+        t.hold(r(0), 2.5);
+        t.tag(TAG);
+        t.hold(r(154_400), 7.0);
+        t.hold(moving_frame(), 3.1);
+        assert_eq!(t.proposal().gross_g, 154_400);
+        // Net mode last stated (then motion): refused, never proposed.
+        let mut t = T::new();
+        t.hold(r(0), 2.5);
+        t.tag(TAG);
+        t.hold(r(154_400), 7.0);
+        t.reg.on_reading(Reading { mode: IndicatorMode::Net, ..r(154_400) }, t.now + 100);
+        t.now += 100;
+        assert_eq!(t.problem(), RegProblem::IndicatorNotGross);
     }
 
     /// The reported case: 143.60 kg flickering by one 0.1 kg division, with
@@ -679,7 +721,7 @@ mod tests {
         let arrived = t.now + 100;
         for i in 0..100 {
             t.now += 100;
-            let reading = if i % 20 == 7 { moving_frame() } else { r(143_600 + if (i / 3) % 2 == 0 { 0 } else { 100 }) };
+            let reading = if i % 20 == 7 { moving_at(143_600) } else { r(143_600 + if (i / 3) % 2 == 0 { 0 } else { 100 }) };
             t.reg.on_reading(reading, t.now);
         }
         match &t.reg.phase {

@@ -20,14 +20,14 @@
 //! * the countdown starts when the bin arrives on the scale; a tag read up to
 //!   `tag_window_ms` before that, or at any time during the cycle, belongs to
 //!   it and is remembered even if the reader reports it only once;
-//! * at 10 s the current weight is taken: the median of the steady gross
-//!   readings of the last `capture_window_ms` (the 2 s before the 10 s
-//!   mark), which must agree within `capture_tolerance_g`. A one-division
-//!   flicker or a stray motion frame is accepted; nothing waits for the
-//!   weight to become perfectly constant;
-//! * if no valid weight arrives within `capture_grace_ms` after 10 s (motion,
-//!   a real swing, not gross), the bin is refused with the reason shown. It
-//!   never waits indefinitely.
+//! * at 10 s the current weight is taken: the median of the readings of the
+//!   last `capture_window_ms` (the 2 s before the 10 s mark), which must
+//!   agree within `capture_tolerance_g` (0.9 kg). Motion reported by the
+//!   indicator is accepted (a motion frame's weight counts); nothing waits
+//!   for the weight to settle;
+//! * if there is no valid weight at 10 s (a swing wider than 0.9 kg, not
+//!   gross, an indicator fault, too few readings), the bin is refused at once
+//!   with the reason shown (`capture_grace_ms` is 0).
 //!
 //! Duplicate prevention:
 //! * one Record per placement: after recording, nothing is weighed again
@@ -51,17 +51,17 @@ pub struct Params {
     /// Fixed cycle length: the weight is taken this long after the bin
     /// arrives on the scale.
     pub settle_ms: u64,
-    /// At the end of the cycle the weight is the median of the steady gross
-    /// readings in this last window (at least `capture_min_samples`). The
-    /// LabourLink server requires at least 2 s and 5 readings for a tare.
+    /// At the end of the cycle the weight is the median of the readings in
+    /// this last window (at least `capture_min_samples`). The LabourLink
+    /// server requires at least 2 s and 5 readings for a tare.
     pub capture_window_ms: u64,
     pub capture_min_samples: usize,
-    /// Max spread (max − min) of those readings, in grams. Covers a flicker
-    /// of a division; anything larger is a real swing and refused. Must stay
-    /// under the server's 0.2 kg limit for a tare.
+    /// Max spread (max − min) of those readings, in grams: how much the bin
+    /// may fluctuate during the measurement. Anything larger is refused. Must
+    /// not exceed the server's 0.9 kg limit for a tare.
     pub capture_tolerance_g: i64,
-    /// How long after the cycle ends a valid weight may still be taken (the
-    /// indicator showed motion at exactly 10 s). Then the bin is refused.
+    /// How long after the cycle ends a valid weight may still be taken. 0:
+    /// the weight is taken at 10 s or the bin is refused at 10 s.
     pub capture_grace_ms: u64,
     /// Gross at or above this means "something is on the scale".
     pub min_load_g: i64,
@@ -85,8 +85,8 @@ impl Default for Params {
             settle_ms: 10_000,
             capture_window_ms: 2_000,
             capture_min_samples: 5,
-            capture_tolerance_g: 150,
-            capture_grace_ms: 3_000,
+            capture_tolerance_g: 900,
+            capture_grace_ms: 0,
             min_load_g: 2_000,
             zero_threshold_g: 1_000,
             removal_ms: 2_000,
@@ -153,17 +153,15 @@ pub enum BlockReason {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "code", rename_all = "camelCase")]
 pub enum CaptureFail {
-    /// The indicator reported motion on the latest reading, or on most of
-    /// the window.
-    Moving,
     /// Readings spread wider than `capture_tolerance_g`.
     #[serde(rename_all = "camelCase")]
     Unsteady { spread_g: i64 },
-    /// Not an explicit gross weight (net, or a reading without a mode).
+    /// Not a gross weight: net, a steady reading without a mode, or the
+    /// latest reading that states a mode is not gross.
     NotGross,
     /// Overload, underload or an indicator error in the window.
     IndicatorFault,
-    /// Fewer than `capture_min_samples` steady gross readings in the window.
+    /// Fewer than `capture_min_samples` readings in the window.
     TooFewReadings { readings: usize },
 }
 
@@ -356,7 +354,8 @@ impl Machine {
         self.last_reading_ms = Some(now);
         self.scale_online = true;
         self.samples.push_back((now, reading.clone()));
-        let keep_from = now.saturating_sub(self.params.capture_window_ms + 1_000);
+        // The whole cycle is kept: capture_weight needs its latest gross/net frame.
+        let keep_from = now.saturating_sub(self.params.settle_ms + self.params.capture_window_ms + 1_000);
         while matches!(self.samples.front(), Some((t, _)) if *t < keep_from) {
             self.samples.pop_front();
         }
@@ -661,18 +660,32 @@ pub fn median(weights: &[i64]) -> i64 {
     sorted[sorted.len() / 2]
 }
 
+/// A reading's weight if a measurement may use it even while the indicator
+/// reports motion: a steady gross weight, or the weight of a motion frame
+/// (a Format A "M" frame carries no mode). None for net mode, an overload,
+/// underload or indicator error, or a frame without a weight.
+pub fn measurable_weight(r: &Reading) -> Option<i64> {
+    if r.overload || r.underload || r.error || r.mode == IndicatorMode::Net {
+        return None;
+    }
+    if r.motion || r.mode == IndicatorMode::Gross {
+        r.weight_g
+    } else {
+        None
+    }
+}
+
 /// The capture rule shared by weighing and Register Bins, applied at the end
 /// of the fixed 10 s cycle, over the readings of the last
 /// `capture_window_ms`:
 /// * any overload, underload, error or net reading refuses;
-/// * the latest reading must be steady (no motion), and at most half the
-///   window may be motion frames; a stray motion frame is left out, not a
-///   reason to wait;
-/// * every other reading must be an explicit gross weight;
-/// * at least `capture_min_samples` steady gross readings, all within
+/// * motion is accepted: a motion frame's weight counts like any other;
+/// * every steady reading must be an explicit gross weight, and the latest
+///   reading that states a mode must be gross (motion frames carry none);
+/// * at least `capture_min_samples` readings, all within
 ///   `capture_tolerance_g` of each other.
 ///
-/// Returns those steady gross weights; the caller takes their median.
+/// Returns the window's weights; the caller takes their median.
 pub fn capture_weight(samples: &VecDeque<(u64, Reading)>, now: u64, params: &Params) -> Result<Vec<i64>, CaptureFail> {
     let from = now.saturating_sub(params.capture_window_ms);
     let window: Vec<&Reading> = samples.iter().filter(|(t, _)| *t >= from && *t <= now).map(|(_, r)| r).collect();
@@ -682,14 +695,15 @@ pub fn capture_weight(samples: &VecDeque<(u64, Reading)>, now: u64, params: &Par
     if window.iter().any(|r| r.mode == IndicatorMode::Net) {
         return Err(CaptureFail::NotGross);
     }
-    let moving = window.iter().filter(|r| r.motion).count();
-    if window.last().is_some_and(|r| r.motion) || moving * 2 > window.len() {
-        return Err(CaptureFail::Moving);
-    }
-    if window.iter().any(|r| !r.motion && (r.mode != IndicatorMode::Gross || r.weight_g.is_none())) {
+    // Gross mode: the latest frame that states a mode (motion frames don't)
+    // must be gross. The caller keeps the whole cycle's readings for this.
+    let latest_mode = samples.iter().rev().filter(|(t, _)| *t <= now).map(|(_, r)| r.mode).find(|m| *m != IndicatorMode::Unknown);
+    if latest_mode != Some(IndicatorMode::Gross) {
         return Err(CaptureFail::NotGross);
     }
-    let weights: Vec<i64> = window.iter().filter(|r| reading_ok(r)).filter_map(|r| r.weight_g).collect();
+    let Some(weights) = window.iter().map(|r| measurable_weight(r)).collect::<Option<Vec<i64>>>() else {
+        return Err(CaptureFail::NotGross);
+    };
     if weights.len() < params.capture_min_samples.max(1) {
         return Err(CaptureFail::TooFewReadings { readings: weights.len() });
     }
@@ -814,25 +828,46 @@ mod tests {
         }
     }
 
+    /// A Format A motion frame: a weight, the motion flag, no mode.
+    fn r300_motion(g: i64) -> Reading {
+        Reading {
+            mode: IndicatorMode::Unknown,
+            ..moving(g)
+        }
+    }
+
     #[test]
-    fn a_real_swing_is_refused_after_the_grace_instead_of_waiting_forever() {
+    fn a_swing_over_point_nine_kg_is_refused_at_ten_seconds_without_waiting() {
         let c = carriers();
         let mut m = started_empty(&c);
         m.on_tag(TAG_A, 1_000);
-        // Swings by 300 g (more than the 150 g tolerance) the whole time.
-        let swing = |t: u64| gross(64_000 + ((t / 100) % 2) as i64 * 300);
-        assert!(feed(&mut m, &c, 1_000, 13_900, swing).is_empty());
-        assert!(matches!(m.phase, Phase::Stabilizing { .. }), "inside the 3 s grace");
-        assert!(feed(&mut m, &c, 13_900, 60_000, swing).is_empty());
-        assert_eq!(not_captured(&m), CaptureFail::Unsteady { spread_g: 300 });
+        // Swings by 1.0 kg (more than the 0.9 kg tolerance) the whole time.
+        let swing = |t: u64| gross(64_000 + ((t / 100) % 2) as i64 * 1_000);
+        assert!(feed(&mut m, &c, 1_000, 11_100, swing).is_empty());
+        assert_eq!(not_captured(&m), CaptureFail::Unsteady { spread_g: 1_000 }, "refused at 10 s, no extra wait");
         // Sticky while the bin stays; the scale clears normally afterwards.
+        assert!(feed(&mut m, &c, 11_100, 60_000, swing).is_empty());
         feed(&mut m, &c, 60_000, 63_000, |_| gross(0));
         assert_eq!(m.phase, Phase::Idle);
-        // Motion flag alone also refuses, even with identical weights.
-        let mut m = started_empty(&c);
-        m.on_tag(TAG_A, 1_000);
-        assert!(feed(&mut m, &c, 1_000, 30_000, |_| moving(64_000)).is_empty());
-        assert_eq!(not_captured(&m), CaptureFail::Moving);
+    }
+
+    #[test]
+    fn fluctuations_up_to_point_nine_kg_are_captured_at_ten_seconds() {
+        let c = carriers();
+        for spread in [100i64, 500, 900] {
+            let mut m = started_empty(&c);
+            m.on_tag(TAG_A, 1_000);
+            let steps = (spread / 100) as u64;
+            let wobble = move |t: u64| {
+                let p = (t / 100) % (2 * steps);
+                gross(110_200 + (if p <= steps { p } else { 2 * steps - p }) as i64 * 100)
+            };
+            assert!(feed(&mut m, &c, 1_000, 11_000, wobble).is_empty());
+            let recs = feed(&mut m, &c, 11_000, 11_100, wobble);
+            assert_eq!(recs.len(), 1, "{spread} g: taken at the 10 s mark");
+            let (lo, hi) = (*recs[0].samples_g.iter().min().unwrap(), *recs[0].samples_g.iter().max().unwrap());
+            assert!(hi - lo <= spread && (lo..=hi).contains(&recs[0].gross_g));
+        }
     }
 
     #[test]
@@ -850,15 +885,58 @@ mod tests {
     }
 
     #[test]
-    fn motion_at_ten_seconds_is_captured_once_steady_within_the_grace() {
+    fn motion_at_ten_seconds_is_captured_at_ten_seconds() {
         let c = carriers();
+        // Steady, then the R300 reports motion for the whole last 1.5 s.
         let mut m = started_empty(&c);
         m.on_tag(TAG_A, 1_000);
-        feed(&mut m, &c, 1_000, 10_500, |_| gross(64_000));
-        assert!(feed(&mut m, &c, 10_500, 12_000, |_| moving(64_000)).is_empty());
-        let recs = feed(&mut m, &c, 12_000, 13_500, |_| gross(64_100));
+        feed(&mut m, &c, 1_000, 9_500, |_| gross(64_000));
+        let recs = feed(&mut m, &c, 9_500, 11_100, |t| r300_motion(64_000 + ((t / 100) % 3) as i64 * 100));
+        assert_eq!(recs.len(), 1, "not held back by the motion flag");
+        assert!((64_000..=64_200).contains(&recs[0].gross_g));
+        // Motion on most frames of the window, gross on a few: also captured.
+        let mut m = started_empty(&c);
+        m.on_tag(TAG_A, 1_000);
+        let recs = feed(&mut m, &c, 1_000, 11_100, |t| if (t / 100) % 4 == 0 { gross(64_000) } else { r300_motion(64_300) });
         assert_eq!(recs.len(), 1);
-        assert_eq!(recs[0].gross_g, 64_100);
+    }
+
+    #[test]
+    fn motion_never_lets_an_invalid_stale_overloaded_or_removed_reading_through() {
+        let c = carriers();
+        // No frame ever stated gross mode (motion frames only): refused.
+        let mut m = Machine::new(Params::default());
+        feed(&mut m, &c, 0, 1_000, |_| r300_motion(0));
+        assert_eq!(m.phase, Phase::Idle);
+        m.on_tag(TAG_A, 1_000);
+        assert!(feed(&mut m, &c, 1_000, 11_100, |_| r300_motion(64_000)).is_empty());
+        assert_eq!(not_captured(&m), CaptureFail::NotGross);
+        // Gross at arrival, then motion frames for the whole 2 s window: taken.
+        let mut m = started_empty(&c);
+        m.on_tag(TAG_A, 1_000);
+        feed(&mut m, &c, 1_000, 8_500, |_| gross(64_000));
+        assert_eq!(feed(&mut m, &c, 8_500, 11_100, |_| r300_motion(64_100)).len(), 1);
+        // Overload during motion blocks at once and is never weighed.
+        let mut m = started_empty(&c);
+        m.on_tag(TAG_A, 1_000);
+        feed(&mut m, &c, 1_000, 9_000, |_| r300_motion(64_000));
+        let over = Reading { weight_g: None, overload: true, mode: IndicatorMode::Unknown, ..gross(0) };
+        assert!(feed(&mut m, &c, 9_000, 9_500, |_| over.clone()).is_empty());
+        assert!(matches!(m.phase, Phase::Blocked { reason: BlockReason::Overload, .. }));
+        // Cleared: a fresh full 10 s cycle (as in 0.4.0), nothing from the overloaded one.
+        assert!(feed(&mut m, &c, 9_500, 19_400, |_| r300_motion(64_000)).is_empty(), "not weighed from the overloaded cycle");
+        // Bin lifted off while in motion: nothing recorded, back to idle.
+        let mut m = started_empty(&c);
+        m.on_tag(TAG_A, 1_000);
+        feed(&mut m, &c, 1_000, 9_000, |_| r300_motion(64_000));
+        assert!(feed(&mut m, &c, 9_000, 12_000, |_| r300_motion(0)).is_empty());
+        assert_eq!(m.phase, Phase::Idle);
+        // Scale goes silent before 10 s (stale data): the cycle is dropped.
+        let mut m = started_empty(&c);
+        m.on_tag(TAG_A, 1_000);
+        feed(&mut m, &c, 1_000, 7_000, |_| r300_motion(64_000));
+        assert_eq!(m.tick(12_000, &c), None);
+        assert_eq!(m.phase, Phase::Idle);
     }
 
     #[test]
@@ -912,16 +990,26 @@ mod tests {
         let mut v = steady(19);
         v.insert(0, (7_000, gross(1)));
         assert_eq!(at(v).unwrap().len(), 19);
-        // A stray motion frame is left out; motion on the latest reading or on
-        // most of the window waits.
+        // Motion frames count, on the latest reading or most of the window.
         let mut v = steady(19);
-        v[5].1 = moving(64_000);
-        assert_eq!(at(v).unwrap().len(), 18);
+        v[18].1 = r300_motion(64_000);
+        assert_eq!(at(v).unwrap().len(), 19);
+        let v: Vec<_> = steady(19).into_iter().enumerate().map(|(i, (t, r))| (t, if i < 15 { r300_motion(64_000) } else { r })).collect();
+        assert_eq!(at(v).unwrap().len(), 19);
+        // A motion frame without a weight, or a net frame, refuses.
         let mut v = steady(19);
-        v[18].1 = moving(64_000);
-        assert_eq!(at(v), Err(CaptureFail::Moving));
-        let v: Vec<_> = steady(19).into_iter().enumerate().map(|(i, (t, r))| (t, if i < 12 { moving(64_000) } else { r })).collect();
-        assert_eq!(at(v), Err(CaptureFail::Moving));
+        v[18].1 = Reading { weight_g: None, ..r300_motion(0) };
+        assert_eq!(at(v), Err(CaptureFail::NotGross));
+        let mut v = steady(19);
+        v[9].1 = Reading { mode: IndicatorMode::Net, ..moving(64_000) };
+        assert_eq!(at(v), Err(CaptureFail::NotGross));
+        // Over 0.9 kg refuses; exactly 0.9 kg is accepted.
+        let mut v = steady(19);
+        v[4].1 = gross(65_000);
+        assert_eq!(at(v), Err(CaptureFail::Unsteady { spread_g: 1_000 }));
+        let mut v = steady(19);
+        v[4].1 = gross(64_900);
+        assert!(at(v).is_ok());
     }
 
     #[test]
