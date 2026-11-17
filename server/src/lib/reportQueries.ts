@@ -270,6 +270,12 @@ export async function getActivityDensityAttribution(
   const employeeIds = filterToUuidArray(filter.employeeIds);
   const byEmployee = new Map<string, DensityTotals>();
   const byEmployeeDay = new Map<string, DensityTotals>();
+  // Only selected employees are ever credited (no filter = everyone). The
+  // candidate queries below are narrowed to selected employees, but a
+  // shared completion or a row's unresolved candidates still bring in
+  // co-workers' time, which is needed to size each share correctly.
+  const selectedEmployeeIds = employeeIds ? new Set(employeeIds) : null;
+  const isSelected = (id: string) => selectedEmployeeIds === null || selectedEmployeeIds.has(id);
 
   const addTo = (map: Map<string, DensityTotals>, key: string, quantity: number, durationSeconds: number, completions: number) => {
     const cur = map.get(key) ?? { quantity: 0, durationSeconds: 0, completions: 0 };
@@ -463,24 +469,39 @@ export async function getActivityDensityAttribution(
       // contribute() applies across days. "completions" (a
       // whole-row metric, not fractional) credits whichever employee
       // contributed the largest share — never both, never neither.
+      //
+      // Shares are rounded by largest remainder (allocateByDuration), so they
+      // always add up to exactly the row's quantity. Rounding each share on
+      // its own (Math.round) could credit one stem more or less than the row
+      // holds, e.g. 101 stems at 50/50 -> 51 + 51 = 102.
+      //
+      // Shares are always computed from EVERY employee's time on the row,
+      // but only selected employees' shares are credited when the report is
+      // filtered to some employees. An unselected co-worker's share used to
+      // be credited too, which inflated the report's quantity totals (the
+      // Total row and per-date totals add up every credited employee) and so
+      // its overall speed.
+      const empDurations = employeeIdsInGroup.map((empId) =>
+        segs.filter((s) => s.employeeId === empId).reduce((sum, s) => sum + (s.endedAt.getTime() - s.startedAt.getTime()) / 1000, 0)
+      );
+      const empQuantities = allocateByDuration(quantityPerRow, empDurations);
       let bestEmployeeId = "";
       let bestDuration = -1;
-      for (const empId of employeeIdsInGroup) {
-        const empSegs = segs.filter((s) => s.employeeId === empId);
-        const empDuration = empSegs.reduce((sum, s) => sum + (s.endedAt.getTime() - s.startedAt.getTime()) / 1000, 0);
-        const empQuantity = Math.round(quantityPerRow * (empDuration / totalDurationSeconds));
-        contribute(empId, empQuantity, empSegs, empDuration, 0);
-        if (empDuration > bestDuration) {
-          bestDuration = empDuration;
+      employeeIdsInGroup.forEach((empId, i) => {
+        if (empDurations[i] > bestDuration) {
+          bestDuration = empDurations[i];
           bestEmployeeId = empId;
         }
-      }
+        if (!isSelected(empId)) return;
+        const empSegs = segs.filter((s) => s.employeeId === empId);
+        contribute(empId, empQuantities[i], empSegs, empDurations[i], 0);
+      });
       // The one completed row: credited to the largest contributor, on the
       // completion's own final date, only when that date is in range — and
       // on that day's row too, so daily rows add up to the range total.
       const completionDates = [...splitDurationByCalendarDay(segs).keys()].sort();
       const finalDate = completionDates[completionDates.length - 1];
-      if (bestEmployeeId && finalDate && dayInRange(finalDate)) {
+      if (bestEmployeeId && isSelected(bestEmployeeId) && finalDate && dayInRange(finalDate)) {
         addTo(byEmployee, bestEmployeeId, 0, 0, 1);
         addTo(byEmployeeDay, `${bestEmployeeId}:${finalDate}`, 0, 0, 1);
       }
@@ -509,6 +530,10 @@ export async function getActivityDensityAttribution(
       // activityId (see above), so this can never actually be false — kept
       // as a cheap invariant check rather than trusted-but-unverified.
       if (candidate.activityId !== activityId) continue;
+      // A co-worker's sole visit to a row the selected employee also
+      // touched is still resolved above (it decides ambiguity), but never
+      // credited to a report filtered to other employees.
+      if (!isSelected(candidate.employeeId)) continue;
       const startedAt = new Date(candidate.startedAt);
       const endedAt = candidate.endedAt ? new Date(candidate.endedAt) : null;
       // In progress (no ended_at yet) — Activity Hours still count
