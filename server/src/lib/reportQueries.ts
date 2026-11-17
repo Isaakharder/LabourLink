@@ -7,6 +7,14 @@
 // count) from Inputs' single-day grain to a date range; it never introduces
 // a second speed formula.
 import { pool } from "../db";
+import {
+  fetchMergedBreaksByEmployee,
+  isSystemClosedBreak,
+  mergeBreakIntervals,
+  MergedBreaks,
+  secondsOutsideBreaks,
+  subtractBreaks,
+} from "./breakOverlap";
 import { addDaysToDateStr, APP_TIMEZONE, calendarDateInAppTimezone, getDayBoundsUtc, getRangeBoundsUtc } from "./timezone";
 import { aggregateDensitySpeed } from "./densitySpeed";
 import { computeWorkdayTotals, groupByEmployeeDay, WorkdayBoundaryEntry } from "./workdayTotals";
@@ -270,6 +278,12 @@ export async function getActivityDensityAttribution(
   const employeeIds = filterToUuidArray(filter.employeeIds);
   const byEmployee = new Map<string, DensityTotals>();
   const byEmployeeDay = new Map<string, DensityTotals>();
+  // Only selected employees are ever credited (no filter = everyone). The
+  // candidate queries below are narrowed to selected employees, but a
+  // shared completion or a row's unresolved candidates still bring in
+  // co-workers' time, which is needed to size each share correctly.
+  const selectedEmployeeIds = employeeIds ? new Set(employeeIds) : null;
+  const isSelected = (id: string) => selectedEmployeeIds === null || selectedEmployeeIds.has(id);
 
   const addTo = (map: Map<string, DensityTotals>, key: string, quantity: number, durationSeconds: number, completions: number) => {
     const cur = map.get(key) ?? { quantity: 0, durationSeconds: 0, completions: 0 };
@@ -373,12 +387,17 @@ export async function getActivityDensityAttribution(
     );
     const completionIds: string[] = candidateIdRows.map((r) => r.completion_id);
     if (!completionIds.length) return [];
+    // Deleted segments are left out, exactly as Inputs leaves them out of
+    // the same completion's speed (inputs.ts densityContributions...). A
+    // deleted run keeps its row_completion_segments link, so without this
+    // filter its time still counted toward the completion's duration (and
+    // its employee still received a share of the quantity).
     const { rows } = await pool.query(
       `select rc.id as completion_id, rc.quantity_per_row, te.employee_id, te.activity_id, te.started_at, te.ended_at
        from row_completions rc
        join row_completion_segments rcs on rcs.row_completion_id = rc.id
        join time_entries te on te.id = rcs.time_entry_id
-       where rc.id = any($1::uuid[])
+       where rc.id = any($1::uuid[]) and te.deleted_at is null
        order by rc.id, te.started_at`,
       [completionIds]
     );
@@ -432,56 +451,6 @@ export async function getActivityDensityAttribution(
     completionSegsById.set(r.completion_id, g);
   }
 
-  for (const { quantityPerRow, segs } of completionSegsById.values()) {
-    const activityIdsInGroup = new Set(segs.map((s) => s.activityId));
-    if (activityIdsInGroup.size !== 1) continue;
-    const [soleActivityId] = activityIdsInGroup;
-    if (soleActivityId !== activityId) continue;
-    // A completion partly outside the range is no longer skipped — its
-    // in-range days count their own share (see contribute()).
-
-    const totalDurationSeconds = segs.reduce((sum, s) => sum + (s.endedAt.getTime() - s.startedAt.getTime()) / 1000, 0);
-    if (totalDurationSeconds <= 0) continue;
-
-    const employeeIdsInGroup = [...new Set(segs.map((s) => s.employeeId))];
-    if (employeeIdsInGroup.length === 1) {
-      // Common case — one employee, the row's own frozen quantity counts
-      // exactly once, no split needed.
-      const [soleEmployeeId] = employeeIdsInGroup;
-      contribute(soleEmployeeId, quantityPerRow, segs, totalDurationSeconds, 1);
-    } else {
-      // Multiple employees share this one confirmed/combined completion (an
-      // admin merged a re-entry's segments into the original row via the
-      // Row Completion Review modal — POST /api/row-completions) — allocate
-      // the one frozen quantity proportionally by each employee's own share
-      // of the completion's total duration, the same principle
-      // contribute() applies across days. "completions" (a
-      // whole-row metric, not fractional) credits whichever employee
-      // contributed the largest share — never both, never neither.
-      let bestEmployeeId = "";
-      let bestDuration = -1;
-      for (const empId of employeeIdsInGroup) {
-        const empSegs = segs.filter((s) => s.employeeId === empId);
-        const empDuration = empSegs.reduce((sum, s) => sum + (s.endedAt.getTime() - s.startedAt.getTime()) / 1000, 0);
-        const empQuantity = Math.round(quantityPerRow * (empDuration / totalDurationSeconds));
-        contribute(empId, empQuantity, empSegs, empDuration, 0);
-        if (empDuration > bestDuration) {
-          bestDuration = empDuration;
-          bestEmployeeId = empId;
-        }
-      }
-      // The one completed row: credited to the largest contributor, on the
-      // completion's own final date, only when that date is in range — and
-      // on that day's row too, so daily rows add up to the range total.
-      const completionDates = [...splitDurationByCalendarDay(segs).keys()].sort();
-      const finalDate = completionDates[completionDates.length - 1];
-      if (bestEmployeeId && finalDate && dayInRange(finalDate)) {
-        addTo(byEmployee, bestEmployeeId, 0, 0, 1);
-        addTo(byEmployeeDay, `${bestEmployeeId}:${finalDate}`, 0, 0, 1);
-      }
-    }
-  }
-
   // Rule 2: unresolved (not-yet-completed) runs, fetched concurrently with
   // Rule 1 above.
   const ambiguousCycleKeys = computeAmbiguousCycleKeys(candidatesByKey);
@@ -504,6 +473,10 @@ export async function getActivityDensityAttribution(
       // activityId (see above), so this can never actually be false — kept
       // as a cheap invariant check rather than trusted-but-unverified.
       if (candidate.activityId !== activityId) continue;
+      // A co-worker's sole visit to a row the selected employee also
+      // touched is still resolved above (it decides ambiguity), but never
+      // credited to a report filtered to other employees.
+      if (!isSelected(candidate.employeeId)) continue;
       const startedAt = new Date(candidate.startedAt);
       const endedAt = candidate.endedAt ? new Date(candidate.endedAt) : null;
       // In progress (no ended_at yet) — Activity Hours still count
@@ -557,20 +530,125 @@ export async function getActivityDensityAttribution(
     : [];
   const segmentRowById = new Map(segmentRows.map((r) => [r.id, r]));
 
+  // Breaks overlapping any segment credited below (Rule 1 and Rule 2), in
+  // ONE query: time the employee was on a recorded break is never counted
+  // as activity time (see breakOverlap.ts). Rule 1 is credited here, after
+  // Rule 2's segments are known, so the one query covers both; credits are
+  // still applied in the original order (all of Rule 1, then Rule 2).
+  const rule2EmployeeIds = accepted.map(({ only }) => only.employeeId);
+  const allSegTimes = [
+    ...completionSegRows.map((r) => ({ startedAt: r.started_at as Date, endedAt: r.ended_at as Date })),
+    ...segmentRows.filter((r) => r.ended_at).map((r) => ({ startedAt: r.started_at, endedAt: r.ended_at })),
+  ];
+  const breaksByEmployee = allSegTimes.length
+    ? await fetchMergedBreaksByEmployee(
+        [...completionSegRows.map((r) => r.employee_id as string), ...rule2EmployeeIds],
+        new Date(allSegTimes.reduce((m, t) => Math.min(m, t.startedAt.getTime()), Infinity)),
+        new Date(allSegTimes.reduce((m, t) => Math.max(m, t.endedAt.getTime()), -Infinity))
+      )
+    : new Map<string, MergedBreaks>();
+  // A contribution's segments with the parts inside that employee's breaks
+  // removed. Untouched segments come back as themselves, so data with no
+  // overlap gives exactly the figures it always did. When EVERY moment of a
+  // contribution lies inside breaks, its segments are kept as recorded
+  // instead: its quantity is never silently dropped (in production this was
+  // a few seconds-long row visits tapped during a break), and such data is
+  // left for review in Inputs rather than reinterpreted here.
+  const clipAll = <T extends { employeeId?: string; startedAt: Date; endedAt: Date }>(employeeIdOf: (seg: T) => string, segs: T[]): T[] => {
+    const pieces = segs.flatMap((seg) =>
+      subtractBreaks(seg, breaksByEmployee.get(employeeIdOf(seg))).map((p) =>
+        p === seg ? seg : { ...seg, startedAt: p.startedAt, endedAt: p.endedAt }
+      )
+    );
+    return pieces.length ? pieces : segs;
+  };
+
+  for (const { quantityPerRow, segs: rawSegs } of completionSegsById.values()) {
+    const activityIdsInGroup = new Set(rawSegs.map((s) => s.activityId));
+    if (activityIdsInGroup.size !== 1) continue;
+    const [soleActivityId] = activityIdsInGroup;
+    if (soleActivityId !== activityId) continue;
+    // A completion partly outside the range is no longer skipped — its
+    // in-range days count their own share (see contribute()).
+
+    const segs = clipAll((seg) => seg.employeeId, rawSegs);
+    const totalDurationSeconds = segs.reduce((sum, s) => sum + (s.endedAt.getTime() - s.startedAt.getTime()) / 1000, 0);
+    if (totalDurationSeconds <= 0) continue;
+
+    const employeeIdsInGroup = [...new Set(segs.map((s) => s.employeeId))];
+    if (employeeIdsInGroup.length === 1) {
+      // Common case — one employee, the row's own frozen quantity counts
+      // exactly once, no split needed.
+      const [soleEmployeeId] = employeeIdsInGroup;
+      contribute(soleEmployeeId, quantityPerRow, segs, totalDurationSeconds, 1);
+    } else {
+      // Multiple employees share this one confirmed/combined completion (an
+      // admin merged a re-entry's segments into the original row via the
+      // Row Completion Review modal — POST /api/row-completions) — allocate
+      // the one frozen quantity proportionally by each employee's own share
+      // of the completion's total duration, the same principle
+      // contribute() applies across days. "completions" (a
+      // whole-row metric, not fractional) credits whichever employee
+      // contributed the largest share — never both, never neither.
+      //
+      // Shares are rounded by largest remainder (allocateByDuration), so they
+      // always add up to exactly the row's quantity. Rounding each share on
+      // its own (Math.round) could credit one stem more or less than the row
+      // holds, e.g. 101 stems at 50/50 -> 51 + 51 = 102.
+      //
+      // Shares are always computed from EVERY employee's time on the row,
+      // but only selected employees' shares are credited when the report is
+      // filtered to some employees. An unselected co-worker's share used to
+      // be credited too, which inflated the report's quantity totals (the
+      // Total row and per-date totals add up every credited employee) and so
+      // its overall speed.
+      const empDurations = employeeIdsInGroup.map((empId) =>
+        segs.filter((s) => s.employeeId === empId).reduce((sum, s) => sum + (s.endedAt.getTime() - s.startedAt.getTime()) / 1000, 0)
+      );
+      const empQuantities = allocateByDuration(quantityPerRow, empDurations);
+      let bestEmployeeId = "";
+      let bestDuration = -1;
+      employeeIdsInGroup.forEach((empId, i) => {
+        if (empDurations[i] > bestDuration) {
+          bestDuration = empDurations[i];
+          bestEmployeeId = empId;
+        }
+        if (!isSelected(empId)) return;
+        const empSegs = segs.filter((s) => s.employeeId === empId);
+        contribute(empId, empQuantities[i], empSegs, empDurations[i], 0);
+      });
+      // The one completed row: credited to the largest contributor, on the
+      // completion's own final date, only when that date is in range — and
+      // on that day's row too, so daily rows add up to the range total.
+      const completionDates = [...splitDurationByCalendarDay(segs).keys()].sort();
+      const finalDate = completionDates[completionDates.length - 1];
+      if (bestEmployeeId && isSelected(bestEmployeeId) && finalDate && dayInRange(finalDate)) {
+        addTo(byEmployee, bestEmployeeId, 0, 0, 1);
+        addTo(byEmployeeDay, `${bestEmployeeId}:${finalDate}`, 0, 0, 1);
+      }
+    }
+  }
+
+
   accepted.forEach(({ only }) => {
     const quantityPerRow = segmentRowById.get(only.segmentIds[0])?.density_count_per_row;
     if (quantityPerRow == null) return;
     const quantity = Number(quantityPerRow);
     const runSegmentIds = new Set(only.segmentIds);
-    const segs = segmentRows
+    const rawSegs = segmentRows
       .filter((r) => runSegmentIds.has(r.id))
       .map((r) => ({ startedAt: r.started_at as Date, endedAt: r.ended_at as Date }));
+    const segs = clipAll(() => only.employeeId, rawSegs);
+    const clipped = segs.length !== rawSegs.length || segs.some((seg, i) => seg !== rawSegs[i]);
+    const durationSeconds = clipped
+      ? segs.reduce((sum, seg) => sum + (seg.endedAt.getTime() - seg.startedAt.getTime()) / 1000, 0)
+      : only.durationSeconds;
     // A sole, finished, unambiguous visit IS one completed row for its
     // employee, exactly like a confirmed completion: its row's stems count
     // once, and it counts once toward Rows Completed. (It used to add 0
     // here, so Reports showed the quantity/speed but 0 rows completed for
     // the same visit.)
-    contribute(only.employeeId, quantity, segs, only.durationSeconds, 1);
+    contribute(only.employeeId, quantity, segs, durationSeconds, 1);
   });
 
   return { byEmployee, byEmployeeDay };
@@ -661,7 +739,7 @@ export async function getActivityDensityAudit(
        from row_completions rc
        join row_completion_segments rcs on rcs.row_completion_id = rc.id
        join time_entries te on te.id = rcs.time_entry_id
-       where rc.id = any($1::uuid[])`,
+       where rc.id = any($1::uuid[]) and te.deleted_at is null`,
       [completionIds]
     );
     for (const r of groupRows) {
@@ -741,13 +819,16 @@ export async function getActivityDensityAudit(
 
     if (r.row_completion_id) {
       const group = completionGroups.get(r.row_completion_id)!;
-      const employeeIdsInGroup = new Set(group.segs.map((s) => s.employeeId));
       const activityIdsInGroup = new Set(group.segs.map((s) => s.activityId));
       const groupDurationSeconds = group.segs.reduce((s, seg) => s + (seg.endedAt.getTime() - seg.startedAt.getTime()) / 1000, 0);
+      // A completion shared by several employees IS counted by the report:
+      // each employee gets the share of the quantity matching their share of
+      // the completion's time. So this segment's own share (time-proportional
+      // below) is what the report credits. This used to be reported as
+      // excluded, contradicting the report. Only a completion mixing
+      // activities is excluded.
       let reason: string | null = null;
-      if (employeeIdsInGroup.size !== 1) {
-        reason = "This completion's segments span more than one employee — not cleanly attributable";
-      } else if (activityIdsInGroup.size !== 1 || [...activityIdsInGroup][0] !== activityId) {
+      if (activityIdsInGroup.size !== 1 || [...activityIdsInGroup][0] !== activityId) {
         reason = "This completion's segments span more than one activity — not cleanly attributable";
       }
       // A completion partly outside the audited range still counts this
@@ -867,10 +948,20 @@ async function fetchBreakTotals(workEmployeeIds: string[], start: Date, end: Dat
 // undercounts on any day the employee also worked a different activity.
 async function fetchWholeShiftEntries(workEmployeeIds: string[], start: Date, end: Date) {
   if (!workEmployeeIds.length) {
-    return { rows: [] as { employee_id: string; entry_type: "work" | "break"; started_at: Date; ended_at: Date; is_paid: boolean | null }[] };
+    return {
+      rows: [] as {
+        employee_id: string;
+        entry_type: "work" | "break";
+        activity_id: string | null;
+        started_at: Date;
+        ended_at: Date;
+        is_paid: boolean | null;
+        auto_closed_at: Date | null;
+      }[],
+    };
   }
   return pool.query(
-    `select te.employee_id, te.entry_type, te.started_at, te.ended_at, te.is_paid
+    `select te.employee_id, te.entry_type, te.activity_id, te.started_at, te.ended_at, te.is_paid, te.auto_closed_at
      from time_entries te
      where te.deleted_at is null and te.ended_at is not null
        and te.employee_id = any($1::uuid[]) and te.started_at >= $2 and te.started_at < $3
@@ -999,6 +1090,31 @@ export async function getActivityReportDataWithAttribution(
     employeePaidByKey.set(key, toSeconds(computeWorkdayTotals(entries).workedSeconds));
   }
 
+  // Activity Hours leave out any part of this activity's work that overlaps
+  // the same employee's recorded break (see breakOverlap.ts), the same rule
+  // the attribution applies to every speed's own duration. Computed from the
+  // whole-shift rows already fetched, so no extra query. Payroll / Employee
+  // Paid Time above is unchanged.
+  const breakIntervalsByEmployee = new Map<string, { startedAt: Date; endedAt: Date }[]>();
+  for (const r of wholeShiftRes.rows) {
+    if (r.entry_type !== "break" || isSystemClosedBreak(r.started_at, r.ended_at, r.auto_closed_at)) continue;
+    const list = breakIntervalsByEmployee.get(r.employee_id) ?? [];
+    list.push({ startedAt: r.started_at, endedAt: r.ended_at });
+    breakIntervalsByEmployee.set(r.employee_id, list);
+  }
+  const mergedBreaksByEmployee = new Map([...breakIntervalsByEmployee].map(([id, list]) => [id, mergeBreakIntervals(list)]));
+  const breakOverlapSecondsByKey = new Map<string, number>();
+  for (const r of wholeShiftRes.rows) {
+    if (r.entry_type !== "work" || r.activity_id !== activityId) continue;
+    const merged = mergedBreaksByEmployee.get(r.employee_id);
+    if (!merged) continue;
+    const raw = (r.ended_at.getTime() - r.started_at.getTime()) / 1000;
+    const overlap = raw - secondsOutsideBreaks({ startedAt: r.started_at, endedAt: r.ended_at }, merged);
+    if (overlap <= 0) continue;
+    const key = `${r.employee_id}:${calendarDateInAppTimezone(r.started_at)}`;
+    breakOverlapSecondsByKey.set(key, (breakOverlapSecondsByKey.get(key) ?? 0) + overlap);
+  }
+
   const rows: ActivityReportRow[] = workRes.rows.map((r) => {
     const dateStr = String(r.work_date);
     const breakInfo = breakByKey.get(`${r.employee_id}:${dateStr}`) ?? {
@@ -1006,7 +1122,7 @@ export async function getActivityReportDataWithAttribution(
       paidBreakSeconds: 0,
       unpaidBreakSeconds: 0,
     };
-    const rowWorkSeconds = toSeconds(r.work_seconds);
+    const rowWorkSeconds = toSeconds(Number(r.work_seconds) - (breakOverlapSecondsByKey.get(`${r.employee_id}:${dateStr}`) ?? 0));
     // That day's own safely-attributable quantity only — never the
     // employee's whole-range figure. A day with real density work that
     // happened to be part of a multi-day-spanning completion/run correctly
