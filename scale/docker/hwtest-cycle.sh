@@ -5,7 +5,8 @@
 # Runs the real labourlink-scaled binary in hardware-test mode (in-process
 # test server, no network), feeds R300 Format A frames and PROTAGD tag lines,
 # and prints one line per scenario. With EXPECT=1 it also checks each outcome
-# against the 0.9 kg policy and exits non-zero on any mismatch.
+# (Register Bins: readings within 0.9 kg; harvest weighing: the latest
+# reading at 10 s, any fluctuation) and exits non-zero on any mismatch.
 #
 #   docker run --rm --network none -v "$PWD":/work -v llscale-cargo:/usr/local/cargo/registry \
 #     -v llscale-test-target:/cache/target -e CARGO_TARGET_DIR=/cache/target -e EXPECT=1 \
@@ -19,10 +20,10 @@ RFID=$T/dev/rfid
 socat pty,raw,echo=0,link=$T/scale-feed pty,raw,echo=0,link=$SCALE &
 socat pty,raw,echo=0,link=$T/rfid-feed pty,raw,echo=0,link=$RFID &
 sleep 1
-# Twelve bins, one per weighing scenario (so the 5-minute duplicate guard
+# Sixteen bins, one per weighing scenario (so the 5-minute duplicate guard
 # never mixes scenarios up), all with a 27.5 kg tare.
 BINS=""
-i=1; while [ $i -le 12 ]; do
+i=1; while [ $i -le 16 ]; do
   BINS="$BINS{\"name\":\"Bin $i\",\"rfidTag\":\"00000001822257$(printf %02d $i)\",\"tareKg\":27.5},"
   i=$((i + 1))
 done
@@ -149,19 +150,22 @@ wcase() { # wcase <label> <expect> <spread> <motion> [notag]
   [ "$short" = recorded ] && state | jq -r '.recent[0] | "       recorded gross \(.grossG / 1000) kg, net \(.netG / 1000) kg"' || true
 }
 wcase "stable bin"                     recorded 0 none
-wcase "fluctuating 0.1 kg"             recorded 1 none
 wcase "fluctuating 0.5 kg"             recorded 5 none
-wcase "fluctuating 0.9 kg with motion" recorded 9 some
-wcase "indicator reports motion throughout (0.3 kg)" recorded 3 all
-wcase "fluctuating 1.0 kg (over the limit)" "refused:weightNotCaptured/unsteady" 10 none
+wcase "fluctuating 0.5 kg with motion" recorded 5 some
+wcase "fluctuating 1.1 kg (bin 73)"    recorded 11 none
+wcase "fluctuating 1.1 kg with motion" recorded 11 some
+wcase "fluctuating 2.0 kg"             recorded 20 none
+wcase "fluctuating 2.0 kg with motion" recorded 20 some
+wcase "fluctuating 3.0 kg"             recorded 30 none
+wcase "fluctuating 3.0 kg, motion throughout" recorded 30 all
 wcase "missing RFID"                   refused:noTag 0 none notag
-zero; tag 000000018222570$((k)); bin 1102 0 none 6; zero
+zero; tag "00000001822257$(printf %02d $k)"; bin 1102 0 none 6; zero
 report "W bin removed before 10 s" idle "$(state | jq -r .phase.phase)"
 zero; tag 0000000182225702; bin 1102 0 none 14
 report "W same bin again within 5 minutes" refused:recentlyWeighed "$(state | jq -r '.phase | if .phase == "blocked" then "refused:\(.reason.code)" else .phase end')"
 zero
 COUNT=$(state | jq '.recent | length')
-report "W weighings recorded in total" 5 "$COUNT"
+report "W weighings recorded in total" 9 "$COUNT"
 
 kill $SVC
 if [ "${EXPECT:-0}" = 1 ]; then
