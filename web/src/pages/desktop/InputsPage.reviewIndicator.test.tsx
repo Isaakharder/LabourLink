@@ -12,7 +12,7 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { InputsPage } from "./InputsPage";
+import { InputsPage, REVIEW_COUNTS_POLL_MS } from "./InputsPage";
 import { api } from "../../lib/api";
 import { ActivityRunDto, DailyInputsResponse } from "../../lib/inputsTypes";
 import { renderInputsOn } from "../../lib/testUtils/inputsToday";
@@ -389,7 +389,7 @@ describe("keeping the indicators current", () => {
     expect(badge("emp-mia")).toHaveTextContent("1");
   });
 
-  it("the automatic 10-second refresh picks up review items that appear or disappear", async () => {
+  it("the automatic refresh picks up review items that appear or disappear, at most once a minute", async () => {
     // Capture the page's own poll callback rather than faking timers, which
     // would also stop waitFor's polling.
     const setIntervalSpy = vi.spyOn(window, "setInterval");
@@ -398,14 +398,28 @@ describe("keeping the indicators current", () => {
     await waitFor(() => expect(badge("emp-khen")).not.toBeNull());
     const poll = setIntervalSpy.mock.calls.find(([, ms]) => ms === 10_000)?.[0] as (() => void) | undefined;
     expect(poll).toBeDefined();
+    const reviewCalls = () => vi.mocked(api).mock.calls.filter(([url]) => String(url).startsWith("/api/row-completions/review-groups")).length;
 
     groupsByDate[DATE] = [reviewGroup("g9", "emp-larry")];
+    const before = reviewCalls();
+    // A 10-second tick inside the minute leaves the badges as they were.
     await act(async () => {
       poll!();
     });
+    expect(reviewCalls()).toBe(before);
+    expect(badge("emp-khen")).not.toBeNull();
+
+    // Once the minute has passed, the next tick refreshes them.
+    const realNow = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(realNow + REVIEW_COUNTS_POLL_MS);
+    await act(async () => {
+      poll!();
+    });
+    nowSpy.mockRestore();
     await waitFor(() => expect(badge("emp-larry")).toHaveTextContent("1"));
     expect(badge("emp-khen")).toBeNull();
     expect(badge("emp-mia")).toBeNull();
+    expect(reviewCalls()).toBe(before + 1);
     setIntervalSpy.mockRestore();
   });
 

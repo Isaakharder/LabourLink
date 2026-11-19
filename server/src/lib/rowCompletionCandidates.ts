@@ -19,7 +19,7 @@
 // from auto-counting (see 045_row_completion_activity_id.sql).
 import { pool } from "../db";
 import { groupIntoActivityRuns, RunSegment } from "./activityRuns";
-import { calendarDateInAppTimezone, getDayBoundsUtc, inclusiveDayCount } from "./timezone";
+import { addDaysToDateStr, calendarDateInAppTimezone, getDayBoundsUtc, inclusiveDayCount } from "./timezone";
 import { getRowReviewWindowDays } from "./rowReviewWindow";
 
 export interface CandidateRun {
@@ -164,9 +164,19 @@ interface DayFetchRow {
 // saved Setup change regroups unresolved visits on the very next request.
 // A caller that also shows the window to the user (speedReviewGroups.ts)
 // reads it once and passes it in, so the grouping and the text agree.
+//
+// opts.relevantFrom (a YYYY-MM-DD date in APP_TIMEZONE): the earliest date
+// the caller actually looks at. Without it, every unresolved visit to a
+// requested row in its whole history is rebuilt, and each of those
+// employee-days is fetched in full (work and break entries). Unconfirmed
+// visits accumulate, so that grew without bound and was re-downloaded on
+// every Inputs, Dashboard and phone poll. With it, each pair keeps only
+// the cycles that can reach relevantFrom; see cutDateForPair below.
+// Callers that need the whole history (the review modal's candidate list,
+// saving a completion, the density audit) leave it out.
 export async function getUnresolvedRunsForRows(
   pairs: RowActivityDensityKey[],
-  opts: { windowDays?: number } = {}
+  opts: { windowDays?: number; relevantFrom?: string } = {}
 ): Promise<Map<string, CandidateRun[]>> {
   const result = new Map<string, CandidateRun[]>();
   if (pairs.length === 0) return result;
@@ -183,8 +193,13 @@ export async function getUnresolvedRunsForRows(
   // pairs, in a single round trip — the row-value form of "= ANY" lets
   // Postgres match all three columns together per candidate row, the same
   // way a single-pair query would, just for every pair at once.
-  const { rows: touchRows } = await pool.query(
-    `select te.employee_id, te.started_at
+  //
+  // The Row review window is only needed this early when relevantFrom
+  // trims the history below, and is then read alongside this query.
+  const windowDaysEarly =
+    opts.relevantFrom !== undefined && opts.windowDays === undefined ? getRowReviewWindowDays() : undefined;
+  const { rows: allTouchRows } = await pool.query(
+    `select te.employee_id, te.started_at, te.greenhouse_row_id, te.activity_id, te.density_type
      from time_entries te
      left join row_completion_segments rcs on rcs.time_entry_id = te.id
      where te.entry_type = 'work' and te.deleted_at is null
@@ -193,13 +208,42 @@ export async function getUnresolvedRunsForRows(
          in (select * from unnest($1::uuid[], $2::uuid[], $3::text[]))`,
     [dedupedPairs.map((p) => p.greenhouseRowId), dedupedPairs.map((p) => p.activityId), dedupedPairs.map((p) => p.densityType)]
   );
-  if (touchRows.length === 0) return result; // every pair already seeded to [] above
+  if (allTouchRows.length === 0) return result; // every pair already seeded to [] above
 
+  const earlyWindowDays = windowDaysEarly ? await windowDaysEarly : opts.windowDays;
+  const cutByKey = new Map<string, string>();
+  let touchRows = allTouchRows.map((r) => ({ ...r, date: calendarDateInAppTimezone(r.started_at) }));
+  if (opts.relevantFrom !== undefined && earlyWindowDays !== undefined) {
+    const datesByKey = new Map<string, Set<string>>();
+    for (const r of touchRows) {
+      const k = `${r.greenhouse_row_id}:${r.activity_id}:${r.density_type}`;
+      (datesByKey.get(k) ?? datesByKey.set(k, new Set()).get(k)!).add(r.date);
+    }
+    for (const [k, dates] of datesByKey) {
+      const cut = cutDateForPair([...dates].sort(), opts.relevantFrom, earlyWindowDays);
+      if (cut) cutByKey.set(k, cut);
+    }
+    touchRows = touchRows.filter((r) => {
+      const cut = cutByKey.get(`${r.greenhouse_row_id}:${r.activity_id}:${r.density_type}`);
+      return cut === undefined || r.date >= cut;
+    });
+  }
+
+  const allDaysByEmployee = new Map<string, Set<string>>();
+  for (const r of allTouchRows) {
+    const set = allDaysByEmployee.get(r.employee_id) ?? new Set<string>();
+    set.add(calendarDateInAppTimezone(r.started_at));
+    allDaysByEmployee.set(r.employee_id, set);
+  }
   const daysByEmployee = new Map<string, Set<string>>();
   for (const r of touchRows) {
-    const date = calendarDateInAppTimezone(r.started_at);
     const set = daysByEmployee.get(r.employee_id) ?? new Set<string>();
-    set.add(date);
+    set.add(r.date);
+    // Also the day before, when the full history would have fetched it: a
+    // visit rolled over at midnight continues an entry on that day, and the
+    // continuation must still find and extend that day's candidate.
+    const prev = addDaysToDateStr(r.date, -1);
+    if (cutByKey.size > 0 && allDaysByEmployee.get(r.employee_id)?.has(prev)) set.add(prev);
     daysByEmployee.set(r.employee_id, set);
   }
 
@@ -248,6 +292,8 @@ export async function getUnresolvedRunsForRows(
     for (const date of dates) dayKeys.push({ employeeId, date });
   }
   const dayBounds = dayKeys.map(({ date }) => getDayBoundsUtc(date));
+  // te.id breaks ties between entries with the same started_at (duplicate
+  // entries), so run grouping does not depend on the plan the query gets.
   const dayQuery = pool.query<DayFetchRow & { day_idx: number }>(
     `select d.day_idx::int as day_idx,
             te.id, te.entry_type, te.activity_id, te.started_at, te.ended_at,
@@ -259,13 +305,14 @@ export async function getUnresolvedRunsForRows(
        on te.employee_id = d.employee_id and te.started_at >= d.day_start and te.started_at < d.day_end
      left join row_completion_segments rcs on rcs.time_entry_id = te.id
      where te.deleted_at is null
-     order by d.day_idx, te.started_at asc`,
+     order by d.day_idx, te.started_at asc, te.id asc`,
     [dayKeys.map((k) => k.employeeId), dayBounds.map((b) => b.start), dayBounds.map((b) => b.end)]
   );
 
   // Read alongside the queries above (no extra round trip on the critical
   // path) unless the caller already supplied it.
-  const windowDaysQuery = opts.windowDays !== undefined ? Promise.resolve(opts.windowDays) : getRowReviewWindowDays();
+  const windowDaysQuery =
+    earlyWindowDays !== undefined ? Promise.resolve(earlyWindowDays) : getRowReviewWindowDays();
 
   const [rowInfoRes, empRes, activityRes, { rows: allDayRows }, windowDays] = await Promise.all([
     rowInfoQuery,
@@ -454,11 +501,44 @@ export async function getUnresolvedRunsForRows(
     }
   }
 
-  for (const list of result.values()) {
-    list.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-    assignCycleIndexes(list, windowDays);
+  for (const [key, list] of result) {
+    // A day kept for another pair can hold this pair's visits from before
+    // its cut; they belong to earlier cycles the caller never looks at.
+    const cut = cutByKey.get(key);
+    const kept = cut === undefined ? list : list.filter((c) => c.date >= cut);
+    kept.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    assignCycleIndexes(kept, windowDays);
+    result.set(key, kept);
   }
   return result;
+}
+
+// The earliest work date of a pair's unresolved visits that can still
+// matter to a caller looking at relevantFrom onwards, or null to keep the
+// whole history.
+//
+// Cycles (assignCycleIndexes) break wherever two consecutive candidates'
+// dates are more than windowDays apart (inclusiveDayCount). Candidate dates
+// are a subset of these touch dates, so a gap that wide between two touch
+// dates is also a cycle break between the candidates on either side of it:
+// nothing before it shares a cycle with anything after it. Walking back
+// from the first date at or after relevantFrom to the nearest such gap
+// finds the start of the earliest cycle the caller can see; everything
+// earlier only ever formed separate, earlier cycles.
+//
+// The gap is at least 2 dates even with a 1-day window, so a visit rolled
+// over at midnight (consecutive dates) is never cut in half. Cycle numbers
+// therefore start from 0 at the cut instead of counting the dropped
+// cycles; callers only ever compare them within one result.
+//
+// A pair with no unresolved visit on or after relevantFrom keeps its whole
+// history: it was requested for some other reason, so nothing is assumed.
+export function cutDateForPair(sortedDates: string[], relevantFrom: string, windowDays: number): string | null {
+  let i = sortedDates.findIndex((d) => d >= relevantFrom);
+  if (i <= 0) return null;
+  const gap = Math.max(windowDays, 2);
+  while (i > 0 && inclusiveDayCount(sortedDates[i - 1], sortedDates[i]) <= gap) i--;
+  return i === 0 ? null : sortedDates[i];
 }
 
 // Thin single-pair wrapper, kept for callers that only ever need one pair
