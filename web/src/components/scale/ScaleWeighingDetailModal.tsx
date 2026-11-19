@@ -3,7 +3,7 @@ import { Modal } from "../ui/Modal";
 import { useAuth } from "../../context/AuthContext";
 import { api, ApiError } from "../../lib/api";
 import { uuid } from "../../lib/uuid";
-import { ScaleWeighingDetail, STATUS_LABELS, ScaleWeighingStatus } from "../../lib/scaleWeighingTypes";
+import { BIN_CYCLE_STATUS_LABELS, ScaleWeighingDetail, STATUS_LABELS, ScaleWeighingStatus } from "../../lib/scaleWeighingTypes";
 import { formatDateLongInAppTimezone, formatTimeInAppTimezone } from "../../lib/timezone";
 import { StatusBadge } from "./StatusBadge";
 
@@ -16,6 +16,7 @@ const EVENT_LABELS: Record<string, string> = {
   status: "Assignment",
   late_conflict: "Late claim by another employee (credit unchanged)",
   void: "Credit voided",
+  resolve: "Review resolved by an administrator",
 };
 
 // One weighing: weights, who it was credited to and why, the phone claims
@@ -31,6 +32,36 @@ export function ScaleWeighingDetailModal({ weighingId, onClose, onChanged }: { w
   const [saving, setSaving] = useState(false);
   // One id per open dialog: a double click or a retry is applied once.
   const correctionId = useMemo(() => uuid(), []);
+  const resolutionId = useMemo(() => uuid(), []);
+  const [resolving, setResolving] = useState(false);
+  const [resolveEmployeeId, setResolveEmployeeId] = useState("");
+  const [resolveReason, setResolveReason] = useState("");
+
+  async function reload() {
+    const r = await api<{ weighing: ScaleWeighingDetail }>(`/api/scale-weighings/${weighingId}`);
+    setW(r.weighing);
+  }
+
+  async function submitResolve(e: FormEvent) {
+    e.preventDefault();
+    const cycle = w?.pickingCycle;
+    if (saving || !cycle || cycle === "none" || !resolveEmployeeId || resolveReason.trim().length < 3) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api(`/api/bin-cycles/${cycle.id}/resolve`, {
+        method: "POST",
+        body: JSON.stringify({ requestId: resolutionId, employeeId: resolveEmployeeId, reason: resolveReason.trim() }),
+      });
+      setResolving(false);
+      await reload();
+      onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not resolve this weighing");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   useEffect(() => {
     api<{ weighing: ScaleWeighingDetail }>(`/api/scale-weighings/${weighingId}`)
@@ -59,6 +90,13 @@ export function ScaleWeighingDetailModal({ weighingId, onClose, onChanged }: { w
   }
 
   const canVoid = employee?.securityRole === "Administrator" && w?.status === "credited";
+  const cycle = w?.pickingCycle && w.pickingCycle !== "none" ? w.pickingCycle : null;
+  // A weighed cycle more than one employee chose: an Administrator credits it
+  // to one of them (server/src/lib/binCycles.ts resolveCycle).
+  const canResolve = employee?.securityRole === "Administrator" && w?.status === "needs_review" && !w.isDuplicate && !!cycle && !cycle.resolution;
+  const scanners = cycle
+    ? [...new Map(cycle.scans.map((s) => [s.employeeId, { id: s.employeeId, name: s.employeeName, times: cycle.scans.filter((x) => x.employeeId === s.employeeId).map((x) => x.occurredAt) }])).values()]
+    : [];
 
   return (
     <Modal title={w ? `${w.bin.name} · ${formatTimeInAppTimezone(w.weighedAt, { seconds: false })}` : "Weighing"} onClose={onClose} wide>
@@ -90,6 +128,23 @@ export function ScaleWeighingDetailModal({ weighingId, onClose, onChanged }: { w
             <dd>
               {w.stationName} · received {when(w.receivedAt)}
             </dd>
+            {w.pickingCycle !== undefined && w.pickingCycle !== null && (
+              <>
+                <dt>Picking cycle</dt>
+                <dd>
+                  {w.pickingCycle === "none" ? (
+                    "None: nobody chose this bin on a phone since it was last weighed. Not credited."
+                  ) : (
+                    <>
+                      {BIN_CYCLE_STATUS_LABELS[w.pickingCycle.status]} · started by {w.pickingCycle.employeeName} at {when(w.pickingCycle.openedAt)}
+                      {(w.pickingCycle.reviewReason || w.pickingCycle.closeReason) && (
+                        <div className="field-hint">{w.pickingCycle.closeReason ?? w.pickingCycle.reviewReason}</div>
+                      )}
+                    </>
+                  )}
+                </dd>
+              </>
+            )}
             <dt>Counts toward</dt>
             <dd>
               {w.countsForProduction ? "Production totals" : "Not counted in production totals"}
@@ -109,6 +164,24 @@ export function ScaleWeighingDetailModal({ weighingId, onClose, onChanged }: { w
                   </li>
                 ))}
               </ul>
+            </>
+          )}
+          {cycle && cycle.scans.length > 0 && (
+            <>
+              <h3>Phone scans in this picking cycle</h3>
+              <ul className="scale-weighing-list">
+                {scanners.map((s) => (
+                  <li key={s.id}>
+                    {s.name}: {s.times.map((t) => formatTimeInAppTimezone(t, { seconds: false })).join(", ")}
+                  </li>
+                ))}
+              </ul>
+              {cycle.resolution && (
+                <p className="field-hint">
+                  Resolved by {cycle.resolution.resolvedBy} on {when(cycle.resolution.resolvedAt)}: credited to {cycle.resolution.employeeName} (was{" "}
+                  {statusLabel(cycle.resolution.previousStatus)}). {cycle.resolution.reason}
+                </p>
+              )}
             </>
           )}
           {w.flags.length > 0 && (
@@ -163,6 +236,42 @@ export function ScaleWeighingDetailModal({ weighingId, onClose, onChanged }: { w
             </details>
           )}
 
+          {canResolve && !resolving && (
+            <div className="employee-form-actions">
+              <button type="button" className="scale-void-button" onClick={() => setResolving(true)}>
+                Resolve: choose the employee
+              </button>
+            </div>
+          )}
+          {canResolve && resolving && (
+            <form className="scale-weighing-void" onSubmit={submitResolve}>
+              <p>
+                Credit {kg(w.netKg)} to the employee who filled this bin. Only employees who scanned it in this picking cycle can be chosen. The
+                choice and your reason are recorded; the credit can still be voided later.
+              </p>
+              <fieldset>
+                <legend>Employee</legend>
+                {scanners.map((s) => (
+                  <label key={s.id}>
+                    <input type="radio" name="resolve-employee" value={s.id} checked={resolveEmployeeId === s.id} onChange={() => setResolveEmployeeId(s.id)} />
+                    {s.name}
+                  </label>
+                ))}
+              </fieldset>
+              <label>
+                Reason (required)
+                <textarea value={resolveReason} onChange={(e) => setResolveReason(e.target.value)} rows={2} maxLength={500} required />
+              </label>
+              <div className="employee-form-actions">
+                <button type="button" onClick={() => setResolving(false)} disabled={saving}>
+                  Cancel
+                </button>
+                <button type="submit" className="scale-void-button" disabled={saving || !resolveEmployeeId || resolveReason.trim().length < 3}>
+                  {saving ? "Saving..." : "Credit this employee"}
+                </button>
+              </div>
+            </form>
+          )}
           {canVoid && !voiding && (
             <div className="employee-form-actions">
               <button type="button" className="scale-void-button" onClick={() => setVoiding(true)}>

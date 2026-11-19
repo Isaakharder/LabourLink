@@ -56,3 +56,38 @@ describe("foldPendingEventsOntoMe", () => {
     expect(result).toBe(baseMe);
   });
 });
+
+describe("applyLocalEventToMe: bin_rescan (picking cycles)", () => {
+  it("changes nothing on the phone: same job, row, bin and start time", async () => {
+    const { applyLocalEventToMe } = await import("./localSessionState");
+    const working = {
+      employee: { id: "emp-1", firstName: "Ruben", lastName: "O", preferredLanguage: null, securityRole: "Employee" },
+      status: "work",
+      currentActivity: {
+        id: "act-1",
+        name: "Picking",
+        startedAt: "2026-11-19T12:00:00Z",
+        accumulatedWorkedSecondsBeforeCurrentEntry: 0,
+        minimumDurationMinutes: 0,
+        row: { id: "row-1", label: "Row 7" },
+        carrier: { id: "bin-43", name: "Bin 43" },
+      },
+      since: null,
+      previousActivity: null,
+      recentJobs: [],
+      features: { binRescan: true },
+    } as unknown as MeResponse;
+    const rescan = {
+      deviceId: "d",
+      employeeId: "emp-1",
+      eventType: "bin_rescan",
+      occurredAtUtc: "2026-11-19T13:00:00Z",
+      activityId: "act-1",
+      carrierId: "bin-43",
+      answers: [{ questionId: "q", carrierId: "bin-43" }],
+      clientEventId: "e",
+      deviceSeq: 9,
+    } as never;
+    expect(applyLocalEventToMe(working, rescan, {})).toEqual(working);
+  });
+});

@@ -3,6 +3,7 @@
 import { PoolClient } from "pg";
 import { pool } from "../db";
 import { Claim, cycleStart, decide, WeighingFacts } from "./scaleMatchingRule";
+import { isTracked, lastStopBefore, reconcileBinCyclesLocked, reconcileCyclesAfterPhoneSync, sweepBinCycles } from "./binCycles";
 
 export * from "./scaleMatchingRule";
 
@@ -87,7 +88,18 @@ export async function reconcileWeighingLocked(client: PoolClient, weighingId: st
     [weighingId]
   );
   const row = rows[0];
-  if (!row || (row.status !== "pending" && row.status !== "credited")) return;
+  if (!row) return;
+  // Picking cycles (binCycles.ts) decide every weighing inside a tracking
+  // period; weighings outside one keep the rule below.
+  if (await isTracked(client, new Date(row.weighed_at))) {
+    await reconcileBinCyclesLocked(client, row.carrier_id, now);
+    return;
+  }
+  if (row.status !== "pending" && row.status !== "credited") return;
+  // After cycle tracking was stopped, never use a phone scan from before the
+  // stop: those scans belonged to picking cycles (closed at the stop), and
+  // the bin may have been weighed or emptied since.
+  const stop = await lastStopBefore(client, new Date(row.weighed_at));
 
   const facts: WeighingFacts = {
     id: row.id,
@@ -96,7 +108,8 @@ export async function reconcileWeighingLocked(client: PoolClient, weighingId: st
     current: row.status,
     currentEmployeeId: row.employee_id,
   };
-  const claims = await loadClaims(client, row.carrier_id, new Date(cycleStart(facts)), new Date(facts.weighedAt));
+  const start = Math.max(cycleStart(facts), stop ? stop.getTime() : -Infinity);
+  const claims = await loadClaims(client, row.carrier_id, new Date(start), new Date(facts.weighedAt));
   const d = decide(facts, claims, now.getTime());
   const byId = new Map(claims.map((c) => [c.id, c]));
 
@@ -192,8 +205,9 @@ export function carrierIdsInAnswers(answers: unknown): string[] {
 // weighing whose cycle it falls in (the bin's first weighing at or after the
 // event). Runs after the sync response is sent, each weighing in its own
 // transaction; it never throws, so it can't affect phone sync.
-export async function reconcileAfterPhoneSync(deviceId: string, clientEventIds: string[]): Promise<void> {
+export async function reconcileAfterPhoneSync(deviceId: string, clientEventIds: string[], employeeId: string | null = null): Promise<void> {
   if (!scaleMatchingEnabled() || clientEventIds.length === 0) return;
+  await reconcileCyclesAfterPhoneSync(deviceId, clientEventIds, employeeId);
   try {
     const { rows } = await pool.query(
       `select distinct w.id
@@ -225,6 +239,7 @@ export async function reconcileAfterPhoneSync(deviceId: string, clientEventIds: 
 // weighing is re-evaluated. Never throws.
 export async function sweepPendingWeighings(): Promise<number> {
   if (!scaleMatchingEnabled()) return 0;
+  await sweepBinCycles();
   try {
     const { rows } = await pool.query(`select id from scale_weighings where status = 'pending' order by weighed_at limit 500`);
     await reconcileWeighings(rows.map((r) => r.id));
