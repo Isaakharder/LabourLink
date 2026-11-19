@@ -77,10 +77,24 @@ export interface ScaleWeighingDetail extends Omit<ScaleWeighingRow, "flagCount">
     closeReason: string | null;
     scans: { employeeId: string; employeeName: string; occurredAt: string; receivedAt: string }[];
     resolution: { employeeName: string; resolvedBy: string; resolvedAt: string; reason: string; previousStatus: string } | null;
+    // Other employees' cycles superseded before this weighing (075).
+    supersededCycles?: SupersededCycle[];
   };
 }
 
-export type BinCycleStatus = "filling" | "awaiting_weighing" | "needs_review" | "closed" | "closed_unweighed";
+export interface SupersededCycle {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  openedAt: string;
+  lastScanAt: string;
+  supersededAt: string;
+  reviewStatus: "open" | "confirmed" | "reinstated";
+  reason: string | null;
+  scans: { occurredAt: string; receivedAt: string }[];
+}
+
+export type BinCycleStatus = "filling" | "awaiting_weighing" | "needs_review" | "closed" | "closed_unweighed" | "superseded";
 
 export const BIN_CYCLE_STATUS_LABELS: Record<BinCycleStatus, string> = {
   filling: "Filling",
@@ -88,6 +102,7 @@ export const BIN_CYCLE_STATUS_LABELS: Record<BinCycleStatus, string> = {
   needs_review: "Needs review",
   closed: "Weighed / closed",
   closed_unweighed: "Closed without weighing",
+  superseded: "Superseded: not weighed",
 };
 
 export interface BinCycle {
@@ -104,6 +119,9 @@ export interface BinCycle {
   closedAt: string | null;
   closeReason: string | null;
   closedBy: string | null;
+  supersededByCycleId?: string | null;
+  reviewStatus?: "open" | "confirmed" | "reinstated" | null;
+  settled?: boolean;
 }
 
 export const STATUS_LABELS: Record<ScaleWeighingStatus, string> = {

@@ -19,6 +19,9 @@ export function PickingCyclesPanel({ onChanged }: { onChanged: () => void }) {
   const [closing, setClosing] = useState<{ cycle: BinCycle; requestId: string } | null>(null);
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
+  // Superseded cycles (075) waiting for an administrator's review.
+  const [toReview, setToReview] = useState<BinCycle[]>([]);
+  const [confirming, setConfirming] = useState<{ cycle: BinCycle; requestId: string } | null>(null);
 
   const load = useCallback(() => {
     api<{ trackingStartedAt: string | null; trackingEverStarted?: boolean; cycles: BinCycle[] }>(`/api/bin-cycles?state=open`)
@@ -27,6 +30,9 @@ export function PickingCyclesPanel({ onChanged }: { onChanged: () => void }) {
         setError(null);
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : "Could not load the picking cycles"));
+    api<{ cycles: BinCycle[] }>(`/api/bin-cycles?state=review`)
+      .then((d) => setToReview((d?.cycles ?? []).filter((c) => c.status === "superseded")))
+      .catch(() => setToReview([]));
   }, []);
   useEffect(() => {
     load();
@@ -45,6 +51,27 @@ export function PickingCyclesPanel({ onChanged }: { onChanged: () => void }) {
       onChanged();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not close this picking cycle");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function submitConfirm(e: FormEvent) {
+    e.preventDefault();
+    if (!confirming || saving || reason.trim().length < 3) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api(`/api/bin-cycles/${confirming.cycle.id}/confirm-superseded`, {
+        method: "POST",
+        body: JSON.stringify({ requestId: confirming.requestId, reason: reason.trim() }),
+      });
+      setConfirming(null);
+      setReason("");
+      load();
+      onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not confirm this cycle");
     } finally {
       setSaving(false);
     }
@@ -121,6 +148,67 @@ export function PickingCyclesPanel({ onChanged }: { onChanged: () => void }) {
             </button>
             <button type="submit" className="danger" disabled={saving || reason.trim().length < 3}>
               {saving ? "Closing..." : "Close cycle"}
+            </button>
+          </div>
+        </form>
+      )}
+      {toReview.length > 0 && (
+        <>
+          <h2>Superseded cycles to review ({toReview.length})</h2>
+          <p className="field-hint">
+            Another employee started using these bins before they were weighed, so the latest cycle got the credit. To credit one of these
+            instead, open the bin's weighing above and choose "Credit this cycle instead".
+          </p>
+          <div className="scale-weighings-table-wrap">
+            <table className="employees-table scale-weighings-table">
+              <thead>
+                <tr>
+                  <th>Bin</th>
+                  <th>Employee</th>
+                  <th>Started</th>
+                  <th>Superseded</th>
+                  <th>Weighed?</th>
+                  {isAdmin && <th />}
+                </tr>
+              </thead>
+              <tbody>
+                {toReview.map((c) => (
+                  <tr key={c.id}>
+                    <td>{c.bin.name}</td>
+                    <td>{c.employee.name}</td>
+                    <td>{when(c.openedAt)}</td>
+                    <td>{c.closedAt ? when(c.closedAt) : ""}</td>
+                    <td>{c.settled ? "Yes" : "Not yet"}</td>
+                    {isAdmin && (
+                      <td>
+                        <button type="button" onClick={() => { setConfirming({ cycle: c, requestId: uuid() }); setReason(""); }}>
+                          Confirm superseded
+                        </button>
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      {confirming && (
+        <form className="scale-weighing-void" onSubmit={submitConfirm}>
+          <p>
+            Confirm that {confirming.cycle.employee.name}'s cycle on {confirming.cycle.bin.name} really was superseded (the bin was emptied and
+            reused). Nobody's credit changes.
+          </p>
+          <label>
+            Reason (required)
+            <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} maxLength={500} required />
+          </label>
+          <div className="modal-actions">
+            <button type="button" onClick={() => setConfirming(null)} disabled={saving}>
+              Cancel
+            </button>
+            <button type="submit" disabled={saving || reason.trim().length < 3}>
+              {saving ? "Saving..." : "Confirm"}
             </button>
           </div>
         </form>

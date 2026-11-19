@@ -17,6 +17,7 @@ const EVENT_LABELS: Record<string, string> = {
   late_conflict: "Late claim by another employee (credit unchanged)",
   void: "Credit voided",
   resolve: "Review resolved by an administrator",
+  reassign: "Credit moved by an administrator to an earlier picking cycle",
 };
 
 // One weighing: weights, who it was credited to and why, the phone claims
@@ -33,6 +34,30 @@ export function ScaleWeighingDetailModal({ weighingId, onClose, onChanged }: { w
   // One id per open dialog: a double click or a retry is applied once.
   const correctionId = useMemo(() => uuid(), []);
   const resolutionId = useMemo(() => uuid(), []);
+  // Review of a superseded cycle: which one, what, and one request id per open form.
+  const [review, setReview] = useState<{ cycleId: string; employeeName: string; action: "reinstate" | "confirm"; requestId: string } | null>(null);
+  const [reviewReason, setReviewReason] = useState("");
+
+  async function submitReview(e: FormEvent) {
+    e.preventDefault();
+    if (saving || !review || reviewReason.trim().length < 3) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api(`/api/bin-cycles/${review.cycleId}/${review.action === "reinstate" ? "reinstate" : "confirm-superseded"}`, {
+        method: "POST",
+        body: JSON.stringify({ requestId: review.requestId, reason: reviewReason.trim() }),
+      });
+      setReview(null);
+      setReviewReason("");
+      await reload();
+      onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not save the review");
+    } finally {
+      setSaving(false);
+    }
+  }
   const [resolving, setResolving] = useState(false);
   const [resolveEmployeeId, setResolveEmployeeId] = useState("");
   const [resolveReason, setResolveReason] = useState("");
@@ -181,6 +206,65 @@ export function ScaleWeighingDetailModal({ weighingId, onClose, onChanged }: { w
                   Resolved by {cycle.resolution.resolvedBy} on {when(cycle.resolution.resolvedAt)}: credited to {cycle.resolution.employeeName} (was{" "}
                   {statusLabel(cycle.resolution.previousStatus)}). {cycle.resolution.reason}
                 </p>
+              )}
+            </>
+          )}
+          {cycle && (cycle.supersededCycles?.length ?? 0) > 0 && (
+            <>
+              <h3>Earlier picking cycles superseded before this weighing</h3>
+              <p className="field-hint">
+                Another employee started using the bin before it was weighed, so these cycles got no weighing or credit. The latest cycle was
+                credited.
+              </p>
+              <ul className="scale-weighing-list">
+                {cycle.supersededCycles!.map((sc) => (
+                  <li key={sc.id}>
+                    <strong>{sc.employeeName}</strong>: scans {sc.scans.map((x) => formatTimeInAppTimezone(x.occurredAt, { seconds: false })).join(", ")}
+                    <span className="field-hint">
+                      {" "}
+                      · superseded {when(sc.supersededAt)} · {sc.reviewStatus === "open" ? "to review" : sc.reviewStatus}
+                    </span>
+                    {employee?.securityRole === "Administrator" && !review && (
+                      <span className="employee-form-actions">
+                        {w.status === "credited" && (
+                          <button
+                            type="button"
+                            className="scale-void-button"
+                            onClick={() => setReview({ cycleId: sc.id, employeeName: sc.employeeName, action: "reinstate", requestId: uuid() })}
+                          >
+                            Credit this cycle instead
+                          </button>
+                        )}
+                        {sc.reviewStatus === "open" && (
+                          <button type="button" onClick={() => setReview({ cycleId: sc.id, employeeName: sc.employeeName, action: "confirm", requestId: uuid() })}>
+                            Confirm superseded
+                          </button>
+                        )}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              {review && (
+                <form className="scale-weighing-void" onSubmit={submitReview}>
+                  <p>
+                    {review.action === "reinstate"
+                      ? `Move this weighing's credit (${kg(w.netKg)}) to ${review.employeeName}. The current cycle becomes superseded. Recorded with your reason; the credit can still be voided later.`
+                      : `Confirm that ${review.employeeName}'s cycle really was superseded (the bin was emptied and reused).`}
+                  </p>
+                  <label>
+                    Reason (required)
+                    <textarea value={reviewReason} onChange={(e) => setReviewReason(e.target.value)} rows={2} maxLength={500} required />
+                  </label>
+                  <div className="employee-form-actions">
+                    <button type="button" onClick={() => setReview(null)} disabled={saving}>
+                      Cancel
+                    </button>
+                    <button type="submit" className="scale-void-button" disabled={saving || reviewReason.trim().length < 3}>
+                      {saving ? "Saving..." : review.action === "reinstate" ? `Credit ${review.employeeName}` : "Confirm"}
+                    </button>
+                  </div>
+                </form>
               )}
             </>
           )}

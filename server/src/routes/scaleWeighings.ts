@@ -132,7 +132,7 @@ async function loadDetail(id: string) {
   );
   const w = rows[0];
   if (!w) return null;
-  const [history, claims, flags, corrections, cycle] = await Promise.all([
+  const [history, claims, flags, corrections, cycle, superseded] = await Promise.all([
     pool.query(
       `select ev.kind, ev.from_status, ev.to_status, ev.reason, ev.created_at,
               ${fullName("e")} as employee_name, ${fullName("a")} as actor_name
@@ -185,6 +185,23 @@ async function loadDetail(id: string) {
        left join employees rb on rb.id = bc.resolved_by_employee_id`,
       [id, w.weighed_at]
     ),
+    // Earlier picking cycles (075) superseded before this weighing: every
+    // cycle whose superseded-by chain leads to the cycle this weighing closed.
+    pool.query(
+      `with recursive chain as (
+         select id from bin_cycles where weighing_id = $1
+         union
+         select c.id from bin_cycles c join chain on c.superseded_by_cycle_id = chain.id
+       )
+       select bc.id, bc.status, bc.review_status, bc.opened_at, bc.last_scan_at, bc.closed_at, bc.close_reason, bc.finalized_at,
+              bc.employee_id, ${fullName("e")} as employee_name,
+              coalesce((select json_agg(json_build_object('occurredAt', s.occurred_at, 'receivedAt', s.received_at) order by s.occurred_at)
+                        from bin_scans s where s.cycle_id = bc.id), '[]') as scans
+       from bin_cycles bc join employees e on e.id = bc.employee_id
+       where bc.id in (select id from chain) and bc.status = 'superseded'
+       order by bc.opened_at`,
+      [id]
+    ),
   ]);
   const cy = cycle.rows[0];
   const tracked = cy?.tracked === true;
@@ -224,6 +241,19 @@ async function loadDetail(id: string) {
             closeReason: cy.close_reason,
             // Every phone scan in the cycle: who chose the bin, and when.
             scans: cy.scans,
+            // Other employees' cycles this one superseded (the bin was reused
+            // before it was weighed), for administrator review.
+            supersededCycles: superseded.rows.map((r) => ({
+              id: r.id,
+              employeeId: r.employee_id,
+              employeeName: r.employee_name,
+              openedAt: r.opened_at,
+              lastScanAt: r.last_scan_at,
+              supersededAt: r.closed_at,
+              reviewStatus: r.review_status,
+              reason: r.close_reason,
+              scans: r.scans,
+            })),
             resolution: cy.resolved_at
               ? {
                   employeeName: cy.resolved_employee_name,

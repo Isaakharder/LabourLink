@@ -3,11 +3,13 @@
 //   GET  /api/bin-cycles?state=open|recent&carrierId=   cycles, open ones first (Administrator, Manager)
 //   GET  /api/bin-cycles/:id                            one cycle with its scans and history
 //   POST /api/bin-cycles/:id/close                      close without weighing (Administrator)
+//   POST /api/bin-cycles/:id/reinstate                  credit a superseded cycle instead (Administrator)
+//   POST /api/bin-cycles/:id/confirm-superseded         confirm a superseded cycle (Administrator)
 //   POST /api/bin-cycles/:id/resolve                    credit a needs-review cycle's weighing to one of its scanners (Administrator)
 import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
-import { closeCycleWithoutWeighing, OPEN_STATUSES, resolveCycle } from "../lib/binCycles";
+import { closeCycleWithoutWeighing, OPEN_STATUSES, resolveCycle, reviewSupersededCycle } from "../lib/binCycles";
 import { requireAuth, requireRole } from "../middleware/auth";
 
 const router = Router();
@@ -33,6 +35,9 @@ function cycleJson(r: any) {
     closedAt: r.closed_at,
     closeReason: r.close_reason,
     closedBy: r.closed_by_name || null,
+    supersededByCycleId: r.superseded_by_cycle_id ?? null,
+    reviewStatus: r.review_status ?? null,
+    settled: r.status !== "superseded" || !!r.finalized_at,
     resolution: r.resolved_at
       ? { employeeId: r.resolved_employee_id, employeeName: r.resolved_employee_name, resolvedBy: r.resolved_by_name, resolvedAt: r.resolved_at, reason: r.resolution_reason, previousStatus: r.resolution_previous_status }
       : null,
@@ -56,7 +61,9 @@ router.get(
   "/",
   requireRole("Administrator", "Manager"),
   asyncHandler(async (req, res) => {
-    const state = req.query.state === "recent" ? "recent" : "open";
+    // open: open cycles; recent: plus the last 2 days' closed ones; review:
+    // superseded cycles waiting for an administrator's review.
+    const state = req.query.state === "recent" ? "recent" : req.query.state === "review" ? "review" : "open";
     const carrierId = typeof req.query.carrierId === "string" && UUID_RE.test(req.query.carrierId) ? req.query.carrierId : null;
     const { rows: t } = await pool.query(
       `select (select started_at from bin_cycle_tracking where stopped_at is null) as running_since,
@@ -65,10 +72,11 @@ router.get(
     const { rows } = await pool.query(
       `${SELECT}
        where ($1::uuid is null or bc.carrier_id = $1)
-         and (bc.status = any($2::text[]) or ($3 and bc.closed_at > now() - interval '2 days'))
+         and (case when $4 then bc.status = 'superseded' and bc.review_status = 'open'
+                   else bc.status = any($2::text[]) or ($3 and bc.closed_at > now() - interval '2 days') end)
        order by (bc.status = any($2::text[])) desc, coalesce(bc.closed_at, bc.last_scan_at) desc
        limit 500`,
-      [carrierId, OPEN_STATUSES, state === "recent"]
+      [carrierId, OPEN_STATUSES, state === "recent", state === "review"]
     );
     // trackingStartedAt: the running period's start (null while stopped or never started).
     res.json({ trackingStartedAt: t[0].running_since ?? null, trackingEverStarted: t[0].ever_started, cycles: rows.map(cycleJson) });
@@ -131,6 +139,25 @@ router.post(
     res.json({ cycle: cycleJson(rows[0]), replay: r.replay });
   })
 );
+
+for (const [path, action] of [["/:id/reinstate", "reinstate"], ["/:id/confirm-superseded", "confirm"]] as const) {
+  router.post(
+    path,
+    requireRole("Administrator"),
+    asyncHandler(async (req, res) => {
+      if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: "Invalid cycle id" });
+      const body = (req.body ?? {}) as { requestId?: unknown; reason?: unknown };
+      const requestId = typeof body.requestId === "string" && UUID_RE.test(body.requestId) ? body.requestId : null;
+      const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+      if (!requestId) return res.status(400).json({ error: "requestId must be a UUID" });
+      if (reason.length < 3) return res.status(400).json({ error: "A reason is required", errors: { reason: "Say why" } });
+      const r = await reviewSupersededCycle(req.params.id, requestId, action, reason.slice(0, 500), req.employee!.id);
+      if (!r.ok) return res.status(r.status).json({ error: r.error, code: r.code });
+      const { rows } = await pool.query(`${SELECT} where bc.id = $1`, [req.params.id]);
+      res.json({ cycle: cycleJson(rows[0]), replay: r.replay, weighingId: r.weighingId ?? null });
+    })
+  );
+}
 
 router.post(
   "/:id/resolve",

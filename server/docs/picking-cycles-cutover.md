@@ -1,6 +1,6 @@
 # Bin picking cycles: cutover, stop and restart
 
-The rules are in `server/src/lib/binCycles.ts` and the tables in `migrations/074_bin_picking_cycles.sql`.
+The rules are in `server/src/lib/binCycles.ts`. The tables are in `migrations/074_bin_picking_cycles.sql` (applied 2026-11-19) and `migrations/075_bin_cycle_supersession.sql` (superseded cycles).
 
 Every step that changes production needs the owner's separate approval. Keep employee credits disabled (`scale_stations.credits_enabled = false`) throughout.
 
@@ -9,6 +9,7 @@ Every step that changes production needs the owner's separate approval. Keep emp
 | Step | Effect on production |
 |---|---|
 | Migration 074 applied | Four new, empty tables. Phone events may now also be `bin_rescan`. No existing row changes. |
+| Migration 075 applied | Adds the superseded cycle status, its link and review columns, and `bin_cycle_reviews`. No existing row changes. Apply it **before** merging the 075 PR. |
 | Server + web deployed | Nothing changes yet: with no tracking period, the existing matching rule runs unchanged, and phones are not asked to send `bin_rescan`. |
 | Phone app 1.9.1 (versionCode 16) | Re-scanning the bin you're already on sends `bin_rescan`, but only while the server says picking-cycle tracking is running (`/api/mobile/me` `features.binRescan`). Otherwise it shows "Already using this bin", as before. |
 | Station 0.4.3 installed | Shows "Not credited: already weighed" when the server reports `noPickingCycle`. Against an older server the flag is absent and nothing changes. |
@@ -50,23 +51,30 @@ Every step that changes production needs the owner's separate approval. Keep emp
 - **The 57 bins with unused phone scans from before the cutover:** those scans never count. Every bin starts with no open cycle.
 - **Bin 43's 4.0 kg test weighing:** voiding it is a separate, approved action. Use "Void this credit" on the Scale Weighings page.
 
-## Resolving a needs-review cycle
+## Bins reused before they were weighed (075)
 
-**When it happens:** a weighed cycle that more than one employee scanned goes to **Needs review**, and nobody is credited.
+A bin can be filled, packed and emptied without being weighed, then reused by someone else.
 
-**How to resolve it (Administrator):**
-1. Open the weighing on Scale Weighings. It shows every scan in the cycle: who and when.
-2. Choose **Resolve: choose the employee**, pick one of those employees, and give a reason.
+**The rule:**
+- Consecutive scans by the same employee (row changes, repeat scans) stay one cycle. Resuming after a break isn't a scan at all.
+- When a **different employee** starts using the bin, the earlier cycle becomes **Superseded: not weighed**. It gets no weighing and no credit, keeps all its scans, and is flagged for review. A new cycle opens for the new employee.
+- The bin's next weighing credits the **latest** cycle before it, by phone and station timestamps, not by upload order.
+- Example: Patrick fills Bin 56 on 18 Nov. It's emptied unweighed. Ruben fills it on 19 Nov and it's weighed. Ruben is credited, and Patrick's cycle is superseded and flagged.
+- If a phone scan from another employee arrives only after the weighing was credited, it never moves the credit. It's recorded as a superseded cycle flagged for review, and as a late conflict on the weighing.
 
-**What it does:**
-- The weighing is credited exactly once.
-- The cycle records who resolved it, when, why and the previous status.
-- Repeating the same request changes nothing.
-- A resolved cycle can't be resolved again.
-- Late phone scans and background reconciliation never change the credit.
-- The credit can still be voided.
+**Review (Administrator):**
+- **Where:** Scale Weighings → **Superseded cycles to review**, or the weighing's detail (**Earlier picking cycles superseded before this weighing**).
+- **Confirm superseded:** it really was a reused bin. Nobody's credit changes.
+- **Credit this cycle instead:** for an accidental or mistaken scan.
+  - The weighing's credit moves to that cycle's employee, once, in one transaction.
+  - The cycle that had it becomes superseded.
+  - The scans behind the credit are replaced.
+  - It's recorded with who did it, when, the previous and new employee, and why.
+  - Repeating the request changes nothing.
+  - It works for any superseded cycle of that weighing, including undoing a mistaken correction.
+  - It's only possible after the bin is weighed, and not for a voided credit. The credit can still be voided afterwards.
 
-**What can't be resolved:** an open (not yet weighed) needs-review cycle. Wait for its weighing, or use **Close without weighing** if the bin was emptied.
+**Needs review (before 075):** cycles with more than one employee can no longer be created. Any left from before 075 are still resolved with **Resolve: choose the employee**.
 
 ## Stopping tracking (rollback) and restarting
 
@@ -113,6 +121,6 @@ Every step that changes production needs the owner's separate approval. Keep emp
 
 ## Known limits
 
-- **Needs review:** a cycle with more than one employee is credited only after an administrator resolves it. Open ones can't be resolved until weighed.
+- **Accidental scans:** an accidental scan by another employee is the latest cycle unless the real picker scans again (any row change or bin scan does). Until an administrator corrects it, the accidental scanner gets the credit, and the real picker's cycle is flagged for review.
 - **Clock problems:** phone scans with a flagged phone clock never open a cycle, the same as before.
-- **Shared bins:** two pickers deliberately sharing one bin always need a resolution, which credits all of the bin's weight to one of them.
+- **Shared bins:** two pickers deliberately sharing one bin: the one who scanned last gets all of the bin's weight, and the other's cycle is flagged for review.
