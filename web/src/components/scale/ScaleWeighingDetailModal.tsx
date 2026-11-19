@@ -3,7 +3,7 @@ import { Modal } from "../ui/Modal";
 import { useAuth } from "../../context/AuthContext";
 import { api, ApiError } from "../../lib/api";
 import { uuid } from "../../lib/uuid";
-import { ScaleWeighingDetail, STATUS_LABELS, ScaleWeighingStatus } from "../../lib/scaleWeighingTypes";
+import { BIN_CYCLE_STATUS_LABELS, ScaleWeighingDetail, STATUS_LABELS, ScaleWeighingStatus } from "../../lib/scaleWeighingTypes";
 import { formatDateLongInAppTimezone, formatTimeInAppTimezone } from "../../lib/timezone";
 import { StatusBadge } from "./StatusBadge";
 
@@ -90,6 +90,23 @@ export function ScaleWeighingDetailModal({ weighingId, onClose, onChanged }: { w
             <dd>
               {w.stationName} · received {when(w.receivedAt)}
             </dd>
+            {w.pickingCycle !== undefined && w.pickingCycle !== null && (
+              <>
+                <dt>Picking cycle</dt>
+                <dd>
+                  {w.pickingCycle === "none" ? (
+                    "None: nobody chose this bin on a phone since it was last weighed. Not credited."
+                  ) : (
+                    <>
+                      {BIN_CYCLE_STATUS_LABELS[w.pickingCycle.status]} · started by {w.pickingCycle.employeeName} at {when(w.pickingCycle.openedAt)}
+                      {(w.pickingCycle.reviewReason || w.pickingCycle.closeReason) && (
+                        <div className="field-hint">{w.pickingCycle.closeReason ?? w.pickingCycle.reviewReason}</div>
+                      )}
+                    </>
+                  )}
+                </dd>
+              </>
+            )}
             <dt>Counts toward</dt>
             <dd>
               {w.countsForProduction ? "Production totals" : "Not counted in production totals"}

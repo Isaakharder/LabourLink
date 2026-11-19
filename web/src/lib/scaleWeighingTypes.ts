@@ -65,6 +65,43 @@ export interface ScaleWeighingDetail extends Omit<ScaleWeighingRow, "flagCount">
     performedAt: string;
     performedBy: string;
   }[];
+  // Picking cycles (server 074): null = decided before cycle tracking
+  // started; "none" = weighed again with no phone scan since, not credited.
+  pickingCycle?: null | "none" | {
+    id: string;
+    status: BinCycleStatus;
+    employeeName: string;
+    openedAt: string;
+    lastScanAt: string;
+    reviewReason: string | null;
+    closeReason: string | null;
+  };
+}
+
+export type BinCycleStatus = "filling" | "awaiting_weighing" | "needs_review" | "closed" | "closed_unweighed";
+
+export const BIN_CYCLE_STATUS_LABELS: Record<BinCycleStatus, string> = {
+  filling: "Filling",
+  awaiting_weighing: "Awaiting weighing",
+  needs_review: "Needs review",
+  closed: "Weighed / closed",
+  closed_unweighed: "Closed without weighing",
+};
+
+export interface BinCycle {
+  id: string;
+  bin: { id: string; name: string };
+  status: BinCycleStatus;
+  employee: { id: string; name: string };
+  openedAt: string;
+  lastScanAt: string;
+  awaitingSince: string | null;
+  reviewReason: string | null;
+  scanCount: number;
+  weighing: { id: string; weighedAt: string; netKg: number; status: ScaleWeighingStatus } | null;
+  closedAt: string | null;
+  closeReason: string | null;
+  closedBy: string | null;
 }
 
 export const STATUS_LABELS: Record<ScaleWeighingStatus, string> = {

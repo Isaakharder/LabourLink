@@ -132,7 +132,7 @@ async function loadDetail(id: string) {
   );
   const w = rows[0];
   if (!w) return null;
-  const [history, claims, flags, corrections] = await Promise.all([
+  const [history, claims, flags, corrections, cycle] = await Promise.all([
     pool.query(
       `select ev.kind, ev.from_status, ev.to_status, ev.reason, ev.created_at,
               ${fullName("e")} as employee_name, ${fullName("a")} as actor_name
@@ -168,7 +168,18 @@ async function loadDetail(id: string) {
        where co.weighing_id = $1 order by co.performed_at`,
       [id]
     ),
+    // Picking cycle (074) this weighing closed, if any.
+    pool.query(
+      `select bc.id, bc.status, bc.opened_at, bc.last_scan_at, bc.review_reason, bc.close_reason, ${fullName("e")} as employee_name,
+              (select t.started_at from bin_cycle_tracking t where t.id) as tracking_started_at
+       from (select $1::uuid as wid) x
+       left join bin_cycles bc on bc.weighing_id = x.wid
+       left join employees e on e.id = bc.employee_id`,
+      [id]
+    ),
   ]);
+  const cy = cycle.rows[0];
+  const tracked = cy?.tracking_started_at ? new Date(w.weighed_at).getTime() > new Date(cy.tracking_started_at).getTime() : false;
   return {
     id: w.id,
     stationWeighingId: w.station_weighing_id,
@@ -190,6 +201,13 @@ async function loadDetail(id: string) {
     pendingUntil: w.status === "pending" ? w.pending_until : null,
     resolvedAt: w.resolved_at,
     stationName: w.station_name,
+    // null: decided before picking cycles started. "none": no cycle (bin
+    // weighed again with no phone scan since), never credited.
+    pickingCycle: !tracked
+      ? null
+      : cy.id
+        ? { id: cy.id, status: cy.status, employeeName: cy.employee_name, openedAt: cy.opened_at, lastScanAt: cy.last_scan_at, reviewReason: cy.review_reason, closeReason: cy.close_reason }
+        : "none",
     history: history.rows.map((h) => ({
       kind: h.kind,
       fromStatus: h.from_status,

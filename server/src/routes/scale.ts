@@ -130,19 +130,27 @@ export function parseWeighing(body: unknown): { ok: true; value: WeighingInput }
 async function outcome(db: PoolClient | typeof pool, stationId: string, stationWeighingIds: string[]) {
   const { rows } = await db.query(
     `select w.station_weighing_id, w.status, w.pending_until, w.credits_live,
-            case when w.employee_id is not null then trim(e.first_name || ' ' || coalesce(e.last_name, '')) end as employee_name
+            case when w.employee_id is not null then trim(e.first_name || ' ' || coalesce(e.last_name, '')) end as employee_name,
+            (t.started_at is not null and w.weighed_at > t.started_at and c.id is null and not w.is_duplicate
+              and w.status in ('pending', 'expired')) as no_picking_cycle
      from scale_weighings w
      left join employees e on e.id = w.employee_id
+     left join bin_cycles c on c.weighing_id = w.id
+     left join bin_cycle_tracking t on t.id
      where w.station_id = $1 and w.station_weighing_id = any($2::uuid[])`,
     [stationId, stationWeighingIds]
   );
-  const out: Record<string, { status: string; employeeName: string | null; pendingUntil: string | null; creditsLive: boolean }> = {};
+  const out: Record<string, { status: string; employeeName: string | null; pendingUntil: string | null; creditsLive: boolean; noPickingCycle: boolean }> = {};
   for (const r of rows) {
     out[r.station_weighing_id] = {
       status: r.status,
       employeeName: r.employee_name ?? null,
       pendingUntil: r.status === "pending" ? new Date(r.pending_until).toISOString() : null,
       creditsLive: r.credits_live,
+      // Picking cycles: nobody has chosen this bin on a phone since it was
+      // last weighed, so this weighing is not credited (unless a delayed
+      // phone scan dated before it arrives within 24 h).
+      noPickingCycle: r.no_picking_cycle === true,
     };
   }
   return out;
@@ -243,7 +251,9 @@ router.post(
         reason: reviewReason,
         detail: { station: station.name, creditsLive: station.creditsEnabled },
       });
-      if (!reviewReason && scaleMatchingEnabled()) await reconcileWeighingLocked(client, id);
+      // Also for a weighing held for review: under picking cycles it still
+      // closes the bin's open cycle (nobody is credited for it).
+      if (scaleMatchingEnabled()) await reconcileWeighingLocked(client, id);
       await client.query("commit");
 
       const result = await outcome(pool, station.id, [w.stationWeighingId]);

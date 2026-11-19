@@ -5,6 +5,7 @@ import { ScaleWeighingDetailModal } from "../../components/scale/ScaleWeighingDe
 import { api, ApiError } from "../../lib/api";
 import { ScaleWeighingDay } from "../../lib/scaleWeighingTypes";
 import { StatusBadge } from "../../components/scale/StatusBadge";
+import { PickingCyclesPanel } from "../../components/scale/PickingCyclesPanel";
 import { addCalendarDays, formatDateLong, formatTimeInAppTimezone, todayInAppTimezone } from "../../lib/timezone";
 
 const STATUS_FILTERS: { value: string; label: string }[] = [
@@ -165,6 +166,7 @@ export function ScaleWeighingsPage() {
           </div>
         )}
       </section>
+      <PickingCyclesPanel onChanged={load} />
       {openId && (
         <ScaleWeighingDetailModal
           weighingId={openId}

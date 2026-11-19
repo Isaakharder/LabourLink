@@ -28,6 +28,7 @@ import {
   validateActivityAndAnswers,
 } from "../lib/activitySelection";
 import { carrierIdsInAnswers, reconcileAfterPhoneSync } from "../lib/scaleMatching";
+import { reconcileCyclesAfterPhoneSync } from "../lib/binCycles";
 
 const router = Router();
 router.use(asyncHandler(requireDevice));
@@ -1897,6 +1898,7 @@ router.post(
     // Accepted bin choices in this batch, for scale weighing matching once
     // the response is sent (see the end of this handler).
     const acceptedBinChoices: string[] = [];
+    let acceptedAny = false; // any accepted event may move this employee's bin to awaiting weighing
 
     for (const event of valid) {
       const existing = await pool.query(
@@ -1987,6 +1989,7 @@ router.post(
         }
         await recordSyncedEvent(d.id, d.employeeId, event, "accepted", outcome.timeEntryId ?? null, acceptedReason, acceptedDetail);
         if (carrierIdsInAnswers(event.answers).length > 0) acceptedBinChoices.push(event.clientEventId);
+        acceptedAny = true;
         lastAcceptedOccurredAtUtc = new Date(event.occurredAtUtc);
         lastProcessedSeq = event.deviceSeq;
         await pool.query(
@@ -2041,7 +2044,8 @@ router.post(
     // A bin chosen on a phone may settle a pending scale weighing. Runs after
     // the response, in its own transactions, and never throws: matching can
     // never affect phone sync (lib/scaleMatching.ts).
-    if (acceptedBinChoices.length > 0) void reconcileAfterPhoneSync(d.id, acceptedBinChoices);
+    if (acceptedBinChoices.length > 0) void reconcileAfterPhoneSync(d.id, acceptedBinChoices, d.employeeId);
+    else if (acceptedAny) void reconcileCyclesAfterPhoneSync(d.id, [], d.employeeId);
   })
 );
 
