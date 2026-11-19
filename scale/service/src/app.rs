@@ -339,6 +339,7 @@ impl App {
             employee_name: None,
             pending_until: None,
             credits_live: None,
+            no_picking_cycle: false,
         };
         match self.store.lock().unwrap().insert_weighing(&w) {
             Ok(()) => {
@@ -684,12 +685,9 @@ impl App {
             })
         });
         let p = &e.machine.params;
-        let settle_remaining_ms = match &e.machine.phase {
-            Phase::Settling { started_ms, .. } => {
-                let left = p.settle_ms.saturating_sub(now.saturating_sub(*started_ms));
-                left.div_ceil(100) * 100
-            }
-            _ => 0,
+        let settle_remaining_ms = match e.machine.cycle_started_ms() {
+            Some(started_ms) => p.settle_ms.saturating_sub(now.saturating_sub(started_ms)).div_ceil(100) * 100,
+            None => 0,
         };
         let removal_remaining_ms = match &e.machine.phase {
             Phase::AwaitingRemoval { empty_since_ms: Some(s), .. } | Phase::Blocked { empty_since_ms: Some(s), .. } => {
@@ -777,6 +775,7 @@ fn assignment_of(r: &crate::backend::AssignmentResult) -> Assignment<'_> {
         employee: if status == "credited" || status == "voided" { r.employee_name.as_deref() } else { None },
         pending_until: r.pending_until.as_deref(),
         credits_live: r.credits_live,
+        no_picking_cycle: r.no_picking_cycle,
     }
 }
 

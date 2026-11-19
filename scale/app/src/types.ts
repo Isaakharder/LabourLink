@@ -19,11 +19,22 @@ export type BlockReason =
   | { code: "underload" }
   | { code: "indicatorError" }
   | { code: "emptyBin"; netG: number }
-  | { code: "saveFailed"; message: string };
+  | { code: "saveFailed"; message: string }
+  | { code: "weightNotCaptured"; why: CaptureFail };
+
+/** Why no weight could be taken at the end of the 10 s cycle. */
+export type CaptureFail =
+  | { code: "moving" }
+  | { code: "unsteady"; spreadG: number }
+  | { code: "notGross" }
+  | { code: "indicatorFault" }
+  | { code: "tooFewReadings"; readings: number };
 
 export type Phase =
   | { phase: "starting" }
   | { phase: "idle" }
+  /** The 10 s cycle is running but no tag has been read for the bin yet. */
+  | { phase: "identifying"; startedMs: number }
   | { phase: "settling"; bin: BinRef; startedMs: number }
   | { phase: "stabilizing"; bin: BinRef; sinceMs: number }
   | { phase: "awaitingRemoval"; reason: "recorded" | "startupLoad"; bin: BinRef | null; emptySinceMs: number | null }
@@ -58,6 +69,8 @@ export interface Weighing {
   pendingUntil: string | null;
   /** From the server: false while the station's credits were off (trial). */
   creditsLive: boolean | null;
+  /** From the server (picking cycles): weighed again with no new phone scan, so not credited. */
+  noPickingCycle?: boolean;
 }
 
 export interface LinkStatus {
@@ -93,12 +106,14 @@ export type RegProblem =
   | { code: "indicatorNotGross" }
   | { code: "overload" }
   | { code: "underload" }
-  | { code: "indicatorError" };
+  | { code: "indicatorError" }
+  | { code: "weightNotCaptured"; why: CaptureFail };
 
 export type RegPhase =
   | { phase: "clearScale"; emptySinceMs: number | null }
   | { phase: "ready" }
-  | { phase: "measuring"; sinceMs: number }
+  /** The 10 s cycle; tag is the tag remembered for this bin so far. */
+  | { phase: "measuring"; sinceMs: number; tag: string | null }
   | { phase: "problem"; reason: RegProblem; emptySinceMs: number | null }
   | { phase: "proposed"; proposal: Proposal }
   | { phase: "saving"; proposal: Proposal }

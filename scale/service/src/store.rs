@@ -16,7 +16,7 @@ use std::path::Path;
 use crate::config::Mode;
 use crate::machine::CarrierInfo;
 
-const SCHEMA_VERSION: &str = "2";
+const SCHEMA_VERSION: &str = "3";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +41,9 @@ pub struct Weighing {
     /// so a "credited" outcome is never shown as a real credit. None until
     /// the server has answered.
     pub credits_live: Option<bool>,
+    /// From the server: this bin was weighed again with no new phone scan
+    /// (no picking cycle), so it is not credited.
+    pub no_picking_cycle: bool,
 }
 
 pub struct Store {
@@ -54,6 +57,7 @@ pub struct Assignment<'a> {
     pub employee: Option<&'a str>,
     pub pending_until: Option<&'a str>,
     pub credits_live: Option<bool>,
+    pub no_picking_cycle: bool,
 }
 
 const SCHEMA: &str = r#"
@@ -95,6 +99,7 @@ create table if not exists weighings (
   pending_until     text,
   status_checked_at text,
   credits_live      integer check (credits_live in (0, 1)),
+  no_picking_cycle  integer not null default 0 check (no_picking_cycle in (0, 1)),
   check (net_g = gross_g - tare_g),
   check (tare_g > 0)
 );
@@ -124,6 +129,7 @@ fn row_to_weighing(r: &rusqlite::Row) -> rusqlite::Result<Weighing> {
         employee_name: r.get("employee_name")?,
         pending_until: r.get("pending_until")?,
         credits_live: r.get::<_, Option<i64>>("credits_live")?.map(|v| v == 1),
+        no_picking_cycle: r.get::<_, i64>("no_picking_cycle")? == 1,
     })
 }
 
@@ -137,6 +143,15 @@ fn upgrade(conn: &Connection) -> Result<(), String> {
         > 0;
     if !has {
         conn.execute_batch("alter table weighings add column credits_live integer check (credits_live in (0, 1));")
+            .map_err(|e| e.to_string())?;
+    }
+    // 0.4.3: no_picking_cycle.
+    let has_cycle: bool = conn
+        .query_row("select count(*) from pragma_table_info('weighings') where name = 'no_picking_cycle'", [], |r| r.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        > 0;
+    if !has_cycle {
+        conn.execute_batch("alter table weighings add column no_picking_cycle integer not null default 0 check (no_picking_cycle in (0, 1));")
             .map_err(|e| e.to_string())?;
     }
     conn.execute(
@@ -309,9 +324,9 @@ impl Store {
         self.conn
             .execute(
                 "update weighings set upload_state = 'sent', sent_at = ?2, upload_attempts = upload_attempts + 1, last_error = null,
-                   assignment_status = ?3, employee_name = ?4, pending_until = ?5, credits_live = ?6, status_checked_at = ?2
+                   assignment_status = ?3, employee_name = ?4, pending_until = ?5, credits_live = ?6, no_picking_cycle = ?7, status_checked_at = ?2
                  where id = ?1",
-                params![id, at, a.status, a.employee, a.pending_until, a.credits_live.map(|v| v as i64)],
+                params![id, at, a.status, a.employee, a.pending_until, a.credits_live.map(|v| v as i64), a.no_picking_cycle as i64],
             )
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -344,7 +359,7 @@ impl Store {
     pub fn requeue(&mut self, id: &str) -> Result<(), String> {
         self.conn
             .execute(
-                "update weighings set upload_state = 'queued', assignment_status = 'unknown', employee_name = null, pending_until = null, credits_live = null where id = ?1",
+                "update weighings set upload_state = 'queued', assignment_status = 'unknown', employee_name = null, pending_until = null, credits_live = null, no_picking_cycle = 0 where id = ?1",
                 params![id],
             )
             .map_err(|e| e.to_string())?;
@@ -354,8 +369,8 @@ impl Store {
     pub fn update_assignment(&mut self, id: &str, at: &str, a: &Assignment) -> Result<(), String> {
         self.conn
             .execute(
-                "update weighings set assignment_status = ?3, employee_name = ?4, pending_until = ?5, credits_live = ?6, status_checked_at = ?2 where id = ?1",
-                params![id, at, a.status, a.employee, a.pending_until, a.credits_live.map(|v| v as i64)],
+                "update weighings set assignment_status = ?3, employee_name = ?4, pending_until = ?5, credits_live = ?6, no_picking_cycle = ?7, status_checked_at = ?2 where id = ?1",
+                params![id, at, a.status, a.employee, a.pending_until, a.credits_live.map(|v| v as i64), a.no_picking_cycle as i64],
             )
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -399,6 +414,7 @@ mod tests {
             employee_name: None,
             pending_until: None,
             credits_live: None,
+            no_picking_cycle: false,
         }
     }
 
@@ -408,7 +424,22 @@ mod tests {
             employee,
             pending_until,
             credits_live,
+            no_picking_cycle: false,
         }
+    }
+
+    #[test]
+    fn no_picking_cycle_is_stored_and_cleared_on_requeue() {
+        let mut s = Store::open_in_memory(Mode::Simulation).unwrap();
+        s.insert_weighing(&w("a", true)).unwrap();
+        assert!(!s.get("a").unwrap().unwrap().no_picking_cycle);
+        s.mark_sent("a", "2026-01-01T10:00:01Z", &Assignment { no_picking_cycle: true, ..a("pending", None, Some("2026-01-02T10:00:00Z"), Some(false)) }).unwrap();
+        assert!(s.get("a").unwrap().unwrap().no_picking_cycle);
+        s.update_assignment("a", "2026-01-01T11:00:00Z", &a("credited", Some("Ruben"), None, Some(false))).unwrap();
+        assert!(!s.get("a").unwrap().unwrap().no_picking_cycle, "a late scan credited it");
+        s.mark_sent("a", "2026-01-01T11:00:01Z", &Assignment { no_picking_cycle: true, ..a("pending", None, None, None) }).unwrap();
+        s.requeue("a").unwrap();
+        assert!(!s.get("a").unwrap().unwrap().no_picking_cycle);
     }
 
     #[test]
@@ -473,8 +504,9 @@ mod tests {
             // The 0.2.x weighings table, with one row in it.
             let c = Connection::open(&path).unwrap();
             let old = SCHEMA.replace("  credits_live      integer check (credits_live in (0, 1)),
+", "").replace("  no_picking_cycle  integer not null default 0 check (no_picking_cycle in (0, 1)),
 ", "");
-            assert!(!old.contains("credits_live"));
+            assert!(!old.contains("credits_live") && !old.contains("no_picking_cycle"));
             c.execute_batch(&old).unwrap();
             c.execute("insert into meta (key, value) values ('mode', 'hardware-test'), ('schema_version', '1')", []).unwrap();
             c.execute(
@@ -486,9 +518,9 @@ mod tests {
         }
         let s = Store::open(&path, Mode::HardwareTest).unwrap();
         let old = s.get("old").unwrap().unwrap();
-        assert_eq!((old.net_g, old.credits_live), (18_100, None));
+        assert_eq!((old.net_g, old.credits_live, old.no_picking_cycle), (18_100, None, false));
         let v: String = s.conn.query_row("select value from meta where key = 'schema_version'", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, "2");
+        assert_eq!(v, "3");
         drop(s);
         // Opening again is a no-op.
         Store::open(&path, Mode::HardwareTest).unwrap();

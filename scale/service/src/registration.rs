@@ -1,33 +1,41 @@
 //! Register Bins: measures one completely empty bin at a time and proposes
-//! its RFID tag and tare (its stable gross weight) for a person to confirm.
+//! its RFID tag and tare (its gross weight) for a person to confirm.
 //! Pure, like machine.rs: no I/O and no clock. The engine feeds it the same
 //! indicator readings and tag reads as weighing, and while it runs the
-//! weighing machine is paused, so registration can never create a weighing.
+//! weighing machine is paused, so registration can never create a weighing
+//! or an employee credit.
 //!
 //! ```text
-//! ClearScale ──empty for removal_ms──▶ Ready ──load──▶ Measuring (10 s settle, then stable window)
-//! Measuring ──stable, gross, exactly one tag──▶ Proposed ──confirm──▶ Saving ──saved──▶ Saved
+//! ClearScale ──empty for removal_ms──▶ Ready ──load──▶ Measuring (fixed 10 s cycle)
+//! Measuring ──10 s: one tag, weight captured──▶ Proposed ──confirm──▶ Saving ──saved──▶ Saved
+//! Measuring ──10 s: no tag──▶ Problem(NoTag) ──tag read while the bin is on──▶ Measuring (fresh 10 s)
+//! Measuring ──10 s: no valid weight──▶ Problem(WeightNotCaptured)
 //! Saved ──empty for removal_ms──▶ Ready (next bin)
 //! any loaded phase ──problem──▶ Problem(reason) ──resolved, or bin removed──▶ …
 //! ```
+//!
+//! It follows the same fixed 10-second cycle as weighing (see machine.rs):
+//! the countdown starts when the bin arrives; a tag read up to
+//! `tag_window_ms` before that or at any time during the cycle is remembered
+//! for it, even if the reader reports it only once; at 10 s the current
+//! weight is captured with `capture_weight` (fluctuations up to 0.9 kg and
+//! indicator motion are accepted, nothing waits for the weight to settle).
 //!
 //! What it refuses, whatever the person does:
 //! * nothing is measured until the scale has read empty for `removal_ms`,
 //!   on entry and after every bin, so a bin left on the scale (perhaps
 //!   full) is never taken as a new empty bin;
-//! * a weight below `min_load_g`, an unstable weight, or any indicator mode
-//!   other than gross;
+//! * a weight below `min_load_g`, no valid weight at 10 s (see
+//!   `capture_weight`), or any indicator fault;
 //! * no tag, or more than one tag, read for the bin;
+//! * the previous bin's tag, unless it is read again while a bin is on the
+//!   scale (a read as the previous bin is rolled away never names the next);
 //! * confirming when the weight or tag has changed since the measurement.
-//!
-//! The RFID reader behaves as it does for weighing (it may not report the
-//! same tag again until another tag has been read in between); this module
-//! does not try to make it re-read.
 
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 
-use crate::machine::{stable_weights, Params};
+use crate::machine::{capture_weight, measurable_weight, median, reading_ok, CaptureFail, Params};
 use crate::scale_proto::{IndicatorMode, Reading};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -39,6 +47,8 @@ pub struct Proposal {
     pub tag: String,
     pub gross_g: i64,
     pub samples_g: Vec<i64>,
+    /// The window the weight was captured over (sent to the server as
+    /// `stableMs`).
     pub stable_ms: u64,
 }
 
@@ -51,6 +61,8 @@ pub enum RegProblem {
     Overload,
     Underload,
     IndicatorError,
+    /// No valid weight at the end of the 10 s cycle (nor within the grace).
+    WeightNotCaptured { why: CaptureFail },
 }
 
 impl RegProblem {
@@ -68,8 +80,10 @@ pub enum RegPhase {
     #[serde(rename_all = "camelCase")]
     ClearScale { empty_since_ms: Option<u64> },
     Ready,
+    /// The 10 s cycle for the bin on the scale. `tag` is the tag remembered
+    /// for this bin so far (None: not read yet).
     #[serde(rename_all = "camelCase")]
-    Measuring { since_ms: u64 },
+    Measuring { since_ms: u64, tag: Option<String> },
     #[serde(rename_all = "camelCase")]
     Problem { reason: RegProblem, empty_since_ms: Option<u64> },
     Proposed { proposal: Proposal },
@@ -95,6 +109,9 @@ pub struct Registration {
     /// The single tag identified for the load now on the scale, kept until
     /// it is removed (the reader may report a tag only once).
     latched: Option<String>,
+    /// The tag of the bin that was last on the scale. A read of it while
+    /// the scale is empty (the bin being rolled away) is ignored.
+    previous: Option<String>,
 }
 
 impl Registration {
@@ -108,6 +125,7 @@ impl Registration {
             last_reading_ms: None,
             tags: HashMap::new(),
             latched: None,
+            previous: None,
         }
     }
 
@@ -116,14 +134,19 @@ impl Registration {
     }
 
     pub fn on_tag(&mut self, tag: &str, now: u64) {
-        self.tags.insert(tag.to_string(), now);
-        if matches!(self.phase, RegPhase::Problem { reason: RegProblem::NoTag, .. }) && self.is_loaded() {
-            // The tag finally read: measure the bin afresh.
-            self.phase = RegPhase::Measuring { since_ms: now };
+        if self.previous.as_deref() == Some(tag) && !self.is_loaded() {
             return;
         }
-        if let RegPhase::Proposed { proposal } = &self.phase {
-            if proposal.tag != tag {
+        self.tags.insert(tag.to_string(), now);
+        match self.phase.clone() {
+            RegPhase::Problem { reason: RegProblem::NoTag, .. } if self.is_loaded() => {
+                // The tag finally read while the bin is on: a fresh 10 s cycle.
+                self.latched = None;
+                self.phase = RegPhase::Measuring { since_ms: now, tag: None };
+                self.measure(now, now);
+            }
+            RegPhase::Measuring { since_ms, .. } => self.measure(since_ms, now),
+            RegPhase::Proposed { proposal } if proposal.tag != tag => {
                 self.phase = RegPhase::Problem {
                     reason: RegProblem::MultipleTags {
                         tags: vec![proposal.tag.clone(), tag.to_string()],
@@ -131,6 +154,7 @@ impl Registration {
                     empty_since_ms: None,
                 };
             }
+            _ => {}
         }
     }
 
@@ -138,7 +162,8 @@ impl Registration {
         self.last_reading_ms = Some(now);
         self.scale_online = true;
         self.samples.push_back((now, reading.clone()));
-        let keep_from = now.saturating_sub(self.params.stable_window_ms + 1_000);
+        // The whole cycle is kept: capture_weight needs its latest gross/net frame.
+        let keep_from = now.saturating_sub(self.params.settle_ms + self.params.capture_window_ms + 1_000);
         while matches!(self.samples.front(), Some((t, _)) if *t < keep_from) {
             self.samples.pop_front();
         }
@@ -150,6 +175,7 @@ impl Registration {
         let online = matches!(self.last_reading_ms, Some(t) if now.saturating_sub(t) <= self.params.scale_timeout_ms);
         if self.scale_online && !online && matches!(self.phase, RegPhase::Measuring { .. } | RegPhase::Proposed { .. }) {
             // Never propose (or keep proposing) a tare from data we no longer receive.
+            self.forget_bin();
             self.phase = RegPhase::ClearScale { empty_since_ms: None };
         }
         self.scale_online = online;
@@ -174,6 +200,9 @@ impl Registration {
         }
     }
 
+    /// A hard indicator condition. Motion (a Format A "M" frame carries no
+    /// mode) is not one: it only matters at the moment the weight is
+    /// captured, where `capture_weight` refuses anything but steady gross.
     fn indicator_problem(&self) -> Option<RegProblem> {
         let r = self.last_reading.as_ref()?;
         if r.overload {
@@ -182,7 +211,7 @@ impl Registration {
             Some(RegProblem::Underload)
         } else if r.error {
             Some(RegProblem::IndicatorError)
-        } else if r.mode != IndicatorMode::Gross {
+        } else if r.mode == IndicatorMode::Net {
             Some(RegProblem::IndicatorNotGross)
         } else {
             None
@@ -190,7 +219,7 @@ impl Registration {
     }
 
     /// Tags read for the load now on the scale: from `tag_window_ms` before
-    /// it arrived (the tag passes the reader as the bin rolls on).
+    /// its cycle started (the tag passes the reader as the bin rolls on).
     fn tags_since(&self, since_ms: u64) -> Vec<String> {
         let from = since_ms.saturating_sub(self.params.tag_window_ms);
         let mut t: Vec<String> = self.tags.iter().filter(|(_, at)| **at >= from).map(|(k, _)| k.clone()).collect();
@@ -203,6 +232,21 @@ impl Registration {
         t
     }
 
+    /// The bin on the scale is gone (or no longer trusted): its tag becomes
+    /// the previous tag and is never carried over to the next bin.
+    fn forget_bin(&mut self) {
+        let tag = match &self.phase {
+            RegPhase::Proposed { proposal } | RegPhase::Saving { proposal } => Some(proposal.tag.clone()),
+            RegPhase::Saved { rfid_tag, .. } => Some(rfid_tag.clone()),
+            _ => None,
+        };
+        if let Some(t) = tag.or_else(|| self.latched.clone()) {
+            self.tags.remove(&t);
+            self.previous = Some(t);
+        }
+        self.latched = None;
+    }
+
     /// Returns Some(empty_since) while waiting for the scale to read empty
     /// long enough, and None once it has (tags seen before are then
     /// forgotten, so a stale read can't identify the next bin).
@@ -212,8 +256,8 @@ impl Registration {
         }
         let since = empty_since_ms.unwrap_or(now);
         if now.saturating_sub(since) >= self.params.removal_ms {
+            self.forget_bin();
             self.tags.retain(|_, seen| *seen >= since);
-            self.latched = None;
             return None;
         }
         Some(Some(since))
@@ -246,11 +290,12 @@ impl Registration {
             },
             RegPhase::Ready => {
                 if self.is_loaded() {
-                    self.phase = RegPhase::Measuring { since_ms: now };
+                    // The bin arrived: the fixed 10 s cycle starts now.
+                    self.phase = RegPhase::Measuring { since_ms: now, tag: None };
                     self.measure(now, now);
                 }
             }
-            RegPhase::Measuring { since_ms } => self.measure(since_ms, now),
+            RegPhase::Measuring { since_ms, .. } => self.measure(since_ms, now),
             RegPhase::Problem { reason, empty_since_ms } => {
                 if self.is_empty() {
                     match self.clear_progress(now, empty_since_ms) {
@@ -262,11 +307,11 @@ impl Registration {
                 if empty_since_ms.is_some() {
                     self.phase = RegPhase::Problem { reason: reason.clone(), empty_since_ms: None };
                 }
-                // The indicator back to gross with no error: measure afresh.
-                // (No tag waits for a tag read, see on_tag; two tags wait
-                // for the scale to be cleared.)
+                // The indicator back to normal: measure afresh (the tag
+                // already read for this bin is kept). No tag waits for a tag
+                // read (see on_tag); the others wait for the scale to clear.
                 if reason.is_indicator() && self.indicator_problem().is_none() && self.is_loaded() {
-                    self.phase = RegPhase::Measuring { since_ms: now };
+                    self.phase = RegPhase::Measuring { since_ms: now, tag: None };
                     self.measure(now, now);
                 }
             }
@@ -274,13 +319,15 @@ impl Registration {
                 if !self.is_loaded() {
                     // Bin taken off before anyone confirmed: start again
                     // with an empty scale.
+                    self.forget_bin();
                     self.phase = RegPhase::ClearScale { empty_since_ms: None };
                     self.advance(now);
                 } else if let Some(reason) = self.indicator_problem() {
                     self.phase = RegPhase::Problem { reason, empty_since_ms: None };
-                } else if matches!(self.weight(), Some(w) if (w - proposal.gross_g).abs() > self.params.stable_tolerance_g) {
-                    // Something was added or taken out: measure again.
-                    self.phase = RegPhase::Measuring { since_ms: now };
+                } else if matches!(self.last_reading.as_ref(), Some(r) if reading_ok(r) && (r.weight_g.unwrap() - proposal.gross_g).abs() > self.params.capture_tolerance_g) {
+                    // Something was added or taken out: measure again (the
+                    // tag stays remembered for this bin).
+                    self.phase = RegPhase::Measuring { since_ms: now, tag: Some(proposal.tag) };
                 }
             }
             // The person confirmed this measurement; the save is in flight.
@@ -291,7 +338,10 @@ impl Registration {
     fn measure(&mut self, since_ms: u64, now: u64) {
         if !self.is_loaded() {
             if self.is_empty() {
-                self.phase = RegPhase::Ready;
+                // Taken off before it was measured: its tag is not reused.
+                self.forget_bin();
+                self.phase = RegPhase::ClearScale { empty_since_ms: None };
+                self.advance(now);
             }
             return;
         }
@@ -299,6 +349,9 @@ impl Registration {
         let tags = self.tags_since(since_ms);
         if tags.len() == 1 {
             self.latched = Some(tags[0].clone());
+            if self.previous.as_deref() != Some(tags[0].as_str()) {
+                self.previous = None;
+            }
         }
         if tags.len() > 1 {
             self.phase = RegPhase::Problem {
@@ -311,10 +364,15 @@ impl Registration {
             self.phase = RegPhase::Problem { reason, empty_since_ms: None };
             return;
         }
-        if now.saturating_sub(since_ms) < self.params.settle_ms {
+        let elapsed = now.saturating_sub(since_ms);
+        if elapsed < self.params.settle_ms {
+            self.phase = RegPhase::Measuring {
+                since_ms,
+                tag: self.latched.clone(),
+            };
             return;
         }
-        let Some(weights) = stable_weights(&self.samples, now, &self.params) else { return };
+        // 10 s: the tag must be known now. Never wait for it indefinitely.
         let Some(tag) = tags.into_iter().next() else {
             self.phase = RegPhase::Problem {
                 reason: RegProblem::NoTag,
@@ -322,23 +380,34 @@ impl Registration {
             };
             return;
         };
-        let mut sorted = weights.clone();
-        sorted.sort();
-        let gross_g = sorted[sorted.len() / 2];
+        let weights = match capture_weight(&self.samples, now, &self.params) {
+            Ok(w) => w,
+            Err(why) => {
+                if elapsed >= self.params.settle_ms + self.params.capture_grace_ms {
+                    self.phase = RegPhase::Problem {
+                        reason: RegProblem::WeightNotCaptured { why },
+                        empty_since_ms: None,
+                    };
+                } else {
+                    self.phase = RegPhase::Measuring { since_ms, tag: Some(tag) };
+                }
+                return;
+            }
+        };
         self.phase = RegPhase::Proposed {
             proposal: Proposal {
                 id: uuid::Uuid::new_v4().to_string(),
                 tag,
-                gross_g,
+                gross_g: median(&weights),
                 samples_g: weights,
-                stable_ms: self.params.stable_window_ms,
+                stable_ms: self.params.capture_window_ms,
             },
         };
     }
 
     /// The person confirmed. Re-checks, at this moment, that the bin is
-    /// still on the scale with the same stable gross weight and no other
-    /// tag, then hands out the measurement to save.
+    /// still on the scale with the same gross weight and no other tag, then
+    /// hands out the measurement to save.
     pub fn confirm(&mut self, now: u64) -> Result<Proposal, String> {
         let RegPhase::Proposed { proposal } = self.phase.clone() else {
             return Err("There is no measured bin to register. Place one empty bin on the scale.".into());
@@ -349,10 +418,15 @@ impl Registration {
         if self.indicator_problem().is_some() {
             return Err("The indicator must be in gross mode with no error.".into());
         }
-        let stable = stable_weights(&self.samples, now, &self.params);
-        let still = matches!(&stable, Some(w) if w.iter().all(|g| (g - proposal.gross_g).abs() <= self.params.stable_tolerance_g));
-        if !still {
-            self.phase = RegPhase::Measuring { since_ms: now };
+        // Motion is accepted here too, as in the measurement itself.
+        let Some(w) = self.last_reading.as_ref().and_then(measurable_weight) else {
+            return Err("The scale is not showing a valid weight. Check the indicator and press Register again.".into());
+        };
+        if (w - proposal.gross_g).abs() > self.params.capture_tolerance_g {
+            self.phase = RegPhase::Measuring {
+                since_ms: now,
+                tag: Some(proposal.tag.clone()),
+            };
             return Err("The weight changed. Keep the bin still; it is being measured again.".into());
         }
         let others: Vec<String> = self.tags_since(now).into_iter().filter(|t| *t != proposal.tag).collect();
@@ -383,9 +457,10 @@ impl Registration {
         }
     }
 
+    /// Time left until the weight is taken (0 outside a running cycle).
     pub fn settle_remaining_ms(&self, now: u64) -> u64 {
         match &self.phase {
-            RegPhase::Measuring { since_ms } => self.params.settle_ms.saturating_sub(now.saturating_sub(*since_ms)).div_ceil(100) * 100,
+            RegPhase::Measuring { since_ms, .. } => self.params.settle_ms.saturating_sub(now.saturating_sub(*since_ms)).div_ceil(100) * 100,
             _ => 0,
         }
     }
@@ -472,7 +547,7 @@ mod tests {
         assert_eq!(t.phase(), "ready");
         t.tag(TAG);
         t.hold(r(154_400), 9.0);
-        assert_eq!(t.phase(), "measuring", "the full 10 s settle runs first");
+        assert_eq!(t.phase(), "measuring", "the full 10 s cycle runs first");
         t.hold(r(154_400), 3.0);
         let p = t.proposal();
         assert_eq!((p.tag.as_str(), p.gross_g), (TAG, 154_400));
@@ -550,20 +625,165 @@ mod tests {
         assert_eq!(t.phase(), "ready");
     }
 
+    fn moving_frame() -> Reading {
+        moving_at(154_400)
+    }
+
+    /// An R300 Format A "M" frame: the weight, motion, and no mode.
+    fn moving_at(g: i64) -> Reading {
+        Reading {
+            mode: IndicatorMode::Unknown,
+            motion: true,
+            ..r(g)
+        }
+    }
+
     #[test]
-    fn an_unstable_weight_is_never_proposed() {
+    fn a_swing_over_point_nine_kg_is_refused_at_ten_seconds_not_left_waiting() {
         let mut t = T::new();
         t.hold(r(0), 2.5);
         t.tag(TAG);
-        for i in 0..200 {
+        for i in 0..101 {
             t.now += 100;
-            t.reg.on_reading(r(154_400 + if i % 2 == 0 { 100 } else { -100 }), t.now);
+            t.reg.on_reading(r(154_400 + if i % 2 == 0 { 500 } else { -500 }), t.now);
         }
+        assert_eq!(
+            t.problem(),
+            RegProblem::WeightNotCaptured {
+                why: CaptureFail::Unsteady { spread_g: 1_000 }
+            },
+            "refused at 10 s, no extra wait"
+        );
+        assert!(t.reg.confirm(t.now).is_err());
+        // Sticky until the bin is taken off.
+        t.hold(r(154_400), 15.0);
+        assert_eq!(t.phase(), "problem");
+    }
+
+    #[test]
+    fn fluctuations_up_to_point_nine_kg_are_proposed_at_ten_seconds() {
+        for spread in [100i64, 500, 900] {
+            let mut t = T::new();
+            t.hold(r(0), 2.5);
+            t.tag(TAG);
+            let steps = spread / 100;
+            for i in 0..101i64 {
+                t.now += 100;
+                let p = i % (2 * steps);
+                let off = if p <= steps { p } else { 2 * steps - p };
+                t.reg.on_reading(r(143_600 + off * 100), t.now);
+            }
+            let p = t.proposal();
+            let (lo, hi) = (*p.samples_g.iter().min().unwrap(), *p.samples_g.iter().max().unwrap());
+            assert!(hi - lo <= spread && (lo..=hi).contains(&p.gross_g), "{spread} g");
+            assert!(p.samples_g.len() >= 5 && p.stable_ms >= 2_000, "what the server requires");
+        }
+    }
+
+    #[test]
+    fn motion_at_ten_seconds_is_proposed_and_can_be_confirmed() {
+        let mut t = T::new();
+        t.hold(r(0), 2.5);
+        t.tag(TAG);
+        t.hold(r(154_400), 8.5);
+        t.hold(moving_frame(), 1.4);
+        assert_eq!(t.phase(), "measuring", "motion frames do not restart the 10 s");
+        t.hold(moving_frame(), 0.2);
+        assert_eq!(t.proposal().gross_g, 154_400, "taken at 10 s despite the motion flag");
+        assert_eq!(t.reg.confirm(t.now).unwrap().tag, TAG, "confirming during motion works");
+        // Motion frames only for the whole 2 s window, gross before: accepted.
+        let mut t = T::new();
+        t.hold(r(0), 2.5);
+        t.tag(TAG);
+        t.hold(r(154_400), 7.0);
+        t.hold(moving_frame(), 3.1);
+        assert_eq!(t.proposal().gross_g, 154_400);
+        // Net mode last stated (then motion): refused, never proposed.
+        let mut t = T::new();
+        t.hold(r(0), 2.5);
+        t.tag(TAG);
+        t.hold(r(154_400), 7.0);
+        t.reg.on_reading(Reading { mode: IndicatorMode::Net, ..r(154_400) }, t.now + 100);
+        t.now += 100;
+        assert_eq!(t.problem(), RegProblem::IndicatorNotGross);
+    }
+
+    /// The reported case: 143.60 kg flickering by one 0.1 kg division, with
+    /// an occasional motion frame, and tag 0000000137480620 read once as
+    /// the bin rolled on and never again.
+    #[test]
+    fn the_reported_bin_is_proposed_at_ten_seconds() {
+        let mut t = T::new();
+        t.hold(r(0), 2.5);
+        assert_eq!(t.phase(), "ready");
+        t.tag("0000000137480620");
+        t.hold(r(900), 0.3); // rolling on, still below the minimum load
+        let arrived = t.now + 100;
+        for i in 0..100 {
+            t.now += 100;
+            let reading = if i % 20 == 7 { moving_at(143_600) } else { r(143_600 + if (i / 3) % 2 == 0 { 0 } else { 100 }) };
+            t.reg.on_reading(reading, t.now);
+        }
+        match &t.reg.phase {
+            RegPhase::Measuring { since_ms, tag } => {
+                assert_eq!(*since_ms, arrived, "the countdown never restarted");
+                assert_eq!(tag.as_deref(), Some("0000000137480620"), "remembered for this bin");
+            }
+            p => panic!("{p:?}"),
+        }
+        assert!(t.reg.settle_remaining_ms(t.now) <= 100);
+        t.hold(r(143_600), 0.2);
+        let p = t.proposal();
+        assert_eq!(p.tag, "0000000137480620");
+        assert!([143_600, 143_700].contains(&p.gross_g));
+        // Confirm still works with the flicker going on.
+        t.hold(r(143_700), 0.3);
+        assert_eq!(t.reg.confirm(t.now).unwrap().tag, "0000000137480620");
+    }
+
+    #[test]
+    fn a_tag_read_during_the_cycle_is_kept_and_the_countdown_runs_from_arrival() {
+        let mut t = T::new();
+        t.hold(r(0), 2.5);
+        t.hold(r(154_400), 6.0);
+        t.tag(TAG);
+        t.hold(r(154_400), 3.9);
         assert_eq!(t.phase(), "measuring");
-        let mut moving = r(154_400);
-        moving.motion = true;
-        t.hold(moving, 5.0);
-        assert_eq!(t.phase(), "measuring");
+        t.hold(r(154_400), 0.2);
+        assert_eq!(t.proposal().tag, TAG, "10 s after arrival, not after the tag");
+    }
+
+    #[test]
+    fn the_previous_bin_tag_never_names_the_next_bin() {
+        let mut t = T::new();
+        t.hold(r(0), 2.5);
+        t.tag(TAG);
+        t.hold(r(154_400), 10.5);
+        let p = t.reg.confirm(t.now).unwrap();
+        t.reg.saved("Bin 77".into(), p.tag.clone(), p.gross_g);
+        t.hold(r(0), 1.0);
+        t.tag(TAG); // read again as it is rolled away, scale already empty
+        t.hold(r(0), 1.5);
+        assert_eq!(t.phase(), "ready");
+        t.tag(TAG); // and once more after the scale cleared
+        t.hold(r(150_000), 13.0); // the next bin, whose own tag is not read
+        assert_eq!(t.problem(), RegProblem::NoTag);
+        // Its own tag read while it is on the scale: measured afresh.
+        t.tag(OTHER);
+        t.hold(r(150_000), 10.5);
+        assert_eq!(t.proposal().tag, OTHER);
+    }
+
+    #[test]
+    fn a_bin_taken_off_mid_cycle_does_not_pass_its_tag_on() {
+        let mut t = T::new();
+        t.hold(r(0), 2.5);
+        t.tag(TAG);
+        t.hold(r(154_400), 4.0);
+        t.hold(r(0), 2.5);
+        assert_eq!(t.phase(), "ready");
+        t.hold(r(150_000), 13.0);
+        assert_eq!(t.problem(), RegProblem::NoTag);
     }
 
     #[test]

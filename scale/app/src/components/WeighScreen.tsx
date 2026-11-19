@@ -21,7 +21,7 @@ export function WeighScreen({ s }: { s: Snapshot }) {
   // scale: show only the live gross until the scale has returned to zero.
   const recorded = s.waitForZero ? null : s.currentWeighing;
   const bin = s.waitForZero ? null : s.bin;
-  const settling = p.phase === "settling";
+  const settling = p.phase === "settling" || p.phase === "identifying";
   const settleProgress = settling ? 1 - s.settleRemainingMs / Math.max(1, s.params.settleMs) : 0;
   const emp = employeeLine(recorded, p);
 

@@ -797,12 +797,205 @@ select {
 
 /* Register Bins */
 .register-bins {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
 }
 
-/* The bin and confirmation card scrolls inside itself on a short screen. */
-.register-bins .card {
+.reg-missing {
+  align-self: center;
+  color: var(--warn);
+  font-size: 0.95rem;
+}
+
+/* A Register Bins card: header, a part that may scroll on a short screen,
+   and the confirmation controls as a footer that is always on screen. */
+.register .reg-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* The details give up their space first (flex-shrink 1000); the
+   confirmation checkboxes scroll only on a very small screen; the buttons
+   never move off screen. */
+.reg-scroll {
+  flex: 1 1000 auto;
+  min-height: 0;
   overflow-y: auto;
+}
+
+.reg-actions {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.reg-actions .row,
+.reg-buttons {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.reg-buttons {
+  flex: none;
+  padding-top: 8px;
+}
+
+/* Bin, tag and tare: always shown for confirmation, compact. */
+.reg-measured.reg-summary {
+  flex: none;
+  margin: 0 0 4px;
+  gap: 2px 14px;
+}
+
+.reg-summary-bin {
+  font-size: 1.35em;
+}
+
+/* Bin search: the keypad stays put; the result list scrolls. */
+.bin-search {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.bin-search .carrier-list {
+  flex: 1 1 auto;
+  min-height: 48px;
+  overflow-y: auto;
+}
+
+/* WebKitGTK (the station display) uses overlay scrollbars that stay
+   invisible; a styled scrollbar is always shown. */
+.register ::-webkit-scrollbar {
+  width: 14px;
+  height: 14px;
+}
+
+.register ::-webkit-scrollbar-track {
+  background: var(--surface-2);
+  border-radius: 7px;
+}
+
+.register ::-webkit-scrollbar-thumb {
+  background: var(--muted);
+  border-radius: 7px;
+}
+
+@media (max-width: 900px), (max-height: 620px) {
+  .register .warn-check,
+  .register .check {
+    font-size: 0.95rem;
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+}
+
+/* Short screens (e.g. a 1920x1080 display at 2x scaling = 960x540):
+   the measurement becomes a compact strip above the confirmation card,
+   which gets the full width so its checkboxes need fewer lines. */
+@media (max-height: 620px) {
+  .register-bins {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .register-grid .card.reg-status {
+    flex-direction: row;
+    align-items: center;
+    gap: 16px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+
+  .register-head h2 {
+    font-size: 1.2rem;
+  }
+
+  .register .warn-check,
+  .register .check {
+    margin: 0;
+    padding-top: 4px;
+    padding-bottom: 4px;
+    font-size: 0.95rem;
+  }
+
+  .reg-actions {
+    gap: 4px;
+    padding-top: 6px;
+  }
+
+  .reg-card > .label {
+    margin-bottom: 2px;
+  }
+
+  .reg-status > .label,
+  .reg-status > .muted,
+  .reg-status .reg-measured {
+    display: none;
+  }
+
+  .reg-status .reg-title {
+    font-size: 1.15rem;
+    margin: 0;
+  }
+
+  .reg-status .reg-weight {
+    font-size: 1.5rem;
+    margin: 0;
+  }
+}
+
+/* Short screens: the summary takes two rows instead of four. */
+@media (max-height: 720px) {
+  .reg-measured.reg-summary {
+    grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr);
+    font-size: 0.95rem;
+  }
+
+  .reg-summary-bin {
+    font-size: 1.15em;
+  }
+
+  .reg-actions {
+    gap: 4px;
+    padding-top: 6px;
+  }
+
+  .register .warn-check {
+    padding: 6px 10px;
+  }
+
+  .register-head {
+    gap: 10px;
+  }
+}
+
+@media (max-height: 760px) {
+  .keypad .btn {
+    min-height: 40px;
+    font-size: 1.1rem;
+  }
+
+  .keypad {
+    gap: 6px;
+    margin: 6px 0;
+  }
+
+  .reg-measured {
+    font-size: 1rem;
+  }
+
+  .reg-weight {
+    font-size: 2rem;
+  }
 }
 
 .reg-status .reg-title {
@@ -877,9 +1070,12 @@ select {
   border: 1px solid var(--warn);
 }
 
-.warn-check input,
-.check input {
+.warn-check input[type="checkbox"],
+.check input[type="checkbox"] {
   width: 26px;
   height: 26px;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
   flex: none;
 }

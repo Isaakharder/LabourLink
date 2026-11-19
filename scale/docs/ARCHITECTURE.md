@@ -48,18 +48,37 @@ The API binds to loopback only. Requests whose `Host` header is not loopback are
 ## 3. Weighing state machine (`service/src/machine.rs`)
 
 ```
-Starting ─► Idle ──load + exactly one known, active, tared tag──► Settling (10 s)
-                                                                    │
-           ◄── scale empty ≥ 2 s ── AwaitingRemoval ◄── Record ── Stabilizing (stable window)
+Starting ─► Idle ──load arrives (10 s cycle starts)──► Identifying ──one known, active, tared tag──► Settling
+            Identifying ──10 s, still no tag──► Blocked(noTag)
+            Settling ──10 s since arrival──► Stabilizing ──weight captured──► Record ──► AwaitingRemoval
+            Stabilizing ──no valid weight within the grace──► Blocked(weightNotCaptured)
+           ◄── scale empty ≥ 2 s ── AwaitingRemoval
 any loaded phase ──problem──► Blocked(reason) ──resolved, or bin removed──► …
 ```
 
+**The fixed 10-second cycle** (since 0.4.0, shared with Register Bins):
+
+1. The countdown starts when the bin arrives on the scale (gross ≥ `minLoadKg`).
+2. A tag read up to `tagWindowMs` before arrival, or at any time during the cycle, belongs to this bin. It is remembered even if the reader reports it only once.
+3. At 10 s the current weight is captured (`machine::capture_weight`) from the readings of the last `captureWindowMs`, the 2 s before the 10 s mark:
+   - The weight is the median of the steady gross readings.
+   - There must be at least `captureMinSamples` of them, and they must agree within `captureToleranceKg`.
+   - Any overload, underload, error or net reading refuses.
+   - A stray motion frame is left out. Motion on the latest reading, or on most of the window, waits.
+   - A one-division flicker is accepted. The station no longer waits for a perfectly constant weight.
+4. If the indicator shows motion at exactly 10 s, a valid weight may still be taken within `captureGraceSeconds`. After that the bin is refused with the reason (*weight not valid*). It is never left waiting.
+5. If no tag was read by 10 s, the bin is refused as *no tag*. A tag read later, while the bin is still on, starts a fresh full 10 s cycle.
+6. Tags read before the previous bin was removed are forgotten, and so is the previous bin's own tag.
+
+Before 0.4.0 the station waited, after the 10 s, for 2 s of readings within 0.05 kg and with no motion frame. On the R300 at 0.1 kg divisions, a one-division flicker never met that rule. In Register Bins, each motion ("M") frame also restarted the 10 s. Either one left Register Bins on *Measuring* indefinitely.
+
 | Parameter (config key) | Default | Meaning |
 |---|---|---|
-| `settleSeconds` | 10 | Fixed settling period after the bin is identified on the scale |
-| `stableWindowMs` | 2000 | Readings in this window must all agree |
-| `stableToleranceKg` | 0.05 | Maximum spread (max − min) inside the window |
-| `stableMinSamples` | 5 | Minimum readings in the window |
+| `settleSeconds` | 10 | Fixed cycle: the weight is taken this long after the bin arrives |
+| `captureWindowMs` | 2000 | The captured weight is the median of the steady gross readings in this last window. At least 2000 (server rule for a tare) |
+| `captureMinSamples` | 5 | Minimum steady gross readings in that window. At least 5 (server rule) |
+| `captureToleranceKg` | 0.15 | Maximum spread (max − min) of those readings: one 0.1 kg division. Under 0.2 (server rule) |
+| `captureGraceSeconds` | 3 | After 10 s, how long a valid weight may still be taken before the bin is refused |
 | `minLoadKg` / `zeroThresholdKg` | 2 / 1 | Thresholds for "loaded" and "empty" (hysteresis between them) |
 | `removalMs` | 2000 | Scale must read empty this long before the next bin is accepted |
 | `tagWindowMs` | 5000 | A tag counts for the load if it was read within this window |
@@ -67,15 +86,17 @@ any loaded phase ──problem──► Blocked(reason) ──resolved, or bin r
 | `duplicateGuardSeconds` | 300 | The same bin can't be recorded twice within this period |
 | `scaleTimeoutMs` | 2000 | No readings for this long means the scale is offline. Weighing pauses |
 
+`stableWindowMs`, `stableToleranceKg` and `stableMinSamples` (before 0.4.0) are still accepted in config.json but ignored. The service logs a line for each at start-up.
+
 **Recording requires all of the following.** These rules are checked by unit tests, including a randomised test that never records a placement twice:
 
 - **Tags:** exactly one distinct tag in the window. Two tags give *multiple tags* and stay blocked until removal.
 - **Bin:** the tag maps to an active carrier with tare > 0.
 - **Indicator status:** gross mode, with no overload, underload or error.
-- **Timing:** the full 10 s settle, then a stable window with no motion flag and spread within tolerance.
+- **Timing:** the fixed 10 s cycle from arrival, then a captured weight: steady gross readings, spread within `captureToleranceKg`.
 - **Weight:** net ≥ minimum.
 
-The recorded gross is the median of the stable window. Net is gross minus the carrier's tare **copied at that moment**.
+The recorded gross is the median of the capture window. Net is gross minus the carrier's tare **copied at that moment**.
 
 **Duplicate prevention**
 - After a record, nothing is weighed again until the scale reads empty for 2 s. Repeated tag reads are ignored.
@@ -95,16 +116,17 @@ The recorded gross is the median of the stable window. Net is gross minus the ca
 ## 3a. Register Bins (`service/src/registration.rs`)
 
 ```
-ClearScale ──empty ≥ 2 s──▶ Ready ──load──▶ Measuring (10 s settle, stable window) ──one tag, gross──▶ Proposed
+ClearScale ──empty ≥ 2 s──▶ Ready ──load──▶ Measuring (fixed 10 s cycle) ──10 s: one tag, weight captured──▶ Proposed
 Proposed ──confirm (re-checked now)──▶ Saving ──server saved──▶ Saved ──empty ≥ 2 s──▶ Ready
-any loaded phase ──no tag / two tags / not gross / overload──▶ Problem ──resolved, or scale cleared──▶ …
+any loaded phase ──no tag at 10 s / two tags / weight not valid / net / overload──▶ Problem ──resolved, or scale cleared──▶ …
 ```
 
 - **No weighings while it runs.** Readings and tags go to the registration machine instead of the weighing machine, so registration can never record a weighing or credit anyone.
 - **Weighing restarts afterwards.** When Register Bins closes, the weighing machine starts over as at service start: the duplicate guard is kept, and a bin still on the scale must be removed first.
 - **An empty scale first.** Nothing is measured until the scale has read zero for `removalMs`, on entry and after every bin. A full bin left on the scale is never taken for an empty one.
-- **The proposed tare** is the median of the stable gross window. It uses the same stable-window rule as weighing (`machine::stable_weights`), never net mode, and only a single tag read for this load (tags seen before the scale was cleared are forgotten).
-- **Re-checked on confirm.** At confirm, the station checks the bin is still on the scale with the same stable weight and no other tag.
+- **The same fixed 10-second cycle as weighing** (§3). The proposed tare is the weight captured at 10 s by `machine::capture_weight`, never net mode. Step 1 shows the countdown and the tag remembered for this bin. Step 2 opens at 10 s, or says why it cannot (*RFID tag missing*, *weight not valid*, …).
+- **Only this bin's tag.** Exactly one tag read for this load. Tags seen before the scale was cleared are forgotten. The previous bin's tag counts only if it is read again while a bin is on the scale, so a read as the previous bin is rolled away never names the next one.
+- **Re-checked on confirm.** At confirm, the station checks the bin is still on the scale, the current reading is a steady gross weight within `captureToleranceKg` of the proposal, and no other tag was read.
 - **One registration id per measurement.** A retried confirm is applied once by the server.
 - **The person must tick "completely empty."** Replacing a tag or tare, or moving a tag from another bin, must also be ticked. The server refuses otherwise (`needsConfirmation`, `tagOnOtherBin`), and refuses a stale view of the bin (`stale`).
 
@@ -214,7 +236,7 @@ That window runs on the server, because only the server sees phone syncs. The st
 - **R300 output format** (protocol, rate, units, decimals, stable/motion flag, gross/net indicator). The indicator is set to TYPE=AUTO, AUT.FMT=FMT_1; stable readings of 93.0 kg and 110.2 kg have been seen, but the frames and status letters haven't been captured yet. `capture` ends with a summary of frame shapes, status letters and runs over time for this (README, "Hardware test mode"). Run `labourlink-scaled capture --port /dev/ttyUSB1 --seconds 120 --out r300.txt` and confirm `rinstrum-auto-a`, or switch to `generic-line`, or add a parser from the capture. Auto-transmit must already be enabled on the indicator. The station will not change indicator settings.
 - **PROTAGD behaviour:** does it repeat reads while a tag is in range, what happens with two tags, what is the read range, and is the 4-digit field constant? Run `capture` on `/dev/ttyUSB0`.
 - **Antenna placement** compared with the scale platform, which affects `tagWindowMs`.
-- **Real scale division and noise,** which affect `stableToleranceKg` and `minLoadKg`.
+- **Real scale division and noise,** which affect `captureToleranceKg` and `minLoadKg`. The 0.15 kg default assumes 0.1 kg divisions.
 - **The RS-232 adapter's USB ids:** Waveshare FT232R, 0403:6001, serial BG0427FU (in the udev rule).
 - **WebKitGTK rendering on Intel HD 400.** `WEBKIT_DISABLE_DMABUF_RENDERER=1` is set in the autostart entry.
 - **Station clock:** NTP sync and the condition of the CMOS battery.

@@ -7,7 +7,7 @@
 // empty, and the confirm request carries exactly what they saw. Refusals
 // from the server reach the person unchanged.
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RegisterBins } from "./RegisterBins";
@@ -144,6 +144,31 @@ describe("RegisterBins", () => {
     });
   });
 
+  it("keeps every confirmation control in the card's fixed footer, outside anything that scrolls", async () => {
+    // 0.3.0 on the NUC: the controls sat below the bin details inside a
+    // scrolling card, and WebKitGTK's invisible scrollbar hid them.
+    bins = [{ id: "c-77", name: "Bin 77", rfidTag: null, tareWeightKg: 155, isActive: true }];
+    tagOwner = { id: "c-3", name: "Bin 3", rfidTag: "0000000182225750", tareWeightKg: 154.4, isActive: true };
+    const user = userEvent.setup();
+    const { rerender } = render(<RegisterBins s={snap(null)} onDone={() => {}} />);
+    await signIn(user, rerender, PROPOSED);
+    await user.type(screen.getByLabelText("Bin number"), "77");
+    await user.click(await screen.findByRole("button", { name: /Bin 77/ }));
+    const footer = screen.getByRole("group", { name: "Confirm registration" });
+    expect(footer).toHaveClass("reg-actions");
+    expect(within(footer).getByLabelText(/This tag is registered to Bin 3/)).toBeInTheDocument();
+    expect(within(footer).getByLabelText(/Replace Bin 77's tare 155.00 kg/)).toBeInTheDocument();
+    expect(within(footer).getByLabelText("This bin is completely empty")).toBeInTheDocument();
+    const register = screen.getByRole("button", { name: "Register Bin 77" });
+    expect(register.closest(".reg-buttons")).not.toBeNull();
+    expect(register.closest(".reg-actions, .reg-scroll")).toBeNull();
+    // The summary the person confirms is never inside a scrolling part either.
+    expect(screen.getByText("Bin 77", { selector: ".reg-summary-bin" }).closest(".reg-scroll")).toBeNull();
+    expect(screen.getByText(/To register, tick: move the tag, replace the tare, completely empty/)).toBeInTheDocument();
+    await user.click(within(footer).getByLabelText("This bin is completely empty"));
+    expect(screen.getByText(/To register, tick: move the tag, replace the tare$/)).toBeInTheDocument();
+  });
+
   it("shows a server refusal and the bin's current values when it changed meanwhile", async () => {
     confirmResult = () =>
       Promise.reject(
@@ -161,6 +186,26 @@ describe("RegisterBins", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Bin 77 was changed while you were registering.");
     expect(screen.getByText(/0000000000000099 · 151.00 kg/)).toBeInTheDocument();
     expect(screen.getByLabelText(/Replace Bin 77's tag 0000000000000099/)).not.toBeChecked();
+  });
+
+  it("shows the countdown and the tag remembered for this bin while measuring, and what step 2 waits for", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<RegisterBins s={snap(null)} onDone={() => {}} />);
+    await signIn(user, rerender, { ...reg({ phase: "measuring", sinceMs: 0, tag: "0000000137480620" }, 143_600), settleRemainingMs: 3_200 });
+    expect(screen.getByText("Weight taken in 4 s")).toBeInTheDocument();
+    expect(screen.getByText("RFID tag").nextElementSibling).toHaveTextContent("0000000137480620");
+    expect(screen.getByText(/Opens when the 10-second measurement ends \(4 s\)/)).toBeInTheDocument();
+    rerender(<RegisterBins s={snap(reg({ phase: "measuring", sinceMs: 0, tag: null }, 143_600))} onDone={() => {}} />);
+    expect(screen.getByText("RFID tag").nextElementSibling).toHaveTextContent("Not read yet");
+  });
+
+  it("explains a missing tag in both steps instead of waiting", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<RegisterBins s={snap(null)} onDone={() => {}} />);
+    await signIn(user, rerender, reg({ phase: "problem", reason: { code: "noTag" }, emptySinceMs: null }, 143_600));
+    expect(screen.getByText("RFID tag missing")).toBeInTheDocument();
+    expect(screen.getByText(/Not available: RFID tag missing. Nothing is registered for this bin./)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Bin number")).toBeNull();
   });
 
   it("confirms success and asks for the bin to be removed before the next one", async () => {

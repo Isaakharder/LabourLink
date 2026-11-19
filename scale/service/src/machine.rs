@@ -7,11 +7,28 @@
 //!
 //! ```text
 //! Starting ──first reading──▶ Idle (scale empty) | AwaitingRemoval (load already on scale)
-//! Idle ──load + exactly one known, weighable tag──▶ Settling (10 s)
-//! Settling ──10 s elapsed──▶ Stabilizing ──stable window──▶ AwaitingRemoval (Record emitted)
+//! Idle ──load arrives──▶ Identifying (the fixed 10 s cycle starts now)
+//! Identifying ──exactly one known, weighable tag──▶ Settling (same cycle, same start)
+//! Identifying ──10 s and still no tag──▶ Blocked(NoTag)
+//! Settling ──10 s since arrival──▶ Stabilizing ──weight captured──▶ AwaitingRemoval (Record emitted)
+//! Stabilizing ──no valid weight within capture_grace_ms──▶ Blocked(WeightNotCaptured)
 //! AwaitingRemoval ──scale empty for removal_ms──▶ Idle   (next bin)
 //! any loaded phase ──problem──▶ Blocked(reason) ──resolved / removed──▶ …
 //! ```
+//!
+//! The fixed 10-second cycle (the same countdown as Register Bins):
+//! * the countdown starts when the bin arrives on the scale; a tag read up to
+//!   `tag_window_ms` before that, or at any time during the cycle, belongs to
+//!   it and is remembered even if the reader reports it only once;
+//! * at 10 s the latest reading is taken as the gross weight
+//!   (`capture_latest_weight`): no median, no stability wait, and no limit on
+//!   how much the weight fluctuated. Motion reported by the indicator is
+//!   accepted (a motion frame's weight counts);
+//! * if there is no valid reading at 10 s (no reading in the last second, not
+//!   gross, an indicator fault), the bin is refused at once with the reason
+//!   shown (`capture_grace_ms` is 0).
+//!
+//! Register Bins keeps the stricter `capture_weight` (readings within 0.9 kg).
 //!
 //! Duplicate prevention:
 //! * one Record per placement: after recording, nothing is weighed again
@@ -32,13 +49,22 @@ use crate::scale_proto::{IndicatorMode, Reading};
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Params {
-    /// Fixed settling period after a bin is identified on the scale.
+    /// Fixed cycle length: the weight is taken this long after the bin
+    /// arrives on the scale.
     pub settle_ms: u64,
-    /// Readings over this window must agree before a weight is accepted.
-    pub stable_window_ms: u64,
-    pub stable_min_samples: usize,
-    /// Max spread (max − min) of the stable window, in grams.
-    pub stable_tolerance_g: i64,
+    /// Register Bins: at the end of the cycle the tare is the median of the
+    /// readings in this last window (at least `capture_min_samples`). The
+    /// LabourLink server requires at least 2 s and 5 readings for a tare.
+    /// Harvest weighing only checks this window for faults and net frames.
+    pub capture_window_ms: u64,
+    pub capture_min_samples: usize,
+    /// Register Bins: max spread (max − min) of those readings, in grams.
+    /// Anything larger is refused. Must not exceed the server's 0.9 kg limit
+    /// for a tare. Not used by harvest weighing.
+    pub capture_tolerance_g: i64,
+    /// How long after the cycle ends a valid weight may still be taken. 0:
+    /// the weight is taken at 10 s or the bin is refused at 10 s.
+    pub capture_grace_ms: u64,
     /// Gross at or above this means "something is on the scale".
     pub min_load_g: i64,
     /// Gross below this means "scale is empty".
@@ -59,9 +85,10 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             settle_ms: 10_000,
-            stable_window_ms: 2_000,
-            stable_min_samples: 5,
-            stable_tolerance_g: 50,
+            capture_window_ms: 2_000,
+            capture_min_samples: 5,
+            capture_tolerance_g: 900,
+            capture_grace_ms: 0,
             min_load_g: 2_000,
             zero_threshold_g: 1_000,
             removal_ms: 2_000,
@@ -118,6 +145,26 @@ pub enum BlockReason {
     SaveFailed {
         message: String,
     },
+    /// No valid weight at the end of the 10 s cycle (nor within the grace).
+    WeightNotCaptured {
+        why: CaptureFail,
+    },
+}
+
+/// Why `capture_weight` could not take a weight.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "code", rename_all = "camelCase")]
+pub enum CaptureFail {
+    /// Readings spread wider than `capture_tolerance_g`.
+    #[serde(rename_all = "camelCase")]
+    Unsteady { spread_g: i64 },
+    /// Not a gross weight: net, a steady reading without a mode, or the
+    /// latest reading that states a mode is not gross.
+    NotGross,
+    /// Overload, underload or an indicator error in the window.
+    IndicatorFault,
+    /// Fewer than `capture_min_samples` readings in the window.
+    TooFewReadings { readings: usize },
 }
 
 impl BlockReason {
@@ -127,7 +174,11 @@ impl BlockReason {
     fn sticky(&self) -> bool {
         matches!(
             self,
-            BlockReason::MultipleTags { .. } | BlockReason::RecentlyWeighed { .. } | BlockReason::EmptyBin { .. } | BlockReason::SaveFailed { .. }
+            BlockReason::MultipleTags { .. }
+                | BlockReason::RecentlyWeighed { .. }
+                | BlockReason::EmptyBin { .. }
+                | BlockReason::SaveFailed { .. }
+                | BlockReason::WeightNotCaptured { .. }
         )
     }
 }
@@ -144,6 +195,13 @@ pub enum RemovalReason {
 pub enum Phase {
     Starting,
     Idle,
+    /// A load arrived and the 10 s cycle is running, but no tag has been
+    /// read for it yet.
+    #[serde(rename_all = "camelCase")]
+    Identifying {
+        started_ms: u64,
+    },
+    /// The bin is identified; `started_ms` is still when it arrived.
     #[serde(rename_all = "camelCase")]
     Settling {
         bin: BinRef,
@@ -173,7 +231,7 @@ pub struct RecordDraft {
     pub bin: BinRef,
     pub gross_g: i64,
     pub net_g: i64,
-    /// The stable-window weights the gross was taken from (median).
+    /// The readings of the last 2 s before the 10 s mark (the gross is the latest).
     pub samples_g: Vec<i64>,
 }
 
@@ -234,6 +292,14 @@ impl Machine {
 
     /// The engine could not persist a Record: undo it so the bin is shown as
     /// not recorded and can be weighed again after it is lifted off.
+    /// When the running cycle started (the bin arrived), if one is running.
+    pub fn cycle_started_ms(&self) -> Option<u64> {
+        match &self.phase {
+            Phase::Identifying { started_ms } | Phase::Settling { started_ms, .. } => Some(*started_ms),
+            _ => None,
+        }
+    }
+
     pub fn record_failed(&mut self, bin: BinRef, message: String) {
         self.recent.remove(&bin.carrier_id);
         self.phase = Phase::Blocked {
@@ -275,7 +341,7 @@ impl Machine {
         let online = matches!(self.last_reading_ms, Some(t) if now.saturating_sub(t) <= self.params.scale_timeout_ms);
         if self.scale_online && !online {
             // Never finish a weighing on data we no longer receive.
-            if matches!(self.phase, Phase::Settling { .. } | Phase::Stabilizing { .. }) {
+            if matches!(self.phase, Phase::Identifying { .. } | Phase::Settling { .. } | Phase::Stabilizing { .. }) {
                 self.go_idle();
             }
         }
@@ -290,7 +356,8 @@ impl Machine {
         self.last_reading_ms = Some(now);
         self.scale_online = true;
         self.samples.push_back((now, reading.clone()));
-        let keep_from = now.saturating_sub(self.params.stable_window_ms + 1_000);
+        // The whole cycle is kept: capture_weight needs its latest gross/net frame.
+        let keep_from = now.saturating_sub(self.params.settle_ms + self.params.capture_window_ms + 1_000);
         while matches!(self.samples.front(), Some((t, _)) if *t < keep_from) {
             self.samples.pop_front();
         }
@@ -346,7 +413,22 @@ impl Machine {
             }
             Phase::Idle => {
                 if self.is_loaded() {
-                    self.phase = self.evaluate(now, lookup);
+                    // The bin arrived: the fixed 10 s cycle starts now.
+                    self.phase = self.identify(now, now, true, lookup);
+                }
+                None
+            }
+            Phase::Identifying { started_ms } => {
+                if !self.is_loaded() {
+                    if self.is_empty() {
+                        self.go_idle(); // taken off before it was identified
+                    }
+                    return None;
+                }
+                self.phase = self.identify(started_ms, now, true, lookup);
+                if matches!(self.phase, Phase::Settling { .. }) {
+                    // Identified at or after the 10 s mark: take the weight now.
+                    return self.advance(now, lookup);
                 }
                 None
             }
@@ -406,7 +488,12 @@ impl Machine {
                     // Between the empty and loaded thresholds: hold.
                     return None;
                 }
-                self.phase = self.evaluate(now, lookup);
+                // Re-check (a tag read late, the carrier cache updated, the
+                // indicator back to gross). Anything that passes starts a
+                // fresh full 10 s cycle from now. Still no tag stays NoTag:
+                // it never silently restarts the countdown.
+                let may_wait = !matches!(reason, BlockReason::NoTag);
+                self.phase = self.identify(now, now, may_wait, lookup);
                 None
             }
         }
@@ -453,7 +540,10 @@ impl Machine {
         Some(since)
     }
 
-    fn evaluate(&mut self, now: u64, lookup: &dyn CarrierLookup) -> Phase {
+    /// Identifies the load of the cycle that started at `started_ms`.
+    /// Tags read from `tag_window_ms` before the cycle started count for it.
+    /// With `may_wait`, no tag yet keeps the cycle running until 10 s.
+    fn identify(&mut self, started_ms: u64, now: u64, may_wait: bool, lookup: &dyn CarrierLookup) -> Phase {
         let blocked = |reason, bin| Phase::Blocked {
             reason,
             bin,
@@ -462,7 +552,7 @@ impl Machine {
         if let Some(reason) = self.indicator_problem() {
             return blocked(reason, None);
         }
-        let window_start = now.saturating_sub(self.params.tag_window_ms);
+        let window_start = started_ms.saturating_sub(self.params.tag_window_ms);
         let mut present: Vec<String> = self.tags.iter().filter(|(_, t)| **t >= window_start).map(|(k, _)| k.clone()).collect();
         if let Some(l) = &self.latched {
             if !present.contains(l) {
@@ -474,6 +564,7 @@ impl Machine {
             self.latched = Some(present[0].clone());
         }
         match present.len() {
+            0 if may_wait && now.saturating_sub(started_ms) < self.params.settle_ms => Phase::Identifying { started_ms },
             0 => blocked(BlockReason::NoTag, None),
             1 => {
                 let tag = present.remove(0);
@@ -498,16 +589,12 @@ impl Machine {
                         return blocked(BlockReason::RecentlyWeighed { seconds_ago: ago / 1000 }, Some(bin));
                     }
                 }
-                Phase::Settling { bin, started_ms: now }
+                Phase::Settling { bin, started_ms }
             }
             _ => blocked(BlockReason::MultipleTags { tags: present }, None),
         }
     }
 
-    /// True when the last `stable_window_ms` of readings are steady enough.
-    pub fn stable_window(&self, now: u64) -> Option<Vec<i64>> {
-        stable_weights(&self.samples, now, &self.params)
-    }
 
     /// Weighing resumes after Register Bins: start over as if the service
     /// had just started (so a bin still on the scale must be removed first),
@@ -524,11 +611,20 @@ impl Machine {
     }
 
     fn try_record(&mut self, now: u64) -> Option<RecordDraft> {
-        let Phase::Stabilizing { bin, .. } = self.phase.clone() else { return None };
-        let weights = self.stable_window(now)?;
-        let mut sorted = weights.clone();
-        sorted.sort();
-        let gross_g = sorted[sorted.len() / 2];
+        let Phase::Stabilizing { bin, since_ms } = self.phase.clone() else { return None };
+        let (gross_g, weights) = match capture_latest_weight(&self.samples, now, &self.params) {
+            Ok(w) => w,
+            Err(why) => {
+                if now.saturating_sub(since_ms) >= self.params.capture_grace_ms {
+                    self.phase = Phase::Blocked {
+                        reason: BlockReason::WeightNotCaptured { why },
+                        bin: Some(bin),
+                        empty_since_ms: None,
+                    };
+                }
+                return None;
+            }
+        };
         let net_g = gross_g - bin.tare_g;
         if net_g < self.params.min_net_g {
             self.phase = Phase::Blocked {
@@ -553,34 +649,109 @@ impl Machine {
     }
 }
 
-/// The stable-window rule shared by weighing and Register Bins: the last
-/// `stable_window_ms` of readings span most of the window, number at least
-/// `stable_min_samples`, show no motion, overload, underload, error or net
-/// mode, and agree within `stable_tolerance_g`.
-pub fn stable_weights(samples: &VecDeque<(u64, Reading)>, now: u64, params: &Params) -> Option<Vec<i64>> {
-    let from = now.saturating_sub(params.stable_window_ms);
-    let window: Vec<&(u64, Reading)> = samples.iter().filter(|(t, _)| *t >= from).collect();
-    if window.len() < params.stable_min_samples {
+/// A reading the cycle may take a weight from: an explicit, steady gross
+/// weight with no indicator condition.
+pub fn reading_ok(r: &Reading) -> bool {
+    r.weight_g.is_some() && r.mode == IndicatorMode::Gross && !r.motion && !r.overload && !r.underload && !r.error
+}
+
+pub fn median(weights: &[i64]) -> i64 {
+    let mut sorted = weights.to_vec();
+    sorted.sort();
+    sorted[sorted.len() / 2]
+}
+
+/// A reading's weight if a measurement may use it even while the indicator
+/// reports motion: a steady gross weight, or the weight of a motion frame
+/// (a Format A "M" frame carries no mode). None for net mode, an overload,
+/// underload or indicator error, or a frame without a weight.
+pub fn measurable_weight(r: &Reading) -> Option<i64> {
+    if r.overload || r.underload || r.error || r.mode == IndicatorMode::Net {
         return None;
     }
-    // The window must actually span (most of) the period, not just be
-    // a burst of readings that arrived in the last few hundred ms.
-    let span = now.saturating_sub(window[0].0);
-    if span * 10 < params.stable_window_ms * 8 {
-        return None;
+    if r.motion || r.mode == IndicatorMode::Gross {
+        r.weight_g
+    } else {
+        None
     }
-    let mut weights = Vec::with_capacity(window.len());
-    for (_, r) in window {
-        if r.motion || r.overload || r.underload || r.error || r.mode == IndicatorMode::Net {
-            return None;
-        }
-        weights.push(r.weight_g?);
+}
+
+/// The capture rule shared by weighing and Register Bins, applied at the end
+/// of the fixed 10 s cycle, over the readings of the last
+/// `capture_window_ms`:
+/// * any overload, underload, error or net reading refuses;
+/// * motion is accepted: a motion frame's weight counts like any other;
+/// * every steady reading must be an explicit gross weight, and the latest
+///   reading that states a mode must be gross (motion frames carry none);
+/// * at least `capture_min_samples` readings, all within
+///   `capture_tolerance_g` of each other.
+///
+/// Returns the window's weights; the caller takes their median.
+pub fn capture_weight(samples: &VecDeque<(u64, Reading)>, now: u64, params: &Params) -> Result<Vec<i64>, CaptureFail> {
+    let from = now.saturating_sub(params.capture_window_ms);
+    let window: Vec<&Reading> = samples.iter().filter(|(t, _)| *t >= from && *t <= now).map(|(_, r)| r).collect();
+    if window.iter().any(|r| r.overload || r.underload || r.error) {
+        return Err(CaptureFail::IndicatorFault);
     }
-    let (min, max) = (*weights.iter().min()?, *weights.iter().max()?);
-    if max - min > params.stable_tolerance_g {
-        return None;
+    if window.iter().any(|r| r.mode == IndicatorMode::Net) {
+        return Err(CaptureFail::NotGross);
     }
-    Some(weights)
+    // Gross mode: the latest frame that states a mode (motion frames don't)
+    // must be gross. The caller keeps the whole cycle's readings for this.
+    let latest_mode = samples.iter().rev().filter(|(t, _)| *t <= now).map(|(_, r)| r.mode).find(|m| *m != IndicatorMode::Unknown);
+    if latest_mode != Some(IndicatorMode::Gross) {
+        return Err(CaptureFail::NotGross);
+    }
+    let Some(weights) = window.iter().map(|r| measurable_weight(r)).collect::<Option<Vec<i64>>>() else {
+        return Err(CaptureFail::NotGross);
+    };
+    if weights.len() < params.capture_min_samples.max(1) {
+        return Err(CaptureFail::TooFewReadings { readings: weights.len() });
+    }
+    let (min, max) = (*weights.iter().min().unwrap(), *weights.iter().max().unwrap());
+    if max - min > params.capture_tolerance_g {
+        return Err(CaptureFail::Unsteady { spread_g: max - min });
+    }
+    Ok(weights)
+}
+
+/// A reading older than this at the 10 s mark is stale: the weight is not taken.
+pub const FRESH_READING_MS: u64 = 1_000;
+
+/// The harvest weighing rule, applied once at the end of the fixed 10 s
+/// cycle: the gross weight is the latest reading, however much the weight
+/// fluctuated before it.
+/// * the latest reading must be at most `FRESH_READING_MS` old (else
+///   `TooFewReadings { readings: 0 }`) and carry a measurable weight (gross,
+///   or a motion frame's weight);
+/// * any overload, underload, error or net reading in the last
+///   `capture_window_ms` refuses, and the latest reading that states a mode
+///   must be gross (motion frames carry none), as in `capture_weight`.
+///
+/// Returns the gross weight and, for the record, the window's weights.
+pub fn capture_latest_weight(samples: &VecDeque<(u64, Reading)>, now: u64, params: &Params) -> Result<(i64, Vec<i64>), CaptureFail> {
+    let Some((t, latest)) = samples.iter().rev().find(|(t, _)| *t <= now) else {
+        return Err(CaptureFail::TooFewReadings { readings: 0 });
+    };
+    if now.saturating_sub(*t) > FRESH_READING_MS {
+        return Err(CaptureFail::TooFewReadings { readings: 0 });
+    }
+    let from = now.saturating_sub(params.capture_window_ms);
+    let window: Vec<&Reading> = samples.iter().filter(|(t, _)| *t >= from && *t <= now).map(|(_, r)| r).collect();
+    if window.iter().any(|r| r.overload || r.underload || r.error) {
+        return Err(CaptureFail::IndicatorFault);
+    }
+    if window.iter().any(|r| r.mode == IndicatorMode::Net) {
+        return Err(CaptureFail::NotGross);
+    }
+    let latest_mode = samples.iter().rev().filter(|(t, _)| *t <= now).map(|(_, r)| r.mode).find(|m| *m != IndicatorMode::Unknown);
+    if latest_mode != Some(IndicatorMode::Gross) {
+        return Err(CaptureFail::NotGross);
+    }
+    let Some(gross_g) = measurable_weight(latest) else {
+        return Err(CaptureFail::NotGross);
+    };
+    Ok((gross_g, window.iter().filter_map(|r| measurable_weight(r)).collect()))
 }
 
 #[cfg(test)]
@@ -687,18 +858,229 @@ mod tests {
         assert_eq!(recs.len(), 1, "records on the first reading after 10 s");
     }
 
+    fn not_captured(m: &Machine) -> CaptureFail {
+        match &m.phase {
+            Phase::Blocked {
+                reason: BlockReason::WeightNotCaptured { why },
+                ..
+            } => why.clone(),
+            p => panic!("not WeightNotCaptured: {p:?}"),
+        }
+    }
+
+    /// A Format A motion frame: a weight, the motion flag, no mode.
+    fn r300_motion(g: i64) -> Reading {
+        Reading {
+            mode: IndicatorMode::Unknown,
+            ..moving(g)
+        }
+    }
+
     #[test]
-    fn unstable_weight_is_never_recorded() {
+    fn any_fluctuation_is_recorded_at_ten_seconds_with_the_latest_reading() {
+        let c = carriers();
+        // 0, 0.5, 1.1 (bin 73 on the NUC), 2.0 and 3.0 kg swings, with and
+        // without motion frames: recorded at the 10 s mark, gross = the
+        // reading at that moment, net = gross - the bin's tare.
+        for spread in [0i64, 500, 1_100, 2_000, 3_000] {
+            for motion in [false, true] {
+                let mut m = started_empty(&c);
+                m.on_tag(TAG_A, 1_000);
+                let swing = move |t: u64| {
+                    let w = 110_200 + if (t / 100) % 2 == 1 { spread } else { 0 } + (t as i64 / 100 % 7) * 10;
+                    if motion && (t / 100) % 3 != 0 { r300_motion(w) } else { gross(w) }
+                };
+                assert!(feed(&mut m, &c, 1_000, 11_000, swing).is_empty(), "{spread} g: not before 10 s");
+                let recs = feed(&mut m, &c, 11_000, 11_100, swing);
+                assert_eq!(recs.len(), 1, "{spread} g motion={motion}: recorded at the 10 s mark");
+                let r = &recs[0];
+                assert_eq!(swing(11_000).weight_g, Some(r.gross_g), "the latest reading, not a median");
+                assert_eq!(r.net_g, r.gross_g - 27_500);
+                assert!(r.samples_g.len() >= 19, "the window's readings are kept with the record");
+                assert!(matches!(m.phase, Phase::AwaitingRemoval { reason: RemovalReason::Recorded, .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn a_stale_reading_at_ten_seconds_is_not_recorded() {
         let c = carriers();
         let mut m = started_empty(&c);
         m.on_tag(TAG_A, 1_000);
-        let recs = feed(&mut m, &c, 1_000, 60_000, |t| gross(64_000 + ((t / 100) % 2) as i64 * 200));
-        assert!(recs.is_empty());
-        assert!(matches!(m.phase, Phase::Stabilizing { .. }));
-        // Motion flag alone also blocks, even with identical weights.
+        feed(&mut m, &c, 1_000, 9_800, |_| gross(64_000));
+        // The scale goes quiet at 9.7 s; the 10 s tick sees a 1.3 s old reading.
+        assert_eq!(m.tick(11_000, &c), None);
+        assert_eq!(not_captured(&m), CaptureFail::TooFewReadings { readings: 0 });
+        assert!(feed(&mut m, &c, 11_000, 30_000, |_| gross(64_000)).is_empty(), "sticky until removed");
+    }
+
+    #[test]
+    fn capture_latest_weight_takes_only_a_fresh_valid_gross_reading() {
+        let p = Params::default();
+        let at = |rs: Vec<(u64, Reading)>| capture_latest_weight(&rs.into_iter().collect(), 10_000, &p);
+        let swing = |n: u64| (0..n).map(|i| (8_100 + i * 100, gross(64_000 + (i % 2) as i64 * 3_000))).collect::<Vec<_>>();
+        assert_eq!(at(swing(19)).unwrap().0, 64_000, "latest of a 3 kg swing");
+        let mut v = swing(19);
+        v[18].1 = r300_motion(66_000);
+        assert_eq!(at(v).unwrap().0, 66_000, "a motion frame's weight");
+        let mut v = swing(19);
+        v[18].1 = Reading { weight_g: None, ..r300_motion(0) };
+        assert_eq!(at(v), Err(CaptureFail::NotGross), "no weight in the latest frame");
+        let mut v = swing(19);
+        v[9].1 = Reading { mode: IndicatorMode::Net, ..gross(64_000) };
+        assert_eq!(at(v), Err(CaptureFail::NotGross), "a net frame");
+        for fault in [Reading { overload: true, ..gross(64_000) }, Reading { underload: true, ..gross(64_000) }, Reading { error: true, ..gross(64_000) }] {
+            let mut v = swing(19);
+            v[12].1 = fault;
+            assert_eq!(at(v), Err(CaptureFail::IndicatorFault));
+        }
+        let v: Vec<_> = swing(19).into_iter().map(|(t, r)| (t, Reading { mode: IndicatorMode::Unknown, ..r })).collect();
+        assert_eq!(at(v), Err(CaptureFail::NotGross), "never stated gross");
+        assert_eq!(at(swing(9)), Err(CaptureFail::TooFewReadings { readings: 0 }), "latest at 8.9 s: stale");
+        assert_eq!(at(vec![]), Err(CaptureFail::TooFewReadings { readings: 0 }));
+        assert_eq!(at(vec![(9_000, gross(64_000))]).unwrap().0, 64_000, "exactly 1 s old is still fresh");
+    }
+
+    #[test]
+    fn a_one_division_flicker_at_ten_seconds_is_captured_without_waiting() {
+        let c = carriers();
         let mut m = started_empty(&c);
         m.on_tag(TAG_A, 1_000);
-        assert!(feed(&mut m, &c, 1_000, 30_000, |_| moving(64_000)).is_empty());
+        // The indicator flickers between 143.60 and 143.70 kg (one 0.1 kg
+        // division): the old 50 g stable window never accepted this.
+        let flicker = |t: u64| gross(143_600 + ((t / 300) % 2) as i64 * 100);
+        assert!(feed(&mut m, &c, 1_000, 11_000, flicker).is_empty());
+        let recs = feed(&mut m, &c, 11_000, 11_200, flicker);
+        assert_eq!(recs.len(), 1, "taken at the 10 s mark");
+        assert!([143_600, 143_700].contains(&recs[0].gross_g));
+    }
+
+    #[test]
+    fn motion_at_ten_seconds_is_captured_at_ten_seconds() {
+        let c = carriers();
+        // Steady, then the R300 reports motion for the whole last 1.5 s.
+        let mut m = started_empty(&c);
+        m.on_tag(TAG_A, 1_000);
+        feed(&mut m, &c, 1_000, 9_500, |_| gross(64_000));
+        let recs = feed(&mut m, &c, 9_500, 11_100, |t| r300_motion(64_000 + ((t / 100) % 3) as i64 * 100));
+        assert_eq!(recs.len(), 1, "not held back by the motion flag");
+        assert!((64_000..=64_200).contains(&recs[0].gross_g));
+        // Motion on most frames of the window, gross on a few: also captured.
+        let mut m = started_empty(&c);
+        m.on_tag(TAG_A, 1_000);
+        let recs = feed(&mut m, &c, 1_000, 11_100, |t| if (t / 100) % 4 == 0 { gross(64_000) } else { r300_motion(64_300) });
+        assert_eq!(recs.len(), 1);
+    }
+
+    #[test]
+    fn motion_never_lets_an_invalid_stale_overloaded_or_removed_reading_through() {
+        let c = carriers();
+        // No frame ever stated gross mode (motion frames only): refused.
+        let mut m = Machine::new(Params::default());
+        feed(&mut m, &c, 0, 1_000, |_| r300_motion(0));
+        assert_eq!(m.phase, Phase::Idle);
+        m.on_tag(TAG_A, 1_000);
+        assert!(feed(&mut m, &c, 1_000, 11_100, |_| r300_motion(64_000)).is_empty());
+        assert_eq!(not_captured(&m), CaptureFail::NotGross);
+        // Gross at arrival, then motion frames for the whole 2 s window: taken.
+        let mut m = started_empty(&c);
+        m.on_tag(TAG_A, 1_000);
+        feed(&mut m, &c, 1_000, 8_500, |_| gross(64_000));
+        assert_eq!(feed(&mut m, &c, 8_500, 11_100, |_| r300_motion(64_100)).len(), 1);
+        // Overload during motion blocks at once and is never weighed.
+        let mut m = started_empty(&c);
+        m.on_tag(TAG_A, 1_000);
+        feed(&mut m, &c, 1_000, 9_000, |_| r300_motion(64_000));
+        let over = Reading { weight_g: None, overload: true, mode: IndicatorMode::Unknown, ..gross(0) };
+        assert!(feed(&mut m, &c, 9_000, 9_500, |_| over.clone()).is_empty());
+        assert!(matches!(m.phase, Phase::Blocked { reason: BlockReason::Overload, .. }));
+        // Cleared: a fresh full 10 s cycle (as in 0.4.0), nothing from the overloaded one.
+        assert!(feed(&mut m, &c, 9_500, 19_400, |_| r300_motion(64_000)).is_empty(), "not weighed from the overloaded cycle");
+        // Bin lifted off while in motion: nothing recorded, back to idle.
+        let mut m = started_empty(&c);
+        m.on_tag(TAG_A, 1_000);
+        feed(&mut m, &c, 1_000, 9_000, |_| r300_motion(64_000));
+        assert!(feed(&mut m, &c, 9_000, 12_000, |_| r300_motion(0)).is_empty());
+        assert_eq!(m.phase, Phase::Idle);
+        // Scale goes silent before 10 s (stale data): the cycle is dropped.
+        let mut m = started_empty(&c);
+        m.on_tag(TAG_A, 1_000);
+        feed(&mut m, &c, 1_000, 7_000, |_| r300_motion(64_000));
+        assert_eq!(m.tick(12_000, &c), None);
+        assert_eq!(m.phase, Phase::Idle);
+    }
+
+    #[test]
+    fn the_countdown_starts_at_arrival_and_a_tag_read_once_during_it_is_kept() {
+        let c = carriers();
+        let mut m = started_empty(&c);
+        feed(&mut m, &c, 1_000, 6_000, |_| gross(64_000));
+        assert_eq!(m.phase, Phase::Identifying { started_ms: 1_000 });
+        m.on_tag(TAG_A, 6_000); // read once, never again
+        assert!(feed(&mut m, &c, 6_000, 11_000, |_| gross(64_000)).is_empty());
+        assert!(matches!(m.phase, Phase::Settling { started_ms: 1_000, .. }));
+        let recs = feed(&mut m, &c, 11_000, 11_200, |_| gross(64_000));
+        assert_eq!(recs.len(), 1, "weighed 10 s after arrival, not 10 s after the tag");
+        assert_eq!(recs[0].bin.carrier_name, "Bin 23");
+    }
+
+    #[test]
+    fn no_tag_is_reported_at_ten_seconds_and_a_late_tag_gets_a_fresh_cycle() {
+        let c = carriers();
+        let mut m = started_empty(&c);
+        feed(&mut m, &c, 1_000, 10_900, |_| gross(64_000));
+        assert!(matches!(m.phase, Phase::Identifying { .. }));
+        feed(&mut m, &c, 10_900, 30_000, |_| gross(64_000));
+        assert!(matches!(
+            m.phase,
+            Phase::Blocked {
+                reason: BlockReason::NoTag,
+                ..
+            }
+        ));
+        m.on_tag(TAG_A, 30_000);
+        assert!(feed(&mut m, &c, 30_000, 39_900, |_| gross(64_000)).is_empty());
+        assert_eq!(feed(&mut m, &c, 39_900, 41_000, |_| gross(64_000)).len(), 1);
+    }
+
+    #[test]
+    fn capture_requires_explicit_gross_and_enough_readings() {
+        let p = Params::default();
+        let at = |rs: Vec<(u64, Reading)>| capture_weight(&rs.into_iter().collect(), 10_000, &p);
+        let unknown = Reading {
+            mode: IndicatorMode::Unknown,
+            ..gross(64_000)
+        };
+        let steady = |n: u64| (0..n).map(|i| (8_100 + i * 100, gross(64_000 + (i % 2) as i64 * 100))).collect::<Vec<_>>();
+        assert_eq!(at(steady(19)).unwrap().len(), 19);
+        let mut v = steady(19);
+        v[3].1 = unknown;
+        assert_eq!(at(v), Err(CaptureFail::NotGross));
+        assert_eq!(at(steady(4)), Err(CaptureFail::TooFewReadings { readings: 4 }));
+        // Readings older than the 2 s window do not count.
+        let mut v = steady(19);
+        v.insert(0, (7_000, gross(1)));
+        assert_eq!(at(v).unwrap().len(), 19);
+        // Motion frames count, on the latest reading or most of the window.
+        let mut v = steady(19);
+        v[18].1 = r300_motion(64_000);
+        assert_eq!(at(v).unwrap().len(), 19);
+        let v: Vec<_> = steady(19).into_iter().enumerate().map(|(i, (t, r))| (t, if i < 15 { r300_motion(64_000) } else { r })).collect();
+        assert_eq!(at(v).unwrap().len(), 19);
+        // A motion frame without a weight, or a net frame, refuses.
+        let mut v = steady(19);
+        v[18].1 = Reading { weight_g: None, ..r300_motion(0) };
+        assert_eq!(at(v), Err(CaptureFail::NotGross));
+        let mut v = steady(19);
+        v[9].1 = Reading { mode: IndicatorMode::Net, ..moving(64_000) };
+        assert_eq!(at(v), Err(CaptureFail::NotGross));
+        // Over 0.9 kg refuses; exactly 0.9 kg is accepted.
+        let mut v = steady(19);
+        v[4].1 = gross(65_000);
+        assert_eq!(at(v), Err(CaptureFail::Unsteady { spread_g: 1_000 }));
+        let mut v = steady(19);
+        v[4].1 = gross(64_900);
+        assert!(at(v).is_ok());
     }
 
     #[test]
@@ -753,6 +1135,8 @@ mod tests {
         assert_eq!(m.phase, Phase::Idle);
         // An untagged/unread load arrives within the tag window of B's read.
         feed(&mut m, &c, 18_000, 19_000, |_| gross(60_000));
+        assert_eq!(m.phase, Phase::Identifying { started_ms: 18_000 });
+        feed(&mut m, &c, 19_000, 30_000, |_| gross(60_000));
         assert!(matches!(
             m.phase,
             Phase::Blocked {

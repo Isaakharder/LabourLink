@@ -1,6 +1,6 @@
 # LabourLink Scale
 
-Weighing station for the packhouse. It runs on an Intel NUC5CPYH with Linux Mint 22.3, a PROTAGD RFID reader and a Rinstrum R300 indicator. When a bin is placed on the scale, its RFID tag identifies the carrier. The station waits for a stable gross weight, subtracts the carrier's tare and records the net weight. The LabourLink server then credits the picker who verifiably scanned that bin in the same use cycle.
+Weighing station for the packhouse. It runs on an Intel NUC5CPYH with Linux Mint 22.3, a PROTAGD RFID reader and a Rinstrum R300 indicator. When a bin is placed on the scale, its RFID tag identifies the carrier. Exactly 10 seconds after the bin arrives, the station takes the gross weight, subtracts the carrier's tare and records the net weight. The LabourLink server then credits the picker who verifiably scanned that bin in the same use cycle.
 
 Bins are registered at the station itself: **Register Bins** measures an empty bin and writes its tag and tare to its LabourLink carrier record.
 
@@ -18,7 +18,7 @@ scale/
 
 | Area | State |
 |---|---|
-| Weighing state machine (10 s settle, stable weight, duplicate and next-bin rules) | Done, unit-tested |
+| Weighing state machine (fixed 10 s cycle, duplicate and next-bin rules) | Done, unit-tested |
 | SQLite outbox, offline queue, restart recovery | Done, unit-tested |
 | Display: weighing screen, status bar, recent weighings | Done, tested in a browser and with component tests |
 | Register Bins (any signed-in user; empty bin measured on the scale; tag and tare saved to the existing carrier, audited) | Done. Tested against the simulator and end to end against a local LabourLink server |
@@ -61,7 +61,7 @@ Register Bins sign-in in simulation: `picker@sim.local` / `1234`. Any user can r
 ```sh
 # Service: 99 tests (parsers, state machine, Register Bins, matching rule incl. the server's shared cases, store, end to end in simulation and hardware test)
 docker run --rm -v "$PWD":/work -w /work/scale/service labourlink-scale-build cargo test
-# Display: 34 tests
+# Display: 35 tests
 cd scale/app && npx vitest run
 # Hardware-test mode end to end: the real binary, virtual serial ports named like the NUC's, no network.
 # Needs an image with socat, curl and jq (see the script's header).
@@ -76,13 +76,13 @@ docker run --rm -v "$PWD":/work -v /path/to/e2e.json:/e2e/e2e.json -e E2E_SERVER
 
 ```sh
 docker run --rm -v "$PWD":/work labourlink-scale-build sh /work/scale/docker/build-deb.sh
-# → scale/dist/labourlink-scale_0.3.0_amd64.deb (~4 MB)
+# → scale/dist/labourlink-scale_0.3.1_amd64.deb (~4 MB)
 ```
 
 To install on the NUC:
 
 ```sh
-sudo apt install ./labourlink-scale_0.3.0_amd64.deb
+sudo apt install ./labourlink-scale_0.3.1_amd64.deb
 ```
 
 The package starts `labourlink-scaled` in **simulation** mode and adds the display to XFCE autostart. Then run `sh /usr/share/labourlink-scale/setup-kiosk.sh` as the station user and enable automatic login.
@@ -91,7 +91,7 @@ The package starts `labourlink-scaled` in **simulation** mode and adds the displ
 
 Hardware-test mode reads the **real** scale indicator and RFID reader at the same time and runs the normal weighing rules on them. Nothing goes to LabourLink.
 
-The rules that run are the 10 s settle, the stable weight, tare and net, duplicate prevention, return to zero, and the pending assignment.
+The rules that run are the fixed 10 s cycle, tare and net, duplicate prevention, return to zero, and the pending assignment.
 
 - **Bins** come from `testCarriers` in the config file: a real tag and that bin's real tare, copied from the Carriers page. Tags that aren't listed show "Unregistered RFID tag" with the tag number, which is the easiest way to read a bin's tag.
 - **The "server"** is the same in-process test server as simulation. The service builds no HTTP client, so nothing can be uploaded and no credit can be created. Weighings show "Awaiting assignment" because no phone scans exist.
@@ -113,7 +113,7 @@ The rules that run are the 10 s settle, the stable weight, tare and net, duplica
 
 ```sh
 # 1. Install 0.2.1. The existing /etc/labourlink-scale/config.json is kept, so the service restarts in simulation.
-sudo apt install ./labourlink-scale_0.3.0_amd64.deb
+sudo apt install ./labourlink-scale_0.3.1_amd64.deb
 
 # 2. Both devices must have stable names.
 ls -l /dev/serial/by-id/ /dev/labourlink/
@@ -181,13 +181,14 @@ Hardware-test weighings stay in `/var/lib/labourlink-scale/scale-hwtest.sqlite3`
 1. **Sign in.** Press **Register Bins** and sign in with any LabourLink email and PIN.
 2. **Clear the scale.** It must read zero for 2 seconds, on entry and after every bin.
 3. **Roll on one completely empty bin.** The station:
-   - reads its tag;
-   - waits the 10-second settle and a stable gross reading;
-   - proposes that weight as the tare.
+   - counts down 10 seconds from the moment the bin arrives, showing the RFID tag it has read for this bin (a single read is enough);
+   - at 10 seconds takes the current gross weight from the 2 seconds before, accepting a one-division flicker or a stray motion frame;
+   - proposes that weight as the tare, and Step 2 opens.
 
-   It refuses when:
-   - no tag or more than one tag is read;
-   - the weight is near zero or unstable;
+   It refuses, and says why in both steps, when:
+   - no tag was read by the end of the 10 seconds (*RFID tag missing*). Hold the tag near the reader while the bin is on the scale: a fresh 10-second measurement starts;
+   - more than one tag is read;
+   - the weight is near zero, or still moving or swinging more than 0.15 kg after the 10 seconds (*Weight not valid*). Take the bin off and place it again;
    - the indicator is not in gross mode.
 4. **Enter the bin's LabourLink number** (on-screen keypad) and pick the bin.
 5. **Check the bin, RFID tag and tare.**
@@ -219,7 +220,7 @@ Every change appears in the bin's history on Basic Data > Carriers.
 3. **On the NUC:**
 
    ```sh
-   sudo apt install ./labourlink-scale_0.3.0_amd64.deb
+   sudo apt install ./labourlink-scale_0.3.1_amd64.deb
    sudo install -m 0644 /usr/share/labourlink-scale/config.live.example.json /etc/labourlink-scale/config.json
    sudo nano /etc/labourlink-scale/config.json          # apiBaseUrl: the LabourLink API's https:// address
    sudo sh -c 'umask 077; printf "%s" "PASTE-TOKEN-HERE" > /etc/labourlink-scale/station-token'

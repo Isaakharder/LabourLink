@@ -81,7 +81,38 @@ frames '    93.0G' 13
 echo "== 5. no simulator in hardware-test mode"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"grossKg":50}' http://127.0.0.1:47800/api/sim/place)" = 404 ] || fail "sim routes"
 
-echo "== 6. the hardware-test database"
+echo "== 6. Register Bins: the reported bin (143.60 kg flickering by 0.1 kg, tag read once) is measured at 10 s"
+api() { curl -s -X POST -H 'content-type: application/json' -H "X-Session-Token: ${TOK:-}" -d "$2" "http://127.0.0.1:47800$1"; }
+TOK=$(api /api/session/login '{"email":"picker@sim.local","pin":"1234"}' | jq -r .token)
+[ -n "$TOK" ] && [ "$TOK" != null ] || fail "sign in to the test server"
+api /api/register/start '{}' > /dev/null
+frames '     0.0G' 3
+[ "$(state | jq -r .registration.phase.phase)" = ready ] || fail "registration should be ready on a cleared scale"
+tag 0000000137480620
+n=0; while [ $n -lt 105 ]; do
+  case $((n % 20)) in 7) f='   143.6M' ;; *) if [ $(((n / 3) % 2)) = 0 ]; then f='   143.6G'; else f='   143.7G'; fi ;; esac
+  printf '\002%s\003' "$f" > $T/scale-feed; sleep 0.1; n=$((n + 1))
+done
+frames '   143.6G' 1
+S=$(state)
+echo "$S" | jq -c '.registration | {phase: .phase.phase, tag: .phase.proposal.tag, grossG: .phase.proposal.grossG}'
+[ "$(echo "$S" | jq -r .registration.phase.phase)" = proposed ] || fail "should be proposed after the 10 s cycle"
+[ "$(echo "$S" | jq -r .registration.phase.proposal.tag)" = 0000000137480620 ] || fail "the tag read once must be remembered"
+case "$(echo "$S" | jq -r .registration.phase.proposal.grossG)" in 143600 | 143700) ;; *) fail "tare" ;; esac
+# What the LabourLink server requires of a tare measurement: >= 5 readings within 0.2 kg over >= 2 s.
+[ "$(echo "$S" | jq '.registration.phase.proposal | (.samplesG | length) >= 5 and ((.samplesG | max) - (.samplesG | min)) <= 150 and .stableMs >= 2000')" = true ] || fail "measurement the server would refuse"
+api /api/register/confirm '{"carrierId":"test-carrier-01","expected":{"rfidTag":"0000000182225750","tareWeightKg":27.5},"emptyConfirmed":true,"confirmOverwrite":true}' | jq -c '{carrier: .carrier.name, tag: .carrier.rfidTag, tare: .carrier.tareWeightKg}'
+[ "$(state | jq -r .registration.phase.phase)" = saved ] || fail "registered after confirming"
+[ "$(state | jq '.recent | length')" = 1 ] || fail "registering must never create a weighing"
+
+echo "== 7. Register Bins: no tag read says so at 10 s instead of waiting"
+frames '     0.0G' 3
+frames '   150.0G' 11
+[ "$(state | jq -r .registration.phase.reason.code)" = noTag ] || fail "no tag should be reported"
+api /api/register/stop '{}' > /dev/null
+[ "$(state | jq '.recent | length')" = 1 ] || fail "still one weighing"
+
+echo "== 8. the hardware-test database"
 ls $T/data
 [ -f $T/data/scale-hwtest.sqlite3 ] && [ ! -e $T/data/scale.sqlite3 ] || fail "database file"
 kill $SVC

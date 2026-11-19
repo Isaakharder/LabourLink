@@ -29,6 +29,11 @@ pub struct AssignmentResult {
     /// the weighing but it never counts as an employee credit.
     #[serde(default)]
     pub credits_live: Option<bool>,
+    /// Picking cycles (server 074+): nobody chose this bin on a phone since
+    /// it was last weighed, so this weighing is not credited. Absent from
+    /// older servers: false.
+    #[serde(default)]
+    pub no_picking_cycle: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -534,6 +539,7 @@ mod tests {
             employee_name: None,
             pending_until: None,
             credits_live: None,
+            no_picking_cycle: false,
         };
         let v = serde_json::to_value(WeighingUpload::from(&w)).unwrap();
         assert_eq!(v["stationWeighingId"], "u-1");
@@ -551,5 +557,8 @@ mod tests {
         assert_eq!(r.credits_live, Some(false));
         let r: AssignmentResult = serde_json::from_str(r#"{"status":"pending","employeeName":null,"pendingUntil":"x"}"#).unwrap();
         assert_eq!(r.credits_live, None);
+        assert!(!r.no_picking_cycle, "older servers don't send it");
+        let r: AssignmentResult = serde_json::from_str(r#"{"status":"pending","employeeName":null,"pendingUntil":"2026-01-02T10:00:00Z","creditsLive":false,"noPickingCycle":true}"#).unwrap();
+        assert!(r.no_picking_cycle);
     }
 }
