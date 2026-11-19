@@ -480,6 +480,10 @@ async function main() {
     check(wC2.status === "credited" && wC2.employee_id === ruben.employeeId, "Q) a late phone scan never changes the corrected credit", wC2);
     const olaCycle = (await cycles(binC)).find((c: any) => c.employee_id === ola.employeeId);
     check(olaCycle?.status === "superseded" && olaCycle?.review_status === "open" && olaCycle?.finalized_at !== null, "Q) it becomes a superseded cycle flagged for review", olaCycle);
+    const rlist = await admin_("GET", `/api/bin-cycles?state=review&carrierId=${binC.id}`, manager.token);
+    check(rlist.body.cycles.some((c: any) => c.id === olaCycle?.id && c.lateScan === true && c.reviewStatus === "open"), "Q) the review list marks it as a late conflict", rlist.body);
+    const dlist = await admin_("GET", `/api/scale-weighings/${wC.id}`, manager.token);
+    check(dlist.body?.weighing?.pickingCycle?.supersededCycles?.some((c: any) => c.employeeName === ola.name && c.lateScan === true), "Q) and so does the weighing detail", dlist.body?.weighing?.pickingCycle?.supersededCycles);
     const lateFlag = (await pool.query(`select kind from scale_weighing_flags where weighing_id = $1 and employee_id = $2`, [wC.id, ola.employeeId])).rows;
     check(lateFlag.length === 1 && lateFlag[0].kind === "late_conflict", "Q) and is flagged on the weighing", lateFlag);
     await sweepPendingWeighings();

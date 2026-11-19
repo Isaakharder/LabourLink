@@ -220,10 +220,13 @@ export function ScaleWeighingDetailModal({ weighingId, onClose, onChanged }: { w
                 {cycle.supersededCycles!.map((sc) => (
                   <li key={sc.id}>
                     <strong>{sc.employeeName}</strong>: scans {sc.scans.map((x) => formatTimeInAppTimezone(x.occurredAt, { seconds: false })).join(", ")}
-                    <span className="field-hint">
-                      {" "}
-                      · superseded {when(sc.supersededAt)} · {sc.reviewStatus === "open" ? "to review" : sc.reviewStatus}
-                    </span>
+                    {" "}
+                    <strong>{sc.reviewStatus === "open" ? "· To review" : sc.reviewStatus === "confirmed" ? "· Confirmed superseded" : "· Credited instead"}</strong>
+                    <div className="field-hint">
+                      {sc.lateScan
+                        ? `Late conflict: this scan reached LabourLink after the weighing was credited. The credit was not changed.`
+                        : `Bin reused before weighing: superseded ${when(sc.supersededAt)} when another employee started using it.`}
+                    </div>
                     {employee?.securityRole === "Administrator" && !review && (
                       <span className="employee-form-actions">
                         {w.status === "credited" && (

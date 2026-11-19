@@ -257,7 +257,7 @@ export function splitRuns<T extends PlaceScan>(group: T[]): T[][] {
 }
 
 const SUPERSEDED_REASON = "Another employee started using this bin before it was weighed. This cycle gets no weighing or credit.";
-const LATE_SUPERSEDED_REASON =
+export const LATE_SUPERSEDED_REASON =
   "This scan reached LabourLink after the bin's weighing was already credited to another employee. Not credited; flagged for review.";
 
 // Re-places a bin's open, superseded-but-unsettled and unplaced scans and

@@ -271,6 +271,8 @@ describe("ScaleWeighingsPage", () => {
     await user.click(await screen.findByText("Ruben Ortiz", { selector: "td" }));
     expect(await screen.findByText("Earlier picking cycles superseded before this weighing")).toBeInTheDocument();
     expect(screen.getByText("Patrick Jones")).toBeInTheDocument();
+    expect(screen.getByText("· To review")).toBeInTheDocument();
+    expect(screen.getByText(/Bin reused before weighing/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Credit this cycle instead" }));
     const submit = screen.getByRole("button", { name: "Credit Patrick Jones" });
     expect(submit).toBeDisabled();
@@ -281,6 +283,16 @@ describe("ScaleWeighingsPage", () => {
     expect(reviewCalls[0].body).toMatchObject({ reason: "Ruben scanned the wrong bin" });
     expect(typeof reviewCalls[0].body.requestId).toBe("string");
     await waitFor(() => expect(screen.queryByText("Earlier picking cycles superseded before this weighing")).toBeNull());
+  });
+
+  it("marks a late conflict as such", async () => {
+    const d = reused(false);
+    if (d.pickingCycle && d.pickingCycle !== "none") d.pickingCycle.supersededCycles![0].lateScan = true;
+    nextDetail = d;
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await user.click(await screen.findByText("Ruben Ortiz", { selector: "td" }));
+    expect(await screen.findByText(/Late conflict: this scan reached LabourLink after the weighing was credited/)).toBeInTheDocument();
   });
 
   it("does not offer moving a credit to a Manager", async () => {

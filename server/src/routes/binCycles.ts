@@ -9,7 +9,7 @@
 import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
-import { closeCycleWithoutWeighing, OPEN_STATUSES, resolveCycle, reviewSupersededCycle } from "../lib/binCycles";
+import { closeCycleWithoutWeighing, LATE_SUPERSEDED_REASON, OPEN_STATUSES, resolveCycle, reviewSupersededCycle } from "../lib/binCycles";
 import { requireAuth, requireRole } from "../middleware/auth";
 
 const router = Router();
@@ -38,6 +38,10 @@ function cycleJson(r: any) {
     supersededByCycleId: r.superseded_by_cycle_id ?? null,
     reviewStatus: r.review_status ?? null,
     settled: r.status !== "superseded" || !!r.finalized_at,
+    // A scan that reached LabourLink after the bin's weighing was already
+    // credited to someone else (a late conflict), rather than a bin reused
+    // before it was weighed.
+    lateScan: r.status === "superseded" && r.close_reason === LATE_SUPERSEDED_REASON,
     resolution: r.resolved_at
       ? { employeeId: r.resolved_employee_id, employeeName: r.resolved_employee_name, resolvedBy: r.resolved_by_name, resolvedAt: r.resolved_at, reason: r.resolution_reason, previousStatus: r.resolution_previous_status }
       : null,

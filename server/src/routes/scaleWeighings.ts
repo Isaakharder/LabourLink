@@ -17,6 +17,7 @@ import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { recordWeighingEvent } from "../lib/scaleMatching";
+import { LATE_SUPERSEDED_REASON } from "../lib/binCycles";
 import { calendarDateInAppTimezone, getDayBoundsUtc } from "../lib/timezone";
 import { requireAuth, requireRole } from "../middleware/auth";
 
@@ -252,6 +253,7 @@ async function loadDetail(id: string) {
               supersededAt: r.closed_at,
               reviewStatus: r.review_status,
               reason: r.close_reason,
+              lateScan: r.close_reason === LATE_SUPERSEDED_REASON,
               scans: r.scans,
             })),
             resolution: cy.resolved_at

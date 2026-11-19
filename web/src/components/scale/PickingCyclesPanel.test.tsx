@@ -64,6 +64,7 @@ describe("PickingCyclesPanel", () => {
     );
     render(<PickingCyclesPanel onChanged={() => {}} />);
     expect(await screen.findByText("Superseded cycles to review (1)")).toBeInTheDocument();
+    expect(screen.getByText("Bin reused before weighing")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Confirm superseded" }));
     await userEvent.type(screen.getByLabelText(/Reason/), "Bin was emptied and reused");
     await userEvent.click(screen.getByRole("button", { name: "Confirm" }));

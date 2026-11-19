@@ -91,6 +91,8 @@ export interface SupersededCycle {
   supersededAt: string;
   reviewStatus: "open" | "confirmed" | "reinstated";
   reason: string | null;
+  // The scan arrived after the weighing was credited (a late conflict).
+  lateScan?: boolean;
   scans: { occurredAt: string; receivedAt: string }[];
 }
 
@@ -122,6 +124,7 @@ export interface BinCycle {
   supersededByCycleId?: string | null;
   reviewStatus?: "open" | "confirmed" | "reinstated" | null;
   settled?: boolean;
+  lateScan?: boolean;
 }
 
 export const STATUS_LABELS: Record<ScaleWeighingStatus, string> = {

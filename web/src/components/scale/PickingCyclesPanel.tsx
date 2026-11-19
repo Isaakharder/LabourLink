@@ -167,6 +167,7 @@ export function PickingCyclesPanel({ onChanged }: { onChanged: () => void }) {
                   <th>Employee</th>
                   <th>Started</th>
                   <th>Superseded</th>
+                  <th>Why</th>
                   <th>Weighed?</th>
                   {isAdmin && <th />}
                 </tr>
@@ -178,6 +179,7 @@ export function PickingCyclesPanel({ onChanged }: { onChanged: () => void }) {
                     <td>{c.employee.name}</td>
                     <td>{when(c.openedAt)}</td>
                     <td>{c.closedAt ? when(c.closedAt) : ""}</td>
+                    <td>{c.lateScan ? "Late conflict: scan arrived after the credit" : "Bin reused before weighing"}</td>
                     <td>{c.settled ? "Yes" : "Not yet"}</td>
                     {isAdmin && (
                       <td>
