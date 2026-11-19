@@ -69,6 +69,8 @@ export interface Weighing {
   pendingUntil: string | null;
   /** From the server: false while the station's credits were off (trial). */
   creditsLive: boolean | null;
+  /** From the server (picking cycles): weighed again with no new phone scan, so not credited. */
+  noPickingCycle?: boolean;
 }
 
 export interface LinkStatus {

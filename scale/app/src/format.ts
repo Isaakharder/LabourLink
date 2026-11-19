@@ -138,10 +138,20 @@ export function employeeLine(w: Weighing | null, phase: Phase): EmployeeLine {
       }
       return { name: w.employeeName ?? "Credited", note: "Verified bin scan", tone: "credited" };
     case "pending":
+      if (w.noPickingCycle) {
+        return {
+          name: "Not credited: already weighed",
+          note: `Nobody has scanned this bin on a phone since it was last weighed. Scan the bin to start a new picking cycle. (A delayed phone scan can still count until ${shortTime(w.pendingUntil)}.)`,
+          tone: "review",
+        };
+      }
       return { name: "Awaiting employee assignment", note: `No verified bin scan yet. Held until ${shortTime(w.pendingUntil)} (24 h).`, tone: "pending" };
     case "needs_review":
       return { name: "Needs review", note: "More than one possible picker, or under supervisor review. Nobody is credited.", tone: "review" };
     case "expired":
+      if (w.noPickingCycle) {
+        return { name: "Not credited: already weighed", note: "Nobody scanned this bin on a phone since it was last weighed.", tone: "review" };
+      }
       return { name: "Not credited", note: "No verified bin scan within 24 hours. This weighing was discarded.", tone: "review" };
     case "voided":
       return { name: "Credit voided", note: "An administrator voided this credit.", tone: "review" };

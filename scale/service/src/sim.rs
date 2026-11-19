@@ -347,6 +347,7 @@ impl SimServer {
             pending_until,
             // "Live" within the test only: nothing leaves this process.
             credits_live: Some(w.credits_live),
+            no_picking_cycle: false,
         })
     }
 
@@ -898,6 +899,7 @@ mod tests {
             employee_name: None,
             pending_until: None,
             credits_live: None,
+            no_picking_cycle: false,
         }
     }
 

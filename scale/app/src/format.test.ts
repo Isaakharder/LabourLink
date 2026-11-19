@@ -41,6 +41,16 @@ describe("employeeLine: only a server-verified assignment shows a name", () => {
     expect(l.note).toMatch(/discarded/);
   });
 
+  it("says a re-weighed bin with no new phone scan is not credited", () => {
+    const p = employeeLine(makeWeighing({ uploadState: "sent", assignmentStatus: "pending", pendingUntil: "2026-10-28T10:00:00Z", noPickingCycle: true }), { phase: "idle" });
+    expect(p).toMatchObject({ name: "Not credited: already weighed", tone: "review" });
+    expect(p.note).toMatch(/Scan the bin to start a new picking cycle/);
+    const e = employeeLine(makeWeighing({ uploadState: "sent", assignmentStatus: "expired", noPickingCycle: true }), { phase: "idle" });
+    expect(e.name).toBe("Not credited: already weighed");
+    // Without the flag (older server, or a real pending assignment): unchanged.
+    expect(employeeLine(makeWeighing({ uploadState: "sent", assignmentStatus: "pending", pendingUntil: "2026-10-28T10:00:00Z" }), { phase: "idle" }).name).toBe("Awaiting employee assignment");
+  });
+
   it("explains the 24 h hold for pending weighings", () => {
     const l = employeeLine(makeWeighing({ uploadState: "sent", assignmentStatus: "pending", pendingUntil: "2026-10-28T10:00:00Z" }), { phase: "idle" });
     expect(l.name).toBe("Awaiting employee assignment");

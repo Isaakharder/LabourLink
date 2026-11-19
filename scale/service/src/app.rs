@@ -339,6 +339,7 @@ impl App {
             employee_name: None,
             pending_until: None,
             credits_live: None,
+            no_picking_cycle: false,
         };
         match self.store.lock().unwrap().insert_weighing(&w) {
             Ok(()) => {
@@ -774,6 +775,7 @@ fn assignment_of(r: &crate::backend::AssignmentResult) -> Assignment<'_> {
         employee: if status == "credited" || status == "voided" { r.employee_name.as_deref() } else { None },
         pending_until: r.pending_until.as_deref(),
         credits_live: r.credits_live,
+        no_picking_cycle: r.no_picking_cycle,
     }
 }
 
