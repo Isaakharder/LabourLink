@@ -136,6 +136,9 @@ async function main() {
       p.working = true;
       return e;
     }
+    function rescan(p: Phone, carrierId: string, when: Date) {
+      return ev(p, "bin_rescan", when, { activityId: pick, carrierId, answers: [{ questionId, carrierId }] });
+    }
     function finish(p: Phone, when: Date) {
       p.working = false;
       return ev(p, "end_day", when);
@@ -200,6 +203,13 @@ async function main() {
     const sam = await phone("Sam");
     const lea = await phone("Lea");
     const noe = await phone("Noe");
+    const rex = await phone("Rex");
+    const ola = await phone("Ola");
+    const pia = await phone("Pia");
+    const tia = await phone("Tia");
+    const uma = await phone("Uma");
+    const vic = await phone("Vic");
+    const wes = await phone("Wes");
     const bin43 = await carrier("Bin 43");
     const bin51 = await carrier("Bin 51");
     const binO = await carrier("Bin O");
@@ -207,6 +217,11 @@ async function main() {
     const binL = await carrier("Bin L");
     const binC = await carrier("Bin C");
     const binN = await carrier("Bin N");
+    const binR = await carrier("Bin R");
+    const binQ = await carrier("Bin Q");
+    const binS = await carrier("Bin S");
+    const binU = await carrier("Bin U");
+    const binW = await carrier("Bin W");
 
     // ---------------------------------------------------------------
     // W) The requested workflow, Bin 43
@@ -361,6 +376,121 @@ async function main() {
     check(one.body?.cycle?.scans?.length === 1 && one.body.cycle.history.some((h: any) => h.kind === "closed_unweighed" && h.actorName), "A) the cycle's scans and audited closure", one.body?.cycle);
 
     // ---------------------------------------------------------------
+    // R) Same employee rescans the same bin after it was weighed
+    // ---------------------------------------------------------------
+    const me = await fetch(`${BASE}/api/mobile/me`, { headers: { "X-Device-Id": rex.identifier } }).then((r) => r.json() as any);
+    check(me?.features?.binRescan === true, "R) the server tells phones it accepts bin_rescan", me?.features);
+    await syncOk(rex, [scan(rex, binR.id, at(150))], "R scan");
+    w = await weigh(binR, at(160));
+    check(w.out?.status === "credited" && w.out?.employeeName === rex.name, "R) Bin R weighed: credited to Rex", w.out);
+    const entriesBefore = (await pool.query(`select id, started_at, ended_at, carrier_id from time_entries where employee_id = $1 order by started_at`, [rex.employeeId])).rows;
+    const rescanEvent = rescan(rex, binR.id, at(165));
+    const rs1 = await sync(rex, [rescanEvent]);
+    await settle();
+    check(rs1.body?.results?.[0]?.status === "accepted", "R) Rex rescans Bin R without switching: accepted", rs1.body);
+    cy = await cycles(binR);
+    check(cy.length === 2 && cy[0].status === "closed" && cy[1].status === "filling" && cy[1].employee_id === rex.employeeId, "R) a new cycle opens for the same bin", cy);
+    const rs2 = await sync(rex, [rescan(rex, binR.id, at(166))]);
+    await settle();
+    check(rs2.body?.results?.[0]?.status === "accepted" && (await cycles(binR)).length === 2, "R) rescanning again does not open another cycle", await cycles(binR));
+    check((await pool.query(`select count(*)::int as n from bin_scans where cycle_id = $1`, [cy[1].id])).rows[0].n === 2, "R) both rescans are in the one open cycle");
+    const entriesAfter = (await pool.query(`select id, started_at, ended_at, carrier_id from time_entries where employee_id = $1 order by started_at`, [rex.employeeId])).rows;
+    check(JSON.stringify(entriesAfter) === JSON.stringify(entriesBefore), "R) rescans change no time entry (work time and bin unchanged)", { entriesBefore, entriesAfter });
+    w = await weigh(binR, at(175), 21_000);
+    check(w.out?.status === "credited" && w.out?.employeeName === rex.name, "R) the next weighing belongs to the new cycle: credited to Rex", w.out);
+    cy = await cycles(binR);
+    check(cy[1]?.status === "closed" && cy[1]?.weighing_id === w.row.id, "R) the new cycle is closed by it", cy);
+    const wrong = await sync(rex, [rescan(rex, binC.id, at(176))]);
+    await settle();
+    check(wrong.body?.results?.[0]?.status === "permanent_conflict", "R) rescanning a bin Rex is not using is refused", wrong.body);
+    check((await pool.query(`select count(*)::int as n from bin_scans where employee_id = $1 and carrier_id = $2`, [rex.employeeId, binC.id])).rows[0].n === 0, "R) and is never a scan");
+    const dupRescan = await sync(rex, [rescanEvent]);
+    await settle();
+    check(dupRescan.body?.results?.[0]?.status === "duplicate" && (await cycles(binR)).length === 2, "R) a re-uploaded rescan creates no cycle", dupRescan.body);
+
+    // ---------------------------------------------------------------
+    // Q) Administrator resolution of a needs-review cycle (Bin C)
+    // ---------------------------------------------------------------
+    const cyC = (await cycles(binC))[0];
+    const wC = (await pool.query(`select * from scale_weighings where id = $1`, [cyC.weighing_id])).rows[0];
+    check(wC.status === "needs_review", "Q) Bin C's weighing is waiting for review", wC);
+    const det = await admin_("GET", `/api/scale-weighings/${wC.id}`, manager.token);
+    const pc = det.body?.weighing?.pickingCycle;
+    check(pc?.id === cyC.id && pc.scans.length === 2 && new Set(pc.scans.map((x: any) => x.employeeName)).size === 2 && pc.scans.every((x: any) => x.occurredAt), "Q) the detail shows both employees and their scan times", pc);
+    const resolveReq = randomUUID();
+    const resolveBody = { requestId: resolveReq, employeeId: maria.employeeId, reason: "Maria filled it; Ruben scanned it by mistake" };
+    check((await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, manager.token, resolveBody)).status === 403, "Q) only an Administrator may resolve");
+    check((await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, { ...resolveBody, reason: "" })).status === 400, "Q) a reason is required");
+    check((await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, { ...resolveBody, employeeId: undefined })).status === 400, "Q) an employee must be chosen");
+    check((await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, { ...resolveBody, requestId: randomUUID(), employeeId: lea.employeeId })).status === 422, "Q) only an employee who scanned the bin in this cycle");
+    const res1 = await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, resolveBody);
+    check(res1.status === 200 && res1.body?.replay === false && res1.body?.cycle?.resolution?.employeeName === maria.name, "Q) resolved: Maria", res1.body);
+    let wC2 = await weighingRow(wC.id);
+    check(wC2.status === "credited" && wC2.employee_id === maria.employeeId, "Q) the weighing is credited to Maria", wC2);
+    const cyC2 = (await pool.query(`select * from bin_cycles where id = $1`, [cyC.id])).rows[0];
+    check(cyC2.resolved_by_employee_id === admin.id && cyC2.resolution_previous_status === "needs_review" && cyC2.resolution_reason === resolveBody.reason && cyC2.resolved_at, "Q) the cycle records who, when, why and the previous status", cyC2);
+    const audit = (await pool.query(`select kind, from_status, to_status, employee_id, actor_employee_id, reason from bin_cycle_events where cycle_id = $1 and kind = 'resolved'`, [cyC.id])).rows;
+    check(audit.length === 1 && audit[0].actor_employee_id === admin.id && audit[0].employee_id === maria.employeeId, "Q) the cycle's audit history has the resolution", audit);
+    const waudit = (await pool.query(`select * from scale_weighing_events where weighing_id = $1 and kind = 'resolve'`, [wC.id])).rows;
+    check(waudit.length === 1 && waudit[0].actor_employee_id === admin.id && waudit[0].from_status === "needs_review" && waudit[0].to_status === "credited", "Q) and so does the weighing's", waudit);
+    const again2 = await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, resolveBody);
+    check(again2.status === 200 && again2.body?.replay === true, "Q) the same request again is a replay", again2.body);
+    check((await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, { ...resolveBody, employeeId: ruben.employeeId })).status === 409, "Q) the same request id for a different employee is refused");
+    check((await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, { ...resolveBody, requestId: randomUUID(), employeeId: ruben.employeeId })).status === 409, "Q) a resolved cycle can't be re-resolved");
+    check((await pool.query(`select count(*)::int as n from scale_weighings where carrier_id = $1 and status = 'credited'`, [binC.id])).rows[0].n === 1, "Q) exactly one credit");
+    // A late scan by another employee, dated inside the cycle, and Pia/Ola on Bin Q.
+    await syncOk(pia, [scan(pia, binQ.id, at(130))], "Q pia");
+    await syncOk(ola, [scan(ola, binC.id, at(115)), scan(ola, binQ.id, at(135))], "Q ola");
+    wC2 = await weighingRow(wC.id);
+    check(wC2.status === "credited" && wC2.employee_id === maria.employeeId, "Q) a late phone scan never changes the resolved credit", wC2);
+    const lateFlag = (await pool.query(`select kind from scale_weighing_flags where weighing_id = $1 and employee_id = $2`, [wC.id, ola.employeeId])).rows;
+    check(lateFlag.length === 1 && lateFlag[0].kind === "late_conflict", "Q) it is flagged as a late conflict", lateFlag);
+    await sweepPendingWeighings();
+    check((await weighingRow(wC.id)).employee_id === maria.employeeId, "Q) background reconciliation never changes it");
+    const cyQ = (await cycles(binQ))[0];
+    check(cyQ?.status === "needs_review", "Q) Bin Q: two employees, open, needs review", cyQ);
+    check((await admin_("POST", `/api/bin-cycles/${cyQ.id}/resolve`, admin.token, { requestId: randomUUID(), employeeId: pia.employeeId, reason: "too early" })).status === 409, "Q) an unweighed cycle can't be resolved yet");
+    const vC = await admin_("POST", `/api/scale-weighings/${wC.id}/void`, admin.token, { correctionId: randomUUID(), reason: "Resolved wrongly" });
+    check(vC.status === 201 && vC.body?.weighing?.status === "voided", "Q) a resolved credit can still be voided", vC.body);
+    check((await pool.query(`select status from bin_cycles where id = $1`, [cyC.id])).rows[0].status === "closed", "Q) voiding leaves the cycle closed");
+    check((await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, { requestId: randomUUID(), employeeId: maria.employeeId, reason: "again" })).status === 409, "Q) a voided resolution can't be resolved again");
+
+    // ---------------------------------------------------------------
+    // T) Stopping tracking (rollback) and starting it again
+    // ---------------------------------------------------------------
+    await syncOk(tia, [scan(tia, binS.id, at(170))], "T tia");
+    check((await cycles(binS))[0]?.status === "filling", "T) Tia is filling Bin S");
+    await pool.query(`update bin_cycle_tracking set stopped_at = now() where stopped_at is null`);
+    const stoppedAt = new Date((await pool.query(`select max(stopped_at) as s from bin_cycle_tracking`)).rows[0].s);
+    await sweepPendingWeighings();
+    cy = await cycles(binS);
+    check(cy.length === 1 && cy[0].status === "closed_unweighed" && /stopped/.test(cy[0].close_reason), "T) stopping closes the open cycle, nobody credited", cy);
+    await sleep(20);
+    w = await weigh(binS, new Date());
+    check(w.out?.status === "pending" && w.out?.noPickingCycle === false && w.row.employee_id === null, "T) after the stop, Bin S is not credited from Tia's earlier scan", w.out);
+    const wS = w.row.id;
+    await syncOk(vic, [scan(vic, binS.id, at(172))], "T vic late");
+    check((await weighingRow(wS)).status === "pending", "T) a late scan from before the stop never credits a weighing after it");
+    check((await pool.query(`select c.status from bin_scans s join bin_cycles c on c.id = s.cycle_id where s.employee_id = $1`, [vic.employeeId])).rows[0]?.status === "closed_unweighed", "T) it is kept with the cycle closed at the stop");
+    check((await pool.query(`select count(*)::int as n from bin_cycles where status = any($1::text[]) and carrier_id = any($2::uuid[]) and opened_at <= $3`, [["filling", "awaiting_weighing", "needs_review"], carrierIds, stoppedAt])).rows[0].n === 0, "T) no cycle from before the stop is open");
+    await sleep(20);
+    await syncOk(uma, [scan(uma, binU.id, new Date())], "T uma");
+    await sleep(20);
+    w = await weigh(binU, new Date());
+    check(w.out?.status === "credited" && w.out?.employeeName === uma.name, "T) while stopped, a scan after the stop is matched by the existing rule", w.out);
+    // Start again.
+    await pool.query(`insert into bin_cycle_tracking (started_at, note) values (now(), 'binCycles.test restart')`);
+    await sweepPendingWeighings();
+    check((await cycles(binS)).length === 1 && (await cycles(binS))[0].status === "closed_unweighed", "T) restarting does not reopen the stopped cycle");
+    await sleep(20);
+    await syncOk(wes, [scan(wes, binW.id, new Date())], "T wes");
+    check((await cycles(binW))[0]?.status === "filling", "T) after the restart, a new scan opens a new cycle");
+    await sleep(20);
+    w = await weigh(binW, new Date());
+    check(w.out?.status === "credited" && w.out?.employeeName === wes.name, "T) and its weighing is credited to Wes", w.out);
+    check((await weighingRow(wS)).status === "pending", "T) the weighing from the stopped time is still not credited");
+
+    // ---------------------------------------------------------------
     // S) Sweep is idempotent: nothing changes on a second pass
     // ---------------------------------------------------------------
     const snap = async () => JSON.stringify((await pool.query(`select id, status, weighing_id, employee_id from bin_cycles where carrier_id = any($1::uuid[]) order by id`, [carrierIds])).rows) +
@@ -380,7 +510,7 @@ async function main() {
       const w = `(select id from scale_weighings where station_id = any($1::uuid[]))`;
       await client.query(`delete from bin_cycle_events where cycle_id in (select id from bin_cycles where carrier_id = any($1::uuid[]))`, [carrierIds]);
       await client.query(`delete from bin_scans where carrier_id = any($1::uuid[])`, [carrierIds]);
-      await client.query(`update bin_cycles set weighing_id = null, status = 'closed_unweighed', closed_at = coalesce(closed_at, now()), closed_by_employee_id = coalesce(closed_by_employee_id, employee_id), close_reason = coalesce(close_reason, 'cleanup') where carrier_id = any($1::uuid[])`, [carrierIds]);
+      await client.query(`update bin_cycles set weighing_id = null, status = 'closed_unweighed', resolved_at = null, resolved_employee_id = null, resolved_by_employee_id = null, resolution_reason = null, closed_at = coalesce(closed_at, now()), closed_by_employee_id = coalesce(closed_by_employee_id, employee_id), close_reason = coalesce(close_reason, 'cleanup') where carrier_id = any($1::uuid[])`, [carrierIds]);
       await client.query(`delete from bin_cycles where carrier_id = any($1::uuid[])`, [carrierIds]);
       await client.query(`delete from scale_weighing_corrections where weighing_id in ${w}`, [stationIds]);
       await client.query(`delete from scale_weighing_events where weighing_id in ${w}`, [stationIds]);

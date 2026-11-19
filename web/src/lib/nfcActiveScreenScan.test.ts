@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildScanSwitchAnswers, classifyHomeScan, HomeNfcGateContext, isHomeNfcScanActive } from "./nfcActiveScreenScan";
+import { BIN_RESCAN_MIN_INTERVAL_MS, binRescanDecision, buildScanSwitchAnswers, classifyHomeScan, HomeNfcGateContext, isHomeNfcScanActive } from "./nfcActiveScreenScan";
 
 function gate(overrides: Partial<HomeNfcGateContext> = {}): HomeNfcGateContext {
   return {
@@ -180,5 +180,18 @@ describe("buildScanSwitchAnswers", () => {
     expect(answers).toEqual({
       "q-row": { questionId: "q-row", questionType: "greenhouse_row", greenhouseRowId: "row-1" },
     });
+  });
+});
+
+describe("binRescanDecision (picking cycles)", () => {
+  it("sends a rescan only when the server accepts bin_rescan", () => {
+    expect(binRescanDecision(false, null, "bin-43", 1_000)).toBe("unsupported");
+    expect(binRescanDecision(true, null, "bin-43", 1_000)).toBe("send");
+  });
+  it("sends at most one rescan per bin per 30 seconds", () => {
+    const last = { carrierId: "bin-43", atMs: 10_000 };
+    expect(binRescanDecision(true, last, "bin-43", 10_000 + BIN_RESCAN_MIN_INTERVAL_MS - 1)).toBe("throttled");
+    expect(binRescanDecision(true, last, "bin-43", 10_000 + BIN_RESCAN_MIN_INTERVAL_MS)).toBe("send");
+    expect(binRescanDecision(true, last, "bin-51", 10_001)).toBe("send");
   });
 });

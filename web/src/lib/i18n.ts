@@ -100,6 +100,8 @@ const TRANSLATIONS_EN = {
   nfcOfflineCannotSwitchRow: "Can't switch rows while offline — choose manually below.",
   nfcOfflineCannotSwitchBin: "Can't switch bins while offline — choose manually below.",
   nfcAlreadyUsingThisBin: "Already using this bin",
+  nfcBinRescanned: "Bin scanned again. If it was weighed, a new picking cycle starts.",
+  nfcBinRescanNotSaved: "Couldn't save the bin scan on the phone. Scan the bin again.",
   nfcRowChangedTo: (p: Params) => `Row changed to ${p.label}`,
   nfcBinChangedTo: (p: Params) => `Bin changed to ${p.label}`,
 
@@ -232,6 +234,8 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   nfcOfflineCannotSwitchRow: "No se puede cambiar de fila sin conexión — elija manualmente abajo.",
   nfcOfflineCannotSwitchBin: "No se puede cambiar de bin sin conexión — elija manualmente abajo.",
   nfcAlreadyUsingThisBin: "Ya está usando este bin",
+  nfcBinRescanned: "Bin escaneado de nuevo. Si ya se pesó, empieza un nuevo ciclo de cosecha.",
+  nfcBinRescanNotSaved: "No se pudo guardar el escaneo del bin en el teléfono. Escanee el bin de nuevo.",
   nfcRowChangedTo: (p) => `Hilera cambiada a ${p.label}`,
   nfcBinChangedTo: (p) => `Bin cambiado a ${p.label}`,
 

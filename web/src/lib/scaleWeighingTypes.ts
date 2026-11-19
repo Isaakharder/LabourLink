@@ -75,6 +75,8 @@ export interface ScaleWeighingDetail extends Omit<ScaleWeighingRow, "flagCount">
     lastScanAt: string;
     reviewReason: string | null;
     closeReason: string | null;
+    scans: { employeeId: string; employeeName: string; occurredAt: string; receivedAt: string }[];
+    resolution: { employeeName: string; resolvedBy: string; resolvedAt: string; reason: string; previousStatus: string } | null;
   };
 }
 

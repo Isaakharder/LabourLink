@@ -171,15 +171,23 @@ async function loadDetail(id: string) {
     // Picking cycle (074) this weighing closed, if any.
     pool.query(
       `select bc.id, bc.status, bc.opened_at, bc.last_scan_at, bc.review_reason, bc.close_reason, ${fullName("e")} as employee_name,
-              (select t.started_at from bin_cycle_tracking t where t.id) as tracking_started_at
+              bc.resolved_at, bc.resolution_reason, bc.resolution_previous_status,
+              ${fullName("re")} as resolved_employee_name, ${fullName("rb")} as resolved_by_name,
+              exists (select 1 from bin_cycle_tracking p
+                      where $2::timestamptz > p.started_at and (p.stopped_at is null or $2::timestamptz <= p.stopped_at)) as tracked,
+              coalesce((select json_agg(json_build_object('employeeId', s.employee_id, 'employeeName', ${fullName("se")},
+                                                          'occurredAt', s.occurred_at, 'receivedAt', s.received_at) order by s.occurred_at)
+                        from bin_scans s join employees se on se.id = s.employee_id where s.cycle_id = bc.id), '[]') as scans
        from (select $1::uuid as wid) x
        left join bin_cycles bc on bc.weighing_id = x.wid
-       left join employees e on e.id = bc.employee_id`,
-      [id]
+       left join employees e on e.id = bc.employee_id
+       left join employees re on re.id = bc.resolved_employee_id
+       left join employees rb on rb.id = bc.resolved_by_employee_id`,
+      [id, w.weighed_at]
     ),
   ]);
   const cy = cycle.rows[0];
-  const tracked = cy?.tracking_started_at ? new Date(w.weighed_at).getTime() > new Date(cy.tracking_started_at).getTime() : false;
+  const tracked = cy?.tracked === true;
   return {
     id: w.id,
     stationWeighingId: w.station_weighing_id,
@@ -206,7 +214,26 @@ async function loadDetail(id: string) {
     pickingCycle: !tracked
       ? null
       : cy.id
-        ? { id: cy.id, status: cy.status, employeeName: cy.employee_name, openedAt: cy.opened_at, lastScanAt: cy.last_scan_at, reviewReason: cy.review_reason, closeReason: cy.close_reason }
+        ? {
+            id: cy.id,
+            status: cy.status,
+            employeeName: cy.employee_name,
+            openedAt: cy.opened_at,
+            lastScanAt: cy.last_scan_at,
+            reviewReason: cy.review_reason,
+            closeReason: cy.close_reason,
+            // Every phone scan in the cycle: who chose the bin, and when.
+            scans: cy.scans,
+            resolution: cy.resolved_at
+              ? {
+                  employeeName: cy.resolved_employee_name,
+                  resolvedBy: cy.resolved_by_name,
+                  resolvedAt: cy.resolved_at,
+                  reason: cy.resolution_reason,
+                  previousStatus: cy.resolution_previous_status,
+                }
+              : null,
+          }
         : "none",
     history: history.rows.map((h) => ({
       kind: h.kind,

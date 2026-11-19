@@ -70,7 +70,9 @@ async function logSequenceAllocationFailure(
   });
 }
 
-export type LocalEventType = "work_start" | "activity_switch" | "break_start" | "break_end" | "end_day";
+// bin_rescan: the bin already in use was scanned again (a new picking cycle
+// on the server if it was weighed since). Changes nothing locally.
+export type LocalEventType = "work_start" | "activity_switch" | "break_start" | "break_end" | "end_day" | "bin_rescan";
 
 export interface NewLocalEvent {
   deviceId: string;

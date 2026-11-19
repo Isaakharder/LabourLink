@@ -2,32 +2,38 @@
 // most one picking cycle; a cycle is closed by at most one weighing.
 //
 // The rule, per bin, in event time (phone occurred_at / station weighed_at):
-// * A phone bin choice (accepted work_start / activity_switch answering a
-//   carrier question, phone clock not flagged) made after cycle tracking
-//   started opens a cycle if none is open, or joins the open one.
+// * A phone bin choice made during a tracking period opens a cycle if none is
+//   open, or joins the open one. A bin choice is an accepted work_start /
+//   activity_switch answering a carrier question, or a bin_rescan (the
+//   employee scanned the bin they are already using again), with the phone
+//   clock not flagged.
 // * A choice by a second employee makes the open cycle needs_review: the
 //   first employee is never silently replaced.
 // * The bin's next weighing (not a five-minute duplicate) closes the open
 //   cycle. One employee in it: the weighing is credited to them. More than
-//   one: the weighing is needs_review, nobody is credited.
+//   one: the weighing is needs_review, nobody is credited until an
+//   administrator resolves it (resolveCycle).
 // * A weighing with no open cycle (weighed again, nobody scanned it since)
 //   is linked to no cycle and is never credited, unless a phone scan dated
 //   before it, and after the previous weighing, reaches LabourLink within
 //   the existing 24-hour recovery window.
 // * An administrator may close an open cycle without weighing (bin emptied
-//   or abandoned); its scans are never credited.
+//   or abandoned). Stopping cycle tracking closes every open cycle the same
+//   way. Neither credits anyone.
 //
 // Late and out-of-order events are placed by their own timestamps: a scan
-// belongs to the interval ending at the bin's first boundary (weighing or
-// administrator closure) at or after it. Closed cycles are final. A late scan
-// that falls inside one is recorded with it but never changes its outcome
-// (another employee's is flagged late_conflict, as before). Only the open
-// cycle (and scans not yet placed) are re-placed, so a weighing uploaded late
-// after a network outage still closes the cycle that was open at its time.
+// belongs to the interval ending at the bin's first boundary (weighing,
+// closure, or the end of its tracking period) at or after it. Closed cycles
+// are final: a late scan inside one is recorded with it but never changes its
+// outcome (another employee's is flagged late_conflict). Only the open cycle
+// and scans not yet placed are re-placed, so a weighing uploaded late after a
+// network outage still closes the cycle that was open at its time.
 //
-// While no bin_cycle_tracking row exists the existing rule
-// (scaleMatchingRule.ts) applies unchanged. Weighings before started_at keep
-// that rule; phone scans before it never open a cycle.
+// Tracking periods (bin_cycle_tracking): weighings and scans inside a period
+// follow these rules. Outside any period the existing rule
+// (scaleMatchingRule.ts) applies, except that after a stop it never uses a
+// scan from before the stop (scaleMatching.ts), so stopping can't let stale
+// scans credit anything.
 import { PoolClient } from "pg";
 import { pool } from "../db";
 import { PENDING_RECOVERY_MS } from "./scaleMatchingRule";
@@ -40,9 +46,14 @@ const CREDITED_REASON = "One employee chose this bin on their phone during this 
 const REVIEW_REASON = "More than one employee chose this bin during this picking cycle";
 const TOO_LATE_REASON = "The bin was weighed before these phone scans reached LabourLink in time. Not credited.";
 const HELD_REASON = "The weighing that closed this cycle is held for review, so nobody was credited.";
+export const STOPPED_REASON = "Picking-cycle tracking was stopped while this cycle was open. Not credited.";
+
+// SQL: is a timestamp inside a tracking period?
+const IN_PERIOD = (col: string) =>
+  `exists (select 1 from bin_cycle_tracking p where ${col} > p.started_at and (p.stopped_at is null or ${col} <= p.stopped_at))`;
 
 // ---------------------------------------------------------------------------
-// Pure placement (unit-tested in binCycles.rule.test.ts)
+// Pure placement (tested in routes/binCycles.test.ts)
 // ---------------------------------------------------------------------------
 export interface PlaceScan {
   id: string;
@@ -50,7 +61,7 @@ export interface PlaceScan {
   occurredAt: number;
 }
 export interface Boundary {
-  key: string; // weighing id, or "u:" + cycle id for an administrator closure
+  key: string;
   at: number;
 }
 // Groups scans by the first boundary at or after them (a scan at the same
@@ -74,9 +85,20 @@ export function distinctEmployees(scans: PlaceScan[]): string[] {
 // ---------------------------------------------------------------------------
 // Database
 // ---------------------------------------------------------------------------
-export async function trackingStart(db: PoolClient | typeof pool): Promise<Date | null> {
-  const { rows } = await db.query(`select started_at from bin_cycle_tracking where id`);
-  return rows[0] ? new Date(rows[0].started_at) : null;
+type Db = PoolClient | typeof pool;
+
+// Whether any tracking period was ever started (otherwise nothing here runs).
+export async function trackingEverStarted(db: Db): Promise<boolean> {
+  return (await db.query(`select 1 from bin_cycle_tracking limit 1`)).rows.length > 0;
+}
+export async function isTracked(db: Db, at: Date): Promise<boolean> {
+  return (await db.query(`select ${IN_PERIOD("$1::timestamptz")} as t`, [at])).rows[0].t === true;
+}
+// The latest stop at or before `at` (the existing rule never uses a scan from
+// before it).
+export async function lastStopBefore(db: Db, at: Date): Promise<Date | null> {
+  const { rows } = await db.query(`select max(stopped_at) as s from bin_cycle_tracking where stopped_at <= $1`, [at]);
+  return rows[0].s ? new Date(rows[0].s) : null;
 }
 
 async function cycleEvent(
@@ -112,24 +134,32 @@ async function cycleEvent(
   );
 }
 
-async function weighingEvent(client: PoolClient, weighingId: string, kind: string, from: string | null, to: string | null, employeeId: string | null, reason: string | null, detail?: unknown) {
+async function weighingEvent(
+  client: PoolClient,
+  weighingId: string,
+  kind: string,
+  from: string | null,
+  to: string | null,
+  employeeId: string | null,
+  reason: string | null,
+  detail?: unknown,
+  actorEmployeeId: string | null = null
+) {
   await client.query(
-    `insert into scale_weighing_events (weighing_id, kind, from_status, to_status, employee_id, reason, detail) values ($1, $2, $3, $4, $5, $6, $7)`,
-    [weighingId, kind, from, to, employeeId, reason, detail === undefined ? null : JSON.stringify(detail)]
+    `insert into scale_weighing_events (weighing_id, kind, from_status, to_status, employee_id, actor_employee_id, reason, detail) values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [weighingId, kind, from, to, employeeId, actorEmployeeId, reason, detail === undefined ? null : JSON.stringify(detail)]
   );
 }
 
-// Records accepted phone bin choices (since tracking started) in bin_scans.
-// Idempotent: a re-uploaded event is the same row. Returns the carriers.
-export async function recordBinScans(client: PoolClient | typeof pool, where: { deviceId: string; clientEventIds: string[] } | { receivedSince: Date }): Promise<string[]> {
-  const t0 = await trackingStart(client);
-  if (!t0) return [];
-  const filter =
-    "deviceId" in where ? `m.device_id = $2 and m.client_event_id = any($3::uuid[])` : `m.received_at >= $2`;
-  const params: unknown[] = "deviceId" in where ? [t0, where.deviceId, where.clientEventIds] : [t0, where.receivedSince];
-  const { rows } = await client.query(
+// Records accepted phone bin choices made during a tracking period in
+// bin_scans. Idempotent: a re-uploaded event is the same row. Returns the
+// carriers touched.
+export async function recordBinScans(db: Db, where: { deviceId: string; clientEventIds: string[] } | { receivedSince: Date }): Promise<string[]> {
+  const filter = "deviceId" in where ? `m.device_id = $1 and m.client_event_id = any($2::uuid[])` : `m.received_at >= $1`;
+  const params: unknown[] = "deviceId" in where ? [where.deviceId, where.clientEventIds] : [where.receivedSince];
+  const { rows } = await db.query(
     `insert into bin_scans (mobile_time_event_id, carrier_id, employee_id, occurred_at, received_at, clock_trusted)
-     select m.id, c.id, m.employee_id, m.occurred_at_utc, m.received_at,
+     select distinct on (m.id) m.id, c.id, m.employee_id, m.occurred_at_utc, m.received_at,
             not coalesce(m.conflict_detail ? 'forwardSkewMs' or m.conflict_detail ? 'regressionMs', false)
      from mobile_time_events m
      cross join lateral (
@@ -138,13 +168,16 @@ export async function recordBinScans(client: PoolClient | typeof pool, where: { 
        union
        select a->>'carrierId' from jsonb_path_query(m.payload, '$.answers[*]') a
          where jsonb_typeof(a) = 'object' and a ? 'carrierId'
+       union
+       select m.payload->>'carrierId' where m.event_type = 'bin_rescan'
      ) chosen
      join carriers c on c.id::text = chosen.carrier_id
      where ${filter}
        and m.processing_status = 'accepted'
-       and m.event_type in ('work_start', 'activity_switch')
+       and m.event_type in ('work_start', 'activity_switch', 'bin_rescan')
        and m.employee_id is not null
-       and m.occurred_at_utc > $1
+       and ${IN_PERIOD("m.occurred_at_utc")}
+     order by m.id
      on conflict (mobile_time_event_id) do nothing
      returning carrier_id`,
     params
@@ -193,11 +226,33 @@ async function employeeNames(client: PoolClient, ids: string[]): Promise<string>
   return rows.map((r) => r.n).join(", ");
 }
 
+async function addClaim(client: PoolClient, scanId: string, weighingId: string, employeeId: string) {
+  await client.query(
+    `insert into scale_weighing_claims (mobile_time_event_id, weighing_id, employee_id) values ($1, $2, $3) on conflict do nothing`,
+    [scanId, weighingId, employeeId]
+  );
+}
+
 // Re-places a bin's open and unplaced scans and links its unlinked weighings.
 // Caller holds lockCarrier() inside an open transaction. Idempotent.
 export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: string, now: Date = new Date()): Promise<void> {
-  const t0 = await trackingStart(client);
-  if (!t0) return;
+  if (!(await trackingEverStarted(client))) return;
+
+  // An open cycle from a period that has since been stopped is closed (by
+  // the system, at the stop) before anything else: it can never be credited.
+  const { rows: stale } = await client.query(
+    `select c.id, c.status, p.stopped_at from bin_cycles c
+     join bin_cycle_tracking p on c.opened_at > p.started_at and p.stopped_at is not null and c.opened_at <= p.stopped_at
+     where c.carrier_id = $1 and c.status = any($2::text[]) for update of c`,
+    [carrierId, OPEN_STATUSES]
+  );
+  for (const s of stale) {
+    await client.query(
+      `update bin_cycles set status = 'closed_unweighed', closed_at = $2, close_reason = $3, updated_at = now() where id = $1`,
+      [s.id, s.stopped_at, STOPPED_REASON]
+    );
+    await cycleEvent(client, { cycleId: s.id, kind: "closed_unweighed", fromStatus: s.status, toStatus: "closed_unweighed", reason: STOPPED_REASON });
+  }
 
   const { rows: openRows } = await client.query(
     `select * from bin_cycles where carrier_id = $1 and status = any($2::text[]) for update`,
@@ -219,23 +274,30 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
     cycleId: r.cycle_id,
   }));
 
-  // Boundaries from the earliest scan to place, plus every unlinked pending
-  // weighing (it still needs its reason and, after 24 h, expiry).
+  // Boundaries from the earliest scan to place: weighings inside a period,
+  // closures, and period ends. Plus every unlinked pending weighing inside a
+  // period (it still needs its reason and, after 24 h, expiry).
   const from = scans.length ? new Date(scans[0].occurredAt) : null; // null: no scan to place
-
   const { rows: bRows } = await client.query(
     `select 'w' as kind, w.id, w.weighed_at as at, w.status, w.pending_until, w.match_reason, c.id as cycle_id
        from scale_weighings w left join bin_cycles c on c.weighing_id = w.id
-       where w.carrier_id = $1 and w.weighed_at > $2 and not w.is_duplicate
-         and (w.weighed_at >= $3::timestamptz or (w.status = 'pending' and c.id is null))
+       where w.carrier_id = $1 and not w.is_duplicate and ${IN_PERIOD("w.weighed_at")}
+         and (w.weighed_at >= $2::timestamptz or (w.status = 'pending' and c.id is null))
      union all
      select 'u', null, c.closed_at, c.status, null, null, c.id
        from bin_cycles c
-       where c.carrier_id = $1 and c.status = 'closed_unweighed' and c.closed_at >= $3::timestamptz
-     order by at`,
-    [carrierId, t0, from]
+       where c.carrier_id = $1 and c.status = 'closed_unweighed' and c.closed_at >= $2::timestamptz
+     union all
+     select 's', p.id, p.stopped_at, null, null, null, null
+       from bin_cycle_tracking p where p.stopped_at is not null and p.stopped_at >= $2::timestamptz
+     order by at, kind desc`, // same instant: a weighing, then a closure, then a period end
+    [carrierId, from]
   );
-  const boundaries = bRows.map((r) => ({ ...r, key: r.kind === "w" ? r.id : `u:${r.cycle_id}`, at: new Date(r.at).getTime() }));
+  const boundaries = bRows.map((r) => ({
+    ...r,
+    key: r.kind === "w" ? r.id : r.kind === "u" ? `u:${r.cycle_id}` : `s:${r.id}`,
+    at: new Date(r.at).getTime(),
+  }));
   const groups = placeScans(scans, boundaries);
   const byId = new Map(scans.map((s) => [s.id, s]));
   let openReused = false;
@@ -257,6 +319,19 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
 
   for (const b of boundaries) {
     const group = groups.get(b.key) ?? [];
+    if (b.kind === "s") {
+      // Scans from the end of a period nobody had placed: recorded in a cycle
+      // closed at the stop, never credited.
+      if (group.length === 0) continue;
+      const { rows: ins } = await client.query(
+        `insert into bin_cycles (carrier_id, status, employee_id, opened_at, last_scan_at, closed_at, close_reason)
+         values ($1, 'closed_unweighed', $2, $3, $4, $5, $6) returning id`,
+        [carrierId, group[0].employeeId, new Date(group[0].occurredAt), new Date(group[group.length - 1].occurredAt), new Date(b.at), STOPPED_REASON]
+      );
+      await cycleEvent(client, { cycleId: ins[0].id, kind: "opened", toStatus: "closed_unweighed", employeeId: group[0].employeeId, reason: STOPPED_REASON });
+      await moveScans(ins[0].id, group, true);
+      continue;
+    }
     if (b.kind === "u" || b.cycle_id) {
       // A final cycle: late scans join it and never change its outcome.
       if (group.length === 0) continue;
@@ -265,10 +340,7 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
         const { rows: wr } = await client.query(`select status, employee_id from scale_weighings where id = $1`, [b.id]);
         for (const s of group) {
           if (wr[0].status === "credited" && s.employeeId === wr[0].employee_id) {
-            await client.query(
-              `insert into scale_weighing_claims (mobile_time_event_id, weighing_id, employee_id) values ($1, $2, $3) on conflict do nothing`,
-              [s.id, b.id, s.employeeId]
-            );
+            await addClaim(client, s.id, b.id, s.employeeId);
           } else if (wr[0].status === "credited" || wr[0].status === "needs_review") {
             const kind = wr[0].status === "credited" ? "late_conflict" : "competing";
             const ins = await client.query(
@@ -333,13 +405,8 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
     if (b.status !== "pending") continue; // already final: never credited now
     const scanIds = group.map((s) => s.id);
     if (employees.length === 1) {
-      for (const s of group) {
-        await client.query(
-          `insert into scale_weighing_claims (mobile_time_event_id, weighing_id, employee_id) values ($1, $2, $3) on conflict do nothing`,
-          [s.id, b.id, s.employeeId]
-        );
-      }
-      await client.query(`update scale_weighings set status = 'credited', employee_id = $2, match_reason = $3, resolved_at = now() where id = $1`, [b.id, employees[0], CREDITED_REASON]);
+      for (const s of group) await addClaim(client, s.id, b.id, s.employeeId);
+      await client.query(`update scale_weighings set status = 'credited', employee_id = $2, match_reason = $3, resolved_at = now() where id = $1 and status = 'pending'`, [b.id, employees[0], CREDITED_REASON]);
       await weighingEvent(client, b.id, "status", "pending", "credited", employees[0], CREDITED_REASON, { binCycleId: cycleId, mobileTimeEventIds: scanIds });
     } else {
       for (const s of group) {
@@ -348,12 +415,13 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
           [b.id, s.id, s.employeeId]
         );
       }
-      await client.query(`update scale_weighings set status = 'needs_review', match_reason = $2, resolved_at = now() where id = $1`, [b.id, REVIEW_REASON]);
+      await client.query(`update scale_weighings set status = 'needs_review', match_reason = $2, resolved_at = now() where id = $1 and status = 'pending'`, [b.id, REVIEW_REASON]);
       await weighingEvent(client, b.id, "status", "pending", "needs_review", null, REVIEW_REASON, { binCycleId: cycleId, mobileTimeEventIds: scanIds });
     }
   }
 
-  // Scans after the last boundary: the bin's open cycle.
+  // Scans after the last boundary: the bin's open cycle (only while a period
+  // is running; scans are only recorded inside one).
   const openGroup = groups.get("open") ?? [];
   if (openGroup.length === 0) return;
   const employees = distinctEmployees(openGroup);
@@ -388,7 +456,7 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
     );
     const cycleId = ins[0].id as string;
     await cycleEvent(client, { cycleId, kind: "opened", toStatus: status, employeeId: openGroup[0].employeeId, mobileTimeEventId: openGroup[0].id, reason: reviewReason });
-    await moveScans(cycleId, openGroup.slice(0), false);
+    await moveScans(cycleId, openGroup, false);
   }
 }
 
@@ -418,7 +486,7 @@ export async function reconcileBins(carrierIds: string[]): Promise<void> {
 export async function reconcileCyclesAfterPhoneSync(deviceId: string, clientEventIds: string[], employeeId: string | null): Promise<void> {
   if (process.env.SCALE_MATCHING_ENABLED === "false") return; // same switch as scale matching
   try {
-    if (!(await trackingStart(pool))) return;
+    if (!(await trackingEverStarted(pool))) return;
     const bins = await recordBinScans(pool, { deviceId, clientEventIds });
     if (employeeId) {
       const { rows } = await pool.query(
@@ -435,17 +503,17 @@ export async function reconcileCyclesAfterPhoneSync(deviceId: string, clientEven
 }
 
 // Safety net (runs with the scale-matching sweep): picks up bin choices a
-// missed post-sync run left out, expires unlinked weighings and refreshes
-// every open cycle's filling / awaiting state (midnight cutoff, admin end).
+// missed post-sync run left out, expires unlinked weighings, closes cycles
+// left open by a stopped period, and refreshes every open cycle's filling /
+// awaiting state (midnight cutoff, admin end).
 export async function sweepBinCycles(now: Date = new Date()): Promise<void> {
   try {
-    if (!(await trackingStart(pool))) return;
+    if (!(await trackingEverStarted(pool))) return;
     const bins = await recordBinScans(pool, { receivedSince: new Date(now.getTime() - 2 * PENDING_RECOVERY_MS) });
     const { rows } = await pool.query(
       `select carrier_id from bin_cycles where status = any($1::text[])
        union select carrier_id from bin_scans where cycle_id is null and clock_trusted
-       union select w.carrier_id from scale_weighings w, bin_cycle_tracking t
-         where w.status = 'pending' and w.weighed_at > t.started_at`,
+       union select w.carrier_id from scale_weighings w where w.status = 'pending' and ${IN_PERIOD("w.weighed_at")}`,
       [OPEN_STATUSES]
     );
     await reconcileBins([...bins, ...rows.map((r) => r.carrier_id)]);
@@ -454,18 +522,15 @@ export async function sweepBinCycles(now: Date = new Date()): Promise<void> {
   }
 }
 
+type ActionResult = { ok: true; replay: boolean } | { ok: false; status: number; error: string; code: string };
+
 // Administrator: close an open cycle without a weighing (bin emptied or
 // abandoned). Nobody is credited for it; the bin's next scan starts a new
 // cycle. Idempotent on requestId.
-export async function closeCycleWithoutWeighing(
-  cycleId: string,
-  requestId: string,
-  reason: string,
-  actorEmployeeId: string
-): Promise<{ ok: true; replay: boolean } | { ok: false; status: number; error: string; code: string }> {
+export async function closeCycleWithoutWeighing(cycleId: string, requestId: string, reason: string, actorEmployeeId: string): Promise<ActionResult> {
   const { rows: c0 } = await pool.query(`select carrier_id from bin_cycles where id = $1`, [cycleId]);
   if (!c0[0]) return { ok: false, status: 404, error: "Picking cycle not found", code: "notFound" };
-  let result: { ok: true; replay: boolean } | { ok: false; status: number; error: string; code: string } = { ok: true, replay: false };
+  let result: ActionResult = { ok: true, replay: false };
   await inCarrierTransaction(c0[0].carrier_id, async (client) => {
     const { rows: done } = await client.query(`select id from bin_cycles where close_request_id = $1`, [requestId]);
     if (done[0]) {
@@ -475,7 +540,7 @@ export async function closeCycleWithoutWeighing(
     // Place anything that arrived first, so the closure covers the cycle as it is now.
     await reconcileBinCyclesLocked(client, c0[0].carrier_id);
     const { rows } = await client.query(`select status from bin_cycles where id = $1 for update`, [cycleId]);
-    if (!OPEN_STATUSES.includes(rows[0].status)) {
+    if (!(OPEN_STATUSES as readonly string[]).includes(rows[0].status)) {
       result = { ok: false, status: 409, error: "Only an open picking cycle can be closed", code: "notOpen" };
       return;
     }
@@ -484,6 +549,73 @@ export async function closeCycleWithoutWeighing(
       [cycleId, reason, actorEmployeeId, requestId]
     );
     await cycleEvent(client, { cycleId, kind: "closed_unweighed", fromStatus: rows[0].status, toStatus: "closed_unweighed", actorEmployeeId, reason });
+  });
+  return result;
+}
+
+// Administrator: a weighed cycle that more than one employee chose (its
+// weighing is needs_review) is credited to the employee the administrator
+// selects, who must be one of the cycle's scanners. The weighing becomes
+// credited exactly once (guarded on its status, under the bin lock); the
+// cycle records who resolved it, when, why and the previous status. After
+// that the cycle is final like any other: late phone scans and background
+// reconciliation never change the credit, and the credit can still be voided.
+// Idempotent on requestId.
+export async function resolveCycle(cycleId: string, requestId: string, employeeId: string, reason: string, actorEmployeeId: string): Promise<ActionResult> {
+  const { rows: c0 } = await pool.query(`select carrier_id from bin_cycles where id = $1`, [cycleId]);
+  if (!c0[0]) return { ok: false, status: 404, error: "Picking cycle not found", code: "notFound" };
+  let result: ActionResult = { ok: true, replay: false };
+  await inCarrierTransaction(c0[0].carrier_id, async (client) => {
+    const { rows: done } = await client.query(`select id, resolved_employee_id from bin_cycles where resolution_request_id = $1`, [requestId]);
+    if (done[0]) {
+      result =
+        done[0].id === cycleId && done[0].resolved_employee_id === employeeId
+          ? { ok: true, replay: true }
+          : { ok: false, status: 409, error: "This request was already used for a different resolution", code: "requestReused" };
+      return;
+    }
+    await reconcileBinCyclesLocked(client, c0[0].carrier_id); // place late scans first
+    const { rows } = await client.query(
+      `select c.status, c.weighing_id, c.resolved_at, w.status as weighing_status
+       from bin_cycles c left join scale_weighings w on w.id = c.weighing_id where c.id = $1 for update of c`,
+      [cycleId]
+    );
+    const c = rows[0];
+    if (c.resolved_at) {
+      result = { ok: false, status: 409, error: "This picking cycle was already resolved", code: "alreadyResolved" };
+      return;
+    }
+    if (c.status !== "closed" || !c.weighing_id) {
+      result = { ok: false, status: 409, error: "Only a weighed picking cycle can be resolved. Resolve it after the bin is weighed.", code: "notWeighed" };
+      return;
+    }
+    if (c.weighing_status !== "needs_review") {
+      result = { ok: false, status: 409, error: "This cycle's weighing is not waiting for review", code: "notInReview" };
+      return;
+    }
+    const { rows: scanners } = await client.query(`select 1 from bin_scans where cycle_id = $1 and employee_id = $2 limit 1`, [cycleId, employeeId]);
+    if (!scanners[0]) {
+      result = { ok: false, status: 422, error: "Choose one of the employees who scanned this bin in this cycle", code: "notInCycle" };
+      return;
+    }
+    const upd = await client.query(
+      `update scale_weighings set status = 'credited', employee_id = $2, match_reason = $3, resolved_at = now()
+       where id = $1 and status = 'needs_review' and not is_duplicate`,
+      [c.weighing_id, employeeId, `Resolved by an administrator: ${reason}`]
+    );
+    if (upd.rowCount !== 1) {
+      result = { ok: false, status: 409, error: "This cycle's weighing can't be credited", code: "notInReview" };
+      return;
+    }
+    const { rows: scans } = await client.query(`select mobile_time_event_id from bin_scans where cycle_id = $1 and employee_id = $2`, [cycleId, employeeId]);
+    for (const s of scans) await addClaim(client, s.mobile_time_event_id, c.weighing_id, employeeId);
+    await client.query(
+      `update bin_cycles set resolved_employee_id = $2, resolved_by_employee_id = $3, resolved_at = now(), resolution_reason = $4,
+         resolution_previous_status = 'needs_review', resolution_request_id = $5, updated_at = now() where id = $1`,
+      [cycleId, employeeId, actorEmployeeId, reason, requestId]
+    );
+    await cycleEvent(client, { cycleId, kind: "resolved", fromStatus: "needs_review", toStatus: "credited", employeeId, actorEmployeeId, weighingId: c.weighing_id, reason });
+    await weighingEvent(client, c.weighing_id, "resolve", "needs_review", "credited", employeeId, reason, { binCycleId: cycleId }, actorEmployeeId);
   });
   return result;
 }

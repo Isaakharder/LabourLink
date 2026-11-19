@@ -910,6 +910,11 @@ async function serializeStatus(
     // client-side (persistServerMeSnapshot) so it's still known at a fully
     // offline cold start, long after this specific response.
     appTimezone: APP_TIMEZONE,
+    // Phone features this server accepts. binRescan: a re-scan of the bin
+    // the employee is already using is sent as a bin_rescan event (picking
+    // cycles, migration 074). A phone never sends one to a server that
+    // doesn't say so, since an older server can't store that event type.
+    features: { binRescan: true },
   };
 }
 
@@ -1722,6 +1727,27 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
         client.release();
       }
     }
+    case "bin_rescan": {
+      // The employee scanned the bin they are already using again: a new
+      // picking cycle if that bin was weighed since (lib/binCycles.ts). It
+      // changes no time entry, so work time, rows and bins are unaffected.
+      // Accepted only while their open work entry is on that same bin.
+      const carrierId = event.carrierId ?? carrierIdsInAnswers(event.answers)[0] ?? null;
+      if (!carrierId) return { status: "permanent_conflict", conflictReason: "bin_rescan without a bin" };
+      const { rows } = await pool.query(
+        `select carrier_id, started_at from time_entries
+         where employee_id = $1 and entry_type = 'work' and ended_at is null and deleted_at is null limit 1`,
+        [employeeId]
+      );
+      const open = rows[0];
+      if (!open || open.carrier_id !== carrierId) {
+        return { status: "permanent_conflict", conflictReason: "Rescanned a bin the employee is not currently using" };
+      }
+      if (new Date(open.started_at).getTime() > new Date(event.occurredAtUtc).getTime()) {
+        return { status: "permanent_conflict", conflictReason: "Rescan dated before the current use of this bin started" };
+      }
+      return { status: "accepted", timeEntryId: null };
+    }
     default:
       return { status: "permanent_conflict", conflictReason: `unknown event type: ${event.eventType}` };
   }
@@ -1988,7 +2014,7 @@ router.post(
           acceptedDetail = { ...((acceptedDetail as Record<string, unknown> | null) ?? {}), reason: acceptedReason };
         }
         await recordSyncedEvent(d.id, d.employeeId, event, "accepted", outcome.timeEntryId ?? null, acceptedReason, acceptedDetail);
-        if (carrierIdsInAnswers(event.answers).length > 0) acceptedBinChoices.push(event.clientEventId);
+        if (carrierIdsInAnswers(event.answers).length > 0 || event.eventType === "bin_rescan") acceptedBinChoices.push(event.clientEventId);
         acceptedAny = true;
         lastAcceptedOccurredAtUtc = new Date(event.occurredAtUtc);
         lastProcessedSeq = event.deviceSeq;

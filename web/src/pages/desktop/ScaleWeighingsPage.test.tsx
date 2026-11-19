@@ -83,11 +83,43 @@ function detail(over: Partial<ScaleWeighingDetail> = {}): ScaleWeighingDetail {
 }
 
 let voidCalls: { path: string; body: Record<string, unknown> }[] = [];
+let resolveCalls: { path: string; body: Record<string, unknown> }[] = [];
+let nextDetail: ScaleWeighingDetail | null = null;
+
+const disputed = (resolved: boolean): ScaleWeighingDetail =>
+  detail({
+    status: resolved ? "credited" : "needs_review",
+    employee: resolved ? { id: "e-2", name: "Maria Lopez" } : null,
+    countsAsCredit: resolved,
+    claims: [],
+    pickingCycle: {
+      id: "c-9",
+      status: "closed",
+      employeeName: "Ruben Ortiz",
+      openedAt: "2026-10-31T09:00:00Z",
+      lastScanAt: "2026-10-31T09:20:00Z",
+      reviewReason: "Chosen by more than one employee: Maria Lopez, Ruben Ortiz",
+      closeReason: null,
+      scans: [
+        { employeeId: "e-1", employeeName: "Ruben Ortiz", occurredAt: "2026-10-31T09:00:00Z", receivedAt: "2026-10-31T09:00:05Z" },
+        { employeeId: "e-2", employeeName: "Maria Lopez", occurredAt: "2026-10-31T09:20:00Z", receivedAt: "2026-10-31T09:20:05Z" },
+      ],
+      resolution: resolved
+        ? { employeeName: "Maria Lopez", resolvedBy: "Ada Admin", resolvedAt: "2026-10-31T12:00:00Z", reason: "Maria filled it", previousStatus: "needs_review" }
+        : null,
+    },
+  });
 
 vi.mock("../../lib/api", () => ({
   ApiError: class extends Error {},
   api: vi.fn((path: string, init?: { method?: string; body?: string }) => {
     if (path.startsWith("/api/scale-weighings?")) return Promise.resolve(day);
+    if (path.startsWith("/api/bin-cycles?")) return Promise.resolve({ trackingStartedAt: null, trackingEverStarted: false, cycles: [] });
+    if (path.endsWith("/resolve")) {
+      resolveCalls.push({ path, body: JSON.parse(init!.body!) });
+      nextDetail = disputed(true);
+      return Promise.resolve({ cycle: {}, replay: false });
+    }
     if (path.endsWith("/void")) {
       voidCalls.push({ path, body: JSON.parse(init!.body!) });
       return Promise.resolve({
@@ -99,7 +131,7 @@ vi.mock("../../lib/api", () => ({
         }),
       });
     }
-    if (path.startsWith("/api/scale-weighings/")) return Promise.resolve({ weighing: detail() });
+    if (path.startsWith("/api/scale-weighings/")) return Promise.resolve({ weighing: nextDetail ?? detail() });
     return Promise.reject(new Error(`unexpected ${path}`));
   }),
 }));
@@ -111,6 +143,8 @@ const lastListCall = () => listCalls()[listCalls().length - 1];
 beforeEach(() => {
   role = "Administrator";
   voidCalls = [];
+  resolveCalls = [];
+  nextDetail = null;
   apiMock.mockClear();
 });
 afterEach(cleanup);
@@ -165,6 +199,39 @@ describe("ScaleWeighingsPage", () => {
     expect(await screen.findByText(/Credit to Ruben Ortiz voided by Ada Admin/)).toBeInTheDocument();
     expect(screen.getByText(/Not counted in production totals/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Void this credit" })).toBeNull();
+  });
+
+  it("an Administrator resolves a disputed picking cycle: chooses one of its scanners and gives a reason", async () => {
+    nextDetail = disputed(false);
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await user.click(await screen.findByText("Ruben Ortiz", { selector: "td" }));
+    expect(await screen.findByText("Phone scans in this picking cycle")).toBeInTheDocument();
+    expect(screen.getByText(/^Maria Lopez:/)).toBeInTheDocument();
+    expect(screen.getByText(/^Ruben Ortiz:/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Resolve: choose the employee" }));
+    const submit = screen.getByRole("button", { name: "Credit this employee" });
+    expect(submit).toBeDisabled();
+    await user.click(screen.getByRole("radio", { name: "Maria Lopez" }));
+    expect(submit).toBeDisabled(); // still needs a reason
+    await user.type(screen.getByRole("textbox"), "Maria filled it");
+    await user.click(submit);
+    await waitFor(() => expect(resolveCalls).toHaveLength(1));
+    expect(resolveCalls[0].path).toBe("/api/bin-cycles/c-9/resolve");
+    expect(resolveCalls[0].body).toMatchObject({ employeeId: "e-2", reason: "Maria filled it" });
+    expect(typeof resolveCalls[0].body.requestId).toBe("string");
+    expect(await screen.findByText(/Resolved by Ada Admin/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Resolve: choose the employee" })).toBeNull();
+  });
+
+  it("does not offer resolving to a Manager", async () => {
+    role = "Manager";
+    nextDetail = disputed(false);
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await user.click(await screen.findByText("Ruben Ortiz", { selector: "td" }));
+    await screen.findByText("Phone scans in this picking cycle");
+    expect(screen.queryByRole("button", { name: "Resolve: choose the employee" })).toBeNull();
   });
 
   it("does not offer voiding to a Manager", async () => {

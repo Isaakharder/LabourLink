@@ -3,10 +3,11 @@
 //   GET  /api/bin-cycles?state=open|recent&carrierId=   cycles, open ones first (Administrator, Manager)
 //   GET  /api/bin-cycles/:id                            one cycle with its scans and history
 //   POST /api/bin-cycles/:id/close                      close without weighing (Administrator)
+//   POST /api/bin-cycles/:id/resolve                    credit a needs-review cycle's weighing to one of its scanners (Administrator)
 import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
-import { closeCycleWithoutWeighing, OPEN_STATUSES } from "../lib/binCycles";
+import { closeCycleWithoutWeighing, OPEN_STATUSES, resolveCycle } from "../lib/binCycles";
 import { requireAuth, requireRole } from "../middleware/auth";
 
 const router = Router();
@@ -32,17 +33,23 @@ function cycleJson(r: any) {
     closedAt: r.closed_at,
     closeReason: r.close_reason,
     closedBy: r.closed_by_name || null,
+    resolution: r.resolved_at
+      ? { employeeId: r.resolved_employee_id, employeeName: r.resolved_employee_name, resolvedBy: r.resolved_by_name, resolvedAt: r.resolved_at, reason: r.resolution_reason, previousStatus: r.resolution_previous_status }
+      : null,
   };
 }
 
 const SELECT = `
   select bc.*, c.name as bin_name, ${fullName("e")} as employee_name, ${fullName("x")} as closed_by_name,
+         ${fullName("re")} as resolved_employee_name, ${fullName("rb")} as resolved_by_name,
          w.weighed_at, w.net_g, w.status as weighing_status,
          (select count(*)::int from bin_scans s where s.cycle_id = bc.id) as scan_count
   from bin_cycles bc
   join carriers c on c.id = bc.carrier_id
   join employees e on e.id = bc.employee_id
   left join employees x on x.id = bc.closed_by_employee_id
+  left join employees re on re.id = bc.resolved_employee_id
+  left join employees rb on rb.id = bc.resolved_by_employee_id
   left join scale_weighings w on w.id = bc.weighing_id`;
 
 router.get(
@@ -51,7 +58,10 @@ router.get(
   asyncHandler(async (req, res) => {
     const state = req.query.state === "recent" ? "recent" : "open";
     const carrierId = typeof req.query.carrierId === "string" && UUID_RE.test(req.query.carrierId) ? req.query.carrierId : null;
-    const { rows: t } = await pool.query(`select started_at, note from bin_cycle_tracking where id`);
+    const { rows: t } = await pool.query(
+      `select (select started_at from bin_cycle_tracking where stopped_at is null) as running_since,
+              exists (select 1 from bin_cycle_tracking) as ever_started`
+    );
     const { rows } = await pool.query(
       `${SELECT}
        where ($1::uuid is null or bc.carrier_id = $1)
@@ -60,7 +70,8 @@ router.get(
        limit 500`,
       [carrierId, OPEN_STATUSES, state === "recent"]
     );
-    res.json({ trackingStartedAt: t[0]?.started_at ?? null, cycles: rows.map(cycleJson) });
+    // trackingStartedAt: the running period's start (null while stopped or never started).
+    res.json({ trackingStartedAt: t[0].running_since ?? null, trackingEverStarted: t[0].ever_started, cycles: rows.map(cycleJson) });
   })
 );
 
@@ -115,6 +126,25 @@ router.post(
     if (!requestId) return res.status(400).json({ error: "requestId must be a UUID" });
     if (reason.length < 3) return res.status(400).json({ error: "A reason is required", errors: { reason: "Say why this cycle is closed without weighing" } });
     const r = await closeCycleWithoutWeighing(req.params.id, requestId, reason.slice(0, 500), req.employee!.id);
+    if (!r.ok) return res.status(r.status).json({ error: r.error, code: r.code });
+    const { rows } = await pool.query(`${SELECT} where bc.id = $1`, [req.params.id]);
+    res.json({ cycle: cycleJson(rows[0]), replay: r.replay });
+  })
+);
+
+router.post(
+  "/:id/resolve",
+  requireRole("Administrator"),
+  asyncHandler(async (req, res) => {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: "Invalid cycle id" });
+    const body = (req.body ?? {}) as { requestId?: unknown; employeeId?: unknown; reason?: unknown };
+    const requestId = typeof body.requestId === "string" && UUID_RE.test(body.requestId) ? body.requestId : null;
+    const employeeId = typeof body.employeeId === "string" && UUID_RE.test(body.employeeId) ? body.employeeId : null;
+    const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+    if (!requestId) return res.status(400).json({ error: "requestId must be a UUID" });
+    if (!employeeId) return res.status(400).json({ error: "Choose the employee to credit", errors: { employeeId: "Choose the employee to credit" } });
+    if (reason.length < 3) return res.status(400).json({ error: "A reason is required", errors: { reason: "Say why this employee gets the credit" } });
+    const r = await resolveCycle(req.params.id, requestId, employeeId, reason.slice(0, 500), req.employee!.id);
     if (!r.ok) return res.status(r.status).json({ error: r.error, code: r.code });
     const { rows } = await pool.query(`${SELECT} where bc.id = $1`, [req.params.id]);
     res.json({ cycle: cycleJson(rows[0]), replay: r.replay });

@@ -37,7 +37,7 @@ const STORE_KV = "kv_cache";
 const INDEX_BY_DEVICE_STATUS = "by_device_status";
 const INDEX_BY_DEVICE_SEQ = "by_device_seq";
 
-export type JournalEventType = "work_start" | "activity_switch" | "break_start" | "break_end" | "end_day";
+export type JournalEventType = "work_start" | "activity_switch" | "break_start" | "break_end" | "end_day" | "bin_rescan";
 export type JournalSyncStatus = "pending" | "syncing" | "synced" | "conflict";
 
 export interface NewJournalEvent {

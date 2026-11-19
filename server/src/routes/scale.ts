@@ -131,12 +131,12 @@ async function outcome(db: PoolClient | typeof pool, stationId: string, stationW
   const { rows } = await db.query(
     `select w.station_weighing_id, w.status, w.pending_until, w.credits_live,
             case when w.employee_id is not null then trim(e.first_name || ' ' || coalesce(e.last_name, '')) end as employee_name,
-            (t.started_at is not null and w.weighed_at > t.started_at and c.id is null and not w.is_duplicate
-              and w.status in ('pending', 'expired')) as no_picking_cycle
+            (c.id is null and not w.is_duplicate and w.status in ('pending', 'expired')
+              and exists (select 1 from bin_cycle_tracking p
+                          where w.weighed_at > p.started_at and (p.stopped_at is null or w.weighed_at <= p.stopped_at))) as no_picking_cycle
      from scale_weighings w
      left join employees e on e.id = w.employee_id
      left join bin_cycles c on c.weighing_id = w.id
-     left join bin_cycle_tracking t on t.id
      where w.station_id = $1 and w.station_weighing_id = any($2::uuid[])`,
     [stationId, stationWeighingIds]
   );
