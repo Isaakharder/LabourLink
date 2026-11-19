@@ -9,14 +9,17 @@ Every step that changes production needs the owner's separate approval. Keep emp
 | Step | Effect on production |
 |---|---|
 | Migration 074 applied | Four new, empty tables. Phone events may now also be `bin_rescan`. No existing row changes. |
-| Server + web deployed | Nothing changes yet: with no tracking period, the existing matching rule runs unchanged. `/api/mobile/me` now tells phones the server accepts `bin_rescan`. |
-| Phone app with rescan | Re-scanning the bin you're already on sends `bin_rescan`, only to a server that says it accepts it. Until tracking starts, a rescan is recorded and does nothing else. |
+| Server + web deployed | Nothing changes yet: with no tracking period, the existing matching rule runs unchanged, and phones are not asked to send `bin_rescan`. |
+| Phone app 1.9.1 (versionCode 16) | Re-scanning the bin you're already on sends `bin_rescan`, but only while the server says picking-cycle tracking is running (`/api/mobile/me` `features.binRescan`). Otherwise it shows "Already using this bin", as before. |
 | Station 0.4.3 installed | Shows "Not credited: already weighed" when the server reports `noPickingCycle`. Against an older server the flag is absent and nothing changes. |
 | **Cutover**: a tracking period is started | From that moment, picking cycles decide every weighing. Phone scans before the start never open a cycle. Weighings before it keep their decisions. |
 
 ## Order
 
-1. **Apply migration 074** in the Supabase SQL Editor, **before** merging. Code that expects a table before its migration runs crashes the API. Then check:
+1. **Apply migration 074** in the Supabase SQL Editor, **before** merging. Code that expects a table before its migration runs crashes the API.
+   - Run it as one script, outside working hours. Replacing the phone-event type constraint briefly locks `mobile_time_events` while it re-checks existing rows, which holds phone syncs for those seconds.
+
+   Then check:
    ```sql
    select count(*) from bin_cycle_tracking;  -- 0: no tracking period
    select count(*) from bin_cycles;          -- 0
@@ -25,7 +28,7 @@ Every step that changes production needs the owner's separate approval. Keep emp
    - `/api/health` returns 200;
    - a weighing is still matched by the existing rule;
    - the Scale Weighings page loads.
-3. **Release the phone app build** (an APK with this change), only after step 2.
+3. **Release phone app 1.9.1 (versionCode 16)** through Google Play, only after step 2.
    - Phones on the old app keep working, but a picker on one of them who keeps the same bin after weighing must switch away and back to start a new cycle.
 4. **Install station 0.4.3** on the NUC with `install-0.4.3.sh`, which backs up the NUC first. This can happen any time after step 2.
 5. **Cutover**, at the start of a workday, **before the first phone bin scan**:
@@ -67,11 +70,13 @@ Every step that changes production needs the owner's separate approval. Keep emp
 
 ## Stopping tracking (rollback) and restarting
 
-- **Stop** with the station's offline queue at 0:
+- **Stop:**
   ```sql
   update bin_cycle_tracking set stopped_at = now() where stopped_at is null;
   ```
   - Within 5 minutes (the sweep), every open cycle is closed without weighing ("tracking was stopped"). Nobody is credited for those cycles.
+  - Exception: a weighing made **before** the stop that reaches LabourLink only afterwards (the station was offline) still closes the cycle that was open at its time, keeps its original weighing time, and is credited as usual. Scans after that weighing stay in a cycle closed at the stop.
+  - Phones stop being asked to send `bin_rescan` while stopped.
   - New weighings return to the existing rule, which **never uses a phone scan from before the stop**. Old scans can't credit anything.
   - Weighings already decided by cycles keep their outcome.
 - **Restart:**
@@ -96,10 +101,15 @@ Every step that changes production needs the owner's separate approval. Keep emp
   - inside a period: picking cycles;
   - after a stop: the old rule, with no pre-stop scans.
 
-  A weighing made before a stop but uploaded after it is never credited: its cycle was already closed by the stop. That's why the stop needs the station queue at 0.
+  A weighing made before a stop but uploaded after it still closes, and is credited for, the cycle open at its time.
 - **Phones:**
   - Old app with new server: no rescans, everything else unchanged.
-  - New app with old server: the server doesn't advertise `binRescan`, so the app sends none.
+  - New app with old server, or with tracking not running: the server doesn't advertise `binRescan`, so the app sends none.
+- **Greenhouses without LabourLink Scale:**
+  - No tracking period is ever started, so picking cycles never run.
+  - Phones are never asked to send `bin_rescan`.
+  - The open-cycles panel stays hidden.
+  - Clock-in/out, jobs, bin and row scanning, breaks, offline sync, payroll and reports are unchanged (tested in `test:bin-cycles-no-scale` and the existing suites).
 
 ## Known limits
 

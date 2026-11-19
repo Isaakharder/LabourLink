@@ -91,6 +91,10 @@ type Db = PoolClient | typeof pool;
 export async function trackingEverStarted(db: Db): Promise<boolean> {
   return (await db.query(`select 1 from bin_cycle_tracking limit 1`)).rows.length > 0;
 }
+// Whether a tracking period is running now (phones send bin_rescan only then).
+export async function trackingRunning(db: Db): Promise<boolean> {
+  return (await db.query(`select 1 from bin_cycle_tracking where stopped_at is null and started_at <= now() limit 1`)).rows.length > 0;
+}
 export async function isTracked(db: Db, at: Date): Promise<boolean> {
   return (await db.query(`select ${IN_PERIOD("$1::timestamptz")} as t`, [at])).rows[0].t === true;
 }
@@ -259,12 +263,28 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
     [carrierId, OPEN_STATUSES]
   );
   const open = openRows[0] ?? null;
+  // A cycle closed by stopping tracking (not by an administrator) stays
+  // available to a weighing made before the stop that only reached
+  // LabourLink afterwards (the station was offline): that weighing closes
+  // the cycle that was open at its time and is credited as usual. Only such
+  // cycles are re-placed, so this is a no-op otherwise.
+  const { rows: softRows } = await client.query(
+    `select c.* from bin_cycles c
+     where c.carrier_id = $1 and c.status = 'closed_unweighed' and c.closed_by_employee_id is null and c.close_request_id is null
+       and exists (select 1 from scale_weighings w left join bin_cycles l on l.weighing_id = w.id
+                   where w.carrier_id = c.carrier_id and l.id is null and w.status = 'pending' and not w.is_duplicate
+                     and w.weighed_at >= c.opened_at and w.weighed_at <= c.closed_at)
+     order by c.opened_at for update`,
+    [carrierId]
+  );
+  const reusable = [...(open ? [open] : []), ...softRows];
+  const reused = new Set<string>();
   const { rows: scanRows } = await client.query(
     `select s.mobile_time_event_id, s.employee_id, s.occurred_at, s.received_at, s.cycle_id
      from bin_scans s
-     where s.carrier_id = $1 and s.clock_trusted and (s.cycle_id is null or s.cycle_id = $2)
+     where s.carrier_id = $1 and s.clock_trusted and (s.cycle_id is null or s.cycle_id = any($2::uuid[]))
      order by s.occurred_at, s.mobile_time_event_id`,
-    [carrierId, open?.id ?? null]
+    [carrierId, reusable.map((r) => r.id)]
   );
   const scans: ScanRow[] = scanRows.map((r) => ({
     id: r.mobile_time_event_id,
@@ -287,6 +307,7 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
      select 'u', null, c.closed_at, c.status, null, null, c.id
        from bin_cycles c
        where c.carrier_id = $1 and c.status = 'closed_unweighed' and c.closed_at >= $2::timestamptz
+         and (c.closed_by_employee_id is not null or c.close_request_id is not null) -- administrator closures; stops are 's'
      union all
      select 's', p.id, p.stopped_at, null, null, null, null
        from bin_cycle_tracking p where p.stopped_at is not null and p.stopped_at >= $2::timestamptz
@@ -300,7 +321,10 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
   }));
   const groups = placeScans(scans, boundaries);
   const byId = new Map(scans.map((s) => [s.id, s]));
-  let openReused = false;
+  // The first not-yet-reused open or stop-closed row owning any of these
+  // scans keeps its identity for the group.
+  const reuseFor = (group: PlaceScan[]) =>
+    reusable.find((r) => !reused.has(r.id) && group.some((s) => byId.get(s.id)!.cycleId === r.id)) ?? null;
 
   const moveScans = async (cycleId: string, group: PlaceScan[], late: boolean) => {
     for (const s of group) {
@@ -320,9 +344,31 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
   for (const b of boundaries) {
     const group = groups.get(b.key) ?? [];
     if (b.kind === "s") {
-      // Scans from the end of a period nobody had placed: recorded in a cycle
-      // closed at the stop, never credited.
+      // Scans from the end of a period with no weighing after them: kept in
+      // a cycle closed at the stop, never credited.
       if (group.length === 0) continue;
+      const keep = reuseFor(group);
+      if (keep && keep.status === "closed_unweighed") {
+        reused.add(keep.id);
+        await client.query(`update bin_cycles set employee_id = $2, opened_at = $3, last_scan_at = $4, updated_at = now() where id = $1`, [
+          keep.id,
+          group[0].employeeId,
+          new Date(group[0].occurredAt),
+          new Date(group[group.length - 1].occurredAt),
+        ]);
+        await moveScans(keep.id, group, false);
+        continue;
+      }
+      const { rows: existing } = await client.query(
+        `select id from bin_cycles where carrier_id = $1 and status = 'closed_unweighed' and closed_by_employee_id is null
+           and close_request_id is null and closed_at = $2 and not (id = any($3::uuid[])) order by opened_at limit 1`,
+        [carrierId, new Date(b.at), [...reused]]
+      );
+      if (existing[0]) {
+        reused.add(existing[0].id);
+        await moveScans(existing[0].id, group, true);
+        continue;
+      }
       const { rows: ins } = await client.query(
         `insert into bin_cycles (carrier_id, status, employee_id, opened_at, last_scan_at, closed_at, close_reason)
          values ($1, 'closed_unweighed', $2, $3, $4, $5, $6) returning id`,
@@ -374,14 +420,14 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
     // The scans before this weighing form the cycle it closes. The open
     // cycle's row keeps its identity if its scans are here.
     const employees = distinctEmployees(group);
-    const reuse = !openReused && open && group.some((s) => byId.get(s.id)!.cycleId === open.id) ? open : null;
+    const reuse = reuseFor(group);
     const opened = new Date(group[0].occurredAt);
     const last = new Date(group[group.length - 1].occurredAt);
     const reviewReason = employees.length > 1 ? `Chosen by more than one employee: ${await employeeNames(client, employees)}` : null;
     const closeReason = b.status === "pending" ? null : b.status === "expired" ? TOO_LATE_REASON : HELD_REASON;
     let cycleId: string;
     if (reuse) {
-      openReused = true;
+      reused.add(reuse.id);
       cycleId = reuse.id;
       await client.query(
         `update bin_cycles set status = 'closed', employee_id = $2, opened_at = $3, last_scan_at = $4, awaiting_since = coalesce(awaiting_since, $5),
@@ -389,7 +435,17 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
         [cycleId, group[0].employeeId, opened, last, new Date(b.at), reviewReason, b.id, closeReason]
       );
       await moveScans(cycleId, group, false);
-      await cycleEvent(client, { cycleId, kind: "weighed", fromStatus: reuse.status, toStatus: "closed", weighingId: b.id, reason: closeReason ?? reviewReason });
+      await cycleEvent(client, {
+        cycleId,
+        kind: "weighed",
+        fromStatus: reuse.status,
+        toStatus: "closed",
+        weighingId: b.id,
+        reason:
+          reuse.status === "closed_unweighed"
+            ? "Weighed before picking-cycle tracking stopped; the weighing reached LabourLink afterwards."
+            : closeReason ?? reviewReason,
+      });
     } else {
       const { rows: ins } = await client.query(
         `insert into bin_cycles (carrier_id, status, employee_id, opened_at, last_scan_at, review_reason, weighing_id, closed_at, close_reason)
@@ -438,7 +494,7 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
     status = f.filling ? "filling" : "awaiting_weighing";
     awaitingSince = f.filling ? null : f.awaitingSince ?? last;
   }
-  if (open && !openReused) {
+  if (open && !reused.has(open.id) && (OPEN_STATUSES as readonly string[]).includes(open.status)) {
     const awaitingChanged = (open.awaiting_since ? +new Date(open.awaiting_since) : null) !== (awaitingSince ? +awaitingSince : null);
     if (awaitingChanged || open.status !== status || open.review_reason !== reviewReason || +new Date(open.opened_at) !== +opened || +new Date(open.last_scan_at) !== +last || open.employee_id !== openGroup[0].employeeId) {
       await client.query(

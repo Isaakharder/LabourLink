@@ -14,14 +14,14 @@ const when = (iso: string) => `${formatDateLongInAppTimezone(iso)} ${formatTimeI
 export function PickingCyclesPanel({ onChanged }: { onChanged: () => void }) {
   const { employee } = useAuth();
   const isAdmin = employee?.securityRole === "Administrator";
-  const [data, setData] = useState<{ trackingStartedAt: string | null; cycles: BinCycle[] } | null>(null);
+  const [data, setData] = useState<{ trackingStartedAt: string | null; trackingEverStarted?: boolean; cycles: BinCycle[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [closing, setClosing] = useState<{ cycle: BinCycle; requestId: string } | null>(null);
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(() => {
-    api<{ trackingStartedAt: string | null; cycles: BinCycle[] }>(`/api/bin-cycles?state=open`)
+    api<{ trackingStartedAt: string | null; trackingEverStarted?: boolean; cycles: BinCycle[] }>(`/api/bin-cycles?state=open`)
       .then((d) => {
         setData(d);
         setError(null);
@@ -50,7 +50,8 @@ export function PickingCyclesPanel({ onChanged }: { onChanged: () => void }) {
     }
   }
 
-  if (data && !data.trackingStartedAt) return null; // cycle tracking not started yet
+  // Greenhouses without LabourLink Scale (tracking never started) never see this.
+  if (data && !data.trackingStartedAt && !data.trackingEverStarted) return null;
   return (
     <section className="setup-section scale-weighings picking-cycles">
       <h2>Open picking cycles</h2>
@@ -58,6 +59,7 @@ export function PickingCyclesPanel({ onChanged }: { onChanged: () => void }) {
         A cycle starts when an employee chooses a bin on their phone and ends when the bin is weighed. A bin weighed again without a new phone
         scan is not credited.
       </p>
+      {data && !data.trackingStartedAt && <p className="field-hint">Picking-cycle tracking is stopped. Weighings use the previous matching rule.</p>}
       {error && <p className="error-text">{error}</p>}
       {!data ? (
         !error && <p>Loading...</p>

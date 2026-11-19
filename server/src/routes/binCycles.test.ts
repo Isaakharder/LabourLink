@@ -210,6 +210,8 @@ async function main() {
     const uma = await phone("Uma");
     const vic = await phone("Vic");
     const wes = await phone("Wes");
+    const xan = await phone("Xan");
+    const yen = await phone("Yen");
     const bin43 = await carrier("Bin 43");
     const bin51 = await carrier("Bin 51");
     const binO = await carrier("Bin O");
@@ -222,6 +224,7 @@ async function main() {
     const binS = await carrier("Bin S");
     const binU = await carrier("Bin U");
     const binW = await carrier("Bin W");
+    const binX = await carrier("Bin X");
 
     // ---------------------------------------------------------------
     // W) The requested workflow, Bin 43
@@ -459,12 +462,35 @@ async function main() {
     // T) Stopping tracking (rollback) and starting it again
     // ---------------------------------------------------------------
     await syncOk(tia, [scan(tia, binS.id, at(170))], "T tia");
+    // Bin X: Xan fills it; the station weighs it while offline; Yen scans it
+    // afterwards; then tracking is stopped before the station reconnects.
+    await syncOk(xan, [scan(xan, binX.id, at(171))], "T xan");
+    const offlineX = { at: new Date(Date.now() - 20_000), id: randomUUID() };
+    await sleep(20);
+    await syncOk(yen, [scan(yen, binX.id, new Date(Date.now() - 10_000))], "T yen");
+    const xanCycleId = (await cycles(binX))[0]?.id;
     check((await cycles(binS))[0]?.status === "filling", "T) Tia is filling Bin S");
     await pool.query(`update bin_cycle_tracking set stopped_at = now() where stopped_at is null`);
     const stoppedAt = new Date((await pool.query(`select max(stopped_at) as s from bin_cycle_tracking`)).rows[0].s);
     await sweepPendingWeighings();
     cy = await cycles(binS);
     check(cy.length === 1 && cy[0].status === "closed_unweighed" && /stopped/.test(cy[0].close_reason), "T) stopping closes the open cycle, nobody credited", cy);
+    check((await cycles(binX))[0]?.status === "closed_unweighed", "T) Bin X's open cycle was closed by the stop too");
+    const meStopped = await fetch(`${BASE}/api/mobile/me`, { headers: { "X-Device-Id": rex.identifier } }).then((r) => r.json() as any);
+    check(meStopped?.features?.binRescan === false, "T) while stopped, phones are told not to send bin_rescan", meStopped?.features);
+    // The station reconnects: its weighing from before the stop arrives now.
+    w = await weigh(binX, offlineX.at, 30_000, offlineX.id);
+    check(w.out?.status === "credited" && w.out?.employeeName === xan.name, "T) a weighing made before the stop and uploaded after it is still credited (Xan)", w.out);
+    check(new Date(w.row.weighed_at).getTime() === offlineX.at.getTime(), "T) with its original weighing time");
+    cy = await cycles(binX);
+    const xc = cy.find((c: any) => c.id === xanCycleId);
+    check(xc?.status === "closed" && xc?.weighing_id === w.row.id && xc?.employee_id === xan.employeeId, "T) it closes the same picking cycle that was open at its time", cy);
+    const rest = cy.filter((c: any) => c.id !== xanCycleId);
+    check(rest.length === 1 && rest[0].status === "closed_unweighed" && rest[0].employee_id === yen.employeeId, "T) Yen's later scan stays in a cycle closed at the stop, not credited", cy);
+    const replayX = await weigh(binX, offlineX.at, 30_000, offlineX.id);
+    check(replayX.status === 200 && replayX.out?.status === "credited", "T) the station retry of it changes nothing", replayX.out);
+    await sweepPendingWeighings();
+    check((await weighingRow(w.row.id)).employee_id === xan.employeeId && (await cycles(binX)).length === 2, "T) and the sweep leaves it alone");
     await sleep(20);
     w = await weigh(binS, new Date());
     check(w.out?.status === "pending" && w.out?.noPickingCycle === false && w.row.employee_id === null, "T) after the stop, Bin S is not credited from Tia's earlier scan", w.out);
@@ -480,6 +506,8 @@ async function main() {
     check(w.out?.status === "credited" && w.out?.employeeName === uma.name, "T) while stopped, a scan after the stop is matched by the existing rule", w.out);
     // Start again.
     await pool.query(`insert into bin_cycle_tracking (started_at, note) values (now(), 'binCycles.test restart')`);
+    const meAgain = await fetch(`${BASE}/api/mobile/me`, { headers: { "X-Device-Id": rex.identifier } }).then((r) => r.json() as any);
+    check(meAgain?.features?.binRescan === true, "T) after the restart, phones may send bin_rescan again", meAgain?.features);
     await sweepPendingWeighings();
     check((await cycles(binS)).length === 1 && (await cycles(binS))[0].status === "closed_unweighed", "T) restarting does not reopen the stopped cycle");
     await sleep(20);

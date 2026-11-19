@@ -51,6 +51,12 @@ describe("PickingCyclesPanel", () => {
     await waitFor(() => expect(container).toBeEmptyDOMElement());
   });
 
+  it("stays visible, saying so, after tracking was stopped", async () => {
+    apiMock.mockResolvedValue({ trackingStartedAt: null, trackingEverStarted: true, cycles: [] });
+    render(<PickingCyclesPanel onChanged={() => {}} />);
+    expect(await screen.findByText(/Picking-cycle tracking is stopped/)).toBeInTheDocument();
+  });
+
   it("lists open cycles; a Manager can't close one", async () => {
     role = "Manager";
     apiMock.mockResolvedValue({ trackingStartedAt: "2026-11-19T06:00:00Z", cycles: [cycle] });

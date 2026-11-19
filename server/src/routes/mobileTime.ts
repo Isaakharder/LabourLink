@@ -28,7 +28,7 @@ import {
   validateActivityAndAnswers,
 } from "../lib/activitySelection";
 import { carrierIdsInAnswers, reconcileAfterPhoneSync } from "../lib/scaleMatching";
-import { reconcileCyclesAfterPhoneSync } from "../lib/binCycles";
+import { reconcileCyclesAfterPhoneSync, trackingRunning } from "../lib/binCycles";
 
 const router = Router();
 router.use(asyncHandler(requireDevice));
@@ -912,9 +912,11 @@ async function serializeStatus(
     appTimezone: APP_TIMEZONE,
     // Phone features this server accepts. binRescan: a re-scan of the bin
     // the employee is already using is sent as a bin_rescan event (picking
-    // cycles, migration 074). A phone never sends one to a server that
-    // doesn't say so, since an older server can't store that event type.
-    features: { binRescan: true },
+    // cycles, migration 074). Only while picking-cycle tracking is running,
+    // so a greenhouse without LabourLink Scale never sees one. A phone never
+    // sends one to a server that doesn't say so (an older server can't store
+    // that event type).
+    features: { binRescan: await trackingRunning(pool) },
   };
 }
 
