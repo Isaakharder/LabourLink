@@ -57,6 +57,20 @@ describe("PickingCyclesPanel", () => {
     expect(await screen.findByText(/Picking-cycle tracking is stopped/)).toBeInTheDocument();
   });
 
+  it("lists superseded cycles to review; an Administrator confirms one with a reason", async () => {
+    const superseded = { ...cycle, id: "c-s", status: "superseded" as const, closedAt: "2026-11-19T13:08:00Z", reviewStatus: "open" as const, settled: true };
+    apiMock.mockImplementation((path: string) =>
+      Promise.resolve(path.includes("state=review") ? { cycles: [superseded] } : { trackingStartedAt: "2026-11-19T06:00:00Z", cycles: [] })
+    );
+    render(<PickingCyclesPanel onChanged={() => {}} />);
+    expect(await screen.findByText("Superseded cycles to review (1)")).toBeInTheDocument();
+    expect(screen.getByText("Bin reused before weighing")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Confirm superseded" }));
+    await userEvent.type(screen.getByLabelText(/Reason/), "Bin was emptied and reused");
+    await userEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(apiMock.mock.calls.some((c) => c[0] === "/api/bin-cycles/c-s/confirm-superseded")).toBe(true));
+  });
+
   it("lists open cycles; a Manager can't close one", async () => {
     role = "Manager";
     apiMock.mockResolvedValue({ trackingStartedAt: "2026-11-19T06:00:00Z", cycles: [cycle] });

@@ -211,6 +211,17 @@ async function main() {
     const vic = await phone("Vic");
     const wes = await phone("Wes");
     const xan = await phone("Xan");
+    const pat = await phone("Patrick");
+    const rub = await phone("Rube");
+    const m1 = await phone("Mia");
+    const m2 = await phone("Max");
+    const m3 = await phone("Mo");
+    const pd = await phone("Paz");
+    const dly = await phone("Dee");
+    const ac1 = await phone("Aki");
+    const ac2 = await phone("Abe");
+    const ac3 = await phone("Ari");
+    const ac4 = await phone("Ava");
     const yen = await phone("Yen");
     const bin43 = await carrier("Bin 43");
     const bin51 = await carrier("Bin 51");
@@ -225,6 +236,11 @@ async function main() {
     const binU = await carrier("Bin U");
     const binW = await carrier("Bin W");
     const binX = await carrier("Bin X");
+    const binV = await carrier("Bin V");
+    const binM = await carrier("Bin M");
+    const binD = await carrier("Bin D");
+    const binA = await carrier("Bin A");
+    const binB = await carrier("Bin B");
 
     // ---------------------------------------------------------------
     // W) The requested workflow, Bin 43
@@ -301,14 +317,18 @@ async function main() {
     // O) A weighing uploaded late after a network outage
     // ---------------------------------------------------------------
     await syncOk(ana, [scan(ana, binO.id, at(0)), scan(ana, binP.id, at(20))], "O ana");
+    const anaCycleId = (await cycles(binO))[0]?.id;
     await syncOk(sam, [scan(sam, binO.id, at(40))], "O sam");
     cy = await cycles(binO);
-    check(cy.length === 1 && cy[0].status === "needs_review" && cy[0].employee_id === ana.employeeId, "O) before the late weighing arrives, Sam's scan looks like a conflict; Ana is not replaced", cy);
-    const openId = cy[0]?.id;
+    check(
+      cy.length === 2 && cy[0].id === anaCycleId && cy[0].status === "superseded" && cy[0].finalized_at === null && cy[1].status === "filling" && cy[1].employee_id === sam.employeeId,
+      "O) before the late weighing arrives, Sam's scan supersedes Ana's unweighed cycle (not settled yet)",
+      cy
+    );
     w = await weigh(binO, at(30)); // weighed at T+30, uploaded now
-    check(w.out?.status === "credited" && w.out?.employeeName === ana.name, "O) the late weighing closes the cycle that was open at its time: Ana", w.out);
+    check(w.out?.status === "credited" && w.out?.employeeName === ana.name, "O) the late weighing, by its own time, closes Ana's cycle and credits Ana", w.out);
     cy = await cycles(binO);
-    check(cy.length === 2 && cy[0].id === openId && cy[0].status === "closed" && cy[1].status === "filling" && cy[1].employee_id === sam.employeeId, "O) Sam's scan starts the next cycle", cy);
+    check(cy.length === 2 && cy[0].id === anaCycleId && cy[0].status === "closed" && cy[0].superseded_by_cycle_id === null && cy[1].status === "filling" && cy[1].employee_id === sam.employeeId, "O) Ana's cycle (same identity) is no longer superseded; Sam's stays open", cy);
 
     // ---------------------------------------------------------------
     // L) Phone scans arriving after the weighing
@@ -323,15 +343,21 @@ async function main() {
     const wLid = w.row.id;
 
     // ---------------------------------------------------------------
-    // C) Conflicting employees
+    // C) Another employee reuses the bin before it is weighed: the latest cycle gets the credit
     // ---------------------------------------------------------------
     await syncOk(ruben, [scan(ruben, binC.id, at(100))], "C ruben");
     await syncOk(maria, [scan(maria, binC.id, at(110))], "C maria");
     cy = await cycles(binC);
-    check(cy.length === 1 && cy[0].status === "needs_review" && cy[0].employee_id === ruben.employeeId && /more than one/.test(cy[0].review_reason ?? ""), "C) a second employee's scan: needs review, Ruben not replaced", cy);
+    check(
+      cy.length === 2 && cy[0].status === "superseded" && cy[0].employee_id === ruben.employeeId && cy[0].review_status === "open" && cy[0].superseded_by_cycle_id === cy[1].id && cy[1].status === "filling" && cy[1].employee_id === maria.employeeId,
+      "C) Maria's scan supersedes Ruben's cycle (flagged for review) and opens hers",
+      cy
+    );
     w = await weigh(binC, at(120));
-    check(w.out?.status === "needs_review" && w.row.employee_id === null, "C) its weighing: needs review, nobody credited", w.out);
-    check((await cycles(binC))[0].status === "closed", "C) the weighing closes the cycle");
+    check(w.out?.status === "credited" && w.out?.employeeName === maria.name, "C) the weighing credits the latest cycle: Maria", w.out);
+    cy = await cycles(binC);
+    check(cy[0].status === "superseded" && cy[0].finalized_at !== null && cy[0].weighing_id === null && cy[1].status === "closed" && cy[1].weighing_id === w.row.id, "C) Ruben's cycle is settled with no weighing; Maria's is closed by it", cy);
+    check((await pool.query(`select count(*)::int as n from bin_scans where cycle_id = $1`, [cy[0].id])).rows[0].n === 1, "C) Ruben's scan is kept with his superseded cycle");
 
     // ---------------------------------------------------------------
     // N) Picked one day, Finish Work, weighed the next day
@@ -412,51 +438,141 @@ async function main() {
     check(dupRescan.body?.results?.[0]?.status === "duplicate" && (await cycles(binR)).length === 2, "R) a re-uploaded rescan creates no cycle", dupRescan.body);
 
     // ---------------------------------------------------------------
-    // Q) Administrator resolution of a needs-review cycle (Bin C)
+    // Q) Administrator correction of a mistaken supersession (Bin C)
     // ---------------------------------------------------------------
-    const cyC = (await cycles(binC))[0];
-    const wC = (await pool.query(`select * from scale_weighings where id = $1`, [cyC.weighing_id])).rows[0];
-    check(wC.status === "needs_review", "Q) Bin C's weighing is waiting for review", wC);
+    const [cRuben, cMaria] = await cycles(binC);
+    const wC = (await pool.query(`select * from scale_weighings where id = $1`, [cMaria.weighing_id])).rows[0];
     const det = await admin_("GET", `/api/scale-weighings/${wC.id}`, manager.token);
-    const pc = det.body?.weighing?.pickingCycle;
-    check(pc?.id === cyC.id && pc.scans.length === 2 && new Set(pc.scans.map((x: any) => x.employeeName)).size === 2 && pc.scans.every((x: any) => x.occurredAt), "Q) the detail shows both employees and their scan times", pc);
-    const resolveReq = randomUUID();
-    const resolveBody = { requestId: resolveReq, employeeId: maria.employeeId, reason: "Maria filled it; Ruben scanned it by mistake" };
-    check((await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, manager.token, resolveBody)).status === 403, "Q) only an Administrator may resolve");
-    check((await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, { ...resolveBody, reason: "" })).status === 400, "Q) a reason is required");
-    check((await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, { ...resolveBody, employeeId: undefined })).status === 400, "Q) an employee must be chosen");
-    check((await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, { ...resolveBody, requestId: randomUUID(), employeeId: lea.employeeId })).status === 422, "Q) only an employee who scanned the bin in this cycle");
-    const res1 = await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, resolveBody);
-    check(res1.status === 200 && res1.body?.replay === false && res1.body?.cycle?.resolution?.employeeName === maria.name, "Q) resolved: Maria", res1.body);
+    const sup = det.body?.weighing?.pickingCycle?.supersededCycles;
+    check(sup?.length === 1 && sup[0].id === cRuben.id && sup[0].employeeName === ruben.name && sup[0].scans.length === 1 && sup[0].reviewStatus === "open", "Q) the weighing detail lists Ruben's superseded cycle with its scan time", sup);
+    const reviewList = await admin_("GET", `/api/bin-cycles?state=review&carrierId=${binC.id}`, manager.token);
+    check(reviewList.status === 200 && reviewList.body.cycles.length === 1 && reviewList.body.cycles[0].id === cRuben.id, "Q) it is in the administrators' review list", reviewList.body);
+    const reqR = randomUUID();
+    const bodyR = { requestId: reqR, reason: "Maria scanned Bin C by mistake; Ruben filled it" };
+    check((await admin_("POST", `/api/bin-cycles/${cRuben.id}/reinstate`, manager.token, bodyR)).status === 403, "Q) only an Administrator may move a credit");
+    check((await admin_("POST", `/api/bin-cycles/${cRuben.id}/reinstate`, admin.token, { ...bodyR, reason: "" })).status === 400, "Q) a reason is required");
+    check((await admin_("POST", `/api/bin-cycles/${cMaria.id}/reinstate`, admin.token, { ...bodyR, requestId: randomUUID() })).status === 409, "Q) only a superseded cycle can be credited instead");
+    const re1 = await admin_("POST", `/api/bin-cycles/${cRuben.id}/reinstate`, admin.token, bodyR);
+    check(re1.status === 200 && re1.body?.replay === false && re1.body?.weighingId === wC.id, "Q) Ruben's cycle is credited instead", re1.body);
     let wC2 = await weighingRow(wC.id);
-    check(wC2.status === "credited" && wC2.employee_id === maria.employeeId, "Q) the weighing is credited to Maria", wC2);
-    const cyC2 = (await pool.query(`select * from bin_cycles where id = $1`, [cyC.id])).rows[0];
-    check(cyC2.resolved_by_employee_id === admin.id && cyC2.resolution_previous_status === "needs_review" && cyC2.resolution_reason === resolveBody.reason && cyC2.resolved_at, "Q) the cycle records who, when, why and the previous status", cyC2);
-    const audit = (await pool.query(`select kind, from_status, to_status, employee_id, actor_employee_id, reason from bin_cycle_events where cycle_id = $1 and kind = 'resolved'`, [cyC.id])).rows;
-    check(audit.length === 1 && audit[0].actor_employee_id === admin.id && audit[0].employee_id === maria.employeeId, "Q) the cycle's audit history has the resolution", audit);
-    const waudit = (await pool.query(`select * from scale_weighing_events where weighing_id = $1 and kind = 'resolve'`, [wC.id])).rows;
-    check(waudit.length === 1 && waudit[0].actor_employee_id === admin.id && waudit[0].from_status === "needs_review" && waudit[0].to_status === "credited", "Q) and so does the weighing's", waudit);
-    const again2 = await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, resolveBody);
-    check(again2.status === 200 && again2.body?.replay === true, "Q) the same request again is a replay", again2.body);
-    check((await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, { ...resolveBody, employeeId: ruben.employeeId })).status === 409, "Q) the same request id for a different employee is refused");
-    check((await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, { ...resolveBody, requestId: randomUUID(), employeeId: ruben.employeeId })).status === 409, "Q) a resolved cycle can't be re-resolved");
-    check((await pool.query(`select count(*)::int as n from scale_weighings where carrier_id = $1 and status = 'credited'`, [binC.id])).rows[0].n === 1, "Q) exactly one credit");
-    // A late scan by another employee, dated inside the cycle, and Pia/Ola on Bin Q.
+    check(wC2.status === "credited" && wC2.employee_id === ruben.employeeId, "Q) the weighing is now credited to Ruben", wC2);
+    cy = await cycles(binC);
+    check(
+      cy.find((c: any) => c.id === cRuben.id)?.status === "closed" && cy.find((c: any) => c.id === cRuben.id)?.weighing_id === wC.id &&
+        cy.find((c: any) => c.id === cMaria.id)?.status === "superseded" && cy.find((c: any) => c.id === cMaria.id)?.superseded_by_cycle_id === cRuben.id,
+      "Q) Ruben's cycle holds the weighing; Maria's is now superseded",
+      cy
+    );
+    const claimsC = (await pool.query(`select employee_id from scale_weighing_claims where weighing_id = $1`, [wC.id])).rows;
+    check(claimsC.length === 1 && claimsC[0].employee_id === ruben.employeeId, "Q) the scans behind the credit are Ruben's", claimsC);
+    const rev = (await pool.query(`select * from bin_cycle_reviews where request_id = $1`, [reqR])).rows[0];
+    check(rev?.performed_by_employee_id === admin.id && rev?.previous_employee_id === maria.employeeId && rev?.new_employee_id === ruben.employeeId && rev?.reason === bodyR.reason, "Q) audited: who, previous and new employee, why", rev);
+    const wev = (await pool.query(`select * from scale_weighing_events where weighing_id = $1 and kind = 'reassign'`, [wC.id])).rows;
+    check(wev.length === 1 && wev[0].actor_employee_id === admin.id && wev[0].employee_id === ruben.employeeId, "Q) and in the weighing's history", wev);
+    const re2 = await admin_("POST", `/api/bin-cycles/${cRuben.id}/reinstate`, admin.token, bodyR);
+    check(re2.status === 200 && re2.body?.replay === true, "Q) the same request again is a replay (nothing moves twice)", re2.body);
+    check((await admin_("POST", `/api/bin-cycles/${cMaria.id}/confirm-superseded`, admin.token, { ...bodyR })).status === 409, "Q) the same request id can't be used for another review");
+    check((await pool.query(`select count(*)::int as n from scale_weighings where carrier_id = $1 and status = 'credited'`, [binC.id])).rows[0].n === 1, "Q) still exactly one credit");
+    // A late scan by another employee, dated inside the weighed interval.
     await syncOk(pia, [scan(pia, binQ.id, at(130))], "Q pia");
     await syncOk(ola, [scan(ola, binC.id, at(115)), scan(ola, binQ.id, at(135))], "Q ola");
     wC2 = await weighingRow(wC.id);
-    check(wC2.status === "credited" && wC2.employee_id === maria.employeeId, "Q) a late phone scan never changes the resolved credit", wC2);
+    check(wC2.status === "credited" && wC2.employee_id === ruben.employeeId, "Q) a late phone scan never changes the corrected credit", wC2);
+    const olaCycle = (await cycles(binC)).find((c: any) => c.employee_id === ola.employeeId);
+    check(olaCycle?.status === "superseded" && olaCycle?.review_status === "open" && olaCycle?.finalized_at !== null, "Q) it becomes a superseded cycle flagged for review", olaCycle);
+    const rlist = await admin_("GET", `/api/bin-cycles?state=review&carrierId=${binC.id}`, manager.token);
+    check(rlist.body.cycles.some((c: any) => c.id === olaCycle?.id && c.lateScan === true && c.reviewStatus === "open"), "Q) the review list marks it as a late conflict", rlist.body);
+    const dlist = await admin_("GET", `/api/scale-weighings/${wC.id}`, manager.token);
+    check(dlist.body?.weighing?.pickingCycle?.supersededCycles?.some((c: any) => c.employeeName === ola.name && c.lateScan === true), "Q) and so does the weighing detail", dlist.body?.weighing?.pickingCycle?.supersededCycles);
     const lateFlag = (await pool.query(`select kind from scale_weighing_flags where weighing_id = $1 and employee_id = $2`, [wC.id, ola.employeeId])).rows;
-    check(lateFlag.length === 1 && lateFlag[0].kind === "late_conflict", "Q) it is flagged as a late conflict", lateFlag);
+    check(lateFlag.length === 1 && lateFlag[0].kind === "late_conflict", "Q) and is flagged on the weighing", lateFlag);
     await sweepPendingWeighings();
-    check((await weighingRow(wC.id)).employee_id === maria.employeeId, "Q) background reconciliation never changes it");
-    const cyQ = (await cycles(binQ))[0];
-    check(cyQ?.status === "needs_review", "Q) Bin Q: two employees, open, needs review", cyQ);
-    check((await admin_("POST", `/api/bin-cycles/${cyQ.id}/resolve`, admin.token, { requestId: randomUUID(), employeeId: pia.employeeId, reason: "too early" })).status === 409, "Q) an unweighed cycle can't be resolved yet");
-    const vC = await admin_("POST", `/api/scale-weighings/${wC.id}/void`, admin.token, { correctionId: randomUUID(), reason: "Resolved wrongly" });
-    check(vC.status === 201 && vC.body?.weighing?.status === "voided", "Q) a resolved credit can still be voided", vC.body);
-    check((await pool.query(`select status from bin_cycles where id = $1`, [cyC.id])).rows[0].status === "closed", "Q) voiding leaves the cycle closed");
-    check((await admin_("POST", `/api/bin-cycles/${cyC.id}/resolve`, admin.token, { requestId: randomUUID(), employeeId: maria.employeeId, reason: "again" })).status === 409, "Q) a voided resolution can't be resolved again");
+    check((await weighingRow(wC.id)).employee_id === ruben.employeeId, "Q) background reconciliation never changes it");
+    cy = await cycles(binQ);
+    check(cy.length === 2 && cy[0].status === "superseded" && cy[0].employee_id === pia.employeeId && cy[1].status === "filling", "Q) Bin Q: Pia superseded by Ola, not weighed yet", cy);
+    check((await admin_("POST", `/api/bin-cycles/${cy[0].id}/reinstate`, admin.token, { requestId: randomUUID(), reason: "too early" })).status === 409, "Q) a cycle can't be credited before the bin is weighed");
+    const vC = await admin_("POST", `/api/scale-weighings/${wC.id}/void`, admin.token, { correctionId: randomUUID(), reason: "Wrong after all" });
+    check(vC.status === 201 && vC.body?.weighing?.status === "voided", "Q) a corrected credit can still be voided", vC.body);
+    check((await admin_("POST", `/api/bin-cycles/${cMaria.id}/reinstate`, admin.token, { requestId: randomUUID(), reason: "after void" })).status === 409, "Q) a voided weighing's credit can't be moved");
+    check((await pool.query(`select status from bin_cycles where id = $1`, [cRuben.id])).rows[0].status === "closed", "Q) voiding leaves the cycle closed");
+
+    // ---------------------------------------------------------------
+    // V) Overnight reuse (Bin 56): Patrick fills it, it is emptied unweighed, Ruben fills it next day
+    // ---------------------------------------------------------------
+    const day1 = NOW - 26 * HOUR;
+    await syncOk(pat, [scan(pat, binV.id, new Date(day1)), scan(pat, binV.id, new Date(day1 + 40 * MIN)), finish(pat, new Date(day1 + 90 * MIN))], "V patrick");
+    cy = await cycles(binV);
+    check(cy.length === 1 && cy[0].employee_id === pat.employeeId, "V) Patrick's row change on the same bin stays one cycle", cy);
+    const patCycleId = cy[0]?.id;
+    await syncOk(rub, [scan(rub, binV.id, new Date(NOW - 3 * HOUR))], "V ruben");
+    w = await weigh(binV, new Date(NOW - 1 * HOUR));
+    check(w.out?.status === "credited" && w.out?.employeeName === rub.name, "V) Ruben gets the credit", w.out);
+    cy = await cycles(binV);
+    const patC = cy.find((c: any) => c.id === patCycleId);
+    check(patC?.status === "superseded" && patC?.weighing_id === null && patC?.review_status === "open" && (await pool.query(`select count(*)::int as n from bin_scans where cycle_id = $1`, [patCycleId])).rows[0].n === 2, "V) Patrick's cycle: superseded, not weighed, both scans kept, flagged for review", patC);
+
+    // ---------------------------------------------------------------
+    // M) Three employees in turn, phones syncing out of order
+    // ---------------------------------------------------------------
+    await syncOk(m3, [scan(m3, binM.id, at(160))], "M mo");
+    await syncOk(m1, [scan(m1, binM.id, at(140))], "M mia");
+    await syncOk(m2, [scan(m2, binM.id, at(150))], "M max");
+    cy = await cycles(binM);
+    const order = cy.map((c: any) => [c.employee_id, c.status]);
+    check(
+      JSON.stringify(order) === JSON.stringify([[m1.employeeId, "superseded"], [m2.employeeId, "superseded"], [m3.employeeId, "filling"]]) &&
+        cy[0].superseded_by_cycle_id === cy[1].id && cy[1].superseded_by_cycle_id === cy[2].id,
+      "M) placed by scan time, not arrival: Mia -> Max -> Mo",
+      cy
+    );
+    w = await weigh(binM, at(170));
+    check(w.out?.status === "credited" && w.out?.employeeName === m3.name, "M) the weighing credits Mo, the latest", w.out);
+    const detM = await admin_("GET", `/api/scale-weighings/${w.row.id}`, manager.token);
+    check(detM.body?.weighing?.pickingCycle?.supersededCycles?.length === 2, "M) both earlier cycles are listed on the weighing", detM.body?.weighing?.pickingCycle);
+    const reM = await admin_("POST", `/api/bin-cycles/${cy[0].id}/reinstate`, admin.token, { requestId: randomUUID(), reason: "Mia filled it" });
+    check(reM.status === 200 && (await weighingRow(w.row.id)).employee_id === m1.employeeId, "M) an earlier link of the chain can be credited instead", reM.body);
+
+    // ---------------------------------------------------------------
+    // D) A delayed phone upload after the credit, then an administrator correction
+    // ---------------------------------------------------------------
+    await syncOk(pd, [scan(pd, binD.id, at(140))], "D paz");
+    w = await weigh(binD, at(150));
+    check(w.out?.status === "credited" && w.out?.employeeName === pd.name, "D) credited to Paz (Dee's phone hasn't synced)", w.out);
+    const wD = w.row.id;
+    await syncOk(dly, [scan(dly, binD.id, at(145))], "D dee late");
+    check((await weighingRow(wD)).employee_id === pd.employeeId, "D) Dee's late scan does not move the finalized credit");
+    const deeCycle = (await cycles(binD)).find((c: any) => c.employee_id === dly.employeeId);
+    check(deeCycle?.status === "superseded" && deeCycle?.review_status === "open", "D) it is kept as a superseded cycle for review", deeCycle);
+    const reqD = randomUUID();
+    const reD = await admin_("POST", `/api/bin-cycles/${deeCycle.id}/reinstate`, admin.token, { requestId: reqD, reason: "Dee took the bin over" });
+    check(reD.status === 200 && (await weighingRow(wD)).employee_id === dly.employeeId, "D) an administrator credits Dee instead", reD.body);
+    const pazCycle = (await cycles(binD)).find((c: any) => c.employee_id === pd.employeeId);
+    const reD2 = await admin_("POST", `/api/bin-cycles/${pazCycle.id}/reinstate`, admin.token, { requestId: randomUUID(), reason: "Correction undone: Paz filled it" });
+    check(reD2.status === 200 && (await weighingRow(wD)).employee_id === pd.employeeId, "D) and can undo a mistaken correction", reD2.body);
+    check((await pool.query(`select count(*)::int as n from scale_weighings where carrier_id = $1 and status = 'credited'`, [binD.id])).rows[0].n === 1, "D) one weighing, one credit throughout");
+
+    // ---------------------------------------------------------------
+    // A) Accidental scans
+    // ---------------------------------------------------------------
+    // Aki fills Bin A; Abe scans it by mistake; Aki keeps going (next row).
+    await syncOk(ac1, [scan(ac1, binA.id, at(140))], "A aki");
+    await syncOk(ac2, [scan(ac2, binA.id, at(142))], "A abe");
+    await syncOk(ac1, [scan(ac1, binA.id, at(145))], "A aki next row");
+    w = await weigh(binA, at(155));
+    check(w.out?.status === "credited" && w.out?.employeeName === ac1.name, "A) Aki scanned again after the mistake: Aki gets the credit", w.out);
+    const abeCycle = (await cycles(binA)).find((c: any) => c.employee_id === ac2.employeeId);
+    check(abeCycle?.status === "superseded" && abeCycle?.review_status === "open", "A) the accidental scan is a superseded cycle flagged for review", abeCycle);
+    const conf = await admin_("POST", `/api/bin-cycles/${abeCycle.id}/confirm-superseded`, admin.token, { requestId: randomUUID(), reason: "Accidental scan" });
+    check(conf.status === 200 && conf.body?.cycle?.reviewStatus === "confirmed", "A) an administrator confirms it", conf.body);
+    check((await admin_("POST", `/api/bin-cycles/${abeCycle.id}/confirm-superseded`, admin.token, { requestId: randomUUID(), reason: "again" })).status === 409, "A) a confirmed review isn't confirmed twice");
+    // Ari fills Bin B; Ava scans it by mistake and Ari never scans again.
+    await syncOk(ac3, [scan(ac3, binB.id, at(140))], "A ari");
+    await syncOk(ac4, [scan(ac4, binB.id, at(150))], "A ava");
+    w = await weigh(binB, at(160));
+    check(w.out?.status === "credited" && w.out?.employeeName === ac4.name, "A) without a later scan, the accidental scanner (latest) is credited and Ari is flagged", w.out);
+    const ariCycle = (await cycles(binB)).find((c: any) => c.employee_id === ac3.employeeId);
+    const reA = await admin_("POST", `/api/bin-cycles/${ariCycle.id}/reinstate`, admin.token, { requestId: randomUUID(), reason: "Ava scanned the wrong bin" });
+    check(reA.status === 200 && (await weighingRow(w.row.id)).employee_id === ac3.employeeId, "A) the administrator correction credits Ari", reA.body);
 
     // ---------------------------------------------------------------
     // T) Stopping tracking (rollback) and starting it again
@@ -475,7 +591,11 @@ async function main() {
     await sweepPendingWeighings();
     cy = await cycles(binS);
     check(cy.length === 1 && cy[0].status === "closed_unweighed" && /stopped/.test(cy[0].close_reason), "T) stopping closes the open cycle, nobody credited", cy);
-    check((await cycles(binX))[0]?.status === "closed_unweighed", "T) Bin X's open cycle was closed by the stop too");
+    {
+      const bx = await cycles(binX);
+      check(bx.find((c: any) => c.employee_id === yen.employeeId)?.status === "closed_unweighed" && bx.find((c: any) => c.employee_id === xan.employeeId)?.status === "superseded",
+        "T) Bin X: Yen's open cycle was closed by the stop; Xan's (superseded by Yen) kept", bx);
+    }
     const meStopped = await fetch(`${BASE}/api/mobile/me`, { headers: { "X-Device-Id": rex.identifier } }).then((r) => r.json() as any);
     check(meStopped?.features?.binRescan === false, "T) while stopped, phones are told not to send bin_rescan", meStopped?.features);
     // The station reconnects: its weighing from before the stop arrives now.
@@ -509,7 +629,7 @@ async function main() {
     const meAgain = await fetch(`${BASE}/api/mobile/me`, { headers: { "X-Device-Id": rex.identifier } }).then((r) => r.json() as any);
     check(meAgain?.features?.binRescan === true, "T) after the restart, phones may send bin_rescan again", meAgain?.features);
     await sweepPendingWeighings();
-    check((await cycles(binS)).length === 1 && (await cycles(binS))[0].status === "closed_unweighed", "T) restarting does not reopen the stopped cycle");
+    check((await cycles(binS)).every((c: any) => c.status === "closed_unweighed" || c.status === "superseded"), "T) restarting does not reopen the stopped cycles", await cycles(binS));
     await sleep(20);
     await syncOk(wes, [scan(wes, binW.id, new Date())], "T wes");
     check((await cycles(binW))[0]?.status === "filling", "T) after the restart, a new scan opens a new cycle");
@@ -536,9 +656,10 @@ async function main() {
     try {
       await client.query("begin");
       const w = `(select id from scale_weighings where station_id = any($1::uuid[]))`;
+      await client.query(`delete from bin_cycle_reviews where cycle_id in (select id from bin_cycles where carrier_id = any($1::uuid[]))`, [carrierIds]);
       await client.query(`delete from bin_cycle_events where cycle_id in (select id from bin_cycles where carrier_id = any($1::uuid[]))`, [carrierIds]);
       await client.query(`delete from bin_scans where carrier_id = any($1::uuid[])`, [carrierIds]);
-      await client.query(`update bin_cycles set weighing_id = null, status = 'closed_unweighed', resolved_at = null, resolved_employee_id = null, resolved_by_employee_id = null, resolution_reason = null, closed_at = coalesce(closed_at, now()), closed_by_employee_id = coalesce(closed_by_employee_id, employee_id), close_reason = coalesce(close_reason, 'cleanup') where carrier_id = any($1::uuid[])`, [carrierIds]);
+      await client.query(`update bin_cycles set weighing_id = null, status = 'closed_unweighed', superseded_by_cycle_id = null, review_status = null, finalized_at = null, resolved_at = null, resolved_employee_id = null, resolved_by_employee_id = null, resolution_reason = null, closed_at = coalesce(closed_at, now()), closed_by_employee_id = coalesce(closed_by_employee_id, employee_id), close_reason = coalesce(close_reason, 'cleanup') where carrier_id = any($1::uuid[])`, [carrierIds]);
       await client.query(`delete from bin_cycles where carrier_id = any($1::uuid[])`, [carrierIds]);
       await client.query(`delete from scale_weighing_corrections where weighing_id in ${w}`, [stationIds]);
       await client.query(`delete from scale_weighing_events where weighing_id in ${w}`, [stationIds]);

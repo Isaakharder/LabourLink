@@ -7,12 +7,15 @@
 //   activity_switch answering a carrier question, or a bin_rescan (the
 //   employee scanned the bin they are already using again), with the phone
 //   clock not flagged.
-// * A choice by a second employee makes the open cycle needs_review: the
-//   first employee is never silently replaced.
-// * The bin's next weighing (not a five-minute duplicate) closes the open
-//   cycle. One employee in it: the weighing is credited to them. More than
-//   one: the weighing is needs_review, nobody is credited until an
-//   administrator resolves it (resolveCycle).
+// * Consecutive choices by the same employee (row changes, repeat scans)
+//   stay one cycle; resuming after a break is not a choice at all.
+// * A choice by a different employee means the bin was emptied and reused
+//   (075): the earlier cycle is SUPERSEDED (no weighing, no credit, kept with
+//   its scans and flagged for administrator review) and a new cycle opens.
+// * The bin's next weighing (not a five-minute duplicate) closes the latest
+//   cycle and credits its employee. An administrator can credit a
+//   superseded cycle instead (reviewSupersededCycle); a needs-review cycle
+//   from before 075 is still resolved with resolveCycle.
 // * A weighing with no open cycle (weighed again, nobody scanned it since)
 //   is linked to no cycle and is never credited, unless a phone scan dated
 //   before it, and after the previous weighing, reaches LabourLink within
@@ -34,15 +37,17 @@
 // (scaleMatchingRule.ts) applies, except that after a stop it never uses a
 // scan from before the stop (scaleMatching.ts), so stopping can't let stale
 // scans credit anything.
+import { randomUUID } from "crypto";
 import { PoolClient } from "pg";
 import { pool } from "../db";
 import { PENDING_RECOVERY_MS } from "./scaleMatchingRule";
 
 export const OPEN_STATUSES = ["filling", "awaiting_weighing", "needs_review"] as const;
-export type CycleStatus = (typeof OPEN_STATUSES)[number] | "closed" | "closed_unweighed";
+export type CycleStatus = (typeof OPEN_STATUSES)[number] | "closed" | "closed_unweighed" | "superseded";
 
 export const NO_CYCLE_REASON = "No picking cycle: nobody has chosen this bin on a phone since it was last weighed. Not credited.";
 const CREDITED_REASON = "One employee chose this bin on their phone during this picking cycle";
+const CREDITED_LATEST_REASON = "Credited to the latest picking cycle before the weighing; earlier cycles by other employees were superseded";
 const REVIEW_REASON = "More than one employee chose this bin during this picking cycle";
 const TOO_LATE_REASON = "The bin was weighed before these phone scans reached LabourLink in time. Not credited.";
 const HELD_REASON = "The weighing that closed this cycle is held for review, so nobody was credited.";
@@ -237,13 +242,34 @@ async function addClaim(client: PoolClient, scanId: string, weighingId: string, 
   );
 }
 
-// Re-places a bin's open and unplaced scans and links its unlinked weighings.
-// Caller holds lockCarrier() inside an open transaction. Idempotent.
+// One cycle per run of consecutive scans by the same employee (row changes,
+// repeat scans and break resumes stay in one cycle). A different employee's
+// scan starts a new cycle and supersedes the one before it: the bin was
+// emptied and reused. The latest run before a weighing gets the credit.
+export function splitRuns<T extends PlaceScan>(group: T[]): T[][] {
+  const runs: T[][] = [];
+  for (const s of group) {
+    const last = runs[runs.length - 1];
+    if (last && last[0].employeeId === s.employeeId) last.push(s);
+    else runs.push([s]);
+  }
+  return runs;
+}
+
+const SUPERSEDED_REASON = "Another employee started using this bin before it was weighed. This cycle gets no weighing or credit.";
+export const LATE_SUPERSEDED_REASON =
+  "This scan reached LabourLink after the bin's weighing was already credited to another employee. Not credited; flagged for review.";
+
+// Re-places a bin's open, superseded-but-unsettled and unplaced scans and
+// links its unlinked weighings. Caller holds lockCarrier() inside an open
+// transaction. Idempotent.
 export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: string, now: Date = new Date()): Promise<void> {
   if (!(await trackingEverStarted(client))) return;
 
   // An open cycle from a period that has since been stopped is closed (by
-  // the system, at the stop) before anything else: it can never be credited.
+  // the system, at the stop) before anything else: it can never be credited
+  // (except by a weighing made before the stop, see softRows). Superseded
+  // cycles of that period are settled.
   const { rows: stale } = await client.query(
     `select c.id, c.status, p.stopped_at from bin_cycles c
      join bin_cycle_tracking p on c.opened_at > p.started_at and p.stopped_at is not null and c.opened_at <= p.stopped_at
@@ -257,6 +283,12 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
     );
     await cycleEvent(client, { cycleId: s.id, kind: "closed_unweighed", fromStatus: s.status, toStatus: "closed_unweighed", reason: STOPPED_REASON });
   }
+  await client.query(
+    `update bin_cycles c set finalized_at = p.stopped_at, updated_at = now() from bin_cycle_tracking p
+     where c.carrier_id = $1 and c.status = 'superseded' and c.finalized_at is null
+       and p.stopped_at is not null and c.opened_at > p.started_at and c.closed_at <= p.stopped_at`,
+    [carrierId]
+  );
 
   const { rows: openRows } = await client.query(
     `select * from bin_cycles where carrier_id = $1 and status = any($2::text[]) for update`,
@@ -266,8 +298,7 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
   // A cycle closed by stopping tracking (not by an administrator) stays
   // available to a weighing made before the stop that only reached
   // LabourLink afterwards (the station was offline): that weighing closes
-  // the cycle that was open at its time and is credited as usual. Only such
-  // cycles are re-placed, so this is a no-op otherwise.
+  // the cycle that was open at its time and is credited as usual.
   const { rows: softRows } = await client.query(
     `select c.* from bin_cycles c
      where c.carrier_id = $1 and c.status = 'closed_unweighed' and c.closed_by_employee_id is null and c.close_request_id is null
@@ -277,7 +308,23 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
      order by c.opened_at for update`,
     [carrierId]
   );
-  const reusable = [...(open ? [open] : []), ...softRows];
+  // Superseded cycles whose bin hasn't been weighed or closed yet: delayed
+  // events can still re-place them.
+  // Also, like a stop-closed cycle, a superseded cycle of a stopped period
+  // while a weighing made in that period (station offline) is still unlinked.
+  const { rows: unsettled } = await client.query(
+    `select c.* from bin_cycles c
+     where c.carrier_id = $1 and c.status = 'superseded'
+       and (c.finalized_at is null
+            or exists (select 1 from bin_cycle_tracking p
+                       join scale_weighings w on w.carrier_id = c.carrier_id and w.status = 'pending' and not w.is_duplicate
+                         and w.weighed_at >= c.opened_at and w.weighed_at > p.started_at and w.weighed_at <= p.stopped_at
+                       left join bin_cycles l on l.weighing_id = w.id
+                       where p.stopped_at is not null and c.opened_at > p.started_at and c.opened_at <= p.stopped_at and l.id is null))
+     order by c.opened_at for update`,
+    [carrierId]
+  );
+  const reusable = [...(open ? [open] : []), ...softRows, ...unsettled];
   const reused = new Set<string>();
   const { rows: scanRows } = await client.query(
     `select s.mobile_time_event_id, s.employee_id, s.occurred_at, s.received_at, s.cycle_id
@@ -295,8 +342,9 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
   }));
 
   // Boundaries from the earliest scan to place: weighings inside a period,
-  // closures, and period ends. Plus every unlinked pending weighing inside a
-  // period (it still needs its reason and, after 24 h, expiry).
+  // administrator closures, and period ends. Plus every unlinked pending
+  // weighing inside a period (it still needs its reason and, after 24 h,
+  // expiry).
   const from = scans.length ? new Date(scans[0].occurredAt) : null; // null: no scan to place
   const { rows: bRows } = await client.query(
     `select 'w' as kind, w.id, w.weighed_at as at, w.status, w.pending_until, w.match_reason, c.id as cycle_id
@@ -321,10 +369,6 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
   }));
   const groups = placeScans(scans, boundaries);
   const byId = new Map(scans.map((s) => [s.id, s]));
-  // The first not-yet-reused open or stop-closed row owning any of these
-  // scans keeps its identity for the group.
-  const reuseFor = (group: PlaceScan[]) =>
-    reusable.find((r) => !reused.has(r.id) && group.some((s) => byId.get(s.id)!.cycleId === r.id)) ?? null;
 
   const moveScans = async (cycleId: string, group: PlaceScan[], late: boolean) => {
     for (const s of group) {
@@ -341,62 +385,182 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
     }
   };
 
+  // The row a run keeps: the first not-yet-used open / stop-closed /
+  // unsettled-superseded row owning any of its scans (stable identity), or a
+  // new one.
+  type Slot = { id: string; existing: any | null };
+  const slotFor = (run: PlaceScan[]): Slot => {
+    const r = reusable.find((x) => !reused.has(x.id) && run.some((s) => byId.get(s.id)!.cycleId === x.id));
+    if (r) {
+      reused.add(r.id);
+      return { id: r.id, existing: r };
+    }
+    return { id: randomUUID(), existing: null };
+  };
+
+  interface CycleFields {
+    status: CycleStatus;
+    weighingId?: string | null;
+    closedAt?: Date | null;
+    closeReason?: string | null;
+    supersededBy?: string | null;
+    finalizedAt?: Date | null;
+    reviewStatus?: string | null;
+    awaitingSince?: Date | null;
+    reviewReason?: string | null;
+  }
+  const writeCycle = async (slot: Slot, run: PlaceScan[], f: CycleFields, eventReason: string | null, weighingId: string | null = null) => {
+    const opened = new Date(run[0].occurredAt);
+    const last = new Date(run[run.length - 1].occurredAt);
+    const vals = [
+      slot.id,
+      f.status,
+      run[0].employeeId,
+      opened,
+      last,
+      f.awaitingSince ?? null,
+      f.reviewReason ?? null,
+      f.weighingId ?? null,
+      f.closedAt ?? null,
+      f.closeReason ?? null,
+      f.supersededBy ?? null,
+      f.finalizedAt ?? null,
+      f.reviewStatus ?? null,
+    ];
+    if (slot.existing) {
+      const e = slot.existing;
+      const same =
+        e.status === f.status && e.employee_id === run[0].employeeId && +new Date(e.opened_at) === +opened && +new Date(e.last_scan_at) === +last &&
+        (e.weighing_id ?? null) === (f.weighingId ?? null) && (e.superseded_by_cycle_id ?? null) === (f.supersededBy ?? null) &&
+        (e.closed_at ? +new Date(e.closed_at) : null) === (f.closedAt ? +f.closedAt : null) &&
+        (e.finalized_at ? 1 : 0) === (f.finalizedAt ? 1 : 0) && (e.review_reason ?? null) === (f.reviewReason ?? null) &&
+        (e.awaiting_since ? +new Date(e.awaiting_since) : null) === (f.awaitingSince ? +f.awaitingSince : null);
+      if (!same) {
+        await client.query(
+          `update bin_cycles set status = $2, employee_id = $3, opened_at = $4, last_scan_at = $5, awaiting_since = $6, review_reason = $7,
+             weighing_id = $8, closed_at = $9, close_reason = $10, superseded_by_cycle_id = $11,
+             finalized_at = case when $2 = 'superseded' then coalesce(finalized_at, $12) end,
+             review_status = case when $2 = 'superseded' then coalesce(review_status, $13) end, updated_at = now()
+           where id = $1`,
+          vals
+        );
+        if (e.status !== f.status) {
+          await cycleEvent(client, {
+            cycleId: slot.id,
+            kind: f.status === "closed" ? "weighed" : f.status === "superseded" ? "superseded" : "status",
+            fromStatus: e.status,
+            toStatus: f.status,
+            weighingId,
+            reason: eventReason,
+            detail: f.supersededBy ? { supersededByCycleId: f.supersededBy } : undefined,
+          });
+        }
+      }
+    } else {
+      await client.query(
+        `insert into bin_cycles (id, status, employee_id, opened_at, last_scan_at, awaiting_since, review_reason, weighing_id, closed_at,
+           close_reason, superseded_by_cycle_id, finalized_at, review_status, carrier_id)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+        [...vals, carrierId]
+      );
+      await cycleEvent(client, {
+        cycleId: slot.id,
+        kind: "opened",
+        toStatus: f.status,
+        employeeId: run[0].employeeId,
+        mobileTimeEventId: run[0].id,
+        weighingId,
+        reason: eventReason,
+        detail: f.supersededBy ? { supersededByCycleId: f.supersededBy } : undefined,
+      });
+    }
+    await moveScans(slot.id, run, false);
+  };
+
+  // Earlier runs of an interval: superseded by the run after them.
+  const writeSuperseded = async (runs: PlaceScan[][], slots: Slot[], settled: boolean) => {
+    for (let i = 0; i < runs.length - 1; i++) {
+      await writeCycle(
+        slots[i],
+        runs[i],
+        {
+          status: "superseded",
+          closedAt: new Date(runs[i + 1][0].occurredAt),
+          closeReason: SUPERSEDED_REASON,
+          supersededBy: slots[i + 1].id,
+          finalizedAt: settled ? now : null,
+          reviewStatus: "open",
+        },
+        SUPERSEDED_REASON
+      );
+    }
+  };
+
   for (const b of boundaries) {
     const group = groups.get(b.key) ?? [];
     if (b.kind === "s") {
-      // Scans from the end of a period with no weighing after them: kept in
-      // a cycle closed at the stop, never credited.
+      // Scans up to the end of a period with no weighing after them.
       if (group.length === 0) continue;
-      const keep = reuseFor(group);
-      if (keep && keep.status === "closed_unweighed") {
-        reused.add(keep.id);
-        await client.query(`update bin_cycles set employee_id = $2, opened_at = $3, last_scan_at = $4, updated_at = now() where id = $1`, [
-          keep.id,
-          group[0].employeeId,
-          new Date(group[0].occurredAt),
-          new Date(group[group.length - 1].occurredAt),
-        ]);
-        await moveScans(keep.id, group, false);
-        continue;
+      const runs = splitRuns(group);
+      const slots = runs.map(slotFor);
+      const lastRun = runs[runs.length - 1];
+      if (!slots[slots.length - 1].existing) {
+        const { rows: existing } = await client.query(
+          `select * from bin_cycles where carrier_id = $1 and status = 'closed_unweighed' and closed_by_employee_id is null
+             and close_request_id is null and closed_at = $2 and not (id = any($3::uuid[])) order by opened_at limit 1`,
+          [carrierId, new Date(b.at), [...reused]]
+        );
+        if (existing[0] && existing[0].employee_id === lastRun[0].employeeId) {
+          reused.add(existing[0].id);
+          slots[slots.length - 1] = { id: existing[0].id, existing: existing[0] };
+        }
       }
-      const { rows: existing } = await client.query(
-        `select id from bin_cycles where carrier_id = $1 and status = 'closed_unweighed' and closed_by_employee_id is null
-           and close_request_id is null and closed_at = $2 and not (id = any($3::uuid[])) order by opened_at limit 1`,
-        [carrierId, new Date(b.at), [...reused]]
-      );
-      if (existing[0]) {
-        reused.add(existing[0].id);
-        await moveScans(existing[0].id, group, true);
-        continue;
+      await writeSuperseded(runs, slots, true);
+      const ls = slots[slots.length - 1];
+      if (ls.existing && ls.existing.status === "closed_unweighed") {
+        await moveScans(ls.id, lastRun, true);
+      } else {
+        await writeCycle(ls, lastRun, { status: "closed_unweighed", closedAt: new Date(b.at), closeReason: STOPPED_REASON }, STOPPED_REASON);
       }
-      const { rows: ins } = await client.query(
-        `insert into bin_cycles (carrier_id, status, employee_id, opened_at, last_scan_at, closed_at, close_reason)
-         values ($1, 'closed_unweighed', $2, $3, $4, $5, $6) returning id`,
-        [carrierId, group[0].employeeId, new Date(group[0].occurredAt), new Date(group[group.length - 1].occurredAt), new Date(b.at), STOPPED_REASON]
-      );
-      await cycleEvent(client, { cycleId: ins[0].id, kind: "opened", toStatus: "closed_unweighed", employeeId: group[0].employeeId, reason: STOPPED_REASON });
-      await moveScans(ins[0].id, group, true);
       continue;
     }
-    if (b.kind === "u" || b.cycle_id) {
-      // A final cycle: late scans join it and never change its outcome.
+    if (b.kind === "u") {
+      if (group.length) await moveScans(b.cycle_id, group, true); // a closed cycle: late scans join it
+      continue;
+    }
+    if (b.cycle_id) {
+      // A weighed, final cycle: late scans never change its outcome. The
+      // credited employee's join it; anyone else's become a superseded cycle
+      // flagged for review (an administrator can credit it instead).
       if (group.length === 0) continue;
-      await moveScans(b.cycle_id, group, true);
-      if (b.kind === "w") {
-        const { rows: wr } = await client.query(`select status, employee_id from scale_weighings where id = $1`, [b.id]);
-        for (const s of group) {
-          if (wr[0].status === "credited" && s.employeeId === wr[0].employee_id) {
-            await addClaim(client, s.id, b.id, s.employeeId);
-          } else if (wr[0].status === "credited" || wr[0].status === "needs_review") {
-            const kind = wr[0].status === "credited" ? "late_conflict" : "competing";
+      const { rows: wr } = await client.query(
+        `select w.status, w.employee_id, c.employee_id as cycle_employee_id from scale_weighings w join bin_cycles c on c.weighing_id = w.id where w.id = $1`,
+        [b.id]
+      );
+      const owner = wr[0].status === "credited" ? wr[0].employee_id : wr[0].cycle_employee_id;
+      for (const run of splitRuns(group)) {
+        if (run[0].employeeId === owner) {
+          await moveScans(b.cycle_id, run, true);
+          if (wr[0].status === "credited") for (const s of run) await addClaim(client, s.id, b.id, s.employeeId);
+          continue;
+        }
+        const slot = { id: randomUUID(), existing: null };
+        await writeCycle(
+          slot,
+          run,
+          { status: "superseded", closedAt: new Date(b.at), closeReason: LATE_SUPERSEDED_REASON, supersededBy: b.cycle_id, finalizedAt: now, reviewStatus: "open" },
+          LATE_SUPERSEDED_REASON
+        );
+        if (wr[0].status === "credited" || wr[0].status === "needs_review") {
+          for (const s of run) {
             const ins = await client.query(
               `insert into scale_weighing_flags (weighing_id, mobile_time_event_id, employee_id, kind) values ($1, $2, $3, $4)
                on conflict (weighing_id, mobile_time_event_id) do nothing`,
-              [b.id, s.id, s.employeeId, kind]
+              [b.id, s.id, s.employeeId, wr[0].status === "credited" ? "late_conflict" : "competing"]
             );
-            if (kind === "late_conflict" && ins.rowCount === 1) {
+            if (wr[0].status === "credited" && ins.rowCount === 1) {
               await weighingEvent(client, b.id, "late_conflict", null, null, s.employeeId,
-                "Another employee chose this bin during a picking cycle that was already credited. The credit is unchanged.", { mobileTimeEventId: s.id });
+                "Another employee's scan of this bin arrived after the credit. The credit is unchanged; flagged for review.", { mobileTimeEventId: s.id, binCycleId: slot.id });
             }
           }
         }
@@ -417,103 +581,62 @@ export async function reconcileBinCyclesLocked(client: PoolClient, carrierId: st
       continue;
     }
 
-    // The scans before this weighing form the cycle it closes. The open
-    // cycle's row keeps its identity if its scans are here.
-    const employees = distinctEmployees(group);
-    const reuse = reuseFor(group);
-    const opened = new Date(group[0].occurredAt);
-    const last = new Date(group[group.length - 1].occurredAt);
-    const reviewReason = employees.length > 1 ? `Chosen by more than one employee: ${await employeeNames(client, employees)}` : null;
+    // The scans before this weighing: the latest run is the cycle it closes,
+    // earlier runs are superseded (settled now the bin is weighed).
+    const runs = splitRuns(group);
+    const slots = runs.map(slotFor);
+    await writeSuperseded(runs, slots, true);
+    const lastRun = runs[runs.length - 1];
+    const closer = slots[slots.length - 1];
     const closeReason = b.status === "pending" ? null : b.status === "expired" ? TOO_LATE_REASON : HELD_REASON;
-    let cycleId: string;
-    if (reuse) {
-      reused.add(reuse.id);
-      cycleId = reuse.id;
-      await client.query(
-        `update bin_cycles set status = 'closed', employee_id = $2, opened_at = $3, last_scan_at = $4, awaiting_since = coalesce(awaiting_since, $5),
-           review_reason = $6, weighing_id = $7, closed_at = $5, close_reason = $8, updated_at = now() where id = $1`,
-        [cycleId, group[0].employeeId, opened, last, new Date(b.at), reviewReason, b.id, closeReason]
-      );
-      await moveScans(cycleId, group, false);
-      await cycleEvent(client, {
-        cycleId,
-        kind: "weighed",
-        fromStatus: reuse.status,
-        toStatus: "closed",
+    const fromStopped = closer.existing?.status === "closed_unweighed";
+    await writeCycle(
+      closer,
+      lastRun,
+      {
+        status: "closed",
         weighingId: b.id,
-        reason:
-          reuse.status === "closed_unweighed"
-            ? "Weighed before picking-cycle tracking stopped; the weighing reached LabourLink afterwards."
-            : closeReason ?? reviewReason,
-      });
-    } else {
-      const { rows: ins } = await client.query(
-        `insert into bin_cycles (carrier_id, status, employee_id, opened_at, last_scan_at, review_reason, weighing_id, closed_at, close_reason)
-         values ($1, 'closed', $2, $3, $4, $5, $6, $7, $8) returning id`,
-        [carrierId, group[0].employeeId, opened, last, reviewReason, b.id, new Date(b.at), closeReason]
-      );
-      cycleId = ins[0].id;
-      await cycleEvent(client, { cycleId, kind: "opened", toStatus: "closed", employeeId: group[0].employeeId, mobileTimeEventId: group[0].id, detail: { lateScans: true } });
-      await moveScans(cycleId, group, false);
-      await cycleEvent(client, { cycleId, kind: "weighed", toStatus: "closed", weighingId: b.id, reason: closeReason ?? reviewReason });
-    }
-
+        closedAt: new Date(b.at),
+        closeReason,
+        awaitingSince: closer.existing?.awaiting_since ? new Date(closer.existing.awaiting_since) : new Date(b.at),
+      },
+      fromStopped ? "Weighed before picking-cycle tracking stopped; the weighing reached LabourLink afterwards." : closeReason,
+      b.id
+    );
     if (b.status !== "pending") continue; // already final: never credited now
-    const scanIds = group.map((s) => s.id);
-    if (employees.length === 1) {
-      for (const s of group) await addClaim(client, s.id, b.id, s.employeeId);
-      await client.query(`update scale_weighings set status = 'credited', employee_id = $2, match_reason = $3, resolved_at = now() where id = $1 and status = 'pending'`, [b.id, employees[0], CREDITED_REASON]);
-      await weighingEvent(client, b.id, "status", "pending", "credited", employees[0], CREDITED_REASON, { binCycleId: cycleId, mobileTimeEventIds: scanIds });
-    } else {
-      for (const s of group) {
-        await client.query(
-          `insert into scale_weighing_flags (weighing_id, mobile_time_event_id, employee_id, kind) values ($1, $2, $3, 'competing') on conflict do nothing`,
-          [b.id, s.id, s.employeeId]
-        );
-      }
-      await client.query(`update scale_weighings set status = 'needs_review', match_reason = $2, resolved_at = now() where id = $1 and status = 'pending'`, [b.id, REVIEW_REASON]);
-      await weighingEvent(client, b.id, "status", "pending", "needs_review", null, REVIEW_REASON, { binCycleId: cycleId, mobileTimeEventIds: scanIds });
-    }
+    const employee = lastRun[0].employeeId;
+    for (const s of lastRun) await addClaim(client, s.id, b.id, employee);
+    const supersededIds = slots.slice(0, -1).map((s) => s.id);
+    await client.query(`update scale_weighings set status = 'credited', employee_id = $2, match_reason = $3, resolved_at = now() where id = $1 and status = 'pending'`, [
+      b.id,
+      employee,
+      supersededIds.length ? CREDITED_LATEST_REASON : CREDITED_REASON,
+    ]);
+    await weighingEvent(client, b.id, "status", "pending", "credited", employee, supersededIds.length ? CREDITED_LATEST_REASON : CREDITED_REASON, {
+      binCycleId: closer.id,
+      mobileTimeEventIds: lastRun.map((s) => s.id),
+      supersededCycleIds: supersededIds.length ? supersededIds : undefined,
+    });
   }
 
-  // Scans after the last boundary: the bin's open cycle (only while a period
-  // is running; scans are only recorded inside one).
+  // Scans after the last boundary: the bin's current cycle, with any earlier
+  // employees' cycles superseded (still re-placeable until the bin is weighed).
   const openGroup = groups.get("open") ?? [];
   if (openGroup.length === 0) return;
-  const employees = distinctEmployees(openGroup);
-  const opened = new Date(openGroup[0].occurredAt);
-  const last = new Date(openGroup[openGroup.length - 1].occurredAt);
-  let status: CycleStatus;
-  let awaitingSince: Date | null = null;
-  let reviewReason: string | null = null;
-  if (employees.length > 1) {
-    status = "needs_review";
-    reviewReason = `Chosen by more than one employee: ${await employeeNames(client, employees)}`;
-  } else {
-    const f = await fillingState(client, carrierId, employees[0], opened);
-    status = f.filling ? "filling" : "awaiting_weighing";
-    awaitingSince = f.filling ? null : f.awaitingSince ?? last;
-  }
-  if (open && !reused.has(open.id) && (OPEN_STATUSES as readonly string[]).includes(open.status)) {
-    const awaitingChanged = (open.awaiting_since ? +new Date(open.awaiting_since) : null) !== (awaitingSince ? +awaitingSince : null);
-    if (awaitingChanged || open.status !== status || open.review_reason !== reviewReason || +new Date(open.opened_at) !== +opened || +new Date(open.last_scan_at) !== +last || open.employee_id !== openGroup[0].employeeId) {
-      await client.query(
-        `update bin_cycles set status = $2, employee_id = $3, opened_at = $4, last_scan_at = $5, awaiting_since = $6, review_reason = $7, updated_at = now() where id = $1`,
-        [open.id, status, openGroup[0].employeeId, opened, last, awaitingSince, reviewReason]
-      );
-      if (open.status !== status) await cycleEvent(client, { cycleId: open.id, kind: "status", fromStatus: open.status, toStatus: status, reason: reviewReason });
-    }
-    await moveScans(open.id, openGroup, false);
-  } else {
-    const { rows: ins } = await client.query(
-      `insert into bin_cycles (carrier_id, status, employee_id, opened_at, last_scan_at, awaiting_since, review_reason)
-       values ($1, $2, $3, $4, $5, $6, $7) returning id`,
-      [carrierId, status, openGroup[0].employeeId, opened, last, awaitingSince, reviewReason]
-    );
-    const cycleId = ins[0].id as string;
-    await cycleEvent(client, { cycleId, kind: "opened", toStatus: status, employeeId: openGroup[0].employeeId, mobileTimeEventId: openGroup[0].id, reason: reviewReason });
-    await moveScans(cycleId, openGroup, false);
-  }
+  const runs = splitRuns(openGroup);
+  const slots = runs.map(slotFor);
+  await writeSuperseded(runs, slots, false);
+  const lastRun = runs[runs.length - 1];
+  const f = await fillingState(client, carrierId, lastRun[0].employeeId, new Date(lastRun[0].occurredAt));
+  await writeCycle(
+    slots[slots.length - 1],
+    lastRun,
+    {
+      status: f.filling ? "filling" : "awaiting_weighing",
+      awaitingSince: f.filling ? null : f.awaitingSince ?? new Date(lastRun[lastRun.length - 1].occurredAt),
+    },
+    null
+  );
 }
 
 async function inCarrierTransaction(carrierId: string, fn: (client: PoolClient) => Promise<void>) {
@@ -605,6 +728,8 @@ export async function closeCycleWithoutWeighing(cycleId: string, requestId: stri
       [cycleId, reason, actorEmployeeId, requestId]
     );
     await cycleEvent(client, { cycleId, kind: "closed_unweighed", fromStatus: rows[0].status, toStatus: "closed_unweighed", actorEmployeeId, reason });
+    // Earlier employees' cycles superseded before this one are settled too.
+    await client.query(`update bin_cycles set finalized_at = now(), updated_at = now() where carrier_id = $1 and status = 'superseded' and finalized_at is null`, [c0[0].carrier_id]);
   });
   return result;
 }
@@ -672,6 +797,117 @@ export async function resolveCycle(cycleId: string, requestId: string, employeeI
     );
     await cycleEvent(client, { cycleId, kind: "resolved", fromStatus: "needs_review", toStatus: "credited", employeeId, actorEmployeeId, weighingId: c.weighing_id, reason });
     await weighingEvent(client, c.weighing_id, "resolve", "needs_review", "credited", employeeId, reason, { binCycleId: cycleId }, actorEmployeeId);
+  });
+  return result;
+}
+
+// Administrator review of a superseded cycle (075).
+// * confirm: it really was superseded; the review is closed.
+// * reinstate: the bin's weighing is credited to this cycle's employee
+//   instead of the cycle that superseded it (a mistaken or accidental scan).
+//   The weighing keeps its weights and time; its credit moves once, in one
+//   transaction under the bin lock; the cycle that had it becomes superseded;
+//   the claims behind the credit are replaced. Only for a credited (not
+//   voided) weighing. The credit can still be voided afterwards.
+// Idempotent on requestId (bin_cycle_reviews is the audit record).
+export async function reviewSupersededCycle(
+  cycleId: string,
+  requestId: string,
+  action: "reinstate" | "confirm",
+  reason: string,
+  actorEmployeeId: string
+): Promise<ActionResult & { weighingId?: string }> {
+  const { rows: c0 } = await pool.query(`select carrier_id from bin_cycles where id = $1`, [cycleId]);
+  if (!c0[0]) return { ok: false, status: 404, error: "Picking cycle not found", code: "notFound" };
+  let result: ActionResult & { weighingId?: string } = { ok: true, replay: false };
+  await inCarrierTransaction(c0[0].carrier_id, async (client) => {
+    const { rows: done } = await client.query(`select cycle_id, action, weighing_id from bin_cycle_reviews where request_id = $1`, [requestId]);
+    if (done[0]) {
+      result =
+        done[0].cycle_id === cycleId && done[0].action === action
+          ? { ok: true, replay: true, weighingId: done[0].weighing_id ?? undefined }
+          : { ok: false, status: 409, error: "This request was already used for a different review", code: "requestReused" };
+      return;
+    }
+    await reconcileBinCyclesLocked(client, c0[0].carrier_id); // place delayed events first
+    const { rows } = await client.query(`select * from bin_cycles where id = $1 for update`, [cycleId]);
+    const s = rows[0];
+    if (s.status !== "superseded") {
+      result = { ok: false, status: 409, error: "Only a superseded picking cycle can be reviewed", code: "notSuperseded" };
+      return;
+    }
+    if (action === "confirm") {
+      if (s.review_status !== "open") {
+        result = { ok: false, status: 409, error: "This superseded cycle was already reviewed", code: "alreadyReviewed" };
+        return;
+      }
+      await client.query(`update bin_cycles set review_status = 'confirmed', updated_at = now() where id = $1`, [cycleId]);
+      await client.query(
+        `insert into bin_cycle_reviews (request_id, cycle_id, action, reason, performed_by_employee_id) values ($1, $2, 'confirm', $3, $4)`,
+        [requestId, cycleId, reason, actorEmployeeId]
+      );
+      await cycleEvent(client, { cycleId, kind: "review_confirmed", fromStatus: "superseded", toStatus: "superseded", actorEmployeeId, reason });
+      return;
+    }
+    if (!s.finalized_at) {
+      result = { ok: false, status: 409, error: "This bin has not been weighed yet. Review it after the weighing.", code: "notWeighed" };
+      return;
+    }
+    // Follow the chain to the cycle that holds the weighing.
+    let cur = s;
+    let closer: any = null;
+    for (let i = 0; i < 100 && cur.superseded_by_cycle_id; i++) {
+      const { rows: n } = await client.query(`select * from bin_cycles where id = $1 for update`, [cur.superseded_by_cycle_id]);
+      if (!n[0]) break;
+      if (n[0].status === "closed") {
+        closer = n[0];
+        break;
+      }
+      if (n[0].status !== "superseded") break;
+      cur = n[0];
+    }
+    if (!closer?.weighing_id) {
+      result = { ok: false, status: 409, error: "This bin's cycle was closed without a weighing, so there is no credit to move", code: "noWeighing" };
+      return;
+    }
+    const { rows: wr } = await client.query(`select id, status, employee_id from scale_weighings where id = $1 for update`, [closer.weighing_id]);
+    const w = wr[0];
+    if (w.status !== "credited") {
+      result = {
+        ok: false,
+        status: 409,
+        error: w.status === "voided" ? "That weighing's credit was voided" : "That weighing is not credited, so there is no credit to move",
+        code: w.status === "voided" ? "voided" : "notCredited",
+      };
+      return;
+    }
+    const note = "Credit moved by an administrator to an earlier picking cycle";
+    await client.query(
+      `update bin_cycles set status = 'superseded', weighing_id = null, superseded_by_cycle_id = $2, review_status = 'confirmed',
+         finalized_at = coalesce(finalized_at, now()), close_reason = $3, updated_at = now() where id = $1`,
+      [closer.id, cycleId, note]
+    );
+    await client.query(
+      `update bin_cycles set status = 'closed', weighing_id = $2, superseded_by_cycle_id = null, review_status = 'reinstated', close_reason = null, updated_at = now() where id = $1`,
+      [cycleId, w.id]
+    );
+    await client.query(`delete from scale_weighing_claims where weighing_id = $1`, [w.id]);
+    const { rows: sc } = await client.query(`select mobile_time_event_id from bin_scans where cycle_id = $1`, [cycleId]);
+    for (const x of sc) await addClaim(client, x.mobile_time_event_id, w.id, s.employee_id);
+    const upd = await client.query(
+      `update scale_weighings set employee_id = $2, match_reason = $3, resolved_at = now() where id = $1 and status = 'credited'`,
+      [w.id, s.employee_id, `Credited by an administrator to an earlier picking cycle: ${reason}`]
+    );
+    if (upd.rowCount !== 1) throw new Error("weighing changed during review");
+    await client.query(
+      `insert into bin_cycle_reviews (request_id, cycle_id, action, weighing_id, previous_employee_id, new_employee_id, reason, performed_by_employee_id)
+       values ($1, $2, 'reinstate', $3, $4, $5, $6, $7)`,
+      [requestId, cycleId, w.id, w.employee_id, s.employee_id, reason, actorEmployeeId]
+    );
+    await cycleEvent(client, { cycleId, kind: "reinstated", fromStatus: "superseded", toStatus: "closed", employeeId: s.employee_id, actorEmployeeId, weighingId: w.id, reason });
+    await cycleEvent(client, { cycleId: closer.id, kind: "superseded", fromStatus: "closed", toStatus: "superseded", employeeId: closer.employee_id, actorEmployeeId, weighingId: w.id, reason: note });
+    await weighingEvent(client, w.id, "reassign", "credited", "credited", s.employee_id, reason, { binCycleId: cycleId, previousEmployeeId: w.employee_id, previousBinCycleId: closer.id }, actorEmployeeId);
+    result = { ok: true, replay: false, weighingId: w.id };
   });
   return result;
 }

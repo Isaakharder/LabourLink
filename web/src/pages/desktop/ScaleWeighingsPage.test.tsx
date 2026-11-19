@@ -85,6 +85,40 @@ function detail(over: Partial<ScaleWeighingDetail> = {}): ScaleWeighingDetail {
 let voidCalls: { path: string; body: Record<string, unknown> }[] = [];
 let resolveCalls: { path: string; body: Record<string, unknown> }[] = [];
 let nextDetail: ScaleWeighingDetail | null = null;
+let reviewCalls: { path: string; body: Record<string, unknown> }[] = [];
+
+// Bin 56: Patrick's cycle superseded by Ruben's; the weighing credited Ruben.
+const reused = (moved: boolean): ScaleWeighingDetail =>
+  detail({
+    employee: moved ? { id: "e-3", name: "Patrick Jones" } : { id: "e-1", name: "Ruben Ortiz" },
+    claims: [],
+    pickingCycle: {
+      id: moved ? "c-p" : "c-r",
+      status: "closed",
+      employeeName: moved ? "Patrick Jones" : "Ruben Ortiz",
+      openedAt: "2026-11-19T13:08:00Z",
+      lastScanAt: "2026-11-19T13:47:00Z",
+      reviewReason: null,
+      closeReason: null,
+      scans: [{ employeeId: "e-1", employeeName: "Ruben Ortiz", occurredAt: "2026-11-19T13:08:00Z", receivedAt: "2026-11-19T13:08:05Z" }],
+      resolution: null,
+      supersededCycles: moved
+        ? []
+        : [
+            {
+              id: "c-p",
+              employeeId: "e-3",
+              employeeName: "Patrick Jones",
+              openedAt: "2026-11-18T16:20:00Z",
+              lastScanAt: "2026-11-18T20:16:00Z",
+              supersededAt: "2026-11-19T13:08:00Z",
+              reviewStatus: "open",
+              reason: "Another employee started using this bin before it was weighed.",
+              scans: [{ occurredAt: "2026-11-18T16:20:00Z", receivedAt: "2026-11-18T16:21:00Z" }],
+            },
+          ],
+    },
+  });
 
 const disputed = (resolved: boolean): ScaleWeighingDetail =>
   detail({
@@ -115,6 +149,11 @@ vi.mock("../../lib/api", () => ({
   api: vi.fn((path: string, init?: { method?: string; body?: string }) => {
     if (path.startsWith("/api/scale-weighings?")) return Promise.resolve(day);
     if (path.startsWith("/api/bin-cycles?")) return Promise.resolve({ trackingStartedAt: null, trackingEverStarted: false, cycles: [] });
+    if (path.endsWith("/reinstate") || path.endsWith("/confirm-superseded")) {
+      reviewCalls.push({ path, body: JSON.parse(init!.body!) });
+      nextDetail = reused(true);
+      return Promise.resolve({ cycle: {}, replay: false });
+    }
     if (path.endsWith("/resolve")) {
       resolveCalls.push({ path, body: JSON.parse(init!.body!) });
       nextDetail = disputed(true);
@@ -144,6 +183,7 @@ beforeEach(() => {
   role = "Administrator";
   voidCalls = [];
   resolveCalls = [];
+  reviewCalls = [];
   nextDetail = null;
   apiMock.mockClear();
 });
@@ -222,6 +262,48 @@ describe("ScaleWeighingsPage", () => {
     expect(typeof resolveCalls[0].body.requestId).toBe("string");
     expect(await screen.findByText(/Resolved by Ada Admin/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Resolve: choose the employee" })).toBeNull();
+  });
+
+  it("shows superseded cycles and an Administrator can credit one instead, with a reason", async () => {
+    nextDetail = reused(false);
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await user.click(await screen.findByText("Ruben Ortiz", { selector: "td" }));
+    expect(await screen.findByText("Earlier picking cycles superseded before this weighing")).toBeInTheDocument();
+    expect(screen.getByText("Patrick Jones")).toBeInTheDocument();
+    expect(screen.getByText("· To review")).toBeInTheDocument();
+    expect(screen.getByText(/Bin reused before weighing/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Credit this cycle instead" }));
+    const submit = screen.getByRole("button", { name: "Credit Patrick Jones" });
+    expect(submit).toBeDisabled();
+    await user.type(screen.getByRole("textbox"), "Ruben scanned the wrong bin");
+    await user.click(submit);
+    await waitFor(() => expect(reviewCalls).toHaveLength(1));
+    expect(reviewCalls[0].path).toBe("/api/bin-cycles/c-p/reinstate");
+    expect(reviewCalls[0].body).toMatchObject({ reason: "Ruben scanned the wrong bin" });
+    expect(typeof reviewCalls[0].body.requestId).toBe("string");
+    await waitFor(() => expect(screen.queryByText("Earlier picking cycles superseded before this weighing")).toBeNull());
+  });
+
+  it("marks a late conflict as such", async () => {
+    const d = reused(false);
+    if (d.pickingCycle && d.pickingCycle !== "none") d.pickingCycle.supersededCycles![0].lateScan = true;
+    nextDetail = d;
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await user.click(await screen.findByText("Ruben Ortiz", { selector: "td" }));
+    expect(await screen.findByText(/Late conflict: this scan reached LabourLink after the weighing was credited/)).toBeInTheDocument();
+  });
+
+  it("does not offer moving a credit to a Manager", async () => {
+    role = "Manager";
+    nextDetail = reused(false);
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await user.click(await screen.findByText("Ruben Ortiz", { selector: "td" }));
+    await screen.findByText("Earlier picking cycles superseded before this weighing");
+    expect(screen.queryByRole("button", { name: "Credit this cycle instead" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Confirm superseded" })).toBeNull();
   });
 
   it("does not offer resolving to a Manager", async () => {
