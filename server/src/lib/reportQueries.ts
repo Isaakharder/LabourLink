@@ -409,8 +409,11 @@ export async function getActivityDensityAttribution(
     // candidate row. getUnresolvedRunsForRows (see its own comment)
     // fetches every needed employee-day in a single query. Same
     // byte-identical totals; the per-run selection logic is unchanged.
+    // Only the range's own visits are attributed, so history before the
+    // cycles reaching rangeStart is never needed (see relevantFrom).
     const candidatesByKey = await getUnresolvedRunsForRows(
-      candidateRowsRes.map((pair) => ({ greenhouseRowId: pair.greenhouse_row_id, activityId, densityType: pair.density_type }))
+      candidateRowsRes.map((pair) => ({ greenhouseRowId: pair.greenhouse_row_id, activityId, densityType: pair.density_type })),
+      { relevantFrom: calendarDateInAppTimezone(rangeStart) }
     );
     return { candidateRowsRes, candidatesByKey };
   })();

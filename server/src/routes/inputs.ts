@@ -884,7 +884,8 @@ router.get(
           greenhouseRowId: pair.greenhouseRowId,
           activityId: pair.activityId,
           densityType: pair.densityType,
-        }))
+        })),
+        { relevantFrom: date }
       ),
     ]);
 

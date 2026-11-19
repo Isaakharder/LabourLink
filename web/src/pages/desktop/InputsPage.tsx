@@ -34,6 +34,12 @@ import {
 // convention elsewhere in the app; the two aren't shared because they poll
 // unrelated endpoints for unrelated reasons.
 const POLL_INTERVAL_MS = 10000;
+// The review-count badges are a whole-day grouping across every employee,
+// far heavier than the 10-second poll's own requests, and they rarely
+// change between polls. The automatic poll refreshes them at most this
+// often; a date change, a save, or returning to the window still
+// refreshes them at once.
+export const REVIEW_COUNTS_POLL_MS = 60_000;
 
 // "12:56 PM" — a client-clock event (when this browser last successfully
 // fetched), not a server timestamp, so it's formatted directly rather than
@@ -313,15 +319,21 @@ export function InputsPage() {
 
   // Review-count badges for `date`, from the same server grouping the
   // review popup shows (GET /api/row-completions/review-groups, every
-  // employee). Refreshed on exactly the sidebar's own triggers — called from
-  // loadEmployees below, so every date change, background poll and
-  // post-save refresh that updates paid hours updates these too. A failed
-  // refresh keeps the last known counts (same as a background employees
-  // refresh); a newer request always wins over an older one.
+  // employee). Refreshed on the sidebar's own triggers — called from
+  // loadEmployees below, so every date change, focus/visibility/online
+  // refresh and post-save refresh that updates paid hours updates these
+  // too. The 10-second poll only refreshes them once REVIEW_COUNTS_POLL_MS
+  // has passed (opts.ifOlderThanMs). A failed refresh keeps the last known
+  // counts (same as a background employees refresh); a newer request
+  // always wins over an older one.
   const reviewCountsSeqRef = useRef(0);
   const reviewCountsDateRef = useRef<string | null>(null);
-  const loadReviewCounts = useCallback(() => {
+  const reviewCountsLastRequestRef = useRef<{ date: string; at: number } | null>(null);
+  const loadReviewCounts = useCallback((opts: { ifOlderThanMs?: number } = {}) => {
     if (!canReviewSpeeds) return;
+    const last = reviewCountsLastRequestRef.current;
+    if (opts.ifOlderThanMs !== undefined && last && last.date === date && Date.now() - last.at < opts.ifOlderThanMs) return;
+    reviewCountsLastRequestRef.current = { date, at: Date.now() };
     const requestId = ++reviewCountsSeqRef.current;
     // A different date's counts must never stay on screen while the new
     // date's are loading.
@@ -346,7 +358,7 @@ export function InputsPage() {
   // in place until the next successful refresh. A foreground call (initial
   // load, or an explicit date/search change) keeps showing the loading
   // placeholder and surfaces a real failure normally.
-  const loadEmployees = useCallback((opts: { background?: boolean } = {}) => {
+  const loadEmployees = useCallback((opts: { background?: boolean; reviewCountsIfOlderThanMs?: number } = {}) => {
     const background = opts.background ?? false;
     const params = new URLSearchParams();
     params.set("date", date);
@@ -358,7 +370,7 @@ export function InputsPage() {
 
     const requestId = ++employeesRequestSeqRef.current;
     if (!background) setEmployeesLoading(true);
-    loadReviewCounts();
+    loadReviewCounts({ ifOlderThanMs: opts.reviewCountsIfOlderThanMs });
     api<{ employees: InputsEmployee[]; workingTotals?: InputsWorkingTotals }>(`/api/inputs/employees?${params.toString()}`, {
       signal: controller.signal,
     })
@@ -616,7 +628,7 @@ export function InputsPage() {
   useEffect(() => {
     if (!selectedEmployeeId) return;
 
-    function backgroundRefresh() {
+    function backgroundRefresh(opts: { reviewCountsIfOlderThanMs?: number } = {}) {
       if (pausedRef.current) return;
       loadDaily({ background: true });
       // Keeps the sidebar's paid-hours totals current through the exact
@@ -629,8 +641,10 @@ export function InputsPage() {
       // means this can never pile up a second concurrent request on top of
       // one already in flight from a rapid date change or another trigger
       // firing moments earlier.
-      loadEmployees({ background: true });
+      loadEmployees({ background: true, reviewCountsIfOlderThanMs: opts.reviewCountsIfOlderThanMs });
     }
+    // Event listeners would otherwise pass their Event as opts.
+    const refreshNow = () => backgroundRefresh();
     function handleVisibility() {
       if (document.visibilityState === "visible") backgroundRefresh();
     }
@@ -638,16 +652,19 @@ export function InputsPage() {
       setStale(true);
     }
 
-    const interval = window.setInterval(backgroundRefresh, POLL_INTERVAL_MS);
+    const interval = window.setInterval(
+      () => backgroundRefresh({ reviewCountsIfOlderThanMs: REVIEW_COUNTS_POLL_MS }),
+      POLL_INTERVAL_MS
+    );
     document.addEventListener("visibilitychange", handleVisibility);
-    window.addEventListener("focus", backgroundRefresh);
-    window.addEventListener("online", backgroundRefresh);
+    window.addEventListener("focus", refreshNow);
+    window.addEventListener("online", refreshNow);
     window.addEventListener("offline", handleOffline);
     return () => {
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", handleVisibility);
-      window.removeEventListener("focus", backgroundRefresh);
-      window.removeEventListener("online", backgroundRefresh);
+      window.removeEventListener("focus", refreshNow);
+      window.removeEventListener("online", refreshNow);
       window.removeEventListener("offline", handleOffline);
     };
   }, [selectedEmployeeId, loadDaily, loadEmployees]);

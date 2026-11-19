@@ -143,7 +143,7 @@ export async function getSpeedReviewGroups(opts: {
   const windowDays = opts.windowDays ?? (await getRowReviewWindowDays());
   const candidatesByKey = await getUnresolvedRunsForRows(
     pairRows.map((p) => ({ greenhouseRowId: p.greenhouse_row_id, activityId: p.activity_id, densityType: p.density_type })),
-    { windowDays }
+    { windowDays, relevantFrom: opts.date }
   );
 
   // Ambiguous cycles only — exactly inputs.ts's ambiguousCycleKeys test.
