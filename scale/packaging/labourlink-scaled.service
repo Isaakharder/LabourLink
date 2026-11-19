@@ -1,0 +1,29 @@
+[Unit]
+Description=LabourLink Scale service (RFID + scale indicator, weighing outbox)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/labourlink-scaled --config /etc/labourlink-scale/config.json
+Restart=always
+RestartSec=2
+
+# Unprivileged throwaway user with serial-port access only.
+DynamicUser=yes
+SupplementaryGroups=dialout
+StateDirectory=labourlink-scale
+# The station token is root-only on disk and handed to the service here.
+LoadCredential=station-token:/etc/labourlink-scale/station-token
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

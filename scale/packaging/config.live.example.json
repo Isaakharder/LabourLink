@@ -1,0 +1,21 @@
+{
+  "mode": "live",
+  "stationName": "Packhouse scale",
+  "dataDir": "/var/lib/labourlink-scale",
+  "listen": "127.0.0.1:47800",
+  "apiBaseUrl": "https://REPLACE-WITH-LABOURLINK-API-HOST",
+  "stationTokenFile": "/etc/labourlink-scale/station-token",
+  "scale": { "port": "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG0427FU-if00-port0", "baud": 9600, "protocol": "rinstrum-auto-a" },
+  "rfid": { "port": "/dev/labourlink/rfid", "baud": 9600 },
+  "weighing": {
+    "settleSeconds": 10,
+    "stableWindowMs": 2000,
+    "stableToleranceKg": 0.05,
+    "minLoadKg": 2,
+    "zeroThresholdKg": 1,
+    "minNetKg": 0.5,
+    "duplicateGuardSeconds": 300
+  },
+  "pendingPollSeconds": 60,
+  "carrierRefreshSeconds": 300
+}
