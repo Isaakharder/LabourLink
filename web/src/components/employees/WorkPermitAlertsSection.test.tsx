@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
-// Covers the Dashboard Work Permit Alerts section: severity styling, the
-// "no oversized empty section" rule, Acknowledge/Renewed/Cancel alert
+// Covers the Work Permit Alerts list (Employees -> Work Permits): severity
+// styling and labels, the empty state, Acknowledge/Renewed/Cancel alert
 // button behavior (including disabling while a request is in flight — a
 // double-click must never fire twice), and Renewed's client-side
 // later-than-current-expiry validation. Server-side behavior (idempotent
@@ -73,18 +73,45 @@ afterEach(() => {
 });
 
 describe("WorkPermitAlertsSection", () => {
-  it("renders nothing (not an empty oversized section) when there are zero alerts", async () => {
+  it("shows a short empty state (no list, no actions) when there are zero alerts", async () => {
     alertsResponse = { alerts: [] };
     const { container } = render(<WorkPermitAlertsSection />);
-    await act(async () => {});
-    expect(container.querySelector(".work-permit-alerts-section")).not.toBeInTheDocument();
+    expect(await screen.findByText("No work permit alerts right now.")).toBeInTheDocument();
+    expect(container.querySelector(".work-permit-alerts-list")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("shows one compact row per alert with the name, a severity label, the actions, and counts per severity", async () => {
+    alertsResponse = {
+      alerts: [
+        makeAlert({ employeeId: "e1", employeeName: "Ana Expired", severity: "expired", remainingDays: -3 }),
+        makeAlert({ employeeId: "e2", employeeName: "Rui Red", severity: "red", remainingDays: 12 }),
+        makeAlert({ employeeId: "e3", employeeName: "Rosa Red", severity: "red", remainingDays: 20 }),
+      ],
+    };
+    render(<WorkPermitAlertsSection />);
+    const rows = await screen.findAllByRole("listitem");
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toHaveTextContent("Ana Expired");
+    expect(rows[0]).toHaveTextContent("Expired");
+    expect(rows[1]).toHaveTextContent("Under 30 days");
+    for (const name of ["Ana Expired", "Rui Red", "Rosa Red"]) {
+      const group = screen.getByRole("group", { name: `Actions for ${name}` });
+      expect(group).toHaveTextContent("Acknowledge");
+      expect(group).toHaveTextContent("Renewed");
+      expect(group).toHaveTextContent("Cancel alert");
+    }
+    expect(screen.getByText("1 expired")).toBeInTheDocument();
+    expect(screen.getByText("2 under 30 days")).toBeInTheDocument();
   });
 
   it("shows the headline, exact expiry date, and remaining time for an amber (>90 day) alert", async () => {
     alertsResponse = { alerts: [makeAlert()] };
     render(<WorkPermitAlertsSection />);
     expect(await screen.findByText(/Work permit expiring in/)).toBeInTheDocument();
-    expect(screen.getByText(/Marcelino Besa's work permit expires February 25, 2027/)).toBeInTheDocument();
+    expect(screen.getByText("Marcelino Besa")).toBeInTheDocument();
+    expect(screen.getByText("Expires February 25, 2027")).toBeInTheDocument();
+    expect(screen.getByText(/remaining · notify lead/)).toBeInTheDocument();
     const card = document.querySelector(".work-permit-alert-card");
     expect(card).toHaveClass("work-permit-alert-amber");
   });
@@ -192,7 +219,7 @@ describe("WorkPermitAlertsSection", () => {
     };
     render(<WorkPermitAlertsSection />);
     await screen.findByText(/Soon Expiry/);
-    const names = [...document.querySelectorAll(".work-permit-alert-detail")].map((el) => el.textContent);
+    const names = [...document.querySelectorAll(".work-permit-alert-name")].map((el) => el.textContent);
     expect(names[0]).toContain("Soon Expiry");
     expect(names[1]).toContain("Later Expiry");
   });

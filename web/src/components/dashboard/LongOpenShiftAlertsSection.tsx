@@ -144,7 +144,7 @@ function LongOpenShiftAlertCard({ alert, timezone, onEndWork }: LongOpenShiftAle
   );
 }
 
-// Near the top of the Dashboard (alongside WorkPermitAlertsSection), per
+// Near the top of the Dashboard (work permit alerts are on Employees -> Work Permits), per
 // the requirements: a workday that's remained open longer than the
 // configurable org threshold. Since a shift is automatically closed at
 // midnight every night (Midnight Cutoff — see midnightCutoff.ts), this can

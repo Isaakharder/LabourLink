@@ -4,11 +4,11 @@ import { RowStemCard } from "../../components/dashboard/RowStemCard";
 import { PickingCard } from "../../components/dashboard/PickingCard";
 import { DashboardSettingsPanel } from "../../components/dashboard/DashboardSettingsPanel";
 import { BinCompletionsPanel } from "../../components/dashboard/BinCompletionsPanel";
-import { WorkPermitAlertsSection } from "../../components/dashboard/WorkPermitAlertsSection";
+import { DashboardKpiStrip } from "../../components/dashboard/DashboardKpiStrip";
 import { LongOpenShiftAlertsSection } from "../../components/dashboard/LongOpenShiftAlertsSection";
 import { useAuth } from "../../context/AuthContext";
 import { api, ApiError } from "../../lib/api";
-import { DashboardCard, GetDashboardCardsResponse } from "../../lib/dashboardTypes";
+import { DashboardCard, GetDashboardCardsResponse, GetDashboardKpisResponse } from "../../lib/dashboardTypes";
 
 // Live overview, not a report — a fixed few-tens-of-seconds cadence keeps
 // cards reasonably current without hammering the endpoint, same spirit as
@@ -20,10 +20,12 @@ export function DashboardPage() {
   const canEdit = employee?.securityRole === "Administrator" || employee?.securityRole === "Manager";
 
   const [cards, setCards] = useState<DashboardCard[] | null>(null);
+  const [kpis, setKpis] = useState<GetDashboardKpisResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showBinCompletions, setShowBinCompletions] = useState(false);
   const loadingRef = useRef(false);
+  const kpisLoadingRef = useRef(false);
 
   const load = useCallback(async (silent: boolean) => {
     // A silent background refresh (poll/focus) never flashes the loading
@@ -44,17 +46,45 @@ export function DashboardPage() {
     }
   }, []);
 
+  // KPI strip (Administrator/Manager): loaded beside the cards on the same
+  // poll, but on its own, so a KPI failure never blanks the employee cards.
+  // A failed refresh keeps the last figures; a failed first load shows no
+  // strip rather than an error banner.
+  const loadKpis = useCallback(async () => {
+    if (!canEdit || kpisLoadingRef.current) return;
+    kpisLoadingRef.current = true;
+    try {
+      setKpis(await api<GetDashboardKpisResponse>("/api/dashboard/kpis"));
+    } catch {
+      // keep whatever is shown
+    } finally {
+      kpisLoadingRef.current = false;
+    }
+  }, [canEdit]);
+
   useEffect(() => {
     load(false);
   }, [load]);
 
   useEffect(() => {
-    const interval = window.setInterval(() => load(true), POLL_INTERVAL_MS);
+    loadKpis();
+  }, [loadKpis]);
+
+  const refresh = useCallback(
+    (silent: boolean) => {
+      load(silent);
+      loadKpis();
+    },
+    [load, loadKpis]
+  );
+
+  useEffect(() => {
+    const interval = window.setInterval(() => refresh(true), POLL_INTERVAL_MS);
     function onFocus() {
-      load(true);
+      refresh(true);
     }
     function onVisibilityChange() {
-      if (document.visibilityState === "visible") load(true);
+      if (document.visibilityState === "visible") refresh(true);
     }
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -63,7 +93,7 @@ export function DashboardPage() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [load]);
+  }, [refresh]);
 
   return (
     <>
@@ -74,7 +104,7 @@ export function DashboardPage() {
         </div>
         <div className="dashboard-header-actions">
           {canEdit && (
-            <button type="button" onClick={() => setShowBinCompletions(true)}>
+            <button type="button" className="dashboard-secondary-button" onClick={() => setShowBinCompletions(true)}>
               Bin Completions
             </button>
           )}
@@ -91,7 +121,7 @@ export function DashboardPage() {
         </div>
       </div>
 
-      {canEdit && <WorkPermitAlertsSection />}
+      {canEdit && <DashboardKpiStrip kpis={kpis} />}
       {canEdit && <LongOpenShiftAlertsSection onEnded={() => load(true)} />}
 
       {loadError && <p className="error-text">{loadError}</p>}

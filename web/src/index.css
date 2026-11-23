@@ -6987,8 +6987,42 @@ input {
 
 .dashboard-header-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 0.6rem;
+  min-width: 0;
+}
+
+/* Tablet width: the title gets its own line so the header actions (and
+   the signed-in name) never run off the right edge. */
+@media (max-width: 900px) {
+  .page-header:has(> .dashboard-header-actions) {
+    flex-wrap: wrap;
+  }
+}
+
+/* Secondary header action (Bin Completions): the same size and shape as
+   Edit Dashboard beside it, outlined like Basic data's "Bulk Add". */
+.dashboard-secondary-button {
+  padding: 0.55rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dashboard-secondary-button:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.dashboard-secondary-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-primary) 55%, transparent);
+  outline-offset: 2px;
 }
 
 /* Exactly two columns at normal desktop widths, one column at/below the
@@ -7005,6 +7039,88 @@ input {
   .dashboard-card-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* KPI strip: fixed-width tiles in a wrapping grid, so more KPIs can be
+   added later without stretching or crowding the existing ones. */
+.dashboard-kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.dashboard-kpi-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.75rem 1rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  color: var(--color-text);
+  text-decoration: none;
+  overflow: hidden;
+}
+
+.dashboard-kpi-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--color-primary);
+}
+
+.dashboard-kpi-card.is-empty::before {
+  background: var(--color-border);
+}
+
+.dashboard-kpi-card.is-attention::before {
+  background: #f59e0b;
+}
+
+.dashboard-kpi-card.is-urgent::before {
+  background: var(--color-danger);
+}
+
+.dashboard-kpi-card.is-urgent .dashboard-kpi-detail {
+  color: #991b1b;
+  font-weight: 600;
+}
+
+.dashboard-kpi-card:hover {
+  border-color: color-mix(in srgb, var(--color-primary) 45%, var(--color-border));
+}
+
+.dashboard-kpi-card:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-primary) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.dashboard-kpi-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
+.dashboard-kpi-value {
+  font-size: 1.45rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.dashboard-kpi-card.is-empty .dashboard-kpi-value {
+  color: var(--color-muted);
+}
+
+.dashboard-kpi-detail {
+  font-size: 0.78rem;
+  color: var(--color-muted);
 }
 
 .dashboard-card {
@@ -7139,90 +7255,180 @@ input {
   opacity: 0.6;
 }
 
-/* ---------- Work Permit Alerts (Dashboard) ---------- */
+/* ---------- Work Permit Alerts (Employees -> Work Permits) ---------- */
 
-.work-permit-alerts-section {
-  margin-bottom: 1.25rem;
+.work-permits-tab {
+  max-width: 1100px;
+}
+
+.work-permit-alerts-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 0.85rem;
+  margin-bottom: 0.2rem;
 }
 
 .work-permit-alerts-section h2 {
-  margin: 0 0 0.65rem;
+  margin: 0;
   font-size: 1.05rem;
 }
 
-.work-permit-alerts-list {
+.work-permit-alerts-counts {
   display: flex;
-  flex-direction: column;
-  gap: 0.65rem;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0;
+}
+
+.work-permit-alerts-count {
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--work-permit-tone-border, var(--color-border));
+  background: var(--work-permit-tone-bg, var(--color-surface));
+  color: var(--work-permit-tone-text, var(--color-text));
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.work-permit-alerts-hint {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+}
+
+.work-permit-alerts-empty {
+  margin: 0;
+  padding: 1.25rem 1rem;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  color: var(--color-muted);
+  font-size: 0.88rem;
+  text-align: center;
+}
+
+/* One panel, one compact row per alert. */
+.work-permit-alerts-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+/* Severity tones, shared by the row's left edge, its badge and the counts.
+   More than 90 days: amber. 30-90 days: orange. Under 30 days and
+   expired: red. */
+.work-permit-alert-amber {
+  --work-permit-tone: #f59e0b;
+  --work-permit-tone-bg: #fffbeb;
+  --work-permit-tone-border: #fcd34d;
+  --work-permit-tone-text: #92400e;
+}
+.work-permit-alert-orange {
+  --work-permit-tone: #ea580c;
+  --work-permit-tone-bg: #fff7ed;
+  --work-permit-tone-border: #fdba74;
+  --work-permit-tone-text: #9a3412;
+}
+.work-permit-alert-red,
+.work-permit-alert-expired {
+  --work-permit-tone: var(--color-danger);
+  --work-permit-tone-bg: #fef2f2;
+  --work-permit-tone-border: #fca5a5;
+  --work-permit-tone-text: #991b1b;
 }
 
 .work-permit-alert-card {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.85rem;
-  padding: 0.85rem 1rem;
-  border-radius: var(--radius);
-  border: 1px solid var(--color-border);
-  background: var(--color-surface);
-  border-left-width: 5px;
+  display: grid;
+  grid-template-columns: auto minmax(12rem, 1.2fr) minmax(12rem, 1fr) auto;
+  align-items: center;
+  gap: 0.4rem 0.9rem;
+  padding: 0.6rem 0.9rem;
+  border-left: 4px solid var(--work-permit-tone, var(--color-border));
 }
 
-/* More than 90 days remaining: neutral/amber. */
-.work-permit-alert-amber {
-  border-left-color: #f59e0b;
-}
-/* 30-90 days remaining: orange. */
-.work-permit-alert-orange {
-  border-left-color: #ea580c;
-}
-/* Less than 30 days remaining, and expired: red. */
-.work-permit-alert-red,
-.work-permit-alert-expired {
-  border-left-color: var(--color-danger);
-}
-.work-permit-alert-expired {
-  background: color-mix(in srgb, var(--color-danger) 6%, var(--color-surface));
+.work-permit-alert-card + .work-permit-alert-card {
+  border-top: 1px solid var(--color-border);
 }
 
-.work-permit-alert-body {
-  flex: 1;
+.work-permit-alert-expired {
+  background: color-mix(in srgb, var(--color-danger) 5%, var(--color-surface));
+}
+
+.work-permit-alert-body,
+.work-permit-alert-dates {
   min-width: 0;
 }
 
-.work-permit-alert-headline {
-  margin: 0 0 0.15rem;
-  font-weight: 600;
-  font-size: 0.95rem;
+.work-permit-alert-body p,
+.work-permit-alert-dates p {
+  margin: 0;
 }
-.work-permit-alert-expired .work-permit-alert-headline {
-  color: var(--color-danger);
+
+.work-permit-alert-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem 0.5rem;
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.work-permit-alert-badge {
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--work-permit-tone-border);
+  background: var(--work-permit-tone-bg);
+  color: var(--work-permit-tone-text);
+  font-size: 0.68rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.work-permit-alert-headline {
+  font-size: 0.82rem;
+  color: var(--color-muted);
+}
+.work-permit-alert-expired .work-permit-alert-headline,
+.work-permit-alert-red .work-permit-alert-headline {
+  color: var(--work-permit-tone-text);
+  font-weight: 600;
 }
 
 .work-permit-alert-detail {
-  margin: 0 0 0.15rem;
-  font-size: 0.88rem;
+  font-size: 0.85rem;
 }
 
 .work-permit-alert-meta {
-  margin: 0;
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   color: var(--color-muted);
 }
 
 .work-permit-alert-actions {
   display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.35rem;
   flex-shrink: 0;
 }
 
 .work-permit-alert-actions button {
-  padding: 0.4rem 0.75rem;
+  min-height: 2.25rem;
+  padding: 0.3rem 0.65rem;
   border: 1px solid var(--color-border);
   border-radius: 6px;
   background: var(--color-surface);
-  font-size: 0.8rem;
+  color: var(--color-text);
+  font-size: 0.78rem;
   white-space: nowrap;
+}
+
+.work-permit-alert-actions button:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
 }
 
 .work-permit-alert-actions button:disabled {
@@ -7230,14 +7436,17 @@ input {
   cursor: default;
 }
 
-@media (max-width: 700px) {
+@media (max-width: 1000px) {
   .work-permit-alert-card {
-    flex-direction: column;
+    grid-template-columns: auto 1fr;
   }
+  .work-permit-alert-dates,
   .work-permit-alert-actions {
-    flex-direction: row;
-    width: 100%;
+    grid-column: 2;
   }
+}
+
+@media (max-width: 560px) {
   .work-permit-alert-actions button {
     flex: 1;
   }

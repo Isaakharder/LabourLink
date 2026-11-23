@@ -18,6 +18,7 @@ import { AuthProvider } from "../../context/AuthContext";
 import { Employee } from "../../lib/employeeTypes";
 import { EmploymentTimelineEmployee } from "../../lib/employmentPeriodTypes";
 
+let workPermitAlertsResponse: { alerts: unknown[] } = { alerts: [] };
 let meResponse: { employee: { id: string; firstName: string; lastName: string; securityRole: string; teamRole: string } };
 let employeesResponse: { employees: Employee[]; jobGroups: string[] };
 let timelineResponse: { employees: EmploymentTimelineEmployee[] };
@@ -35,6 +36,7 @@ vi.mock("../../lib/api", () => {
     onSessionExpired: vi.fn(() => () => {}),
     api: vi.fn((path: string) => {
       if (path.startsWith("/api/auth/me")) return Promise.resolve(meResponse);
+      if (path.startsWith("/api/dashboard/work-permit-alerts")) return Promise.resolve(workPermitAlertsResponse);
       if (path.startsWith("/api/employees/")) return Promise.resolve({ employee: employeesResponse.employees[0] });
       if (path.startsWith("/api/employees")) return Promise.resolve(employeesResponse);
       if (path.startsWith("/api/devices")) return Promise.resolve({ devices: [] });
@@ -172,5 +174,49 @@ describe("EmployeesPage compact layout", () => {
     await user.click(screen.getByRole("link", { name: "Directory" }));
     await screen.findByText("1 visible");
     expect(document.querySelector(".employees-page-topbar")).toBeInTheDocument();
+  });
+});
+
+describe("EmployeesPage Work Permits tab", () => {
+  it("shows a Work Permits tab for an Administrator, listing the alerts with their actions", async () => {
+    workPermitAlertsResponse = {
+      alerts: [
+        {
+          employeeId: "emp-wp",
+          employeeName: "Marcelino Besa",
+          photoUrl: null,
+          expiryDate: "2027-02-25",
+          remainingDays: 45,
+          severity: "orange",
+          leadMonths: 6,
+          leadDays: null,
+        },
+      ],
+    };
+    renderEmployees("/employees/work-permits");
+    expect(await screen.findByRole("link", { name: "Work Permits" })).toHaveClass("tab-active");
+    expect(await screen.findByText("Marcelino Besa")).toBeInTheDocument();
+    expect(screen.getByText("Work permit expiring in 45 days")).toBeInTheDocument();
+    for (const action of ["Acknowledge", "Renewed", "Cancel alert"]) {
+      expect(screen.getByRole("button", { name: action })).toBeInTheDocument();
+    }
+    expect(document.querySelector(".work-permits-tab")?.previousElementSibling).toHaveClass("employees-page-topbar");
+  });
+
+  it("shows the empty state when there are no alerts", async () => {
+    workPermitAlertsResponse = { alerts: [] };
+    renderEmployees("/employees/work-permits");
+    expect(await screen.findByText("No work permit alerts right now.")).toBeInTheDocument();
+  });
+
+  it("hides the tab from a plain Employee, and its address falls back to Directory", async () => {
+    meResponse = {
+      employee: { id: "emp-1", firstName: "Evan", lastName: "Employee", securityRole: "Employee", teamRole: "Team Member" },
+    };
+    renderEmployees("/employees/work-permits");
+    await screen.findByText("Evan Employee");
+    expect(screen.queryByRole("link", { name: "Work Permits" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Directory" })).toHaveClass("tab-active");
+    expect(document.querySelector(".work-permits-tab")).not.toBeInTheDocument();
   });
 });
