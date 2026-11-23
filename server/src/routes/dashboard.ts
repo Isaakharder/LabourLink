@@ -10,6 +10,7 @@ import { aggregateDensitySpeed } from "../lib/densitySpeed";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { getSignedPhotoUrls } from "../lib/storage";
 import { getActiveWorkPermitAlerts } from "../lib/workPermits";
+import { getKgWeighedOnDate } from "../lib/dashboardKpis";
 import {
   getLongOpenShiftAlerts,
   getOrgSettings,
@@ -110,6 +111,21 @@ router.get(
         leadDays: a.leadDays,
       })),
     });
+  })
+);
+
+// KPI strip: small greenhouse-wide figures for today (greenhouse-local
+// date). Read-only. Each KPI is null when it doesn't apply here (no
+// LabourLink Scale -> kgWeighedToday is null), and the Dashboard hides that
+// card. Scale figures are Administrator/Manager only, like the Scale
+// Weighings page they summarize.
+router.get(
+  "/kpis",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (_req, res) => {
+    const date = calendarDateInAppTimezone(new Date());
+    res.json({ date, kgWeighedToday: await getKgWeighedOnDate(pool, date) });
   })
 );
 

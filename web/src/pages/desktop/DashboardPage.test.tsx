@@ -11,8 +11,8 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DashboardPage } from "./DashboardPage";
 import { AuthProvider } from "../../context/AuthContext";
-import { ApiError } from "../../lib/api";
-import { DashboardCard, GetDashboardCardsResponse } from "../../lib/dashboardTypes";
+import { api, ApiError } from "../../lib/api";
+import { DashboardCard, GetDashboardCardsResponse, GetDashboardKpisResponse } from "../../lib/dashboardTypes";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -31,6 +31,7 @@ function createDeferred<T>(): Deferred<T> {
 
 let meResponse: { employee: { id: string; firstName: string; lastName: string; securityRole: string; teamRole: string } };
 let cardsDeferred: Deferred<GetDashboardCardsResponse>;
+let kpisResponse: GetDashboardKpisResponse | Error;
 
 vi.mock("../../lib/api", () => {
   class ApiError extends Error {
@@ -49,6 +50,9 @@ vi.mock("../../lib/api", () => {
       }
       if (path.startsWith("/api/dashboard/cards")) {
         return cardsDeferred.promise;
+      }
+      if (path.startsWith("/api/dashboard/kpis")) {
+        return kpisResponse instanceof Error ? Promise.reject(kpisResponse) : Promise.resolve(kpisResponse);
       }
       return Promise.reject(new Error(`Unhandled mock api() call in test: ${path}`));
     }),
@@ -115,6 +119,7 @@ beforeEach(() => {
     employee: { id: "admin-1", firstName: "Ada", lastName: "Admin", securityRole: "Administrator", teamRole: "Team Member" },
   };
   cardsDeferred = createDeferred<GetDashboardCardsResponse>();
+  kpisResponse = { date: "2026-11-23", kgWeighedToday: null };
 });
 
 afterEach(() => {
@@ -196,5 +201,82 @@ describe("DashboardPage", () => {
     const grid = document.querySelector(".dashboard-card-grid");
     expect(grid).toBeInTheDocument();
     expect(grid?.children.length).toBe(2);
+  });
+
+  describe("KPI strip: KG weighed today", () => {
+    const calledPaths = () => vi.mocked(api).mock.calls.map((c) => c[0] as string);
+
+    async function renderWithCards() {
+      renderDashboard();
+      await act(async () => {
+        cardsDeferred.resolve({ weekStart: "2026-08-17", weekEnd: "2026-08-23", cards: [] });
+      });
+    }
+
+    it("shows today's net kg, the bin count and the last weighing time, linking to Scale Weighings", async () => {
+      kpisResponse = { date: "2026-11-23", kgWeighedToday: { netKg: 1234.5, bins: 16, lastWeighedAt: "2026-11-23T15:34:07.000Z" } };
+      await renderWithCards();
+      expect(await screen.findByText("KG weighed today")).toBeInTheDocument();
+      expect(screen.getByText("1,234.5 kg")).toBeInTheDocument();
+      expect(screen.getByText("16 bins · last 10:34 AM")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /KG weighed today: 1,234.5 kg/ })).toHaveAttribute("href", "/scale-weighings");
+    });
+
+    it("shows an empty state when no bins have been weighed today", async () => {
+      kpisResponse = { date: "2026-11-23", kgWeighedToday: { netKg: 0, bins: 0, lastWeighedAt: null } };
+      await renderWithCards();
+      expect(await screen.findByText("No bins weighed yet today")).toBeInTheDocument();
+      expect(screen.getByText("0 kg")).toBeInTheDocument();
+      expect(document.querySelector(".dashboard-kpi-card")).toHaveClass("is-empty");
+    });
+
+    it("has no card (and no strip) for a greenhouse without LabourLink Scale", async () => {
+      kpisResponse = { date: "2026-11-23", kgWeighedToday: null };
+      await renderWithCards();
+      await waitFor(() => expect(calledPaths()).toContain("/api/dashboard/kpis"));
+      expect(screen.queryByText("KG weighed today")).not.toBeInTheDocument();
+      expect(document.querySelector(".dashboard-kpi-strip")).not.toBeInTheDocument();
+    });
+
+    it("a KPI error never blanks the employee cards and shows no error banner", async () => {
+      kpisResponse = new ApiError(500, "kpi boom");
+      renderDashboard();
+      await act(async () => {
+        cardsDeferred.resolve({ weekStart: "2026-08-17", weekEnd: "2026-08-23", cards: [pickingCard()] });
+      });
+      await screen.findByText("Paco Pines");
+      expect(screen.queryByText("kpi boom")).not.toBeInTheDocument();
+      expect(document.querySelector(".dashboard-kpi-strip")).not.toBeInTheDocument();
+    });
+
+    it("updates on refresh as new weighings arrive", async () => {
+      kpisResponse = { date: "2026-11-23", kgWeighedToday: { netKg: 20, bins: 1, lastWeighedAt: "2026-11-23T15:00:00.000Z" } };
+      await renderWithCards();
+      await screen.findByText("20 kg");
+      kpisResponse = { date: "2026-11-23", kgWeighedToday: { netKg: 41.5, bins: 2, lastWeighedAt: "2026-11-23T15:05:00.000Z" } };
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+      });
+      expect(await screen.findByText("41.5 kg")).toBeInTheDocument();
+      expect(screen.getByText("2 bins · last 10:05 AM")).toBeInTheDocument();
+    });
+
+    it("is not requested or shown for a plain Employee", async () => {
+      meResponse = {
+        employee: { id: "emp-1", firstName: "Evan", lastName: "Employee", securityRole: "Employee", teamRole: "Team Member" },
+      };
+      kpisResponse = { date: "2026-11-23", kgWeighedToday: { netKg: 20, bins: 1, lastWeighedAt: null } };
+      await renderWithCards();
+      await screen.findByText(/No one is currently doing a Dashboard-tracked job/);
+      expect(calledPaths()).not.toContain("/api/dashboard/kpis");
+      expect(screen.queryByText("KG weighed today")).not.toBeInTheDocument();
+    });
+
+    it("no longer shows Work Permit Alerts on the Dashboard (they moved to Employees -> Work Permits)", async () => {
+      await renderWithCards();
+      await waitFor(() => expect(calledPaths()).toContain("/api/dashboard/kpis"));
+      expect(calledPaths()).not.toContain("/api/dashboard/work-permit-alerts");
+      expect(screen.queryByText(/Work permit alerts/i)).not.toBeInTheDocument();
+    });
   });
 });

@@ -66,3 +66,16 @@ export interface DashboardSettingsActivity {
 export interface GetDashboardSettingsResponse {
   activities: DashboardSettingsActivity[];
 }
+
+// GET /api/dashboard/kpis — small greenhouse-wide figures for today. Each
+// KPI is null when it doesn't apply to this greenhouse (the card is hidden).
+export interface KgWeighedKpi {
+  netKg: number;
+  bins: number;
+  lastWeighedAt: string | null;
+}
+
+export interface GetDashboardKpisResponse {
+  date: string;
+  kgWeighedToday: KgWeighedKpi | null;
+}
