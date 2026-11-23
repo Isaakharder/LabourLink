@@ -3,7 +3,8 @@
 // greenhouse-local date: trial and live, credited, pending, needs review
 // and expired all count; voided and duplicate never do; a weighing just
 // outside the local day's boundaries never counts. Null (card hidden) for
-// a greenhouse without LabourLink Scale. Administrator/Manager only.
+// a greenhouse without LabourLink Scale. The Work Permit Alerts count
+// matches GET /work-permit-alerts exactly. Administrator/Manager only.
 // RUN_ID-suffixed fixtures; sums are compared as deltas so other data on
 // the shared test database never affects the result.
 //
@@ -33,6 +34,10 @@ function check(condition: boolean, label: string, extra?: unknown) {
 const RUN_ID = Date.now();
 const TODAY = calendarDateInAppTimezone(new Date());
 const DAY = addDaysToDateStr(TODAY, -1200 - (RUN_ID % 300));
+
+function permitCounts(body: unknown) {
+  return (body as { workPermitAlerts: { active: number; expired: number; under30Days: number } }).workPermitAlerts;
+}
 
 async function main() {
   const app = express();
@@ -143,6 +148,28 @@ async function main() {
     check(r1.status === 200, "Manager -> 200", r1.status);
     const b1 = (await r1.json()) as { date: string; kgWeighedToday: { netKg: number; bins: number } | null };
     check(b1.date === TODAY, "date is today's greenhouse-local date", b1.date);
+    // Permit fixtures: expired, under 30 days, over 90 days (6-month lead).
+    for (const [first, days] of [["Pia", -3], ["Rex", 10], ["Amy", 120]] as const) {
+      const e = await employee("Employee", first);
+      await pool.query(`update employees set work_permit_expiry_date = $2, work_permit_notify_lead_months = 6 where id = $1`, [e.id, addDaysToDateStr(TODAY, days)]);
+    }
+    const permitsBefore = permitCounts(b1);
+    const b1b = (await (await get("/api/dashboard/kpis", manager.token)).json()) as typeof b1;
+    const afterCounts = permitCounts(b1b);
+    check(
+      afterCounts.active - permitsBefore.active === 3 && afterCounts.expired - permitsBefore.expired === 1 && afterCounts.under30Days - permitsBefore.under30Days === 1,
+      "new permit alerts are counted (3 active: 1 expired, 1 under 30 days)",
+      { permitsBefore, afterCounts }
+    );
+    const permitBody = b1b as unknown as { workPermitAlerts: { active: number; expired: number; under30Days: number } };
+    const listed = (await (await get("/api/dashboard/work-permit-alerts", manager.token)).json()) as { alerts: { severity: string }[] };
+    check(
+      permitBody.workPermitAlerts.active === listed.alerts.length &&
+        permitBody.workPermitAlerts.expired === listed.alerts.filter((a) => a.severity === "expired").length &&
+        permitBody.workPermitAlerts.under30Days === listed.alerts.filter((a) => a.severity === "red").length,
+      "workPermitAlerts counts exactly the alerts the Work Permits tab lists",
+      { counts: permitBody.workPermitAlerts, listed: listed.alerts.length }
+    );
     check(b1.kgWeighedToday !== null && typeof b1.kgWeighedToday?.netKg === "number", "kgWeighedToday present with a station", b1);
 
     await weighing(new Date(Date.now() - 1000), 23456, "pending");

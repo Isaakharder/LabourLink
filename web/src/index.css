@@ -6987,8 +6987,42 @@ input {
 
 .dashboard-header-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 0.6rem;
+  min-width: 0;
+}
+
+/* Tablet width: the title gets its own line so the header actions (and
+   the signed-in name) never run off the right edge. */
+@media (max-width: 900px) {
+  .page-header:has(> .dashboard-header-actions) {
+    flex-wrap: wrap;
+  }
+}
+
+/* Secondary header action (Bin Completions): the same size and shape as
+   Edit Dashboard beside it, outlined like Basic data's "Bulk Add". */
+.dashboard-secondary-button {
+  padding: 0.55rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dashboard-secondary-button:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.dashboard-secondary-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-primary) 55%, transparent);
+  outline-offset: 2px;
 }
 
 /* Exactly two columns at normal desktop widths, one column at/below the
@@ -7041,6 +7075,19 @@ input {
 
 .dashboard-kpi-card.is-empty::before {
   background: var(--color-border);
+}
+
+.dashboard-kpi-card.is-attention::before {
+  background: #f59e0b;
+}
+
+.dashboard-kpi-card.is-urgent::before {
+  background: var(--color-danger);
+}
+
+.dashboard-kpi-card.is-urgent .dashboard-kpi-detail {
+  color: #991b1b;
+  font-weight: 600;
 }
 
 .dashboard-kpi-card:hover {

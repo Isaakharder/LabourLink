@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { GetDashboardKpisResponse, KgWeighedKpi } from "../../lib/dashboardTypes";
+import { GetDashboardKpisResponse, KgWeighedKpi, WorkPermitAlertsKpi } from "../../lib/dashboardTypes";
 import { formatTimeInAppTimezone } from "../../lib/timezone";
 
 // A row of small greenhouse-wide figures at the top of the Dashboard. The
@@ -29,9 +29,32 @@ function KgWeighedTodayCard({ kpi }: { kpi: KgWeighedKpi }) {
   );
 }
 
+// Only the count; the alerts themselves (and their actions) live on
+// Employees -> Work Permits.
+function WorkPermitAlertsCard({ kpi }: { kpi: WorkPermitAlertsKpi }) {
+  const empty = kpi.active === 0;
+  const urgent = kpi.expired + kpi.under30Days > 0;
+  const parts = [kpi.expired > 0 && `${kpi.expired} expired`, kpi.under30Days > 0 && `${kpi.under30Days} under 30 days`].filter(Boolean);
+  const detail = empty ? "No active alerts" : parts.length > 0 ? parts.join(" · ") : "None due within 30 days";
+  return (
+    <Link
+      to="/employees/work-permits"
+      className={`dashboard-kpi-card${empty ? " is-empty" : urgent ? " is-urgent" : " is-attention"}`}
+      aria-label={`Work permit alerts: ${kpi.active} active. ${detail}. Open Employees, Work Permits`}
+    >
+      <span className="dashboard-kpi-label">Work permit alerts</span>
+      <span className="dashboard-kpi-value">{kpi.active}</span>
+      <span className="dashboard-kpi-detail">{detail}</span>
+    </Link>
+  );
+}
+
 export function DashboardKpiStrip({ kpis }: { kpis: GetDashboardKpisResponse | null }) {
   if (!kpis) return null;
-  const tiles = [kpis.kgWeighedToday && <KgWeighedTodayCard key="kg" kpi={kpis.kgWeighedToday} />].filter(Boolean);
+  const tiles = [
+    kpis.kgWeighedToday && <KgWeighedTodayCard key="kg" kpi={kpis.kgWeighedToday} />,
+    kpis.workPermitAlerts && <WorkPermitAlertsCard key="permits" kpi={kpis.workPermitAlerts} />,
+  ].filter(Boolean);
   if (tiles.length === 0) return null;
   return (
     <section className="dashboard-kpi-strip" aria-label="Today at a glance">

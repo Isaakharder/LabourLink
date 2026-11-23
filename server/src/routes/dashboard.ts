@@ -117,15 +117,25 @@ router.get(
 // KPI strip: small greenhouse-wide figures for today (greenhouse-local
 // date). Read-only. Each KPI is null when it doesn't apply here (no
 // LabourLink Scale -> kgWeighedToday is null), and the Dashboard hides that
-// card. Scale figures are Administrator/Manager only, like the Scale
-// Weighings page they summarize.
+// card. Administrator/Manager only, like the Scale Weighings page and the
+// work permit alerts these summarize. workPermitAlerts counts exactly the
+// alerts GET /work-permit-alerts lists (same function, same "today").
 router.get(
   "/kpis",
   requireAuth,
   requireRole("Administrator", "Manager"),
   asyncHandler(async (_req, res) => {
     const date = calendarDateInAppTimezone(new Date());
-    res.json({ date, kgWeighedToday: await getKgWeighedOnDate(pool, date) });
+    const [kgWeighedToday, alerts] = await Promise.all([getKgWeighedOnDate(pool, date), getActiveWorkPermitAlerts(pool, date)]);
+    res.json({
+      date,
+      kgWeighedToday,
+      workPermitAlerts: {
+        active: alerts.length,
+        expired: alerts.filter((a) => a.severity === "expired").length,
+        under30Days: alerts.filter((a) => a.severity === "red").length,
+      },
+    });
   })
 );
 

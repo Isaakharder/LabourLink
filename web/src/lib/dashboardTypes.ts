@@ -75,7 +75,15 @@ export interface KgWeighedKpi {
   lastWeighedAt: string | null;
 }
 
+// Counts of the alerts listed on Employees -> Work Permits.
+export interface WorkPermitAlertsKpi {
+  active: number;
+  expired: number;
+  under30Days: number;
+}
+
 export interface GetDashboardKpisResponse {
   date: string;
   kgWeighedToday: KgWeighedKpi | null;
+  workPermitAlerts: WorkPermitAlertsKpi | null;
 }

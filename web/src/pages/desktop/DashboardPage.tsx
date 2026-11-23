@@ -104,7 +104,7 @@ export function DashboardPage() {
         </div>
         <div className="dashboard-header-actions">
           {canEdit && (
-            <button type="button" onClick={() => setShowBinCompletions(true)}>
+            <button type="button" className="dashboard-secondary-button" onClick={() => setShowBinCompletions(true)}>
               Bin Completions
             </button>
           )}
