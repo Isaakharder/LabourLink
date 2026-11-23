@@ -11,16 +11,27 @@
 --                             total number of plants planted (optional
 --                             until it is known).
 --   variety_row_assignments   which variety each greenhouse row holds in a
---                             season: one variety per row per season.
+--                             season: one variety per row per season, with
+--                             a snapshot of the row's length for that
+--                             season.
 --
 -- History: a harvest on date D in row R belongs to the variety R held in
 -- the season covering D. Next season's assignments are new rows here, so
 -- they can never rewrite which variety a past harvest came from. Seasons
 -- are kept, not overwritten; one with assignments can't be deleted.
 --
+-- Row lengths: each assignment keeps row_length_ft, the row's saved
+-- length when it was assigned to the season. Every season figure (total
+-- length, plants per metre, per-row estimates) uses this snapshot, so a
+-- later layout change (a land resize rescales row lengths, a row may be
+-- removed) never silently changes a season's densities or a later yield
+-- calculation. Reassigning a row to another variety in the same season
+-- keeps its snapshot; only an explicit "use current layout lengths" action
+-- updates it.
+--
 -- Plant counts: variety_plantings.total_plants is what was actually
 -- planted for the variety. Per-row figures are calculated from it
--- (proportional to each row's saved length) and are never stored, so they
+-- (proportional to each row's season length) and are never stored, so they
 -- can't be mistaken for counted values. The existing per-row "Plants per
 -- row" settings (plant_densities / plant_density_rows, used for speed
 -- reporting) are unchanged and stay the separate, entered figure.
@@ -70,16 +81,19 @@ create index idx_variety_plantings_variety on variety_plantings (variety_id);
 
 -- A row assignment always belongs to a planting of that variety in that
 -- season (composite foreign key), so a row can't point at a variety the
--- season doesn't have. Rows are referenced, never copied: their saved
--- length_ft is read live. A row soft-deleted from the layout keeps its
--- assignment (history) and simply stops counting toward current totals.
+-- season doesn't have. A row later removed from the layout keeps its
+-- assignment and its length snapshot: it was planted that season, so it
+-- still counts toward that season's totals.
 create table variety_row_assignments (
   season_id uuid not null,
   greenhouse_row_id uuid not null references greenhouse_rows(id),
   variety_id uuid not null,
+  row_length_ft numeric not null,
   assigned_at timestamptz not null default now(),
+  length_saved_at timestamptz not null default now(),
   primary key (season_id, greenhouse_row_id),
-  foreign key (season_id, variety_id) references variety_plantings (season_id, variety_id)
+  foreign key (season_id, variety_id) references variety_plantings (season_id, variety_id),
+  constraint chk_variety_row_assignments_length_positive check (row_length_ft > 0)
 );
 
 create index idx_variety_row_assignments_variety on variety_row_assignments (season_id, variety_id);

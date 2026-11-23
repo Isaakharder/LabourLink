@@ -51,20 +51,22 @@ export function estimatePlantsByLength(totalPlants: number | null, rows: RowLeng
 }
 
 // The variety a row held on a greenhouse-local date: the assignment in the
-// season covering that date. Null when no season covers the date or the
-// row had no variety then. For the forecasting stage: a past harvest keeps
-// the variety planted at the time, whatever the row holds later.
+// season covering that date, with the row length saved for that season.
+// Null when no season covers the date or the row had no variety then. For
+// the forecasting stage: a past harvest keeps the variety planted at the
+// time and that season's row length, whatever the row holds later or
+// however the layout changes.
 export async function varietyForRowOnDate(
   db: Pool | PoolClient,
   greenhouseRowId: string,
   date: string
-): Promise<{ seasonId: string; varietyId: string } | null> {
+): Promise<{ seasonId: string; varietyId: string; rowLengthFt: number } | null> {
   const { rows } = await db.query(
-    `select a.season_id, a.variety_id
+    `select a.season_id, a.variety_id, a.row_length_ft
      from variety_row_assignments a
      join growing_seasons s on s.id = a.season_id
      where a.greenhouse_row_id = $1 and s.starts_on <= $2::date and (s.ends_on is null or s.ends_on >= $2::date)`,
     [greenhouseRowId, date]
   );
-  return rows[0] ? { seasonId: rows[0].season_id, varietyId: rows[0].variety_id } : null;
+  return rows[0] ? { seasonId: rows[0].season_id, varietyId: rows[0].variety_id, rowLengthFt: Number(rows[0].row_length_ft) } : null;
 }

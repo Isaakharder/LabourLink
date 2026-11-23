@@ -179,8 +179,10 @@ router.post(
             [id, copyFrom]
           );
           await client.query(
-            `insert into variety_row_assignments (season_id, greenhouse_row_id, variety_id)
-             select $1, a.greenhouse_row_id, a.variety_id
+            // The new season's length snapshot is the layout as it is now
+            // (the season being planted), not the source season's lengths.
+            `insert into variety_row_assignments (season_id, greenhouse_row_id, variety_id, row_length_ft)
+             select $1, a.greenhouse_row_id, a.variety_id, gr.length_ft
              from variety_row_assignments a join greenhouse_rows gr on gr.id = a.greenhouse_row_id
              where a.season_id = $2 and gr.deleted_at is null`,
             [id, copyFrom]
@@ -267,19 +269,25 @@ interface SeasonRow {
   phaseId: string;
   phaseName: string;
   rowNumber: number;
+  // The season's length for this row: its snapshot when assigned, else
+  // (unassigned) the current layout length.
   lengthFt: number;
+  // The row's length in the current layout (null if removed from it).
+  layoutLengthFt: number | null;
+  // Assigned, and the layout length no longer matches the snapshot.
+  lengthChanged: boolean;
   varietyId: string | null;
   enteredPlantsPerRow: number | null;
 }
 
 // Every current (not deleted) row in an active phase and land, plus any
-// row assigned in this season even if it has since been deleted (shown,
-// flagged, so its history is visible). enteredPlantsPerRow is the
-// existing Plant Density "Plants per row" setting, if the row has one.
+// row assigned in this season even if it has since been removed from the
+// layout (kept, flagged: it was planted that season). enteredPlantsPerRow
+// is the existing Plant Density "Plants per row" setting, if any.
 async function loadSeasonRows(seasonId: string): Promise<(SeasonRow & { deleted: boolean })[]> {
   const { rows } = await pool.query(
     `select gr.id, gl.name as land_name, gp.id as phase_id, gp.name as phase_name, gr.row_number, gr.length_ft,
-            gr.deleted_at is not null as deleted, a.variety_id, pd.count_per_row as entered_plants_per_row
+            a.row_length_ft, gr.deleted_at is not null as deleted, a.variety_id, pd.count_per_row as entered_plants_per_row
      from greenhouse_rows gr
      join greenhouse_phases gp on gp.id = gr.phase_id
      join greenhouse_lands gl on gl.id = gp.land_id
@@ -296,7 +304,9 @@ async function loadSeasonRows(seasonId: string): Promise<(SeasonRow & { deleted:
     phaseId: r.phase_id,
     phaseName: r.phase_name,
     rowNumber: r.row_number,
-    lengthFt: Number(r.length_ft),
+    lengthFt: Number(r.row_length_ft ?? r.length_ft),
+    layoutLengthFt: r.deleted ? null : Number(r.length_ft),
+    lengthChanged: r.row_length_ft != null && !r.deleted && Number(r.row_length_ft) !== Number(r.length_ft),
     deleted: r.deleted,
     varietyId: r.variety_id,
     enteredPlantsPerRow: r.entered_plants_per_row == null ? null : Number(r.entered_plants_per_row),
@@ -356,8 +366,11 @@ router.put(
           [seasonId, varietyId]
         );
         await client.query(
-          `insert into variety_row_assignments (season_id, greenhouse_row_id, variety_id)
-           select $1, unnest($2::uuid[]), $3
+          // A newly assigned row saves its current layout length as the
+          // season's snapshot. Moving a row to another variety in the same
+          // season keeps the snapshot it already has.
+          `insert into variety_row_assignments (season_id, greenhouse_row_id, variety_id, row_length_ft)
+           select $1, gr.id, $3, gr.length_ft from greenhouse_rows gr where gr.id = any($2::uuid[])
            on conflict (season_id, greenhouse_row_id) do update set variety_id = excluded.variety_id, assigned_at = now()
            where variety_row_assignments.variety_id is distinct from excluded.variety_id`,
           [seasonId, ids, varietyId]
@@ -369,6 +382,27 @@ router.put(
     });
     if (result.status !== 200) return res.status(result.status).json({ error: result.error });
     res.json({ rows: await loadSeasonRows(seasonId) });
+  })
+);
+
+// The only way a season's saved row lengths change: an Administrator
+// explicitly asks to take the current layout lengths (e.g. after fixing a
+// row that was drawn the wrong length). Rows removed from the layout keep
+// their snapshot. Returns how many rows changed.
+router.post(
+  "/seasons/:seasonId/use-layout-lengths",
+  canWrite,
+  asyncHandler(async (req, res) => {
+    const seasonId = seasonParam(req.params.seasonId);
+    if (!seasonId) return res.status(400).json({ error: "Invalid season id" });
+    if (!(await seasonExists(seasonId))) return res.status(404).json({ error: "Season not found" });
+    const { rowCount } = await pool.query(
+      `update variety_row_assignments a set row_length_ft = gr.length_ft, length_saved_at = now()
+       from greenhouse_rows gr
+       where a.season_id = $1 and gr.id = a.greenhouse_row_id and gr.deleted_at is null and a.row_length_ft <> gr.length_ft`,
+      [seasonId]
+    );
+    res.json({ updated: rowCount ?? 0, rows: await loadSeasonRows(seasonId) });
   })
 );
 
@@ -396,10 +430,11 @@ async function loadVarietiesForSeason(seasonId: string | null) {
   return varieties.map((v) => {
     const planting = plantings.find((p) => p.variety_id === v.id);
     const totalPlants = planting?.total_plants == null ? null : Number(planting.total_plants);
+    // Every row planted with this variety in the season, at the season's
+    // saved lengths: later layout changes don't move these figures.
     const assigned = rows.filter((r) => r.varietyId === v.id);
-    const current = assigned.filter((r) => !r.deleted);
-    const summary = summarizePlanting(totalPlants, current);
-    const withEntered = current.filter((r) => r.enteredPlantsPerRow != null);
+    const summary = summarizePlanting(totalPlants, assigned);
+    const withEntered = assigned.filter((r) => r.enteredPlantsPerRow != null);
     return {
       id: v.id,
       name: v.name,
@@ -410,7 +445,8 @@ async function loadVarietiesForSeason(seasonId: string | null) {
       totalPlants,
       summary: {
         rows: summary.rows,
-        deletedRows: assigned.length - current.length,
+        deletedRows: assigned.filter((r) => r.deleted).length,
+        lengthChangedRows: assigned.filter((r) => r.lengthChanged).length,
         totalLengthM: round(summary.totalLengthM, 1),
         plantsPerMetre: summary.plantsPerMetre == null ? null : round(summary.plantsPerMetre, 2),
         averageEstimatedPlantsPerRow: summary.averageEstimatedPlantsPerRow == null ? null : round(summary.averageEstimatedPlantsPerRow, 1),
@@ -584,8 +620,7 @@ router.get(
     const planting = await pool.query("select total_plants from variety_plantings where season_id = $1 and variety_id = $2", [seasonId, id]);
     const totalPlants = planting.rows[0]?.total_plants == null ? null : Number(planting.rows[0].total_plants);
     const assigned = (await loadSeasonRows(seasonId)).filter((r) => r.varietyId === id);
-    const current: (SeasonRow & { deleted: boolean })[] = assigned.filter((r) => !r.deleted);
-    const lengths: RowLength[] = current.map((r) => ({ id: r.id, lengthFt: r.lengthFt }));
+    const lengths: RowLength[] = assigned.map((r) => ({ id: r.id, lengthFt: r.lengthFt }));
     const estimates = estimatePlantsByLength(totalPlants, lengths);
 
     res.json({
@@ -596,8 +631,10 @@ router.get(
         phaseName: r.phaseName,
         rowNumber: r.rowNumber,
         lengthM: round(r.lengthFt * METRES_PER_FOOT, 1),
+        layoutLengthM: r.layoutLengthFt == null ? null : round(r.layoutLengthFt * METRES_PER_FOOT, 1),
+        lengthChanged: r.lengthChanged,
         deleted: r.deleted,
-        estimatedPlants: r.deleted || !estimates.has(r.id) ? null : round(estimates.get(r.id)!, 1),
+        estimatedPlants: estimates.has(r.id) ? round(estimates.get(r.id)!, 1) : null,
         enteredPlantsPerRow: r.enteredPlantsPerRow,
       })),
     });

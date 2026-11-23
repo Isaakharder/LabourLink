@@ -3,6 +3,8 @@ import { Modal } from "../ui/Modal";
 import { api, ApiError } from "../../lib/api";
 import { GrowingSeason } from "../../lib/varietyTypes";
 
+export const SUGGESTED_FIRST_SEASON = { name: "2027 Growing Season", startsOn: "2027-01-01" };
+
 interface Props {
   season: GrowingSeason | null; // null = new season
   seasons: GrowingSeason[];
@@ -12,11 +14,14 @@ interface Props {
 
 // New / edit growing season. Seasons can't overlap (the server checks), so
 // every harvest date belongs to one season's planting. A new season can
-// start as a copy of another season's plantings and row assignments.
+// start as a copy of another season's plantings and row assignments. With
+// no seasons yet, the form suggests "2027 Growing Season" from January 1,
+// 2027 (a suggestion only; nothing is created until it's saved).
 export function SeasonFormModal({ season, seasons, onClose, onSaved }: Props) {
   const latest = seasons[0];
-  const [name, setName] = useState(season?.name ?? "");
-  const [startsOn, setStartsOn] = useState(season?.startsOn ?? "");
+  const suggest = !season && seasons.length === 0;
+  const [name, setName] = useState(season?.name ?? (suggest ? SUGGESTED_FIRST_SEASON.name : ""));
+  const [startsOn, setStartsOn] = useState(season?.startsOn ?? (suggest ? SUGGESTED_FIRST_SEASON.startsOn : ""));
   const [endsOn, setEndsOn] = useState(season?.endsOn ?? "");
   const [copyFrom, setCopyFrom] = useState<string>(season ? "" : latest?.id ?? "");
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -88,6 +93,9 @@ export function SeasonFormModal({ season, seasons, onClose, onSaved }: Props) {
             )}
           </div>
         </section>
+        {suggest && (
+          <p className="field-hint">Suggested first season. Change the name or dates as needed; an earlier season (e.g. 2026) can be added later for history.</p>
+        )}
         {formError && <p className="error-text">{formError}</p>}
         <div className="employee-form-actions">
           <button type="button" onClick={onClose} disabled={saving}>

@@ -30,7 +30,7 @@ export function VarietyRowsModal({ variety, season, onClose }: Props) {
       <p className="variety-rows-intro">
         {totalPlants == null
           ? "Record plants planted for this variety to calculate plants per row."
-          : `${formatNumber(totalPlants, 0)} plants planted, shared across these rows in proportion to each row's saved length.`}
+          : `${formatNumber(totalPlants, 0)} plants planted, shared across these rows in proportion to each row's length saved for this season.`}
       </p>
       {error && <p className="error-text">{error}</p>}
       {!rows ? (
@@ -44,7 +44,7 @@ export function VarietyRowsModal({ variety, season, onClose }: Props) {
               <tr>
                 <th>Phase</th>
                 <th>Row</th>
-                <th className="num">Length</th>
+                <th className="num">Season length</th>
                 <th className="num">
                   Estimated plants <span className="variety-calc-tag">Calculated</span>
                 </th>
@@ -61,7 +61,14 @@ export function VarietyRowsModal({ variety, season, onClose }: Props) {
                     {r.rowNumber}
                     {r.deleted && <span className="variety-deleted-tag">Removed from layout</span>}
                   </td>
-                  <td className="num">{formatNumber(r.lengthM, 1)} m</td>
+                  <td className="num">
+                    {formatNumber(r.lengthM, 1)} m
+                    {r.lengthChanged && r.layoutLengthM != null && (
+                      <span className="variety-layout-length" title="The current greenhouse layout has a different length for this row. This season keeps its saved length.">
+                        layout now {formatNumber(r.layoutLengthM, 1)} m
+                      </span>
+                    )}
+                  </td>
                   <td className="num">{r.estimatedPlants == null ? "—" : formatNumber(r.estimatedPlants, 1)}</td>
                   <td className="num">{r.enteredPlantsPerRow == null ? "—" : formatNumber(r.enteredPlantsPerRow, 0)}</td>
                 </tr>
@@ -71,7 +78,7 @@ export function VarietyRowsModal({ variety, season, onClose }: Props) {
         </div>
       )}
       <p className="field-hint variety-legend">
-        <strong>Calculated</strong>: from plants planted and row lengths, never counted in the row. <strong>Entered</strong>: the Plants per row setting
+        <strong>Calculated</strong>: from plants planted and the row lengths saved for this season, never counted in the row. <strong>Entered</strong>: the Plants per row setting
         from Basic Data → Density.
       </p>
     </Modal>

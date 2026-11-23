@@ -10808,8 +10808,6 @@ button.variety-row-chip {
 }
 
 .variety-assign-bar {
-  position: sticky;
-  bottom: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
@@ -10836,4 +10834,42 @@ button.variety-row-chip {
   .variety-toolbar-actions {
     margin-left: 0;
   }
+}
+
+.variety-layout-length {
+  display: block;
+  font-size: 0.72rem;
+  color: #92400e;
+}
+
+.variety-length-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 1rem;
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #fcd34d;
+  border-radius: var(--radius);
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 0.86rem;
+}
+
+.variety-length-notice span {
+  flex: 1 1 24rem;
+}
+
+/* The rows dialog fits its five columns without sideways scrolling:
+   headers may wrap, and the tags sit under the header text. */
+.variety-rows-table th {
+  white-space: normal;
+  vertical-align: bottom;
+}
+
+.variety-rows-table th .variety-calc-tag,
+.variety-rows-table th .variety-entered-tag {
+  display: block;
+  width: max-content;
+  margin: 0.25rem 0 0 auto;
 }

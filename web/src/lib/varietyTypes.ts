@@ -11,9 +11,12 @@ export interface GrowingSeason {
 
 export interface VarietySummary {
   rows: number;
-  // Rows assigned this season that have since been deleted from the
-  // layout: kept as history, not counted in the totals.
+  // Rows assigned this season that have since been removed from the
+  // layout: still planted that season, so still counted.
   deletedRows: number;
+  // Rows whose current layout length differs from the length saved for
+  // this season (the season's figures keep using the saved length).
+  lengthChangedRows: number;
   totalLengthM: number;
   // Calculated from plants planted and saved row lengths.
   plantsPerMetre: number | null;
@@ -40,7 +43,10 @@ export interface SeasonRow {
   phaseId: string;
   phaseName: string;
   rowNumber: number;
+  // The season's saved length when assigned, else the layout length.
   lengthFt: number;
+  layoutLengthFt: number | null;
+  lengthChanged: boolean;
   deleted: boolean;
   varietyId: string | null;
   enteredPlantsPerRow: number | null;
@@ -51,7 +57,11 @@ export interface VarietyRowDetail {
   landName: string;
   phaseName: string;
   rowNumber: number;
+  // Saved for the season.
   lengthM: number;
+  // In the current layout (null if removed from it).
+  layoutLengthM: number | null;
+  lengthChanged: boolean;
   deleted: boolean;
   estimatedPlants: number | null;
   enteredPlantsPerRow: number | null;

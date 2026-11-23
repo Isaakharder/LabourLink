@@ -1,9 +1,10 @@
 // Basic Data -> Varieties API (routes/varieties.ts, 076_varieties.sql)
 // through the real router: the variety catalogue, growing seasons (no
 // overlaps, copy to a new season), plants planted per variety per season,
-// bulk row assignment, calculated density from saved row lengths, the
-// entered Plant Density figure kept separate, history by season, delete
-// rules and permissions. Seasons use far-future dates and RUN_ID-suffixed
+// bulk row assignment, calculated density from each season's saved row
+// lengths (unchanged by a real greenhouse resize through the layout API),
+// the entered Plant Density figure kept separate, history by season,
+// delete rules and permissions. Seasons use far-future dates and RUN_ID-suffixed
 // names; everything created is removed at the end.
 //
 // Run with: npm run test:varieties
@@ -15,6 +16,7 @@ import { pool } from "../db";
 import { signSession } from "../middleware/auth";
 import { METRES_PER_FOOT, varietyForRowOnDate } from "../lib/varietyPlanting";
 import varietiesRouter from "./varieties";
+import greenhouseLayoutRouter from "./greenhouseLayout";
 
 let pass = 0;
 let fail = 0;
@@ -38,6 +40,7 @@ async function main() {
   app.use(express.json());
   app.use(cookieParser());
   app.use("/api/varieties", varietiesRouter);
+  app.use("/api/greenhouse-layout", greenhouseLayoutRouter);
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     res.status(500).json({ error: "Internal server error", detail: String(err) });
   });
@@ -234,11 +237,82 @@ async function main() {
     check((await varietyForRowOnDate(pool, p1Rows[0], `${Y}-12-25`)) === null, "a date between seasons has no variety");
     check((await call("GET", `/?seasonId=${season1}`, admin)).body.varieties.find((v: Json) => v.id === red).summary.rows === 8, "changing next season never changes last season");
 
-    // ---- A row deleted from the layout keeps its history ----
+    // ---- Season row-length snapshot vs a real greenhouse resize ----
+    const lengthOf = async (rowId: string) => Number((await pool.query(`select length_ft from greenhouse_rows where id = $1`, [rowId])).rows[0].length_ft);
+    const season1Before = (await call("GET", `/?seasonId=${season1}`, admin)).body.varieties.find((v: Json) => v.id === red);
+    const season1RowsBefore = (await call("GET", `/${red}/rows?seasonId=${season1}`, admin)).body.rows;
+    const season2Before = (await call("GET", `/?seasonId=${season2}`, admin)).body.varieties.find((v: Json) => v.id === red);
+    check(season1RowsBefore.every((r: Json) => r.lengthM === Math.round(192 * METRES_PER_FOOT * 10) / 10 && r.lengthChanged === false), "before the resize: season lengths match the layout", season1RowsBefore);
+
+    // Widen the land 2000 ft -> 2400 ft East-West through the layout API:
+    // every horizontal row's length is rescaled x1.2 (192 ft -> 230.4 ft).
+    const resize = await fetch(`${BASE}/api/greenhouse-layout/lands/${landId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie: `labourlink_session=${admin}` },
+      body: JSON.stringify({ eastWestFeet: 2400 }),
+    });
+    check(resize.status === 200, "greenhouse resize through the layout API", resize.status);
+    check(Math.abs((await lengthOf(p1Rows[2])) - 230.4) < 1e-9, "the resize really changed the layout row length (192 -> 230.4 ft)", await lengthOf(p1Rows[2]));
+
+    const season1After = (await call("GET", `/?seasonId=${season1}`, admin)).body.varieties.find((v: Json) => v.id === red);
+    const season1RowsAfter = (await call("GET", `/${red}/rows?seasonId=${season1}`, admin)).body.rows;
+    for (const k of ["rows", "totalLengthM", "plantsPerMetre", "averageEstimatedPlantsPerRow"]) {
+      check(season1After.summary[k] === season1Before.summary[k], `after the resize: last season's ${k} is unchanged`, { before: season1Before.summary[k], after: season1After.summary[k] });
+    }
+    check(
+      JSON.stringify(season1RowsAfter.map((r: Json) => [r.id, r.lengthM, r.estimatedPlants])) === JSON.stringify(season1RowsBefore.map((r: Json) => [r.id, r.lengthM, r.estimatedPlants])),
+      "after the resize: last season's per-row lengths and plant estimates are unchanged"
+    );
+    check(season1After.summary.lengthChangedRows === season1After.summary.rows, "the rows whose layout length now differs are flagged", season1After.summary);
+    check(season1RowsAfter.every((r: Json) => r.lengthChanged && r.layoutLengthM === Math.round(230.4 * METRES_PER_FOOT * 10) / 10), "each row shows the new layout length beside its saved one", season1RowsAfter[0]);
+    check(
+      JSON.stringify((await call("GET", `/?seasonId=${season2}`, admin)).body.varieties.find((v: Json) => v.id === red).summary) ===
+        JSON.stringify({ ...season2Before.summary, lengthChangedRows: season2Before.summary.rows }),
+      "the next season's saved figures don't move either (only flagged)"
+    );
+
+    // History lookups: the right season, the saved assignment and length.
+    const past = await varietyForRowOnDate(pool, p1Rows[2], `${Y}-06-15`);
+    check(past?.seasonId === season1 && past.varietyId === red && past.rowLengthFt === 192, "a past harvest date resolves to last season, its variety and its saved 192 ft length", past);
+    const later = await varietyForRowOnDate(pool, p1Rows[0], `${Y + 1}-06-15`);
+    check(later?.seasonId === season2 && later.varietyId === yellow, "a date in the next season resolves to the next season's assignment", later);
+    check((await varietyForRowOnDate(pool, p1Rows[2], `${Y}-01-05`))?.seasonId === season1, "a season's first day belongs to it");
+    check((await varietyForRowOnDate(pool, p1Rows[2], `${Y}-11-30`))?.seasonId === season1, "a season's last day belongs to it");
+    check((await varietyForRowOnDate(pool, p1Rows[2], `${Y + 1}-01-03`)) === null, "the day before the next season starts has no variety");
+
+    // Moving a row to another variety in the same season keeps its saved length.
+    await call("PUT", `/seasons/${season1}/rows`, admin, { rowIds: [p1Rows[3]], varietyId: yellow });
+    check((await varietyForRowOnDate(pool, p1Rows[3], `${Y}-06-15`))?.rowLengthFt === 192, "reassigning a row within the season keeps its saved length");
+    await call("PUT", `/seasons/${season1}/rows`, admin, { rowIds: [p1Rows[3]], varietyId: red });
+
+    // A season created now saves the current layout.
+    const s4 = await call("POST", "/seasons", admin, { name: `QA ${RUN_ID} ${Y + 2}`, startsOn: `${Y + 2}-01-01`, endsOn: `${Y + 2}-11-30`, copyFromSeasonId: season1 });
+    ids.seasons.push(s4.body.season.id);
+    check((await varietyForRowOnDate(pool, p1Rows[2], `${Y + 2}-06-15`))?.rowLengthFt === 230.4, "a season copied after the resize saves the new layout length", await varietyForRowOnDate(pool, p1Rows[2], `${Y + 2}-06-15`));
+    check((await varietyForRowOnDate(pool, p1Rows[2], `${Y}-06-15`))?.rowLengthFt === 192, "...while last season keeps 192 ft");
+
+    // Only an explicit Administrator action takes the layout lengths.
+    check((await call("POST", `/seasons/${season1}/use-layout-lengths`, manager)).status === 403, "Manager can't update a season's saved lengths");
+    const useLayout = await call("POST", `/seasons/${s4.body.season.id}/use-layout-lengths`, admin);
+    check(useLayout.status === 200 && useLayout.body.updated === 0, "a season already matching the layout has nothing to update", useLayout.body);
+
+    // ---- A row removed from the layout keeps its season history ----
+    const beforeRemove = (await call("GET", `/?seasonId=${season1}`, admin)).body.varieties.find((v: Json) => v.id === red).summary;
     await pool.query(`update greenhouse_rows set deleted_at = now() where id = $1`, [p1Rows[1]]);
-    const afterDelete = (await call("GET", `/?seasonId=${season1}`, admin)).body.varieties.find((v: Json) => v.id === red).summary;
-    check(afterDelete.rows === 7 && afterDelete.deletedRows === 1, "a deleted row stops counting but its assignment is kept", afterDelete);
-    check((await varietyForRowOnDate(pool, p1Rows[1], `${Y}-06-15`))?.varietyId === red, "history for a deleted row is still answerable");
+    const afterRemove = (await call("GET", `/?seasonId=${season1}`, admin)).body.varieties.find((v: Json) => v.id === red).summary;
+    check(
+      afterRemove.rows === beforeRemove.rows && afterRemove.totalLengthM === beforeRemove.totalLengthM && afterRemove.plantsPerMetre === beforeRemove.plantsPerMetre && afterRemove.deletedRows === 1,
+      "removing a row from the layout doesn't change last season's figures (row kept, flagged)",
+      { beforeRemove, afterRemove }
+    );
+    check((await varietyForRowOnDate(pool, p1Rows[1], `${Y}-06-15`))?.varietyId === red, "history for a removed row is still answerable");
+
+    // The explicit action updates rows still in the layout, never removed ones.
+    const season1Assigned = Number((await pool.query(`select count(*) from variety_row_assignments where season_id = $1`, [season1])).rows[0].count);
+    const refreshed = await call("POST", `/seasons/${season1}/use-layout-lengths`, admin);
+    check(refreshed.status === 200 && refreshed.body.updated === season1Assigned - 1, "use current layout lengths updates the season's rows still in the layout", refreshed.body.updated);
+    check((await varietyForRowOnDate(pool, p1Rows[2], `${Y}-06-15`))?.rowLengthFt === 230.4, "...to the current layout length");
+    check((await varietyForRowOnDate(pool, p1Rows[1], `${Y}-06-15`))?.rowLengthFt === 192, "...and a removed row keeps its saved length");
     await pool.query(`update greenhouse_rows set deleted_at = null where id = $1`, [p1Rows[1]]);
 
     // ---- Deactivate / delete rules ----

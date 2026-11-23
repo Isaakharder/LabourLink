@@ -4,7 +4,9 @@
 // entered figures labelled apart, adding a variety with plants planted,
 // bulk row assignment by range (no shift-click, tablet-friendly) with a
 // confirmation before reassigning, the read-only view for Managers, and
-// the no-season empty state. lib/api.ts is mocked; the server rules are
+// the no-season empty state with the suggested first season, and the
+// notice + explicit action when the layout's row lengths differ from the
+// lengths saved for the season. lib/api.ts is mocked; the server rules are
 // covered by server/src/routes/varieties.test.ts.
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
@@ -48,6 +50,8 @@ vi.mock("../../../lib/api", () => {
           rows = rows.map((r) => (b.rowIds.includes(r.id) ? { ...r, varietyId: b.varietyId } : r));
           return { rows };
         }
+        if (path.endsWith("/use-layout-lengths")) return { updated: 2, rows };
+        if (path === "/api/varieties/seasons" && method === "POST") return { season: { id: "s-new" } };
         return { id: "new-variety" };
       }
       if (path === "/api/varieties/seasons") return { seasons, defaultSeasonId: seasons.find((s) => s.isCurrent)?.id ?? seasons[0]?.id ?? null };
@@ -70,6 +74,7 @@ function variety(overrides: Partial<Variety>): Variety {
     summary: {
       rows: 10,
       deletedRows: 0,
+      lengthChangedRows: 0,
       totalLengthM: 585.2,
       plantsPerMetre: 5.43,
       averageEstimatedPlantsPerRow: 318,
@@ -88,6 +93,8 @@ function seasonRows(): SeasonRow[] {
     phaseName: "Phase 1",
     rowNumber: i + 1,
     lengthFt: 192,
+    layoutLengthFt: 192,
+    lengthChanged: false,
     deleted: false,
     varietyId: i < 2 ? "v-red" : null,
     enteredPlantsPerRow: null,
@@ -225,5 +232,51 @@ describe("VarietiesTab", () => {
     await act(async () => {});
     expect(screen.queryByText(/Rows in/)).not.toBeInTheDocument();
     expect(vi.mocked(api).mock.calls.some((c) => String(c[0]).startsWith("/api/varieties/rows"))).toBe(false);
+  });
+
+  it("suggests 2027 Growing Season from January 1, 2027 for the first season, creating nothing until saved", async () => {
+    const user = userEvent.setup();
+    seasons = [];
+    varieties = [];
+    renderTab();
+    await screen.findByText(/New season suggests 2027 Growing Season from January 1, 2027/);
+    expect(writes).toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: "New season" }));
+    expect(screen.getByLabelText("Name *")).toHaveValue("2027 Growing Season");
+    expect(screen.getByLabelText("Starts *")).toHaveValue("2027-01-01");
+    expect(screen.getByLabelText(/^Ends/)).toHaveValue("");
+    expect(writes).toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: "Create season" }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]).toEqual({ path: "/api/varieties/seasons", method: "POST", body: { name: "2027 Growing Season", startsOn: "2027-01-01", endsOn: null } });
+  });
+
+  it("doesn't prefill the suggestion once a season exists", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByRole("table");
+    await user.click(screen.getByRole("button", { name: "New season" }));
+    expect(screen.getByLabelText("Name *")).toHaveValue("");
+  });
+
+  it("says when the layout's row lengths differ from the season's saved lengths, and only changes them after confirmation", async () => {
+    const user = userEvent.setup();
+    rows = seasonRows().map((r) => (r.varietyId ? { ...r, layoutLengthFt: 230.4, lengthChanged: true } : r));
+    renderTab();
+    expect(await screen.findByText(/2 rows have a different length in the current greenhouse layout than the length saved for 2026 season/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Use current layout lengths" }));
+    expect(screen.getByText(/This changes 2026 season's row lengths, plants per metre and plant estimates/)).toBeInTheDocument();
+    expect(writes).toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: "Use current lengths" }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]).toEqual({ path: "/api/varieties/seasons/s1/use-layout-lengths", method: "POST", body: undefined });
+  });
+
+  it("shows the length notice to a Manager without the action", async () => {
+    role = "Manager";
+    rows = seasonRows().map((r) => (r.varietyId ? { ...r, layoutLengthFt: 230.4, lengthChanged: true } : r));
+    renderTab();
+    await screen.findByText(/2 rows have a different length/);
+    expect(screen.queryByRole("button", { name: "Use current layout lengths" })).not.toBeInTheDocument();
   });
 });
