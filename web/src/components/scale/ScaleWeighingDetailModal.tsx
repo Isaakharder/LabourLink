@@ -5,6 +5,7 @@ import { api, ApiError } from "../../lib/api";
 import { uuid } from "../../lib/uuid";
 import { BIN_CYCLE_STATUS_LABELS, ScaleWeighingDetail, STATUS_LABELS, ScaleWeighingStatus } from "../../lib/scaleWeighingTypes";
 import { formatDateLongInAppTimezone, formatTimeInAppTimezone } from "../../lib/timezone";
+import { WeighingRowsList } from "./WeighingRowsCell";
 import { StatusBadge } from "./StatusBadge";
 
 const when = (iso: string) => `${formatDateLongInAppTimezone(iso)} ${formatTimeInAppTimezone(iso)}`;
@@ -144,6 +145,10 @@ export function ScaleWeighingDetailModal({ weighingId, onClose, onChanged }: { w
             <dt>Bin</dt>
             <dd>
               {w.bin.name} · tag {w.rfidTag}
+            </dd>
+            <dt>Rows</dt>
+            <dd>
+              <WeighingRowsList rows={w.rows} />
             </dd>
             <dt>Weights</dt>
             <dd>

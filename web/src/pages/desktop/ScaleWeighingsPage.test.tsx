@@ -39,6 +39,14 @@ const day: ScaleWeighingDay = {
       pendingUntil: null,
       stationName: "Weigh station 1",
       flagCount: 0,
+      rows: {
+        status: "known",
+        rows: [
+          { id: "r-12", phaseName: "Phase 1", rowNumber: 12, label: "Phase 1 · Row 12" },
+          { id: "r-13", phaseName: "Phase 1", rowNumber: 13, label: "Phase 1 · Row 13" },
+          { id: "r-571", phaseName: "Phase 2", rowNumber: 571, label: "Phase 2 · Row 571" },
+        ],
+      },
     },
     {
       id: "w-2",
@@ -57,8 +65,10 @@ const day: ScaleWeighingDay = {
       pendingUntil: null,
       stationName: "Weigh station 1",
       flagCount: 0,
+      rows: { status: "unknown", code: "duplicate", reason: "A repeat weighing of the same bin within five minutes; the rows are on the first weighing." },
     },
   ],
+  statusCounts: { all: 2, credited: 1, pending: 0, needs_review: 0, expired: 0, voided: 0, not_credited: 1, duplicate: 1 },
   filters: { bins: [{ id: "b-77", name: "Bin 77" }], employees: [{ id: "e-1", name: "Ruben Ortiz" }] },
 };
 
@@ -201,7 +211,7 @@ describe("ScaleWeighingsPage", () => {
     const rows = screen.getAllByRole("row");
     expect(within(rows[1]).getByText("Credited")).toBeInTheDocument();
     expect(within(rows[1]).getByText("172.5")).toBeInTheDocument();
-    expect(within(rows[2]).getByText("Duplicate")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("Duplicate", { selector: ".scale-status" })).toBeInTheDocument();
     expect(rows[2]).toHaveClass("scale-weighing-not-counted");
   });
 
@@ -211,7 +221,7 @@ describe("ScaleWeighingsPage", () => {
     await screen.findByText("Ruben Ortiz", { selector: "td" });
     await user.click(screen.getByRole("button", { name: "Previous day" }));
     await waitFor(() => expect(lastListCall()).toContain(`date=${addCalendarDays(todayInAppTimezone(), -1)}`));
-    await user.selectOptions(screen.getByRole("combobox", { name: "Status" }), "not_credited");
+    await user.click(within(screen.getByRole("group", { name: "Status" })).getByRole("button", { name: /Not credited/ }));
     await waitFor(() => expect(lastListCall()).toContain("status=not_credited"));
     await user.selectOptions(screen.getByRole("combobox", { name: "Bin" }), "b-77");
     await waitFor(() => expect(lastListCall()).toContain("carrierId=b-77"));
@@ -220,6 +230,66 @@ describe("ScaleWeighingsPage", () => {
     await user.click(screen.getByRole("button", { name: "Today" }));
     await waitFor(() => expect(lastListCall()).toContain(`date=${todayInAppTimezone()}`));
     expect(screen.getByRole("button", { name: "Next day" })).toBeDisabled();
+  });
+
+  it("shows the rows each bin was picked in, grouped by phase, and — when unknown", async () => {
+    render(<ScaleWeighingsPage />);
+    await screen.findByText("Ruben Ortiz", { selector: "td" });
+    const rows = screen.getAllByRole("row");
+    const known = within(rows[1]).getByLabelText("Rows: Phase 1 · Row 12, Phase 1 · Row 13, Phase 2 · Row 571");
+    expect(within(known).getByText("12, 13")).toBeInTheDocument();
+    expect(within(known).getByText("571")).toBeInTheDocument();
+    expect(within(known).getByText("Phase 2")).toBeInTheDocument();
+    // Unknown: a visible label, and the full reason on tap (no hover needed).
+    const why = within(rows[2]).getByRole("button", { name: /^Rows unknown: Duplicate\. Show why/ });
+    expect(why).toHaveTextContent("—");
+    expect(why).toHaveAttribute("aria-expanded", "false");
+    expect(within(rows[2]).queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  it("reveals why rows are unknown on tap or keyboard, without opening the weighing", async () => {
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await screen.findByText("Ruben Ortiz", { selector: "td" });
+    const row = screen.getAllByRole("row")[2];
+    const detailCalls = () => apiMock.mock.calls.filter((c) => /^\/api\/scale-weighings\/[^?]/.test(c[0] as string)).length;
+    const before = detailCalls();
+    await user.click(within(row).getByRole("button", { name: /Show why/ }));
+    expect(within(row).getByRole("note")).toHaveTextContent("A repeat weighing of the same bin within five minutes");
+    expect(within(row).getByRole("button", { name: /Hide why/ })).toHaveAttribute("aria-expanded", "true");
+    expect(detailCalls()).toBe(before);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    within(row).getByRole("button", { name: /Hide why/ }).focus();
+    await user.keyboard("{Enter}");
+    expect(within(row).queryByRole("note")).not.toBeInTheDocument();
+    expect(detailCalls()).toBe(before);
+  });
+
+  it("shows status counts on the filter chips and clears filters", async () => {
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await screen.findByText("Ruben Ortiz", { selector: "td" });
+    const tabs = within(screen.getByRole("group", { name: "Status" }));
+    expect(tabs.getByRole("button", { name: "All 2" })).toHaveAttribute("aria-pressed", "true");
+    // Needs review leaves out the duplicate; the duplicate has its own chip,
+    // and the Needs review card shows the same number as the chip.
+    expect(tabs.getByRole("button", { name: "Needs review 0" })).toBeInTheDocument();
+    expect(tabs.getByRole("button", { name: "Duplicate 1" })).toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "Day totals" })).getByText("Needs review").parentElement).toHaveTextContent("Needs review0");
+    expect(screen.queryByRole("button", { name: "Clear filters" })).not.toBeInTheDocument();
+    await user.click(tabs.getByRole("button", { name: "Credited 1" }));
+    await waitFor(() => expect(lastListCall()).toContain("status=credited"));
+    expect(tabs.getByRole("button", { name: "Credited 1" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getAllByRole("button", { name: "Clear filters" })[0]);
+    await waitFor(() => expect(lastListCall()).toContain("status=all"));
+  });
+
+  it("shows the rows in the weighing's detail", async () => {
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await user.click(await screen.findByText("Ruben Ortiz", { selector: "td" }));
+    expect(await screen.findByText("Rows 12, 13")).toBeInTheDocument();
+    expect(screen.getByText("Row 571")).toBeInTheDocument();
   });
 
   it("opens a weighing with its history, and an Administrator can void the credit with a reason", async () => {

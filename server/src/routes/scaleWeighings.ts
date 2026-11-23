@@ -18,6 +18,7 @@ import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { recordWeighingEvent } from "../lib/scaleMatching";
 import { LATE_SUPERSEDED_REASON } from "../lib/binCycles";
+import { loadWeighingRows, WeighingRows } from "../lib/scaleWeighingRows";
 import { calendarDateInAppTimezone, getDayBoundsUtc } from "../lib/timezone";
 import { requireAuth, requireRole } from "../middleware/auth";
 
@@ -27,6 +28,29 @@ router.use(requireAuth);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const STATUSES = ["pending", "credited", "needs_review", "expired", "voided"];
+
+// The status filter choices, one definition for the filter, its counts and
+// the summary cards. "needs_review" is a weighing held for an administrator:
+// status needs_review and NOT a duplicate (a duplicate is a repeat weighing
+// within five minutes, never reviewed or counted; it has its own choice).
+// "not_credited" is everything that didn't become a credit: pending, needs
+// review (duplicates included) and expired.
+export const STATUS_FILTERS = ["all", "credited", "pending", "needs_review", "not_credited", "expired", "voided", "duplicate"] as const;
+type StatusFilter = (typeof STATUS_FILTERS)[number];
+export function matchesStatusFilter(r: { status: string; is_duplicate: boolean }, filter: StatusFilter): boolean {
+  switch (filter) {
+    case "all":
+      return true;
+    case "needs_review":
+      return r.status === "needs_review" && !r.is_duplicate;
+    case "duplicate":
+      return r.is_duplicate;
+    case "not_credited":
+      return ["pending", "needs_review", "expired"].includes(r.status);
+    default:
+      return r.status === filter;
+  }
+}
 
 const kg = (g: number | string) => Math.round(Number(g)) / 1000;
 const fullName = (alias: string) => `trim(${alias}.first_name || ' ' || coalesce(${alias}.last_name, ''))`;
@@ -39,10 +63,11 @@ router.get(
     const { start, end } = getDayBoundsUtc(date);
     const carrierId = typeof req.query.carrierId === "string" && UUID_RE.test(req.query.carrierId) ? req.query.carrierId : null;
     const employeeId = typeof req.query.employeeId === "string" && UUID_RE.test(req.query.employeeId) ? req.query.employeeId : null;
-    const status = typeof req.query.status === "string" ? req.query.status : "all";
-    if (status !== "all" && status !== "not_credited" && !STATUSES.includes(status)) {
+    const statusParam = typeof req.query.status === "string" ? req.query.status : "all";
+    if (!(STATUS_FILTERS as readonly string[]).includes(statusParam)) {
       return res.status(400).json({ error: "Unknown status filter" });
     }
+    const status = statusParam as StatusFilter;
 
     const { rows } = await pool.query(
       `select w.id, w.weighed_at, w.carrier_id, c.name as bin_name, w.rfid_tag, w.gross_g, w.tare_g, w.net_g,
@@ -69,16 +94,20 @@ router.get(
       if (r.employee_id) employees.set(r.employee_id, r.employee_name);
     }
 
-    const shown = rows.filter(
-      (r) =>
-        (!carrierId || r.carrier_id === carrierId) &&
-        (!employeeId || r.employee_id === employeeId) &&
-        (status === "all" ||
-          (status === "not_credited" ? ["pending", "needs_review", "expired"].includes(r.status) : r.status === status))
-    );
+    // The day under the bin and employee filters. The summary cards and the
+    // status counts describe this set; the status filter only chooses which
+    // of these weighings are listed, so the cards and the counts always agree.
+    const base = rows.filter((r) => (!carrierId || r.carrier_id === carrierId) && (!employeeId || r.employee_id === employeeId));
+    const shown = base.filter((r) => matchesStatusFilter(r, status));
 
-    const production = shown.filter((r) => r.counts_for_production);
-    const credits = shown.filter((r) => r.counts_as_credit);
+    // Rows each bin was picked in (display only; see scaleWeighingRows.ts).
+    const rowsById = await loadWeighingRows(pool, shown);
+    const unknownRows: WeighingRows = { status: "unknown", code: "noCycle", reason: "" };
+
+    const statusCounts = Object.fromEntries(STATUS_FILTERS.map((f) => [f, base.filter((r) => matchesStatusFilter(r, f)).length]));
+
+    const production = base.filter((r) => r.counts_for_production);
+    const credits = base.filter((r) => r.counts_as_credit);
     res.json({
       date,
       totals: {
@@ -86,12 +115,12 @@ router.get(
         binsWeighed: production.length,
         creditedNetKg: kg(credits.reduce((sum, r) => sum + r.net_g, 0)),
         credited: credits.length,
-        pending: shown.filter((r) => r.status === "pending").length,
-        needsReview: shown.filter((r) => r.status === "needs_review" && !r.is_duplicate).length,
-        neverCredited: shown.filter((r) => (r.status === "needs_review" || r.status === "expired") && !r.is_duplicate).length,
-        duplicates: shown.filter((r) => r.is_duplicate).length,
-        voided: shown.filter((r) => r.status === "voided").length,
-        trial: shown.filter((r) => !r.credits_live).length,
+        pending: statusCounts.pending,
+        needsReview: statusCounts.needs_review,
+        neverCredited: base.filter((r) => (r.status === "needs_review" || r.status === "expired") && !r.is_duplicate).length,
+        duplicates: statusCounts.duplicate,
+        voided: statusCounts.voided,
+        trial: base.filter((r) => !r.credits_live).length,
       },
       weighings: shown.map((r) => ({
         id: r.id,
@@ -110,7 +139,9 @@ router.get(
         pendingUntil: r.status === "pending" ? r.pending_until : null,
         stationName: r.station_name,
         flagCount: r.flag_count,
+        rows: rowsById.get(r.id) ?? unknownRows,
       })),
+      statusCounts,
       filters: {
         bins: [...bins].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })),
         employees: [...employees].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name)),
@@ -204,6 +235,7 @@ async function loadDetail(id: string) {
       [id]
     ),
   ]);
+  const rowsInfo = (await loadWeighingRows(pool, [w])).get(w.id) ?? { status: "unknown", code: "noCycle", reason: "" };
   const cy = cycle.rows[0];
   const tracked = cy?.tracked === true;
   return {
@@ -227,6 +259,7 @@ async function loadDetail(id: string) {
     pendingUntil: w.status === "pending" ? w.pending_until : null,
     resolvedAt: w.resolved_at,
     stationName: w.station_name,
+    rows: rowsInfo,
     // null: decided before picking cycles started. "none": no cycle (bin
     // weighed again with no phone scan since), never credited.
     pickingCycle: !tracked

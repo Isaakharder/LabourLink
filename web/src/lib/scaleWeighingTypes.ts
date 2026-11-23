@@ -2,6 +2,20 @@
 
 export type ScaleWeighingStatus = "pending" | "credited" | "needs_review" | "expired" | "voided";
 
+// Greenhouse rows the bin was picked in during the bin use this weighing
+// ended (server/src/lib/scaleWeighingRows.ts). "unknown" is shown as — with
+// the reason, never as a guess.
+export interface WeighingPickedRow {
+  id: string;
+  phaseName: string;
+  rowNumber: number;
+  label: string;
+}
+
+export type UnknownRowsCode = "noCycle" | "severalInCycle" | "competing" | "nobody" | "earlierDay" | "noRows" | "duplicate";
+
+export type WeighingRows = { status: "known"; rows: WeighingPickedRow[] } | { status: "unknown"; code: UnknownRowsCode; reason: string };
+
 export interface ScaleWeighingRow {
   id: string;
   weighedAt: string;
@@ -20,6 +34,7 @@ export interface ScaleWeighingRow {
   pendingUntil: string | null;
   stationName: string;
   flagCount: number;
+  rows?: WeighingRows;
 }
 
 export interface ScaleWeighingDay {
@@ -37,6 +52,8 @@ export interface ScaleWeighingDay {
     trial: number;
   };
   weighings: ScaleWeighingRow[];
+  // Weighings per status filter choice, over the bin and employee filters.
+  statusCounts?: Record<string, number>;
   filters: { bins: { id: string; name: string }[]; employees: { id: string; name: string }[] };
 }
 
