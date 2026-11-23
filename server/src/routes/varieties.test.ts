@@ -4,7 +4,9 @@
 // bulk row assignment, calculated density from each season's saved row
 // lengths (unchanged by a real greenhouse resize through the layout API),
 // the entered Plant Density figure kept separate, history by season,
-// delete rules and permissions. Seasons use far-future dates and RUN_ID-suffixed
+// delete rules and permissions, database-level non-overlapping seasons
+// (adjacent seasons allowed), and the confirmed "use current layout
+// lengths" action. Seasons use far-future dates and RUN_ID-suffixed
 // names; everything created is removed at the end.
 //
 // Run with: npm run test:varieties
@@ -291,10 +293,15 @@ async function main() {
     check((await varietyForRowOnDate(pool, p1Rows[2], `${Y + 2}-06-15`))?.rowLengthFt === 230.4, "a season copied after the resize saves the new layout length", await varietyForRowOnDate(pool, p1Rows[2], `${Y + 2}-06-15`));
     check((await varietyForRowOnDate(pool, p1Rows[2], `${Y}-06-15`))?.rowLengthFt === 192, "...while last season keeps 192 ft");
 
-    // Only an explicit Administrator action takes the layout lengths.
-    check((await call("POST", `/seasons/${season1}/use-layout-lengths`, manager)).status === 403, "Manager can't update a season's saved lengths");
-    const useLayout = await call("POST", `/seasons/${s4.body.season.id}/use-layout-lengths`, admin);
-    check(useLayout.status === 200 && useLayout.body.updated === 0, "a season already matching the layout has nothing to update", useLayout.body);
+    // Only an explicit, confirmed Administrator action takes the layout lengths.
+    const season1Name = `QA ${RUN_ID} ${Y}`;
+    check((await call("GET", `/seasons/${season1}/layout-length-changes`, manager)).status === 403, "Manager can't preview the length update");
+    check(
+      (await call("POST", `/seasons/${season1}/use-layout-lengths`, manager, { confirmSeasonName: season1Name, confirmAffectedRows: 1 })).status === 403,
+      "Manager can't update a season's saved lengths"
+    );
+    const noChanges = await call("GET", `/seasons/${s4.body.season.id}/layout-length-changes`, admin);
+    check(noChanges.status === 200 && noChanges.body.affectedRows === 0, "a season already matching the layout has nothing to update", noChanges.body);
 
     // ---- A row removed from the layout keeps its season history ----
     const beforeRemove = (await call("GET", `/?seasonId=${season1}`, admin)).body.varieties.find((v: Json) => v.id === red).summary;
@@ -307,10 +314,37 @@ async function main() {
     );
     check((await varietyForRowOnDate(pool, p1Rows[1], `${Y}-06-15`))?.varietyId === red, "history for a removed row is still answerable");
 
-    // The explicit action updates rows still in the layout, never removed ones.
+    // The explicit action updates rows still in the layout, never removed ones,
+    // and only after a confirmation naming the season and the row count.
     const season1Assigned = Number((await pool.query(`select count(*) from variety_row_assignments where season_id = $1`, [season1])).rows[0].count);
-    const refreshed = await call("POST", `/seasons/${season1}/use-layout-lengths`, admin);
-    check(refreshed.status === 200 && refreshed.body.updated === season1Assigned - 1, "use current layout lengths updates the season's rows still in the layout", refreshed.body.updated);
+    const preview = await call("GET", `/seasons/${season1}/layout-length-changes`, admin);
+    check(
+      preview.status === 200 && preview.body.season.name === season1Name && preview.body.affectedRows === season1Assigned - 1,
+      "the preview names the season and counts the rows that would change (removed rows excluded)",
+      preview.body
+    );
+    const ex = preview.body.examples.find((e: Json) => e.rowNumber === 3);
+    check(
+      ex && ex.savedLengthM === Math.round(192 * METRES_PER_FOOT * 10) / 10 && ex.layoutLengthM === Math.round(230.4 * METRES_PER_FOOT * 10) / 10,
+      "the preview shows saved vs layout lengths",
+      preview.body.examples
+    );
+    const lengthsNow = async () => (await pool.query(`select greenhouse_row_id, row_length_ft from variety_row_assignments where season_id = $1 order by 1`, [season1])).rows;
+    const untouched = JSON.stringify(await lengthsNow());
+    const noConfirm = await call("POST", `/seasons/${season1}/use-layout-lengths`, admin, {});
+    check(noConfirm.status === 400 && JSON.stringify(await lengthsNow()) === untouched, "no confirmation: refused, nothing changed", noConfirm.body);
+    const wrongCount = await call("POST", `/seasons/${season1}/use-layout-lengths`, admin, { confirmSeasonName: season1Name, confirmAffectedRows: preview.body.affectedRows + 1 });
+    check(
+      wrongCount.status === 409 && wrongCount.body.affectedRows === preview.body.affectedRows && JSON.stringify(await lengthsNow()) === untouched,
+      "a stale or wrong row count: refused with the current count, nothing changed",
+      wrongCount.body
+    );
+    const wrongSeason = await call("POST", `/seasons/${season1}/use-layout-lengths`, admin, { confirmSeasonName: `QA ${RUN_ID} ${Y + 1}`, confirmAffectedRows: preview.body.affectedRows });
+    check(wrongSeason.status === 409 && JSON.stringify(await lengthsNow()) === untouched, "another season's name: refused, nothing changed", wrongSeason.body);
+    const refreshed = await call("POST", `/seasons/${season1}/use-layout-lengths`, admin, { confirmSeasonName: season1Name, confirmAffectedRows: preview.body.affectedRows });
+    check(refreshed.status === 200 && refreshed.body.updated === season1Assigned - 1, "confirmed: updates exactly the previewed rows still in the layout", refreshed.body.updated);
+    const again = await call("POST", `/seasons/${season1}/use-layout-lengths`, admin, { confirmSeasonName: season1Name, confirmAffectedRows: preview.body.affectedRows });
+    check(again.status === 409 && again.body.affectedRows === 0, "repeating a used confirmation is refused (nothing left to update)", again.body);
     check((await varietyForRowOnDate(pool, p1Rows[2], `${Y}-06-15`))?.rowLengthFt === 230.4, "...to the current layout length");
     check((await varietyForRowOnDate(pool, p1Rows[1], `${Y}-06-15`))?.rowLengthFt === 192, "...and a removed row keeps its saved length");
     await pool.query(`update greenhouse_rows set deleted_at = null where id = $1`, [p1Rows[1]]);
@@ -330,6 +364,50 @@ async function main() {
     const stretch = await call("PATCH", `/seasons/${season1}`, admin, { endsOn: `${Y + 1}-02-01` });
     check(stretch.status === 409, "editing a season into the next one is rejected", stretch.body);
     check((await call("PATCH", `/seasons/${season1}`, admin, { name: `QA ${RUN_ID} ${Y} renamed` })).status === 200, "rename a season");
+
+    // ---- Non-overlapping seasons enforced by the database itself ----
+    const Z = Y + 10;
+    const insertSeason = async (name: string, startsOn: string, endsOn: string | null) => {
+      try {
+        const r = await pool.query(`insert into growing_seasons (name, starts_on, ends_on) values ($1, $2, $3) returning id`, [`QA ${RUN_ID} ${name}`, startsOn, endsOn]);
+        ids.seasons.push(r.rows[0].id);
+        return { ok: true as const, id: r.rows[0].id as string };
+      } catch (err) {
+        return { ok: false as const, code: (err as { code?: string }).code, constraint: (err as { constraint?: string }).constraint };
+      }
+    };
+    const isOverlapError = (r: Awaited<ReturnType<typeof insertSeason>>) => !r.ok && r.code === "23P01" && r.constraint === "excl_growing_seasons_no_overlap";
+    const a = await insertSeason("db A", `${Z}-01-01`, `${Z}-06-30`);
+    check(a.ok, "db: a season can be inserted directly", a);
+    check((await insertSeason("db B", `${Z}-07-01`, `${Z}-12-31`)).ok, "db: an adjacent season (starts the day after) is allowed");
+    check(isOverlapError(await insertSeason("db overlap", `${Z}-06-15`, `${Z}-08-01`)), "db: an overlapping season is rejected by the constraint (direct SQL, no API)");
+    check(isOverlapError(await insertSeason("db same day", `${Z}-12-31`, `${Z + 1}-02-01`)), "db: starting on another season's last day is rejected (both ends inclusive)");
+    check(isOverlapError(await insertSeason("db inside", `${Z}-03-01`, `${Z}-03-02`)), "db: a season inside another is rejected");
+    check((await insertSeason("db open", `${Z + 1}-01-01`, null)).ok, "db: an open-ended season after the last one is allowed");
+    check(isOverlapError(await insertSeason("db after open", `${Z + 5}-01-01`, `${Z + 5}-12-31`)), "db: nothing can start inside an open-ended season");
+    let updateErr: { code?: string; constraint?: string } = {};
+    try {
+      await pool.query(`update growing_seasons set ends_on = $2 where id = $1`, [a.ok ? a.id : null, `${Z}-07-15`]);
+    } catch (err) {
+      updateErr = err as { code?: string; constraint?: string };
+    }
+    check(updateErr.code === "23P01" && updateErr.constraint === "excl_growing_seasons_no_overlap", "db: extending a season into the next one is rejected", updateErr);
+
+    // Two requests at the same moment for overlapping seasons: exactly one wins.
+    const W = Y + 6; // free years before the database tests above (Z = Y + 10 onward)
+    const racers = await Promise.all(
+      [1, 2, 3].map((i) => call("POST", "/seasons", admin, { name: `QA ${RUN_ID} race ${i}`, startsOn: `${W}-01-0${i}`, endsOn: `${W}-12-31` }))
+    );
+    for (const r of racers) if (r.status === 201) ids.seasons.push(r.body.season.id);
+    check(racers.filter((r) => r.status === 201).length === 1, "simultaneous overlapping requests: exactly one season is created", racers.map((r) => r.status));
+    check(
+      racers.filter((r) => r.status !== 201).every((r) => r.status === 409 && /overlap/.test(r.body.errors?.startsOn ?? "")),
+      "...the others get a clear overlap error, never a server error",
+      racers.map((r) => r.body)
+    );
+    const adjacentApi = await call("POST", "/seasons", admin, { name: `QA ${RUN_ID} after race`, startsOn: `${W + 1}-01-01`, endsOn: `${W + 1}-12-31` });
+    if (adjacentApi.status === 201) ids.seasons.push(adjacentApi.body.season.id);
+    check(adjacentApi.status === 201, "API: an adjacent season is allowed", adjacentApi.body);
 
     // ---- Nothing else touched ----
     check(Number((await pool.query(`select count(*) from time_entries`)).rows[0].count) === timeEntriesBefore, "time entries untouched");

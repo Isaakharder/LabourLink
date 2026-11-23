@@ -10873,3 +10873,24 @@ button.variety-row-chip {
   width: max-content;
   margin: 0.25rem 0 0 auto;
 }
+
+.variety-lengths-confirm p {
+  margin: 0 0 0.6rem;
+}
+
+.variety-lengths-table {
+  margin: 0.4rem 0;
+}
+
+.variety-lengths-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+  font-weight: 600;
+}
+
+.variety-lengths-check input {
+  width: 1.15rem;
+  height: 1.15rem;
+}

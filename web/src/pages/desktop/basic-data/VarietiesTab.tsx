@@ -6,6 +6,7 @@ import { VarietyFormModal } from "../../../components/varieties/VarietyFormModal
 import { SeasonFormModal } from "../../../components/varieties/SeasonFormModal";
 import { VarietyRowsModal } from "../../../components/varieties/VarietyRowsModal";
 import { RowAssignmentPanel } from "../../../components/varieties/RowAssignmentPanel";
+import { UseLayoutLengthsModal } from "../../../components/varieties/UseLayoutLengthsModal";
 import { formatNumber, formatSeasonDates, GrowingSeason, SeasonRow, Variety, VARIETY_COLORS } from "../../../lib/varietyTypes";
 
 // Basic Data -> Varieties: the variety list, plants planted per variety in
@@ -28,9 +29,7 @@ export function VarietiesTab() {
   const [deleteTarget, setDeleteTarget] = useState<Variety | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [confirmLayoutLengths, setConfirmLayoutLengths] = useState(false);
-  const [updatingLengths, setUpdatingLengths] = useState(false);
-  const [lengthsError, setLengthsError] = useState<string | null>(null);
+  const [showLayoutLengths, setShowLayoutLengths] = useState(false);
 
   const season = seasons?.find((s) => s.id === seasonId) ?? null;
 
@@ -85,22 +84,6 @@ export function VarietiesTab() {
       setDeleteError(err instanceof ApiError ? err.message : "Could not delete this variety");
     } finally {
       setDeleting(false);
-    }
-  }
-
-  // Explicit, confirmed: the only way a season's saved row lengths change.
-  async function useLayoutLengths() {
-    if (!season) return;
-    setUpdatingLengths(true);
-    setLengthsError(null);
-    try {
-      await api(`/api/varieties/seasons/${season.id}/use-layout-lengths`, { method: "POST" });
-      setConfirmLayoutLengths(false);
-      void loadSeasonData();
-    } catch (err) {
-      setLengthsError(err instanceof ApiError ? err.message : "Could not update the saved row lengths");
-    } finally {
-      setUpdatingLengths(false);
     }
   }
 
@@ -251,10 +234,7 @@ export function VarietiesTab() {
             <button
               type="button"
               className="variety-secondary-button"
-              onClick={() => {
-                setLengthsError(null);
-                setConfirmLayoutLengths(true);
-              }}
+              onClick={() => setShowLayoutLengths(true)}
             >
               Use current layout lengths
             </button>
@@ -300,18 +280,14 @@ export function VarietiesTab() {
         />
       )}
       {rowsVariety && season && <VarietyRowsModal variety={rowsVariety} season={season} onClose={() => setRowsVariety(null)} />}
-      {confirmLayoutLengths && season && (
-        <ConfirmDialog
-          title="Use current layout lengths?"
-          message={`Replace the row lengths saved for ${season.name} with the current greenhouse layout for ${changedLengthRows} row${
-            changedLengthRows === 1 ? "" : "s"
-          }? This changes ${season.name}'s row lengths, plants per metre and plant estimates. Only do this to correct rows that were drawn the wrong length.`}
-          confirmLabel="Use current lengths"
-          confirmingLabel="Updating..."
-          submitting={updatingLengths}
-          error={lengthsError}
-          onConfirm={useLayoutLengths}
-          onCancel={() => !updatingLengths && setConfirmLayoutLengths(false)}
+      {showLayoutLengths && season && (
+        <UseLayoutLengthsModal
+          season={season}
+          onClose={() => setShowLayoutLengths(false)}
+          onUpdated={() => {
+            setShowLayoutLengths(false);
+            void loadSeasonData();
+          }}
         />
       )}
       {deleteTarget && (

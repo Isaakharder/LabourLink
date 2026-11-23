@@ -5,8 +5,9 @@
 -- Model
 --   varieties                 the catalogue (name, notes, active), shared
 --                             by every season.
---   growing_seasons           dated planting periods that never overlap.
---                             A season with no end date is still running.
+--   growing_seasons           dated planting periods that never overlap
+--                             (enforced by the database). A season with no
+--                             end date is still running.
 --   variety_plantings         one variety planted in one season, with the
 --                             total number of plants planted (optional
 --                             until it is known).
@@ -27,7 +28,8 @@
 -- removed) never silently changes a season's densities or a later yield
 -- calculation. Reassigning a row to another variety in the same season
 -- keeps its snapshot; only an explicit "use current layout lengths" action
--- updates it.
+-- updates it, after an Administrator confirms the season and the exact
+-- number of rows affected.
 --
 -- Plant counts: variety_plantings.total_plants is what was actually
 -- planted for the variety. Per-row figures are calculated from it
@@ -58,13 +60,21 @@ create table growing_seasons (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint chk_growing_seasons_name_not_blank check (length(trim(name)) > 0),
-  constraint chk_growing_seasons_dates check (ends_on is null or ends_on >= starts_on)
+  constraint chk_growing_seasons_dates check (ends_on is null or ends_on >= starts_on),
+  -- No two seasons share a day, so every date belongs to at most one
+  -- season (and each row to at most one variety on that date). Enforced
+  -- here, not only by the API, so a direct SQL edit or two simultaneous
+  -- requests can't create an overlap. Both ends are inclusive ('[]'): a
+  -- season ending Dec 31 and the next starting Jan 1 are allowed, a season
+  -- ending on the day the next one starts is not. A missing end date is
+  -- open-ended. Scope is the whole table: this schema is single-tenant
+  -- (one database per organisation, see 043_mobile_time_events.sql) and a
+  -- season covers every greenhouse land. Uses the built-in GiST support
+  -- for range types; no extension (btree_gist) is needed.
+  constraint excl_growing_seasons_no_overlap exclude using gist (daterange(starts_on, ends_on, '[]') with &&)
 );
 
 create unique index uq_growing_seasons_name on growing_seasons (lower(trim(name)));
--- Overlap between seasons is rejected by the API inside a transaction that
--- locks this table (see routes/varieties.ts); a btree_gist exclusion
--- constraint would need an extension this project doesn't otherwise use.
 create index idx_growing_seasons_starts_on on growing_seasons (starts_on);
 
 create table variety_plantings (

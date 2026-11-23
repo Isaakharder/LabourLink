@@ -23,6 +23,8 @@ let seasons: GrowingSeason[];
 let varieties: Variety[];
 let rows: SeasonRow[];
 const writes: { path: string; method: string; body: unknown }[] = [];
+let lengthPreview = { season: { id: "s1", name: "2026 season" }, affectedRows: 2, examples: [{ phaseName: "Phase 1", rowNumber: 1, savedLengthM: 58.5, layoutLengthM: 70.2 }] };
+let lengthConflict = false;
 
 vi.mock("../../../lib/api", () => {
   class ApiError extends Error {
@@ -50,10 +52,18 @@ vi.mock("../../../lib/api", () => {
           rows = rows.map((r) => (b.rowIds.includes(r.id) ? { ...r, varietyId: b.varietyId } : r));
           return { rows };
         }
-        if (path.endsWith("/use-layout-lengths")) return { updated: 2, rows };
+        if (path.endsWith("/use-layout-lengths")) {
+          if (lengthConflict) {
+            lengthConflict = false;
+            lengthPreview = { ...lengthPreview, affectedRows: 5 };
+            throw new ApiError(409, "The confirmation no longer matches: 2026 season now has 5 rows to update. Nothing was changed; review and confirm again.");
+          }
+          return { updated: lengthPreview.affectedRows, rows };
+        }
         if (path === "/api/varieties/seasons" && method === "POST") return { season: { id: "s-new" } };
         return { id: "new-variety" };
       }
+      if (path.endsWith("/layout-length-changes")) return lengthPreview;
       if (path === "/api/varieties/seasons") return { seasons, defaultSeasonId: seasons.find((s) => s.isCurrent)?.id ?? seasons[0]?.id ?? null };
       if (path.startsWith("/api/varieties/rows")) return { rows };
       if (path.startsWith("/api/varieties")) return { seasonId: seasons[0]?.id ?? null, varieties };
@@ -120,6 +130,8 @@ beforeEach(() => {
   ];
   rows = seasonRows();
   writes.length = 0;
+  lengthPreview = { season: { id: "s1", name: "2026 season" }, affectedRows: 2, examples: [{ phaseName: "Phase 1", rowNumber: 1, savedLengthM: 58.5, layoutLengthM: 70.2 }] };
+  lengthConflict = false;
 });
 
 afterEach(() => {
@@ -259,17 +271,54 @@ describe("VarietiesTab", () => {
     expect(screen.getByLabelText("Name *")).toHaveValue("");
   });
 
-  it("says when the layout's row lengths differ from the season's saved lengths, and only changes them after confirmation", async () => {
+  it("says when the layout's row lengths differ, and only updates them after a confirmation naming the season and the row count", async () => {
     const user = userEvent.setup();
     rows = seasonRows().map((r) => (r.varietyId ? { ...r, layoutLengthFt: 230.4, lengthChanged: true } : r));
     renderTab();
     expect(await screen.findByText(/2 rows have a different length in the current greenhouse layout than the length saved for 2026 season/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Use current layout lengths" }));
-    expect(screen.getByText(/This changes 2026 season's row lengths, plants per metre and plant estimates/)).toBeInTheDocument();
+
+    expect(await screen.findByText("Update saved row lengths · 2026 season")).toBeInTheDocument();
+    expect(screen.getByText(/This replaces the saved lengths of/)).toHaveTextContent("This replaces the saved lengths of 2 rows in 2026 season with the current greenhouse layout.");
+    expect(screen.getByText("58.5 m")).toBeInTheDocument();
+    expect(screen.getByText("70.2 m")).toBeInTheDocument();
+    const update = screen.getByRole("button", { name: "Update 2 rows" });
+    expect(update).toBeDisabled();
+    await user.click(update);
     expect(writes).toHaveLength(0);
-    await user.click(screen.getByRole("button", { name: "Use current lengths" }));
+
+    await user.click(screen.getByLabelText("I confirm updating 2 rows in 2026 season"));
+    await user.click(screen.getByRole("button", { name: "Update 2 rows" }));
     await waitFor(() => expect(writes).toHaveLength(1));
-    expect(writes[0]).toEqual({ path: "/api/varieties/seasons/s1/use-layout-lengths", method: "POST", body: undefined });
+    expect(writes[0]).toEqual({
+      path: "/api/varieties/seasons/s1/use-layout-lengths",
+      method: "POST",
+      body: { confirmSeasonName: "2026 season", confirmAffectedRows: 2 },
+    });
+  });
+
+  it("if the rows changed since the preview, shows the new count and asks again", async () => {
+    const user = userEvent.setup();
+    rows = seasonRows().map((r) => (r.varietyId ? { ...r, layoutLengthFt: 230.4, lengthChanged: true } : r));
+    lengthConflict = true;
+    renderTab();
+    await user.click(await screen.findByRole("button", { name: "Use current layout lengths" }));
+    await user.click(await screen.findByLabelText("I confirm updating 2 rows in 2026 season"));
+    await user.click(screen.getByRole("button", { name: "Update 2 rows" }));
+    expect(await screen.findByText(/now has 5 rows to update\. Nothing was changed/)).toBeInTheDocument();
+    const again = await screen.findByLabelText("I confirm updating 5 rows in 2026 season");
+    expect(again).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Update 5 rows" })).toBeDisabled();
+  });
+
+  it("says there is nothing to update when every row already matches", async () => {
+    const user = userEvent.setup();
+    rows = seasonRows().map((r) => (r.varietyId ? { ...r, lengthChanged: true } : r));
+    lengthPreview = { ...lengthPreview, affectedRows: 0, examples: [] };
+    renderTab();
+    await user.click(await screen.findByRole("button", { name: "Use current layout lengths" }));
+    expect(await screen.findByText(/already matches the current greenhouse layout\. Nothing to update/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Update / })).not.toBeInTheDocument();
   });
 
   it("shows the length notice to a Manager without the action", async () => {

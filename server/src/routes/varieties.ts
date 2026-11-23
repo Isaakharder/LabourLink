@@ -40,6 +40,19 @@ function isUniqueViolation(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { code?: string }).code === "23505";
 }
 
+// Postgres exclusion violation: excl_growing_seasons_no_overlap (076) caught
+// an overlap the API's own check didn't see (e.g. two requests at once).
+function isSeasonOverlapViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: string }).code === "23P01" &&
+    (err as { constraint?: string }).constraint === "excl_growing_seasons_no_overlap"
+  );
+}
+
+const SEASON_OVERLAP_ERROR = { errors: { startsOn: "These dates overlap another growing season" } };
+
 async function inTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
@@ -118,10 +131,15 @@ function parseSeasonInput(body: Record<string, unknown>, existing?: SeasonInput)
 }
 
 // Seasons never overlap, so every date belongs to at most one season (and
-// so to at most one variety per row). Checked under a table lock so two
-// admins can't create overlapping seasons at the same moment.
+// so to at most one variety per row). The database enforces it
+// (excl_growing_seasons_no_overlap, 076). Season writes from the API also
+// queue behind one transaction-level advisory lock: without it, two
+// simultaneous overlapping requests can deadlock inside the exclusion
+// constraint (one would get a server error instead of a clear message).
+// Reads are never blocked. This check then finds which season is in the
+// way so the error can name it.
 async function findOverlap(client: PoolClient, input: SeasonInput, exceptId: string | null) {
-  await client.query("lock table growing_seasons in share row exclusive mode");
+  await client.query("select pg_advisory_xact_lock(hashtext('labourlink.growing_seasons'))");
   const { rows } = await client.query(
     `select name from growing_seasons
      where ($3::uuid is null or id <> $3)
@@ -195,6 +213,7 @@ router.post(
       res.status(201).json({ season: seasons.find((s) => s.id === result.body.seasonId), seasons });
     } catch (err) {
       if (isUniqueViolation(err)) return res.status(409).json({ errors: { name: "A season with this name already exists" } });
+      if (isSeasonOverlapViolation(err)) return res.status(409).json(SEASON_OVERLAP_ERROR);
       throw err;
     }
   })
@@ -230,6 +249,7 @@ router.patch(
       res.json({ season: seasons.find((s) => s.id === id), seasons });
     } catch (err) {
       if (isUniqueViolation(err)) return res.status(409).json({ errors: { name: "A season with this name already exists" } });
+      if (isSeasonOverlapViolation(err)) return res.status(409).json(SEASON_OVERLAP_ERROR);
       throw err;
     }
   })
@@ -385,24 +405,86 @@ router.put(
   })
 );
 
-// The only way a season's saved row lengths change: an Administrator
-// explicitly asks to take the current layout lengths (e.g. after fixing a
-// row that was drawn the wrong length). Rows removed from the layout keep
-// their snapshot. Returns how many rows changed.
+// "Use current layout lengths": the only way a season's saved row lengths
+// change (e.g. after fixing a row that was drawn the wrong length). Rows
+// removed from the layout keep their snapshot.
+//
+// Two steps, Administrator only. The preview says which season and exactly
+// how many rows would change (with examples); the update must repeat that
+// season's name and row count, and is refused if either no longer matches
+// (renamed season, layout changed again, another admin already updated),
+// so a confirmation can never change more or other rows than it showed.
+const LAYOUT_LENGTH_CHANGES = `
+  select a.greenhouse_row_id, gp.name as phase_name, gr.row_number, a.row_length_ft, gr.length_ft
+  from variety_row_assignments a
+  join greenhouse_rows gr on gr.id = a.greenhouse_row_id
+  join greenhouse_phases gp on gp.id = gr.phase_id
+  where a.season_id = $1 and gr.deleted_at is null and a.row_length_ft <> gr.length_ft
+  order by gp.name, gr.row_number`;
+
+router.get(
+  "/seasons/:seasonId/layout-length-changes",
+  canWrite,
+  asyncHandler(async (req, res) => {
+    const seasonId = seasonParam(req.params.seasonId);
+    if (!seasonId) return res.status(400).json({ error: "Invalid season id" });
+    const season = await pool.query("select id, name from growing_seasons where id = $1", [seasonId]);
+    if (!season.rows[0]) return res.status(404).json({ error: "Season not found" });
+    const { rows } = await pool.query(LAYOUT_LENGTH_CHANGES, [seasonId]);
+    res.json({
+      season: { id: season.rows[0].id, name: season.rows[0].name },
+      affectedRows: rows.length,
+      examples: rows.slice(0, 10).map((r) => ({
+        phaseName: r.phase_name,
+        rowNumber: r.row_number,
+        savedLengthM: round(Number(r.row_length_ft) * METRES_PER_FOOT, 1),
+        layoutLengthM: round(Number(r.length_ft) * METRES_PER_FOOT, 1),
+      })),
+    });
+  })
+);
+
 router.post(
   "/seasons/:seasonId/use-layout-lengths",
   canWrite,
   asyncHandler(async (req, res) => {
     const seasonId = seasonParam(req.params.seasonId);
     if (!seasonId) return res.status(400).json({ error: "Invalid season id" });
-    if (!(await seasonExists(seasonId))) return res.status(404).json({ error: "Season not found" });
-    const { rowCount } = await pool.query(
-      `update variety_row_assignments a set row_length_ft = gr.length_ft, length_saved_at = now()
-       from greenhouse_rows gr
-       where a.season_id = $1 and gr.id = a.greenhouse_row_id and gr.deleted_at is null and a.row_length_ft <> gr.length_ft`,
-      [seasonId]
-    );
-    res.json({ updated: rowCount ?? 0, rows: await loadSeasonRows(seasonId) });
+    const confirmName = req.body?.confirmSeasonName;
+    const confirmRows = req.body?.confirmAffectedRows;
+    if (typeof confirmName !== "string" || !Number.isInteger(confirmRows) || confirmRows < 1) {
+      return res.status(400).json({ error: "Confirm the season name and the number of rows to update" });
+    }
+
+    const result = await inTransaction(async (client) => {
+      const season = await client.query("select name from growing_seasons where id = $1 for update", [seasonId]);
+      if (!season.rows[0]) return { status: 404, body: { error: "Season not found" } };
+      // Lock the season's assignment rows so the count can't change between
+      // the check and the update.
+      await client.query("select 1 from variety_row_assignments where season_id = $1 for update", [seasonId]);
+      const changes = await client.query(LAYOUT_LENGTH_CHANGES, [seasonId]);
+      if (season.rows[0].name !== confirmName || changes.rows.length !== confirmRows) {
+        return {
+          status: 409,
+          body: {
+            error: `The confirmation no longer matches: ${season.rows[0].name} now has ${changes.rows.length} row${
+              changes.rows.length === 1 ? "" : "s"
+            } to update. Nothing was changed; review and confirm again.`,
+            seasonName: season.rows[0].name,
+            affectedRows: changes.rows.length,
+          },
+        };
+      }
+      const { rowCount } = await client.query(
+        `update variety_row_assignments a set row_length_ft = gr.length_ft, length_saved_at = now()
+         from greenhouse_rows gr
+         where a.season_id = $1 and gr.id = a.greenhouse_row_id and gr.deleted_at is null and a.row_length_ft <> gr.length_ft`,
+        [seasonId]
+      );
+      return { status: 200, body: { updated: rowCount ?? 0 } };
+    });
+    if (result.status !== 200) return res.status(result.status).json(result.body);
+    res.json({ ...result.body, rows: await loadSeasonRows(seasonId) });
   })
 );
 
