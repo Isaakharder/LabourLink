@@ -96,6 +96,8 @@
     "test:dashboard-settings": "ts-node src/routes/dashboard.settings.test.ts",
     "test:dashboard": "ts-node src/routes/dashboard.test.ts",
     "test:dashboard-kpis": "ts-node src/routes/dashboard.kpis.test.ts",
+    "test:variety-planting": "ts-node src/lib/varietyPlanting.test.ts",
+    "test:varieties": "ts-node src/routes/varieties.test.ts",
     "test:row-completion-candidates": "ts-node src/lib/rowCompletionCandidates.test.ts",
     "test:row-completion-candidates-cutoff": "ts-node src/lib/rowCompletionCandidates.cutoff.test.ts",
     "test:row-completion-activity-scoping": "ts-node src/routes/rowCompletions.activityScoping.test.ts",

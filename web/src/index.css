@@ -10481,3 +10481,359 @@ input {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------- Basic Data -> Varieties ---------- */
+
+.variety-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.6rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.variety-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.variety-toolbar-actions .employees-add-button {
+  margin-left: 0;
+}
+
+.variety-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-muted);
+}
+
+.variety-field select,
+.variety-field input {
+  min-height: 2.5rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.9rem;
+  font-weight: 400;
+}
+
+.variety-season-field select {
+  min-width: 14rem;
+}
+
+.variety-season-dates {
+  padding-bottom: 0.6rem;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.variety-secondary-button {
+  min-height: 2.5rem;
+  padding: 0.5rem 0.95rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.88rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.variety-secondary-button:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.variety-secondary-button:disabled,
+.variety-link-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.variety-link-button {
+  min-height: 2.5rem;
+  padding: 0.4rem 0.4rem;
+  border: none;
+  background: none;
+  color: var(--color-primary);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.variety-empty {
+  margin: 0 0 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  color: var(--color-muted);
+  font-size: 0.88rem;
+}
+
+.variety-table-wrap,
+.variety-rows-table-wrap {
+  overflow-x: auto;
+}
+
+/* Explicit display: table: these tables have no card-list fallback, so
+   they must not inherit the Employees page's `.employees-table
+   { display: none }` at <=900px (same reason as .inputs-logs-table). On a
+   tablet the wrapper scrolls sideways instead of squeezing the figures. */
+.variety-table,
+.variety-rows-table {
+  display: table;
+  width: 100%;
+}
+
+.variety-table {
+  min-width: 46rem;
+}
+
+.variety-rows-table-wrap {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.variety-table .num,
+.variety-rows-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.variety-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-weight: 600;
+}
+
+.variety-notes {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 400;
+  color: var(--color-muted);
+}
+
+td.num .variety-notes {
+  display: inline;
+}
+
+.variety-missing {
+  color: var(--color-muted);
+  font-size: 0.82rem;
+}
+
+.variety-inactive td {
+  color: var(--color-muted);
+}
+
+.variety-status-tag,
+.variety-deleted-tag,
+.variety-calc-tag,
+.variety-entered-tag {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.variety-status-tag,
+.variety-deleted-tag {
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-muted);
+}
+
+/* Calculated figures (from plants planted and row length) vs entered
+   figures (the Plant Density setting) are always labelled apart. */
+.variety-calc-tag {
+  border: 1px solid #c7d2fe;
+  background: #eef2ff;
+  color: #3730a3;
+}
+
+.variety-entered-tag {
+  border: 1px solid #bbf7d0;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.variety-row-deleted td {
+  color: var(--color-muted);
+}
+
+.variety-legend {
+  margin-top: 0.5rem;
+  max-width: 60rem;
+}
+
+.variety-rows-intro {
+  margin: 0 0 0.75rem;
+  font-size: 0.88rem;
+}
+
+.variety-swatch {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 3px;
+}
+
+.variety-swatch-empty {
+  border: 1px dashed var(--color-muted);
+  background: var(--color-surface);
+}
+
+.variety-form-notes {
+  grid-column: 1 / -1;
+}
+
+/* Row assignment */
+.variety-assign {
+  margin-top: 1.75rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+}
+
+.variety-assign h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.variety-assign-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.6rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.variety-assign-header h3 {
+  margin-right: auto;
+  align-self: center;
+}
+
+.variety-assign-count {
+  padding-bottom: 0.6rem;
+  font-size: 0.82rem;
+  color: var(--color-muted);
+}
+
+.variety-assign-tools {
+  margin-bottom: 0.6rem;
+}
+
+.variety-range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+
+.variety-range input {
+  width: 6rem;
+}
+
+.variety-legend-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+  margin: 0.25rem 0 0.6rem;
+  font-size: 0.8rem;
+}
+
+.variety-legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.variety-row-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(3rem, 1fr));
+  gap: 0.3rem;
+  max-height: 22rem;
+  overflow-y: auto;
+  padding: 0.15rem;
+}
+
+.variety-row-chip {
+  min-height: 2.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+
+.variety-row-chip.is-unassigned {
+  border: 1px dashed var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-muted);
+}
+
+button.variety-row-chip {
+  cursor: pointer;
+}
+
+.variety-row-chip.is-selected {
+  outline: 3px solid var(--color-primary);
+  outline-offset: 1px;
+  color: var(--color-primary);
+}
+
+.variety-row-chip:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--color-primary) 55%, transparent);
+  outline-offset: 1px;
+}
+
+.variety-assign-bar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.6rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.variety-assign-bar .employees-add-button {
+  margin-left: 0;
+  min-height: 2.5rem;
+}
+
+.variety-assign-selected {
+  margin-right: auto;
+  align-self: center;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+@media (max-width: 900px) {
+  .variety-toolbar-actions {
+    margin-left: 0;
+  }
+}

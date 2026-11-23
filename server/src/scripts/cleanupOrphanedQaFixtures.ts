@@ -132,6 +132,11 @@ export async function deleteOrphanedQaFixtures(pool: Pool, scope: QaFixtureScope
     await del("row_completions", `delete from row_completions where greenhouse_row_id = any($1::uuid[])`, [scope.rowIds]);
     await del("time_entries", `delete from time_entries where employee_id = any($1::uuid[])`, [scope.employeeIds]);
     await del("devices", `delete from devices where id = any($1::uuid[])`, [scope.deviceIds]);
+    // Variety assignments on QA rows (076_varieties.sql). Skipped on a
+    // database that doesn't have that migration yet.
+    if ((await client.query(`select to_regclass('variety_row_assignments') is not null as present`)).rows[0].present) {
+      await del("variety_row_assignments", `delete from variety_row_assignments where greenhouse_row_id = any($1::uuid[])`, [scope.rowIds]);
+    }
     await del("greenhouse_rows", `delete from greenhouse_rows where id = any($1::uuid[])`, [scope.rowIds]);
     await del("greenhouse_phases", `delete from greenhouse_phases where id = any($1::uuid[])`, [scope.phaseIds]);
     await del("greenhouse_lands", `delete from greenhouse_lands where id = any($1::uuid[])`, [scope.landIds]);
