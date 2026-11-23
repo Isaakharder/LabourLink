@@ -22,6 +22,7 @@
     "test:migration-070-scale-weighings": "ts-node src/scripts/migration070ScaleWeighings.test.ts",
     "test:scale-registration": "ts-node src/routes/scaleRegistration.test.ts",
     "test:scale-weighings": "ts-node src/routes/scaleWeighings.test.ts",
+    "test:scale-weighings-rows": "ts-node src/routes/scaleWeighings.rows.test.ts",
     "test:bin-cycles": "ts-node src/routes/binCycles.test.ts",
     "test:bin-cycles-no-scale": "ts-node src/routes/binCycles.noScale.test.ts",
     "test:migration-072-scale-weighing-corrections": "ts-node src/scripts/migration072ScaleWeighingCorrections.test.ts",

@@ -18,6 +18,7 @@ import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { recordWeighingEvent } from "../lib/scaleMatching";
 import { LATE_SUPERSEDED_REASON } from "../lib/binCycles";
+import { loadWeighingRows, WeighingRows } from "../lib/scaleWeighingRows";
 import { calendarDateInAppTimezone, getDayBoundsUtc } from "../lib/timezone";
 import { requireAuth, requireRole } from "../middleware/auth";
 
@@ -77,6 +78,20 @@ router.get(
           (status === "not_credited" ? ["pending", "needs_review", "expired"].includes(r.status) : r.status === status))
     );
 
+    // Rows each bin was picked in (display only; see scaleWeighingRows.ts).
+    const rowsById = await loadWeighingRows(pool, shown);
+    const unknownRows: WeighingRows = { status: "unknown", reason: "" };
+
+    // Status filter choices, counted over the bin and employee filters only,
+    // so every choice shows how many it would list.
+    const statusBase = rows.filter((r) => (!carrierId || r.carrier_id === carrierId) && (!employeeId || r.employee_id === employeeId));
+    const statusCounts: Record<string, number> = { all: statusBase.length, not_credited: 0 };
+    for (const st of STATUSES) statusCounts[st] = 0;
+    for (const r of statusBase) {
+      statusCounts[r.status]++;
+      if (["pending", "needs_review", "expired"].includes(r.status)) statusCounts.not_credited++;
+    }
+
     const production = shown.filter((r) => r.counts_for_production);
     const credits = shown.filter((r) => r.counts_as_credit);
     res.json({
@@ -110,7 +125,9 @@ router.get(
         pendingUntil: r.status === "pending" ? r.pending_until : null,
         stationName: r.station_name,
         flagCount: r.flag_count,
+        rows: rowsById.get(r.id) ?? unknownRows,
       })),
+      statusCounts,
       filters: {
         bins: [...bins].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })),
         employees: [...employees].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name)),
@@ -204,6 +221,7 @@ async function loadDetail(id: string) {
       [id]
     ),
   ]);
+  const rowsInfo = (await loadWeighingRows(pool, [w])).get(w.id) ?? { status: "unknown", reason: "" };
   const cy = cycle.rows[0];
   const tracked = cy?.tracked === true;
   return {
@@ -227,6 +245,7 @@ async function loadDetail(id: string) {
     pendingUntil: w.status === "pending" ? w.pending_until : null,
     resolvedAt: w.resolved_at,
     stationName: w.station_name,
+    rows: rowsInfo,
     // null: decided before picking cycles started. "none": no cycle (bin
     // weighed again with no phone scan since), never credited.
     pickingCycle: !tracked

@@ -9556,95 +9556,359 @@ input {
 }
 
 /* Scale Weighings page (pages/desktop/ScaleWeighingsPage.tsx) */
-.scale-weighings-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: center;
-  margin-bottom: 1rem;
-}
-
-.scale-weighings-toolbar select,
-.scale-weighings-toolbar input[type="date"] {
-  min-height: 2.25rem;
-}
-
-.scale-weighings-date {
-  display: flex;
-  gap: 0.25rem;
-  align-items: center;
-}
-
-.scale-weighings-date button {
-  min-height: 2.25rem;
-  min-width: 2.25rem;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.scale-weighings-day {
-  margin: 0 0 0.75rem;
-}
-
-.scale-weighings-totals {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-  gap: 0.75rem;
-  margin-bottom: 0.75rem;
-}
-
-.scale-weighings-total {
+.scale-page {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
-  padding: 0.75rem 0.9rem;
+  gap: 1rem;
+}
+
+.scale-page .page-header {
+  margin-bottom: 0.5rem;
+}
+
+.scale-panel {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
 }
 
-.scale-weighings-total.is-attention {
-  border-color: #f59e0b;
+.scale-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1.25rem;
+  padding: 0.75rem 1rem;
 }
 
-.scale-weighings-total-label {
-  font-size: 0.75rem;
+.scale-toolbar-date {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.scale-toolbar-date .inputs-date-long {
+  min-width: 230px;
+}
+
+.scale-toolbar-date .inputs-date-nav-arrow:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.scale-toolbar-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+
+.scale-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.scale-field-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted);
+}
+
+.scale-field select {
+  min-width: 11rem;
+  min-height: 2.25rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.85rem;
+}
+
+.scale-field select:focus-visible,
+.scale-button:focus-visible,
+.scale-status-tab:focus-visible,
+.scale-summary-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-primary) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.scale-button {
+  min-height: 2.25rem;
+  padding: 0.4rem 0.85rem;
+  border: 1px solid var(--color-primary);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-primary);
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.scale-button:hover {
+  background: color-mix(in srgb, var(--color-primary) 7%, var(--color-surface));
+}
+
+.scale-button-quiet {
+  border-color: var(--color-border);
+  color: var(--color-text);
+  font-weight: 500;
+}
+
+.scale-button-quiet:hover {
+  background: var(--color-bg);
+}
+
+/* Summary cards */
+.scale-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.75rem;
+}
+
+.scale-summary-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.9rem 1rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  overflow: hidden;
+}
+
+.scale-summary-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--color-border);
+}
+
+.scale-summary-card.is-primary::before {
+  background: var(--color-primary);
+}
+
+.scale-summary-card.is-success::before {
+  background: #16a34a;
+}
+
+.scale-summary-card.is-attention {
+  background: #fffbeb;
+  border-color: #fcd34d;
+}
+
+.scale-summary-card.is-attention::before {
+  background: #f59e0b;
+}
+
+.scale-summary-card.is-clickable {
+  padding: 0;
+}
+
+.scale-summary-button {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  width: 100%;
+  height: 100%;
+  padding: 0.9rem 1rem;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+}
+
+.scale-summary-card.is-clickable:hover {
+  border-color: color-mix(in srgb, var(--color-primary) 45%, var(--color-border));
+}
+
+.scale-summary-label {
+  font-size: 0.72rem;
+  font-weight: 600;
   color: var(--color-muted);
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.04em;
 }
 
-.scale-weighings-total-value {
-  font-size: 1.35rem;
-  font-weight: 600;
+.scale-summary-value {
+  font-size: 1.5rem;
+  font-weight: 650;
+  line-height: 1.2;
   font-variant-numeric: tabular-nums;
+}
+
+.scale-summary-card.is-attention .scale-summary-value {
+  color: #92400e;
+}
+
+.scale-summary-hint {
+  font-size: 0.78rem;
+  color: var(--color-muted);
+}
+
+.scale-note {
+  margin: 0;
+  padding: 0.55rem 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--color-primary) 20%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-primary) 6%, var(--color-surface));
+  color: var(--color-text);
+  font-size: 0.82rem;
+}
+
+/* Table panel */
+.scale-table-panel {
+  overflow: hidden;
+}
+
+.scale-table-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.65rem 0.85rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.scale-status-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.scale-status-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2rem;
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.scale-status-tab:hover {
+  background: var(--color-bg);
+}
+
+.scale-status-tab.is-active {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.scale-status-tab-count {
+  min-width: 1.4rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: var(--color-bg);
+  color: var(--color-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.scale-status-tab.is-attention:not(.is-active) .scale-status-tab-count {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.scale-status-tab.is-active .scale-status-tab-count {
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
+}
+
+.scale-loading {
+  font-size: 0.78rem;
+  color: var(--color-muted);
+}
+
+.scale-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 2.5rem 1rem;
+  color: var(--color-muted);
+  text-align: center;
+}
+
+.scale-empty p {
+  margin: 0;
 }
 
 /* Tablet and narrow windows: the table scrolls inside its own box, never the page. */
 .scale-weighings-table-wrap {
   overflow-x: auto;
-  margin-top: 0.75rem;
   -webkit-overflow-scrolling: touch;
 }
 
 .scale-weighings-table {
-  /* Same reasoning as .inputs-logs-table: this page has no card-list
-     fallback, so it must not inherit the Employees page's
-     `.employees-table { display: none }` at <=900px. On a tablet the table
-     keeps its columns and scrolls sideways inside its own box. */
+  /* No card-list fallback on this page, so never inherit the Employees
+     page's `.employees-table { display: none }` at <=900px. */
   display: table;
-  min-width: 760px;
+  width: 100%;
+  min-width: 820px;
+  border-collapse: collapse;
+  background: var(--color-surface);
+  font-size: 0.85rem;
+}
+
+.scale-weighings-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 0.55rem 0.85rem;
+  background: #f8f9fb;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.scale-weighings-table td {
+  padding: 0.6rem 0.85rem;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.scale-weighings-table tbody tr:last-child td {
+  border-bottom: none;
 }
 
 .scale-weighings-table tbody tr {
   cursor: pointer;
+  transition: background-color 0.1s ease;
 }
 
 .scale-weighings-table tbody tr:hover,
-.scale-weighings-table tbody tr:focus {
-  background: var(--color-bg);
+.scale-weighings-table tbody tr:focus-visible {
+  background: color-mix(in srgb, var(--color-primary) 5%, var(--color-surface));
   outline: none;
+}
+
+.scale-weighings-table tbody tr:focus-visible td:first-child {
+  box-shadow: inset 3px 0 0 var(--color-primary);
 }
 
 .scale-weighings-table .num {
@@ -9652,13 +9916,148 @@ input {
   font-variant-numeric: tabular-nums;
 }
 
-.scale-weighing-not-counted td {
+.scale-col-time {
+  font-variant-numeric: tabular-nums;
   color: var(--color-muted);
+}
+
+.scale-col-bin,
+.scale-col-net {
+  font-weight: 600;
+}
+
+.scale-weighings-table td.scale-col-secondary {
+  color: var(--color-muted);
+}
+
+.scale-weighings-table .scale-weighing-status {
+  flex-wrap: nowrap;
+}
+
+.scale-col-rows {
+  min-width: 10rem;
+}
+
+.scale-muted {
+  color: var(--color-muted);
+}
+
+.scale-weighing-not-counted td,
+.scale-weighing-not-counted td.scale-col-bin,
+.scale-weighing-not-counted td.scale-col-net {
+  color: var(--color-muted);
+  font-weight: 400;
 }
 
 .scale-weighing-tag {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
+  color: var(--color-muted);
+}
+
+/* Rows a bin was picked in (components/scale/WeighingRowsCell.tsx) */
+.scale-rows {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: normal;
+}
+
+.scale-rows-group {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid #d1fae5;
+  border-radius: 6px;
+  background: #ecfdf5;
+  color: #065f46;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.scale-rows-phase {
+  font-weight: 500;
+  color: #047857;
+}
+
+.scale-rows-phase::after {
+  content: " ·";
+}
+
+.scale-rows-numbers {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.scale-rows-more {
+  font-size: 0.75rem;
+  color: var(--color-muted);
+}
+
+.scale-rows-unknown {
+  color: var(--color-muted);
+  cursor: help;
+}
+
+.scale-rows-full .scale-rows-group {
+  font-size: 0.85rem;
+}
+
+.scale-weighing-not-counted .scale-rows-group {
+  border-color: var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-muted);
+}
+
+.scale-weighing-not-counted .scale-rows-phase {
+  color: var(--color-muted);
+}
+
+/* Picking cycles panel and the dialogs share the page's buttons. */
+.picking-cycles {
+  margin: 0;
+  padding: 1rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.picking-cycles h2 {
+  margin-top: 0;
+  font-size: 1.05rem;
+}
+
+.picking-cycles .scale-weighings-table-wrap {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.picking-cycles button:not(.scale-void-button):not(.danger),
+.scale-weighing-detail button:not(.scale-void-button),
+.scale-weighing-void .modal-actions button:not(.danger):not([type="submit"]) {
+  padding: 0.4rem 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.85rem;
+}
+
+/* Doubled class: .employee-form-actions button (0,1,1) would otherwise win
+   and leave white text on a white button. */
+.scale-void-button.scale-void-button,
+.picking-cycles button.danger,
+.scale-weighing-void button[type="submit"] {
+  padding: 0.4rem 0.85rem;
+  border: 1px solid var(--color-danger);
+  border-radius: 6px;
+  background: var(--color-danger);
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
 }
 
 .scale-weighing-status {
@@ -9758,11 +10157,6 @@ input {
   color: var(--color-muted);
 }
 
-.scale-void-button {
-  background: var(--color-danger);
-  border-color: var(--color-danger);
-  color: #fff;
-}
 
 .scale-void-button:disabled {
   opacity: 0.6;
@@ -9775,7 +10169,34 @@ input {
   }
 
   .scale-weighings-table {
-    min-width: 560px;
+    min-width: 640px;
+  }
+}
+
+@media (max-width: 900px) {
+  .scale-weighings-table .scale-col-secondary {
+    display: none;
+  }
+
+  .scale-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .scale-toolbar-date {
+    justify-content: center;
+  }
+
+  /* A grid, not a wrapping flex row: inside the column toolbar Chrome sizes
+     a wrapping row as if every field had wrapped, leaving an empty band. */
+  .scale-toolbar-filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  }
+
+  .scale-field select {
+    min-width: 0;
+    width: 100%;
   }
 }
 
