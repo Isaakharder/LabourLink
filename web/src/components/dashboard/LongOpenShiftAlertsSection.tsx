@@ -152,7 +152,7 @@ function LongOpenShiftAlertCard({ alert, timezone, onEndWork }: LongOpenShiftAle
 // Restricted server-side (GET /api/dashboard/long-open-shift-
 // alerts, POST .../end-work both requireRole("Administrator","Manager")) —
 // this component simply doesn't render for anyone else, same "silently
-// nothing rather than an error banner" convention as WorkPermitAlertsSection.
+// nothing rather than an error banner" convention as the Work Permits tab (WorkPermitAlertsSection).
 interface LongOpenShiftAlertsSectionProps {
   // Fired after a successful End Work — lets DashboardPage refresh its own
   // card grid too (the ended employee may have been showing as an active
