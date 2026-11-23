@@ -1,8 +1,21 @@
-import { WeighingPickedRow, WeighingRows } from "../../lib/scaleWeighingTypes";
+import { useState } from "react";
+import { UnknownRowsCode, WeighingPickedRow, WeighingRows } from "../../lib/scaleWeighingTypes";
 
 // Rows a weighed bin was picked in, grouped by phase ("Phase 1 · 12, 13").
-// Unknown rows show — with the reason as a tooltip and accessible name; the
-// server already refused to guess (server/src/lib/scaleWeighingRows.ts).
+// When the server could not tell the bin use apart it says why
+// (server/src/lib/scaleWeighingRows.ts); the cell then shows — with a short
+// label that is always visible, and a button that reveals the full reason on
+// tap, click or keyboard (no hover needed on tablets and touchscreens).
+
+export const UNKNOWN_ROWS_LABELS: Record<UnknownRowsCode, string> = {
+  noCycle: "No picking cycle",
+  severalInCycle: "Several pickers",
+  competing: "Needs review",
+  nobody: "No phone scan",
+  earlierDay: "Began an earlier day",
+  noRows: "No row recorded",
+  duplicate: "Duplicate",
+};
 
 export function groupRowsByPhase(rows: WeighingPickedRow[]): { phase: string; numbers: number[] }[] {
   const groups: { phase: string; numbers: number[] }[] = [];
@@ -17,15 +30,41 @@ export function groupRowsByPhase(rows: WeighingPickedRow[]): { phase: string; nu
 const MAX_GROUPS = 2;
 const MAX_NUMBERS = 4;
 
+function UnknownRows({ rows }: { rows: Extract<WeighingRows, { status: "unknown" }> | undefined }) {
+  const [open, setOpen] = useState(false);
+  const label = rows ? UNKNOWN_ROWS_LABELS[rows.code] ?? "Unknown" : "Unknown";
+  const reason = rows?.reason || "The rows for this weighing aren't available.";
+  return (
+    <span className="scale-rows-unknown">
+      <button
+        type="button"
+        className="scale-rows-why"
+        aria-expanded={open}
+        aria-label={`Rows unknown: ${label}. ${open ? "Hide" : "Show"} why`}
+        // The table row opens the weighing; this button only explains.
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        onKeyDown={(e) => e.stopPropagation()}
+      >
+        <span aria-hidden="true">—</span>
+        <span className="scale-rows-why-label">{label}</span>
+        <span className="scale-rows-why-icon" aria-hidden="true">
+          i
+        </span>
+      </button>
+      {open && (
+        <span className="scale-rows-why-text" role="note">
+          {reason}
+        </span>
+      )}
+    </span>
+  );
+}
+
 export function WeighingRowsCell({ rows }: { rows: WeighingRows | undefined }) {
-  if (!rows || rows.status === "unknown") {
-    const reason = rows?.status === "unknown" ? rows.reason : "Rows not available";
-    return (
-      <span className="scale-rows-unknown" title={reason} aria-label={`Rows unknown: ${reason}`}>
-        —
-      </span>
-    );
-  }
+  if (!rows || rows.status === "unknown") return <UnknownRows rows={rows} />;
   const groups = groupRowsByPhase(rows.rows);
   const full = rows.rows.map((r) => r.label).join(", ");
   const shown = groups.slice(0, MAX_GROUPS);
@@ -43,7 +82,7 @@ export function WeighingRowsCell({ rows }: { rows: WeighingRows | undefined }) {
   );
 }
 
-// Full list for the detail dialog.
+// Full list for the detail dialog; the reason is always written out there.
 export function WeighingRowsList({ rows }: { rows: WeighingRows | undefined }) {
   if (!rows || rows.status === "unknown") {
     return (

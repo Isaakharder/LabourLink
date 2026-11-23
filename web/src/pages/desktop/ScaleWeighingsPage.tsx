@@ -17,6 +17,9 @@ const STATUS_FILTERS: { value: string; label: string }[] = [
   { value: "not_credited", label: "Not credited" },
   { value: "expired", label: "Expired" },
   { value: "voided", label: "Voided" },
+  // Repeat weighings within five minutes: never reviewed or counted, so not
+  // part of Needs review. Shown only when there are any (or it is selected).
+  { value: "duplicate", label: "Duplicate" },
 ];
 
 const kg = (v: number) => v.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 2 });
@@ -131,7 +134,7 @@ export function ScaleWeighingsPage() {
           <Total
             label="Needs review"
             value={String(t.needsReview)}
-            hint={t.needsReview > 0 ? "Open to review" : "Nothing to review"}
+            hint={t.needsReview > 0 ? "Held for an administrator" : "Nothing to review"}
             tone={t.needsReview > 0 ? "attention" : undefined}
             onSelect={t.needsReview > 0 ? () => setStatus("needs_review") : undefined}
           />
@@ -139,11 +142,14 @@ export function ScaleWeighingsPage() {
         </div>
       )}
       {notes.length > 0 && <p className="scale-note">{notes.join(" · ")}</p>}
+      <p className="scale-summary-scope">
+        Cards and status counts cover this day{carrierId || employeeId ? " with the Bin and Employee filters" : ""}. Needs review never includes duplicates.
+      </p>
 
       <section className="scale-panel scale-table-panel" aria-label="Weighings">
         <div className="scale-table-header">
           <div className="scale-status-tabs" role="group" aria-label="Status">
-            {STATUS_FILTERS.map((s) => {
+            {STATUS_FILTERS.filter((s) => s.value !== "duplicate" || status === "duplicate" || (counts?.duplicate ?? 0) > 0).map((s) => {
               const n = counts?.[s.value];
               return (
                 <button

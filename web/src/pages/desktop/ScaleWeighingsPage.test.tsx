@@ -65,10 +65,10 @@ const day: ScaleWeighingDay = {
       pendingUntil: null,
       stationName: "Weigh station 1",
       flagCount: 0,
-      rows: { status: "unknown", reason: "A repeat weighing of the same bin within five minutes; the rows are on the first weighing." },
+      rows: { status: "unknown", code: "duplicate", reason: "A repeat weighing of the same bin within five minutes; the rows are on the first weighing." },
     },
   ],
-  statusCounts: { all: 2, credited: 1, pending: 0, needs_review: 1, expired: 0, voided: 0, not_credited: 1 },
+  statusCounts: { all: 2, credited: 1, pending: 0, needs_review: 0, expired: 0, voided: 0, not_credited: 1, duplicate: 1 },
   filters: { bins: [{ id: "b-77", name: "Bin 77" }], employees: [{ id: "e-1", name: "Ruben Ortiz" }] },
 };
 
@@ -211,7 +211,7 @@ describe("ScaleWeighingsPage", () => {
     const rows = screen.getAllByRole("row");
     expect(within(rows[1]).getByText("Credited")).toBeInTheDocument();
     expect(within(rows[1]).getByText("172.5")).toBeInTheDocument();
-    expect(within(rows[2]).getByText("Duplicate")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("Duplicate", { selector: ".scale-status" })).toBeInTheDocument();
     expect(rows[2]).toHaveClass("scale-weighing-not-counted");
   });
 
@@ -240,9 +240,29 @@ describe("ScaleWeighingsPage", () => {
     expect(within(known).getByText("12, 13")).toBeInTheDocument();
     expect(within(known).getByText("571")).toBeInTheDocument();
     expect(within(known).getByText("Phase 2")).toBeInTheDocument();
-    const unknown = within(rows[2]).getByLabelText(/^Rows unknown: A repeat weighing/);
-    expect(unknown).toHaveTextContent("—");
-    expect(unknown).toHaveAttribute("title", expect.stringContaining("repeat weighing"));
+    // Unknown: a visible label, and the full reason on tap (no hover needed).
+    const why = within(rows[2]).getByRole("button", { name: /^Rows unknown: Duplicate\. Show why/ });
+    expect(why).toHaveTextContent("—");
+    expect(why).toHaveAttribute("aria-expanded", "false");
+    expect(within(rows[2]).queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  it("reveals why rows are unknown on tap or keyboard, without opening the weighing", async () => {
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await screen.findByText("Ruben Ortiz", { selector: "td" });
+    const row = screen.getAllByRole("row")[2];
+    const detailCalls = () => apiMock.mock.calls.filter((c) => /^\/api\/scale-weighings\/[^?]/.test(c[0] as string)).length;
+    const before = detailCalls();
+    await user.click(within(row).getByRole("button", { name: /Show why/ }));
+    expect(within(row).getByRole("note")).toHaveTextContent("A repeat weighing of the same bin within five minutes");
+    expect(within(row).getByRole("button", { name: /Hide why/ })).toHaveAttribute("aria-expanded", "true");
+    expect(detailCalls()).toBe(before);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    within(row).getByRole("button", { name: /Hide why/ }).focus();
+    await user.keyboard("{Enter}");
+    expect(within(row).queryByRole("note")).not.toBeInTheDocument();
+    expect(detailCalls()).toBe(before);
   });
 
   it("shows status counts on the filter chips and clears filters", async () => {
@@ -251,7 +271,11 @@ describe("ScaleWeighingsPage", () => {
     await screen.findByText("Ruben Ortiz", { selector: "td" });
     const tabs = within(screen.getByRole("group", { name: "Status" }));
     expect(tabs.getByRole("button", { name: "All 2" })).toHaveAttribute("aria-pressed", "true");
-    expect(tabs.getByRole("button", { name: "Needs review 1" })).toBeInTheDocument();
+    // Needs review leaves out the duplicate; the duplicate has its own chip,
+    // and the Needs review card shows the same number as the chip.
+    expect(tabs.getByRole("button", { name: "Needs review 0" })).toBeInTheDocument();
+    expect(tabs.getByRole("button", { name: "Duplicate 1" })).toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "Day totals" })).getByText("Needs review").parentElement).toHaveTextContent("Needs review0");
     expect(screen.queryByRole("button", { name: "Clear filters" })).not.toBeInTheDocument();
     await user.click(tabs.getByRole("button", { name: "Credited 1" }));
     await waitFor(() => expect(lastListCall()).toContain("status=credited"));

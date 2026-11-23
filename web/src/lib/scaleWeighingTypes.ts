@@ -12,7 +12,9 @@ export interface WeighingPickedRow {
   label: string;
 }
 
-export type WeighingRows = { status: "known"; rows: WeighingPickedRow[] } | { status: "unknown"; reason: string };
+export type UnknownRowsCode = "noCycle" | "severalInCycle" | "competing" | "nobody" | "earlierDay" | "noRows" | "duplicate";
+
+export type WeighingRows = { status: "known"; rows: WeighingPickedRow[] } | { status: "unknown"; code: UnknownRowsCode; reason: string };
 
 export interface ScaleWeighingRow {
   id: string;

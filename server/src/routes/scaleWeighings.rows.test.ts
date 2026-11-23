@@ -280,6 +280,7 @@ async function main() {
     check(reason(L2) === ROWS_REASONS.duplicate, "L2: duplicate shows —", byId.get(L2)?.rows);
     check(reason(L3) === ROWS_REASONS.competing, "L3: needs review before tracking shows —", byId.get(L3)?.rows);
     check(reason(L4) === ROWS_REASONS.nobody, "L4: pending with nobody shows —", byId.get(L4)?.rows);
+    check(byId.get(L4)?.rows?.code === "nobody" && byId.get(T2)?.rows?.code === "noCycle" && byId.get(L2)?.rows?.code === "duplicate", "unknown rows carry a reason code", [byId.get(L4)?.rows, byId.get(T2)?.rows]);
     check(reason(L5) === ROWS_REASONS.earlierDay, "L5: a bin use from an earlier day shows —", byId.get(L5)?.rows);
     check(reason(L6) === ROWS_REASONS.noRows, "L6: no row recorded shows —", byId.get(L6)?.rows);
     check(JSON.stringify(labels(L7)) === JSON.stringify([label(2, 7)]), "L7: a voided credit keeps its rows", byId.get(L7)?.rows);
@@ -291,7 +292,21 @@ async function main() {
     check(t1Row?.phaseName === `QA SWR ${RUN_ID} Phase 2` && t1Row?.rowNumber === 7 && t1Row?.id === r7, "row carries phase name, number and id", t1Row);
 
     // Status counts cover the bin/employee filters only.
-    check(day.body.statusCounts?.all === 11 && day.body.statusCounts?.credited === 5 && day.body.statusCounts?.needs_review === 3, "status counts", day.body.statusCounts);
+    check(
+      day.body.statusCounts?.all === 11 && day.body.statusCounts?.credited === 5 && day.body.statusCounts?.needs_review === 2 && day.body.statusCounts?.duplicate === 1,
+      "status counts: needs review leaves out the duplicate, which has its own count",
+      day.body.statusCounts
+    );
+    check(day.body.totals.needsReview === day.body.statusCounts.needs_review, "Needs review card = Needs review count", day.body.totals);
+    const review = await get(`/api/scale-weighings?date=${DAY}&status=needs_review`);
+    check(
+      review.body.weighings.length === review.body.statusCounts.needs_review && review.body.weighings.every((w: any) => w.status === "needs_review" && !w.isDuplicate),
+      "Needs review filter lists exactly what the card and count say",
+      review.body.weighings.map((w: any) => [w.status, w.isDuplicate])
+    );
+    check(JSON.stringify(review.body.totals) === JSON.stringify(day.body.totals), "status filter leaves the summary cards unchanged", review.body.totals);
+    const dups = await get(`/api/scale-weighings?date=${DAY}&status=duplicate`);
+    check(dups.body.weighings.length === 1 && dups.body.weighings[0].id === L2, "Duplicate filter lists the duplicate", dups.body.weighings.length);
     const filtered = await get(`/api/scale-weighings?date=${DAY}&status=pending`);
     check(filtered.body.weighings.length === 2 && filtered.body.statusCounts.all === 11, "status filter keeps every count", filtered.body.statusCounts);
     const byBin = await get(`/api/scale-weighings?date=${DAY}&carrierId=${binA}`);

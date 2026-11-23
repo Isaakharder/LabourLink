@@ -33,7 +33,9 @@ export interface WeighingRow {
 
 export type WeighingRows =
   | { status: "known"; rows: WeighingRow[] }
-  | { status: "unknown"; reason: string };
+  | { status: "unknown"; code: UnknownRowsCode; reason: string };
+
+export type UnknownRowsCode = keyof typeof ROWS_REASONS;
 
 export const ROWS_REASONS = {
   noCycle: "No picking cycle is linked to this weighing, so its rows aren't known.",
@@ -92,21 +94,21 @@ export async function loadWeighingRows(db: Pool | PoolClient, weighings: Weighin
   const windows: UseWindow[] = [];
   for (const w of weighings) {
     const weighedAt = new Date(w.weighed_at);
-    const unknown = (reason: string) => out.set(w.id, { status: "unknown", reason });
+    const unknown = (code: UnknownRowsCode) => out.set(w.id, { status: "unknown", code, reason: ROWS_REASONS[code] });
     let employeeId: string;
     let from: Date;
     const cycle = cycleByWeighing.get(w.id);
     if (w.is_duplicate) {
-      unknown(ROWS_REASONS.duplicate);
+      unknown("duplicate");
       continue;
     }
     if (inPeriod(weighedAt)) {
       if (!cycle) {
-        unknown(ROWS_REASONS.noCycle);
+        unknown("noCycle");
         continue;
       }
       if (cycle.scan_employees > 1) {
-        unknown(ROWS_REASONS.severalInCycle);
+        unknown("severalInCycle");
         continue;
       }
       employeeId = cycle.employee_id;
@@ -114,24 +116,24 @@ export async function loadWeighingRows(db: Pool | PoolClient, weighings: Weighin
     } else {
       const c = claimsByWeighing.get(w.id);
       if (c && c.employees > 1) {
-        unknown(ROWS_REASONS.competing);
+        unknown("competing");
         continue;
       }
       if (w.status === "needs_review") {
         // Competing claims are flags, not claims: several employees, or an
         // anomaly held for review. Either way, no one bin use to show.
-        unknown(ROWS_REASONS.competing);
+        unknown("competing");
         continue;
       }
       if (!c || !(w.status === "credited" || w.status === "voided")) {
-        unknown(ROWS_REASONS.nobody);
+        unknown("nobody");
         continue;
       }
       employeeId = c.employee_id;
       from = new Date(c.first_claim);
     }
     if (!sameAppDay(from, weighedAt)) {
-      unknown(ROWS_REASONS.earlierDay);
+      unknown("earlierDay");
       continue;
     }
     windows.push({ weighingId: w.id, employeeId, carrierId: w.carrier_id, from, to: weighedAt });
@@ -168,7 +170,7 @@ export async function loadWeighingRows(db: Pool | PoolClient, weighings: Weighin
     const collator = new Intl.Collator(undefined, { numeric: true });
     for (const x of windows) {
       const list = (byWeighing.get(x.weighingId) ?? []).sort((a, b) => collator.compare(a.phaseName, b.phaseName) || a.rowNumber - b.rowNumber);
-      out.set(x.weighingId, list.length ? { status: "known", rows: list } : { status: "unknown", reason: ROWS_REASONS.noRows });
+      out.set(x.weighingId, list.length ? { status: "known", rows: list } : { status: "unknown", code: "noRows", reason: ROWS_REASONS.noRows });
     }
   }
   return out;
