@@ -6,6 +6,7 @@ import { api, ApiError } from "../../lib/api";
 import { ScaleWeighingDay } from "../../lib/scaleWeighingTypes";
 import { StatusBadge } from "../../components/scale/StatusBadge";
 import { PickingCyclesPanel } from "../../components/scale/PickingCyclesPanel";
+import { ProductivityAllocationsPanel } from "../../components/scale/ProductivityAllocationsPanel";
 import { WeighingRowsCell } from "../../components/scale/WeighingRowsCell";
 import { formatTimeInAppTimezone, todayInAppTimezone } from "../../lib/timezone";
 
@@ -232,6 +233,7 @@ export function ScaleWeighingsPage() {
         )}
       </section>
 
+      <ProductivityAllocationsPanel date={date} />
       <PickingCyclesPanel onChanged={load} />
       {openId && <ScaleWeighingDetailModal weighingId={openId} onClose={() => setOpenId(null)} onChanged={load} />}
     </div>

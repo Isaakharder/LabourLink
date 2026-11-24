@@ -49,6 +49,25 @@ describe("Dashboard card: kg/hour Jobs", () => {
     expect(screen.queryByText(/stems\/hour/)).not.toBeInTheDocument();
   });
 
+  it("labels shared-bin kilograms as estimated, and manual ones as set by an administrator", () => {
+    render(
+      <RowStemCard
+        card={card({
+          scaleProductivity: {
+            kgPerHour: 133.3, netKg: 200, matchedHours: 1.5, weighedBins: 2, sharedBins: 1, estimatedKg: 66.667, manualKg: 20,
+            excludedBins: 0, binsNotYetWeighed: 0, reportingFrom: "2026-11-24",
+          },
+        })}
+      />
+    );
+    expect(screen.getByText("1 shared bin · 66.7 kg estimated from picking minutes · 20 kg set by an administrator")).toBeInTheDocument();
+  });
+
+  it("no shared bins: no shared-bin line", () => {
+    render(<RowStemCard card={card({ scaleProductivity: { kgPerHour: 150, netKg: 150, matchedHours: 1, weighedBins: 1, sharedBins: 0, estimatedKg: 0, manualKg: 0, excludedBins: 0, binsNotYetWeighed: 0, reportingFrom: "2026-11-24" } })} />);
+    expect(screen.queryByText("Shared bins")).not.toBeInTheDocument();
+  });
+
   it("waits (never 0) when no bin has been weighed", () => {
     render(
       <RowStemCard

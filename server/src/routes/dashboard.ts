@@ -40,7 +40,10 @@ interface DashboardScaleProductivity {
   netKg: number;
   matchedHours: number;
   weighedBins: number;
-  excludedBins: number; // weighed, but not attributable (see the reasons)
+  sharedBins: number; // of the weighed bins, shared with other employees (kg allocated by minutes)
+  estimatedKg: number; // kilograms from shared bins allocated by minutes (an estimate)
+  manualKg: number; // kilograms set by an administrator (Review allocation)
+  excludedBins: number; // weighed, but waiting for an administrator or never counted
   binsNotYetWeighed: number;
   reportingFrom: string | null; // null: the week is before kg/hour reporting starts
 }
@@ -540,6 +543,9 @@ router.get(
           netKg: (e?.netGrams ?? 0) / 1000,
           matchedHours: (e?.matchedSeconds ?? 0) / 3600,
           weighedBins: e?.bins ?? 0,
+          sharedBins: e?.sharedBins ?? 0,
+          estimatedKg: (e?.estimatedGrams ?? 0) / 1000,
+          manualKg: (e?.manualGrams ?? 0) / 1000,
           excludedBins: e?.excludedBins ?? 0,
           binsNotYetWeighed: result.openBinsByEmployee.get(employeeId) ?? 0,
           reportingFrom: result.dateStart,

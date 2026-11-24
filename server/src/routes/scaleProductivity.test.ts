@@ -1,5 +1,5 @@
-// Kilograms/hour Jobs (077, lib/scaleProductivity.ts) against the real
-// database: the matched weighed-bin calculation, the TV ranking slide, the
+// Kilograms/hour Jobs (077/078, lib/scaleProductivity.ts) against the real
+// database: the matched weighed-bin calculation with shared-bin allocation, the TV ranking slide, the
 // Dashboard card and the Jobs API. RUN_ID-suffixed fixtures on a day well in
 // the future (after the reporting start date), removed at the end.
 //
@@ -262,25 +262,33 @@ async function main() {
     check(Math.abs((a?.kgPerHour ?? 0) - 270 / (97 / 60)) < 1e-9, "Ana: 270 kg / 1.617 h", a?.kgPerHour);
     check(r.openBinsByEmployee.get(ana.id) === 1, "Ana: one bin not yet weighed", [...r.openBinsByEmployee]);
 
+    // Ben: B1 (Cal scanned, no picking time: an accidental scan, 0 kg) and
+    // B2 (Cal picked 10 of the bin's minutes at the same time as Ben: shared
+    // by minutes) count. B3 (Cal's earlier, superseded use was under another
+    // Job), B4 (half under another Job) and B5 (late conflict) wait for review.
     const b = r.byEmployee.get(ben.id);
-    check(b?.bins === 0 && b.kgPerHour === null, "Ben: no trusted bin yet, no figure (not 0)", b);
-    check(
-      b?.excludedByReason.several_employees === 2 && b.excludedByReason.superseded_review_open === 1 && b.excludedByReason.other_job === 1 && b.excludedByReason.late_conflict === 1,
-      "Ben: exclusions by reason",
-      b?.excludedByReason
-    );
+    check(b?.bins === 2 && b.sharedBins === 1 && b.netGrams === 100_000 + 85_714 && b.matchedSeconds === 2 * 3600, "Ben: B1 whole (stray scan gets nothing), B2 shared 60:10", b);
+    check(b?.estimatedGrams === 85_714 && b.manualGrams === 0, "Ben: B2's kilograms are an estimate", b);
+    check(b?.excludedBins === 3 && b.excludedByReason.other_job === 2 && b.excludedByReason.late_conflict === 1, "Ben: B3, B4 and B5 wait for review, by reason", b?.excludedByReason);
 
+    // Cal: B2 share 14.286 kg / 10 min; C3 (credited to Cal, an old
+    // resolution put the cycle under Ben, but only Cal picked into it) 100 kg
+    // / 30 min; C1 has no picking time with the bin; C2 is another Job's bin.
     const c = r.byEmployee.get(cal.id);
-    check(c?.excludedByReason.no_matched_time === 1 && c.excludedByReason.credit_mismatch === 1 && c.excludedBins === 2, "Cal: no matched time and a credit mismatch excluded; the other Job's bin isn't this Job's", c);
+    check(c?.bins === 2 && c.netGrams === 14_286 + 100_000 && c.matchedSeconds === 40 * 60, "Cal: his B2 share and C3", c);
+    check(c?.excludedBins === 1 && c.excludedByReason.no_matched_time === 1, "Cal: C1 never counts; B3 is not listed for him (his time with it is another Job's)", c?.excludedByReason);
+    check(85_714 + 14_286 === 100_000, "B2's 100 kg split exactly between Ben and Cal");
 
     const d = r.byEmployee.get(dee.id);
-    check(d?.excludedByReason.overlapping_time === 2, "Dee: two bins with overlapping time both excluded", d);
+    check(d?.excludedByReason.overlapping_time === 2, "Dee: two bins with overlapping time both wait for review", d);
     check(d?.bins === 1 && d.netGrams === 200_000 && d.matchedSeconds === 2 * 3600, "Dee: the two-day bin counts on its weighing day with both hours", d);
 
     const prev = await getScaleProductivity(PICK, PREV, PREV, { now });
     check(!prev.byEmployee.get(dee.id)?.bins, "the two-day bin is not reported on the day it was started", prev.byEmployee.get(dee.id));
     const both = await getScaleProductivity(PICK, PREV, DAY, { now });
     check(both.byEmployee.get(dee.id)?.netGrams === 200_000 && both.byEmployee.get(dee.id)?.matchedSeconds === 2 * 3600, "over both days the two-day bin appears once", both.byEmployee.get(dee.id));
+    const sig = (m: typeof r.byEmployee) => JSON.stringify([...m.values()].map((e) => [e.employeeId, e.netGrams, e.matchedSeconds]).sort());
+    check(sig(both.byEmployee) === sig(r.byEmployee), "a wider range gives the same figures (nothing double counted across days)");
 
     const other = await getScaleProductivity(OTHER, DAY, DAY, { now });
     check(other.byEmployee.get(cal.id)?.bins === 1 && other.byEmployee.get(cal.id)?.netGrams === 100_000, "the other Job sees its own bin C2", other.byEmployee.get(cal.id));
@@ -289,12 +297,15 @@ async function main() {
     check(before.dateStart === null && before.byEmployee.size === 0, "nothing is reported before 2026-11-24", before);
 
     const onlyAna = await getScaleProductivity(PICK, DAY, DAY, { now, employeeIds: [ana.id] });
-    check(onlyAna.byEmployee.size === 1 && onlyAna.byEmployee.has(ana.id), "employee filter", [...onlyAna.byEmployee.keys()]);
+    check(onlyAna.byEmployee.size === 1 && onlyAna.byEmployee.get(ana.id)?.netGrams === 270_000, "employee filter", [...onlyAna.byEmployee.keys()]);
+    const onlyCal = await getScaleProductivity(PICK, DAY, DAY, { now, employeeIds: [cal.id] });
+    check(onlyCal.byEmployee.get(cal.id)?.netGrams === 114_286, "the employee filter keeps shares of bins credited to someone else", onlyCal.byEmployee.get(cal.id));
 
-    // An administrator settles the superseded review: Ben's B3 becomes trusted.
+    // Settling the official supersede review changes nothing for kg/hour: B3's
+    // allocation is decided in Review allocation, not by the credit review.
     await pool.query(`update bin_cycles set review_status = 'confirmed' where id = $1`, [sup]);
     r = await getScaleProductivity(PICK, DAY, DAY, { now });
-    check(r.byEmployee.get(ben.id)?.bins === 1 && r.byEmployee.get(ben.id)?.netGrams === 160_000 && r.byEmployee.get(ben.id)?.matchedSeconds === 3600, "after the review, B3 counts: 160 kg / 1 h", r.byEmployee.get(ben.id));
+    check(r.byEmployee.get(ben.id)?.excludedByReason.other_job === 2 && r.byEmployee.get(ben.id)?.netGrams === 185_714, "confirming the official supersede review does not count B3", r.byEmployee.get(ben.id));
     // An administrator voids Ana's A2: it leaves the figure (kg and time together).
     await pool.query(`update scale_weighings set status = 'voided' where id = $1`, [wA2]);
     r = await getScaleProductivity(PICK, DAY, DAY, { now });
@@ -316,10 +327,10 @@ async function main() {
     check(pick?.status === "ok" && pick.speedUnit === "kg/hour" && pick.productivityMetric === "scale_kg", "kg/hour slide uses the kg unit", pick);
     check(pick?.target === 150, "kg/hour slide target is the Job's kg/hour normal speed, not the row-count override (999)", pick?.target);
     const names = pick?.employees.map((e) => e.firstName);
-    check(JSON.stringify(names) === JSON.stringify(["Ana", "Ben", "Dee"]), "ranked fastest first: Ana 167, Ben 160, Dee 100", pick?.employees);
-    const ae = pick?.employees[0];
+    check(JSON.stringify(names) === JSON.stringify(["Cal", "Ana", "Dee", "Ben"]), "ranked fastest first: Cal 171.4, Ana 167, Dee 100, Ben 92.9", pick?.employees);
+    const ae = pick?.employees[1];
     check(ae?.speed === 167 && ae.quantityCounted === 270 && ae.activityHours === 1.62 && ae.binsCounted === 2, "slide carries kg/hour, kg, matched hours and bins", ae);
-    check(pick?.employeesWithoutSpeed === 1, "Cal (only excluded bins) is counted without a speed", pick?.employeesWithoutSpeed);
+    check(pick?.employeesWithoutSpeed === 0, "everyone with a bin to review here also has a counted bin", pick?.employeesWithoutSpeed);
     // Minimum hours on a kg/hour slide = picking hours matched to eligible
     // weighed bins only (not shift hours, not open bins: Ana also has 1 h in
     // an unweighed bin and Cal's job time has no eligible bin).
@@ -328,14 +339,14 @@ async function main() {
     const minPayload = await buildDisplaySlides({ id: displayId!, reportWeek: "this_week", reportIncludeToday: true, mapSlideSeconds: 20 }, DAY, now);
     const minSlide = minPayload.slides.find((s) => s.activityId === PICK);
     check(
-      JSON.stringify(minSlide?.employees.map((e) => e.firstName)) === JSON.stringify(["Dee"]) && minSlide?.belowMinimumHours === 2,
-      "minimum 1.7 h uses matched hours: Ana 1.62 h and Ben 1.0 h are below it, Dee 2.0 h is shown",
+      JSON.stringify(minSlide?.employees.map((e) => e.firstName)) === JSON.stringify(["Dee", "Ben"]) && minSlide?.belowMinimumHours === 2,
+      "minimum 1.7 h uses matched hours: Cal 0.67 h and Ana 1.62 h are below it, Dee and Ben 2.0 h are shown",
       minSlide
     );
     await pool.query(`update greenhouse_display_activity_slides set minimum_activity_hours = 1 where display_id = $1 and activity_id = $2`, [displayId, PICK]);
     _clearSpeedCacheForTests();
     const oneHour = (await buildDisplaySlides({ id: displayId!, reportWeek: "this_week", reportIncludeToday: true, mapSlideSeconds: 20 }, DAY, now)).slides.find((s) => s.activityId === PICK);
-    check(oneHour?.employees.length === 3 && oneHour.belowMinimumHours === 0, "minimum 1.0 matched hour: all three shown (Ben exactly 1.0 h)", oneHour);
+    check(oneHour?.employees.length === 3 && oneHour.belowMinimumHours === 1, "minimum 1.0 matched hour: Ana, Dee and Ben shown; Cal's 0.67 h (shared-bin minutes included) is below", oneHour);
 
     const empty = payload.slides.find((s) => s.activityId === EMPTY);
     check(empty?.status === "no_speed" && empty.reason === "waiting_for_bins" && /Waiting for weighed bins/.test(empty.notice ?? ""), "a kg/hour Job with work but no weighed bins waits", empty);
@@ -349,7 +360,8 @@ async function main() {
       const card = body.cards?.find((x: any) => x.employeeId === ana.id);
       check(res.status === 200 && card?.cardType === "row_stem", "kg/hour Job keeps its row/stem card (block progress unchanged)", body);
       check(
-        card?.scaleProductivity?.kgPerHour === null && card.scaleProductivity.weighedBins === 0 && card.scaleProductivity.reportingFrom >= "2026-11-24",
+        card?.scaleProductivity?.kgPerHour === null && card.scaleProductivity.weighedBins === 0 && card.scaleProductivity.sharedBins === 0 &&
+          card.scaleProductivity.estimatedKg === 0 && card.scaleProductivity.reportingFrom >= "2026-11-24",
         "card carries kg/hour figures; none yet this week means a waiting state, not 0",
         card?.scaleProductivity
       );
@@ -394,6 +406,8 @@ async function main() {
     };
     if (displayId) await del(`delete from greenhouse_displays where id = $1`, [displayId]);
     if (landId) await del(`delete from greenhouse_lands where id = $1`, [landId]);
+    await del(`delete from scale_productivity_allocation_history where weighing_id = any($1::uuid[])`, [ids.weighings]);
+    await del(`delete from scale_productivity_allocations where weighing_id = any($1::uuid[])`, [ids.weighings]);
     await del(`delete from scale_weighing_flags where weighing_id = any($1::uuid[])`, [ids.weighings]);
     await del(`delete from bin_scans where carrier_id = any($1::uuid[])`, [ids.carriers]);
     await del(`delete from bin_cycles where id = any($1::uuid[])`, [ids.cycles]);

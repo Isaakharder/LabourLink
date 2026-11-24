@@ -33,6 +33,7 @@ import integrationsRoutes from "./routes/integrations";
 import scaleRoutes from "./routes/scale";
 import scaleWeighingsRoutes from "./routes/scaleWeighings";
 import binCyclesRoutes from "./routes/binCycles";
+import scaleProductivityAllocationsRoutes from "./routes/scaleProductivityAllocations";
 import { startScaleMatchingSweep } from "./lib/scaleMatching";
 import nfcTagsRoutes from "./routes/nfcTags";
 import pairingRoutes from "./routes/pairing";
@@ -96,6 +97,7 @@ app.use("/api/integrations", integrationsRoutes);
 app.use("/api/scale", scaleRoutes);
 app.use("/api/scale-weighings", scaleWeighingsRoutes);
 app.use("/api/bin-cycles", binCyclesRoutes);
+app.use("/api/scale-productivity-allocations", scaleProductivityAllocationsRoutes);
 
 // Safety net: any error forwarded via next(err) (see asyncHandler) lands
 // here instead of crashing the process. Logged server-side; the client only

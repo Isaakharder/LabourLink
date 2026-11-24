@@ -1,32 +1,39 @@
-// Pure rules of matched weighed-bin productivity; see scaleProductivity.ts
-// for the full description. No database.
+// Pure rules of matched weighed-bin productivity with shared-bin allocation;
+// see scaleProductivity.ts for the full description. No database.
 
 export const SCALE_PRODUCTIVITY_START_DATE = "2026-11-24";
 export const SCALE_KG_SPEED_UNIT = "kg/hour";
+// Longest pause in picking at a handover between two employees that still
+// counts as one continuous load. Longer pauses (and any handover on a later
+// day) make the load boundary uncertain: the bin may have been emptied.
+export const HANDOVER_MAX_GAP_MS = 15 * 60_000;
 
-export type BinExclusionReason =
-  | "several_employees"
-  | "superseded_review_open"
-  | "late_conflict"
-  | "credit_mismatch"
+// Why a weighed bin waits for an administrator (counts for nobody until then).
+export type LoadReviewReason =
+  | "handover_gap"
+  | "overnight_handover"
   | "other_job"
-  | "no_matched_time"
   | "overlapping_time"
-  | "no_cycle";
+  | "late_conflict"
+  | "inputs_changed";
+// Why a weighed bin never counts (not reviewable).
+export type LoadExclusionReason = "no_cycle" | "no_matched_time" | "excluded_by_admin";
+export type BinExclusionReason = LoadReviewReason | LoadExclusionReason;
 
 export const BIN_EXCLUSION_LABELS: Record<BinExclusionReason, string> = {
-  several_employees: "More than one employee picked into this bin",
-  superseded_review_open: "An earlier use of this bin by someone else is awaiting review",
-  late_conflict: "Another employee claimed this bin after it was credited",
-  credit_mismatch: "The credited employee isn't the picking cycle's employee",
+  handover_gap: "Picking stopped for more than 15 minutes before another employee continued this bin",
+  overnight_handover: "Another employee continued this bin on a later day",
   other_job: "Some of this bin's time is under another job",
-  no_matched_time: "No picking time matches this bin",
-  overlapping_time: "This bin's time overlaps another bin's time",
+  overlapping_time: "An employee's time for this bin overlaps their time for another bin",
+  late_conflict: "Another employee's phone claimed this bin after it was weighed",
+  inputs_changed: "The time records changed after this allocation was reviewed",
   no_cycle: "No picking cycle is linked to this weighing",
+  no_matched_time: "No picking time matches this bin",
+  excluded_by_admin: "Excluded by an administrator",
 };
 
 // ---------------------------------------------------------------------------
-// Pure part (tested in lib/scaleProductivity.test.ts)
+// Intervals
 // ---------------------------------------------------------------------------
 export type Interval = [number, number]; // [start ms, end ms), start < end
 
@@ -59,23 +66,28 @@ export function subtractIntervals(from: Interval[], remove: Interval[]): Interva
 
 export const totalMs = (list: Interval[]) => list.reduce((s, [a, b]) => s + (b - a), 0);
 
-export interface BinInput {
+export function overlapMs(a: Interval[], b: Interval[]): number {
+  let t = 0;
+  for (const [x, y] of a) for (const [p, q] of b) t += Math.max(0, Math.min(y, q) - Math.max(x, p));
+  return t;
+}
+
+// ---------------------------------------------------------------------------
+// Inputs
+// ---------------------------------------------------------------------------
+// One weighed bin load: everything put into a physical bin between its
+// previous boundary (previous weighing, administrator "closed without
+// weighing", or the start of picking-cycle tracking) and this weighing.
+export interface LoadInput {
   weighingId: string;
   carrierId: string;
-  employeeId: string; // the credited employee
+  creditedEmployeeId: string; // the official scale credit (never changed here)
   netGrams: number;
   weighedAt: number;
-  weighDate: string; // local date of weighed_at
-  cycle: {
-    employeeId: string;
-    openedAt: number;
-    otherScanEmployees: number; // distinct scanning employees other than the credited one
-    openSupersededReviews: number;
-    // The bin's previous weighing or previous cycle end before this cycle
-    // opened (null: none). The bin's time never reaches back past it.
-    previousBoundaryAt: number | null;
-  } | null;
+  loadStart: number;
+  hasCycle: boolean; // this weighing closed a picking cycle
   lateConflicts: number;
+  scannerIds: string[]; // employees whose phone chose this bin during the load
 }
 
 export interface EntryInput {
@@ -92,124 +104,249 @@ export interface BreakInput {
   endedAt: number | null;
 }
 
-export type BinOutcome =
-  | { kind: "eligible"; bin: BinInput; matchedMs: number; intervals: Interval[] }
-  | { kind: "excluded"; bin: BinInput; reason: BinExclusionReason }
-  // All of the bin's time is under a different Job: not this Job's bin.
-  | { kind: "other_job_only"; bin: BinInput };
-
-// Decides one bin for one Job. `entries` are every non-deleted work entry
-// with this bin that overlaps the bin's window (any employee, any Job);
-// `breaks` are the credited employee's non-deleted breaks.
-export function evaluateBin(bin: BinInput, jobId: string, entries: EntryInput[], breaks: BreakInput[]): BinOutcome {
-  const c = bin.cycle;
-  if (!c) return { kind: "excluded", bin, reason: "no_cycle" };
-  if (c.employeeId !== bin.employeeId) return { kind: "excluded", bin, reason: "credit_mismatch" };
-  if (c.otherScanEmployees > 0) return { kind: "excluded", bin, reason: "several_employees" };
-  if (c.openSupersededReviews > 0) return { kind: "excluded", bin, reason: "superseded_review_open" };
-  if (bin.lateConflicts > 0) return { kind: "excluded", bin, reason: "late_conflict" };
-
-  const to = bin.weighedAt;
-  // The cycle opens at the bin scan, which the phone records a moment after
-  // the time entry it belongs to starts. The credited employee's own entry
-  // with this bin that is already running when the cycle opens belongs to
-  // this bin use, so the bin's time starts at that entry's start (never
-  // before the bin's previous weighing or cycle).
-  let from = c.openedAt;
-  for (const e of entries) {
-    if (e.employeeId !== bin.employeeId || e.carrierId !== bin.carrierId) continue;
-    if (e.startedAt < c.openedAt && (e.endedAt ?? to) > c.openedAt) {
-      from = Math.min(from, Math.max(e.startedAt, c.previousBoundaryAt ?? -Infinity));
-    }
-  }
-  const clip = (e: { startedAt: number; endedAt: number | null }): Interval | null => {
-    // An open entry is only used up to the weighing, which is already past.
-    const a = Math.max(e.startedAt, from);
-    const b = Math.min(e.endedAt ?? to, to);
-    return b > a ? [a, b] : null;
-  };
-  const inWindow = entries.filter((e) => e.carrierId === bin.carrierId).map((e) => ({ e, iv: clip(e) })).filter((x) => x.iv);
-  if (inWindow.some((x) => x.e.employeeId !== bin.employeeId)) return { kind: "excluded", bin, reason: "several_employees" };
-  const mine = inWindow.filter((x) => x.e.employeeId === bin.employeeId);
-  const thisJob = mine.filter((x) => x.e.activityId === jobId);
-  if (mine.length > 0 && thisJob.length === 0) return { kind: "other_job_only", bin };
-  if (thisJob.length !== mine.length) return { kind: "excluded", bin, reason: "other_job" };
-
-  const breakIvs = breaks
-    .filter((b) => b.employeeId === bin.employeeId)
-    .map((b) => clip(b))
-    .filter((x): x is Interval => x != null);
-  const intervals = subtractIntervals(
-    thisJob.map((x) => x.iv as Interval),
-    breakIvs
-  );
-  const matchedMs = totalMs(intervals);
-  if (matchedMs <= 0) return { kind: "excluded", bin, reason: "no_matched_time" };
-  return { kind: "eligible", bin, matchedMs, intervals };
+export interface Contributor {
+  employeeId: string;
+  matchedMs: number; // this Job's picking with this bin in the load, breaks removed
+  intervals: Interval[];
+  otherJobMs: number; // time with this bin under another Job
+  scanned: boolean;
 }
 
-// Across one employee's eligible bins: a minute matched to two bins (from
-// overlapping time entries with different bins) is a data-quality conflict.
-// Both bins are excluded rather than counting the minute twice.
-export function excludeOverlappingBins(outcomes: BinOutcome[]): BinOutcome[] {
-  const eligible = outcomes.filter((o): o is Extract<BinOutcome, { kind: "eligible" }> => o.kind === "eligible");
-  const conflicted = new Set<string>();
-  const byEmployee = new Map<string, typeof eligible>();
-  for (const o of eligible) {
-    const list = byEmployee.get(o.bin.employeeId) ?? [];
-    list.push(o);
-    byEmployee.set(o.bin.employeeId, list);
+// An administrator's decision (078), as stored.
+export interface AllocationDecision {
+  action: "confirm" | "override" | "exclude";
+  method: "proportional" | "manual" | null;
+  fingerprint: string;
+  shares: { employeeId: string; included: boolean; allocatedGrams: number }[];
+}
+
+export type AllocationBasis = "single" | "shared_auto" | "reviewed_proportional" | "manual";
+
+export interface Share {
+  employeeId: string;
+  matchedMs: number;
+  grams: number;
+  intervals: Interval[];
+}
+
+export type LoadOutcome =
+  | { kind: "allocated"; load: LoadInput; basis: AllocationBasis; shares: Share[]; contributors: Contributor[]; fingerprint: string }
+  | { kind: "review"; load: LoadInput; reasons: LoadReviewReason[]; proposal: Share[]; contributors: Contributor[]; fingerprint: string }
+  | { kind: "excluded"; load: LoadInput; reason: LoadExclusionReason; contributors: Contributor[]; fingerprint: string }
+  // All of the bin's time is under a different Job: not this Job's bin.
+  | { kind: "other_job_only"; load: LoadInput };
+
+// ---------------------------------------------------------------------------
+// Rules
+// ---------------------------------------------------------------------------
+// Every employee with time with this bin inside the load (any Job), their
+// matched picking for `jobId` minus their own breaks, and the scanners.
+// `entries` may include entries of other bins; `breaks` of any employee.
+export function gatherContributors(load: LoadInput, jobId: string, entries: EntryInput[], breaks: BreakInput[]): Contributor[] {
+  const clip = (s: number, e: number | null): Interval | null => {
+    const a = Math.max(s, load.loadStart);
+    const b = Math.min(e ?? load.weighedAt, load.weighedAt);
+    return b > a ? [a, b] : null;
+  };
+  const by = new Map<string, { job: Interval[]; other: Interval[] }>();
+  for (const e of entries) {
+    if (e.carrierId !== load.carrierId) continue;
+    const iv = clip(e.startedAt, e.endedAt);
+    if (!iv) continue;
+    const x = by.get(e.employeeId) ?? { job: [], other: [] };
+    (e.activityId === jobId ? x.job : x.other).push(iv);
+    by.set(e.employeeId, x);
   }
-  for (const list of byEmployee.values()) {
-    const ivs = list.flatMap((o) => o.intervals.map(([a, b]) => ({ a, b, id: o.bin.weighingId })));
-    ivs.sort((x, y) => x.a - y.a);
-    for (let i = 0; i < ivs.length; i++) {
-      for (let j = i + 1; j < ivs.length && ivs[j].a < ivs[i].b; j++) {
-        if (ivs[j].id !== ivs[i].id) {
-          conflicted.add(ivs[i].id);
-          conflicted.add(ivs[j].id);
-        }
+  for (const id of load.scannerIds) if (!by.has(id)) by.set(id, { job: [], other: [] });
+  const out: Contributor[] = [];
+  for (const [employeeId, x] of by) {
+    const own = breaks.filter((b) => b.employeeId === employeeId).map((b) => clip(b.startedAt, b.endedAt)).filter((v): v is Interval => v != null);
+    const intervals = subtractIntervals(x.job, own);
+    out.push({
+      employeeId,
+      matchedMs: totalMs(intervals),
+      intervals,
+      otherJobMs: totalMs(subtractIntervals(x.other, own)),
+      scanned: load.scannerIds.includes(employeeId),
+    });
+  }
+  return out.sort((a, b) => a.employeeId.localeCompare(b.employeeId));
+}
+
+// Handover continuity: walking the bin's picking in time order, each time a
+// different employee continues the bin, the pause since anyone last picked
+// into it must be at most HANDOVER_MAX_GAP_MS and on the same local day.
+// Two employees picking into the bin at the same time is continuous.
+export function handoverReasons(contributors: Contributor[], dayOf: (ms: number) => string): LoadReviewReason[] {
+  const segs = contributors
+    .flatMap((c) => c.intervals.map(([a, b]) => ({ a, b, id: c.employeeId })))
+    .sort((x, y) => x.a - y.a || x.b - y.b);
+  const reasons = new Set<LoadReviewReason>();
+  let lastEnd = -Infinity;
+  let lastId: string | null = null;
+  for (const s of segs) {
+    if (lastId !== null && s.id !== lastId && s.a > lastEnd) {
+      if (dayOf(lastEnd) !== dayOf(s.a)) reasons.add("overnight_handover");
+      else if (s.a - lastEnd > HANDOVER_MAX_GAP_MS) reasons.add("handover_gap");
+    }
+    if (s.b >= lastEnd) {
+      lastEnd = s.b;
+      lastId = s.id;
+    }
+  }
+  return [...reasons];
+}
+
+// Integer grams in proportion to weights; always sums exactly to `total`.
+// Largest remainder; ties go to the larger weight, then the employee id.
+export function allocateGrams(total: number, weights: { employeeId: string; weight: number }[]): Map<string, number> {
+  const out = new Map<string, number>();
+  const pos = weights.filter((w) => w.weight > 0);
+  const sum = pos.reduce((s, w) => s + w.weight, 0);
+  for (const w of weights) out.set(w.employeeId, 0);
+  if (sum <= 0 || total <= 0) return out;
+  const parts = pos.map((w) => {
+    const exact = (total * w.weight) / sum;
+    const floor = Math.floor(exact);
+    return { id: w.employeeId, weight: w.weight, floor, rem: exact - floor };
+  });
+  let left = total - parts.reduce((s, p) => s + p.floor, 0);
+  parts.sort((x, y) => y.rem - x.rem || y.weight - x.weight || x.id.localeCompare(y.id));
+  for (const p of parts) {
+    out.set(p.id, p.floor + (left > 0 ? 1 : 0));
+    if (left > 0) left--;
+  }
+  return out;
+}
+
+// What a decision is tied to: contributing employees with their matched
+// seconds, the net weight and the load start.
+export function fingerprintOf(load: LoadInput, contributors: Contributor[]): string {
+  const parts = contributors
+    .filter((c) => c.matchedMs > 0)
+    .map((c) => `${c.employeeId}:${Math.round(c.matchedMs / 1000)}`)
+    .sort();
+  return `v1|${load.netGrams}|${load.loadStart}|${parts.join(",")}`;
+}
+
+function proportional(load: LoadInput, contributors: Contributor[], include?: Set<string>): Share[] {
+  const eff = contributors.filter((c) => c.matchedMs > 0 && (!include || include.has(c.employeeId)));
+  const grams = allocateGrams(load.netGrams, eff.map((c) => ({ employeeId: c.employeeId, weight: c.matchedMs })));
+  return eff.map((c) => ({ employeeId: c.employeeId, matchedMs: c.matchedMs, grams: grams.get(c.employeeId) ?? 0, intervals: c.intervals }));
+}
+
+// Decides one weighed bin load for one Job.
+export function evaluateLoad(
+  load: LoadInput,
+  jobId: string,
+  entries: EntryInput[],
+  breaks: BreakInput[],
+  decision: AllocationDecision | null,
+  dayOf: (ms: number) => string
+): LoadOutcome {
+  const contributors = gatherContributors(load, jobId, entries, breaks);
+  const fingerprint = fingerprintOf(load, contributors);
+  if (!load.hasCycle) return { kind: "excluded", load, reason: "no_cycle", contributors, fingerprint };
+  const eff = contributors.filter((c) => c.matchedMs > 0);
+  if (eff.length === 0) {
+    if (contributors.some((c) => c.otherJobMs > 0)) return { kind: "other_job_only", load };
+    return { kind: "excluded", load, reason: "no_matched_time", contributors, fingerprint };
+  }
+  const reasons: LoadReviewReason[] = handoverReasons(eff, dayOf);
+  if (contributors.some((c) => c.otherJobMs > 0)) reasons.push("other_job");
+  if (load.lateConflicts > 0) reasons.push("late_conflict");
+  const proposal = proportional(load, contributors);
+
+  if (decision) {
+    if (decision.fingerprint !== fingerprint) return { kind: "review", load, reasons: ["inputs_changed", ...reasons], proposal, contributors, fingerprint };
+    if (decision.action === "exclude") return { kind: "excluded", load, reason: "excluded_by_admin", contributors, fingerprint };
+    if (decision.action === "confirm") return { kind: "allocated", load, basis: "reviewed_proportional", shares: proposal, contributors, fingerprint };
+    const included = new Set(decision.shares.filter((s) => s.included).map((s) => s.employeeId));
+    if (decision.method === "proportional") {
+      return { kind: "allocated", load, basis: "reviewed_proportional", shares: proportional(load, contributors, included), contributors, fingerprint };
+    }
+    const grams = new Map(decision.shares.map((s) => [s.employeeId, s.allocatedGrams]));
+    const shares = eff
+      .filter((c) => included.has(c.employeeId))
+      .map((c) => ({ employeeId: c.employeeId, matchedMs: c.matchedMs, grams: grams.get(c.employeeId) ?? 0, intervals: c.intervals }));
+    return { kind: "allocated", load, basis: "manual", shares, contributors, fingerprint };
+  }
+  if (reasons.length) return { kind: "review", load, reasons, proposal, contributors, fingerprint };
+  return { kind: "allocated", load, basis: eff.length === 1 ? "single" : "shared_auto", shares: proposal, contributors, fingerprint };
+}
+
+// A minute never counts for two bins: when an employee's counted time for
+// one bin overlaps their counted time for another, both bins go to review
+// (whatever was decided), until a contribution is excluded in one of them.
+export function reviewOverlappingLoads(outcomes: LoadOutcome[]): LoadOutcome[] {
+  const allocated = outcomes.filter((o): o is Extract<LoadOutcome, { kind: "allocated" }> => o.kind === "allocated");
+  const conflicted = new Set<string>();
+  const ivs = allocated.flatMap((o) => o.shares.flatMap((s) => s.intervals.map(([a, b]) => ({ a, b, emp: s.employeeId, id: o.load.weighingId }))));
+  ivs.sort((x, y) => x.a - y.a);
+  for (let i = 0; i < ivs.length; i++) {
+    for (let j = i + 1; j < ivs.length && ivs[j].a < ivs[i].b; j++) {
+      if (ivs[j].emp === ivs[i].emp && ivs[j].id !== ivs[i].id) {
+        conflicted.add(ivs[i].id);
+        conflicted.add(ivs[j].id);
       }
     }
   }
-  return outcomes.map((o) =>
-    o.kind === "eligible" && conflicted.has(o.bin.weighingId) ? { kind: "excluded", bin: o.bin, reason: "overlapping_time" as const } : o
-  );
+  return outcomes.map((o) => {
+    if (o.kind !== "allocated" || !conflicted.has(o.load.weighingId)) return o;
+    const proposal = proportional(o.load, o.contributors);
+    return { kind: "review", load: o.load, reasons: ["overlapping_time"], proposal, contributors: o.contributors, fingerprint: o.fingerprint };
+  });
 }
 
 export interface EmployeeScaleProductivity {
   employeeId: string;
-  netGrams: number; // eligible bins only
-  matchedSeconds: number; // eligible bins only
-  bins: number; // eligible weighed bins
-  kgPerHour: number | null; // null when no eligible bin
-  excludedBins: number;
-  excludedNetGrams: number;
+  netGrams: number; // allocated grams of counted bins
+  matchedSeconds: number; // the employee's matched picking of those bins
+  bins: number; // counted bins the employee picked into
+  sharedBins: number; // of which shared with other employees
+  estimatedGrams: number; // grams from shared bins allocated by minutes
+  manualGrams: number; // grams set by an administrator
+  kgPerHour: number | null; // null when no counted bin
+  excludedBins: number; // bins the employee picked into that wait for review or never count
+  excludedNetGrams: number; // their proposed share of those
   excludedByReason: Partial<Record<BinExclusionReason, number>>;
 }
 
-export function summarizeByEmployee(outcomes: BinOutcome[]): Map<string, EmployeeScaleProductivity> {
+export function summarizeByEmployee(outcomes: LoadOutcome[]): Map<string, EmployeeScaleProductivity> {
   const out = new Map<string, EmployeeScaleProductivity>();
+  const ms = new Map<string, number>();
   const get = (id: string) => {
     let e = out.get(id);
     if (!e) {
-      e = { employeeId: id, netGrams: 0, matchedSeconds: 0, bins: 0, kgPerHour: null, excludedBins: 0, excludedNetGrams: 0, excludedByReason: {} };
+      e = { employeeId: id, netGrams: 0, matchedSeconds: 0, bins: 0, sharedBins: 0, estimatedGrams: 0, manualGrams: 0, kgPerHour: null, excludedBins: 0, excludedNetGrams: 0, excludedByReason: {} };
       out.set(id, e);
     }
     return e;
   };
-  const ms = new Map<string, number>();
   for (const o of outcomes) {
     if (o.kind === "other_job_only") continue;
-    const e = get(o.bin.employeeId);
-    if (o.kind === "eligible") {
-      e.netGrams += o.bin.netGrams;
-      ms.set(e.employeeId, (ms.get(e.employeeId) ?? 0) + o.matchedMs);
-      e.bins++;
-    } else {
+    if (o.kind === "allocated") {
+      const shared = o.shares.filter((s) => s.matchedMs > 0).length > 1;
+      for (const s of o.shares) {
+        if (s.matchedMs <= 0 && s.grams <= 0) continue;
+        const e = get(s.employeeId);
+        e.netGrams += s.grams;
+        ms.set(s.employeeId, (ms.get(s.employeeId) ?? 0) + s.matchedMs);
+        e.bins++;
+        if (shared) e.sharedBins++;
+        if (o.basis === "manual") e.manualGrams += s.grams;
+        else if (shared) e.estimatedGrams += s.grams;
+      }
+      continue;
+    }
+    const people = o.contributors.filter((c) => c.matchedMs > 0);
+    const proposal = o.kind === "review" ? new Map(o.proposal.map((s) => [s.employeeId, s.grams])) : new Map<string, number>();
+    const reasonList: BinExclusionReason[] = o.kind === "review" ? o.reasons : [o.reason];
+    for (const id of people.length ? people.map((c) => c.employeeId) : [o.load.creditedEmployeeId]) {
+      const e = get(id);
       e.excludedBins++;
-      e.excludedNetGrams += o.bin.netGrams;
-      e.excludedByReason[o.reason] = (e.excludedByReason[o.reason] ?? 0) + 1;
+      e.excludedNetGrams += people.length ? proposal.get(id) ?? 0 : o.load.netGrams;
+      for (const r of reasonList) e.excludedByReason[r] = (e.excludedByReason[r] ?? 0) + 1;
     }
   }
   for (const e of out.values()) {
@@ -221,4 +358,3 @@ export function summarizeByEmployee(outcomes: BinOutcome[]): Map<string, Employe
 }
 
 export const roundKgPerHour = (v: number | null) => (v == null ? null : Math.round(v * 10) / 10);
-
