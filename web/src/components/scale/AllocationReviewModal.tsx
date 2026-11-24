@@ -1,11 +1,13 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { api, ApiError } from "../../lib/api";
 import { uuid } from "../../lib/uuid";
 import { ALLOCATION_STATUS_BADGE, ALLOCATION_STATUS_LABELS, AllocationDetail, AllocationHistoryEntry } from "../../lib/scaleProductivityAllocationTypes";
-import { formatDateLongInAppTimezone, formatTimeInAppTimezone } from "../../lib/timezone";
+import { APP_TIMEZONE, formatDateLongInAppTimezone, formatTimeInAppTimezone } from "../../lib/timezone";
 
 const when = (iso: string) => `${formatDateLongInAppTimezone(iso)} ${formatTimeInAppTimezone(iso, { seconds: false })}`;
+const shortDay = (iso: string) => new Date(iso).toLocaleDateString("en-US", { timeZone: APP_TIMEZONE, month: "short", day: "numeric" });
+const span = (a: string, b: string) => `${shortDay(a)} ${formatTimeInAppTimezone(a, { seconds: false })}–${shortDay(a) === shortDay(b) ? "" : shortDay(b) + " "}${formatTimeInAppTimezone(b, { seconds: false })}`;
 const kg = (v: number) => v.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 3 });
 const ACTION_LABELS: Record<AllocationHistoryEntry["action"], string> = {
   confirm: "Confirmed the proposed allocation",
@@ -32,6 +34,12 @@ export function AllocationReviewModal({ weighingId, activityId, onClose, onChang
   const [byHand, setByHand] = useState(false);
   const [kgInput, setKgInput] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+  // The breakdown scrolls sideways on narrow screens while correcting; start
+  // from its left edge whenever the form opens or closes.
+  const tableWrap = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (tableWrap.current) tableWrap.current.scrollLeft = 0;
+  }, [mode, byHand]);
 
   const load = useCallback(() => {
     api<AllocationDetail>(`/api/scale-productivity-allocations/${weighingId}?activityId=${encodeURIComponent(activityId)}`)
@@ -54,8 +62,10 @@ export function AllocationReviewModal({ weighingId, activityId, onClose, onChang
   const pickers = d?.contributors.filter((c) => c.matchedSeconds > 0) ?? [];
   const handSum = pickers.filter((c) => included[c.employeeId]).reduce((s, c) => s + Math.round((Number(kgInput[c.employeeId]) || 0) * 1000), 0);
   const netG = d ? Math.round(d.netKg * 1000) : 0;
-  const countedLabel =
-    d?.status === "manual" ? "set by an administrator" : d?.status === "single" ? "whole bin" : d?.status === "review" || d?.status === "excluded" ? "not counted" : "estimated from minutes";
+  // What a counted figure is: the measured net weight (one employee gets the
+  // whole bin), an estimate from picking minutes, or set by an administrator.
+  const countedPeople = d?.contributors.filter((c) => c.counted).length ?? 0;
+  const countedLabel = d?.status === "manual" ? "set by an administrator" : countedPeople === 1 ? "whole bin (measured)" : "estimated from minutes";
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -98,7 +108,7 @@ export function AllocationReviewModal({ weighingId, activityId, onClose, onChang
   }
 
   return (
-    <Modal title={d ? `${d.bin} · ${formatTimeInAppTimezone(d.weighedAt, { seconds: false })} · kg/hour allocation` : "kg/hour allocation"} onClose={onClose} wide>
+    <Modal title={d ? `${d.bin} · ${formatTimeInAppTimezone(d.weighedAt, { seconds: false })} · kg/hour allocation` : "kg/hour allocation"} onClose={onClose} xxl>
       {error && (
         <p className="error-text" role="alert">
           {error}{" "}
@@ -150,65 +160,87 @@ export function AllocationReviewModal({ weighingId, activityId, onClose, onChang
           ) : (
             <>
               <h3>Employees who picked into this bin</h3>
-              <table className="employees-table scale-weighings-table">
-                <thead>
-                  <tr>
-                    <th>Employee</th>
-                    <th className="num">Picking minutes</th>
-                    <th className="num">Share</th>
-                    <th className="num">Calculated kg</th>
-                    <th className="num">Counted kg</th>
-                    {mode === "override" && <th>Include</th>}
-                    {mode === "override" && byHand && <th className="num">Kilograms</th>}
-                  </tr>
-                </thead>
-                <tbody>
-                  {d.contributors.map((c) => (
-                    <tr key={c.employeeId}>
-                      <td>
-                        {c.name}
-                        {c.matchedSeconds === 0 && <div className="field-hint">Scanned the bin, no picking time (gets nothing)</div>}
-                        {c.otherJobMinutes > 0 && <div className="field-hint">{c.otherJobMinutes} min with this bin under another job</div>}
-                        {c.firstAt && c.lastAt && (
-                          <div className="field-hint">
-                            {when(c.firstAt)} – {formatTimeInAppTimezone(c.lastAt, { seconds: false })}
-                          </div>
-                        )}
-                      </td>
-                      <td className="num">{c.matchedMinutes.toFixed(1)}</td>
-                      <td className="num">{c.matchedSeconds > 0 ? `${c.percent.toFixed(2)}%` : "—"}</td>
-                      <td className="num">{c.matchedSeconds > 0 ? `${kg(c.proposedKg)} (estimated)` : "—"}</td>
-                      <td className="num">{c.countedKg != null && c.counted ? `${kg(c.countedKg)} · ${countedLabel}` : "not counted"}</td>
-                      {mode === "override" && (
-                        <td>
-                          {c.matchedSeconds > 0 && (
-                            <input
-                              type="checkbox"
-                              aria-label={`Include ${c.name}`}
-                              checked={!!included[c.employeeId]}
-                              onChange={(e) => setIncluded((x) => ({ ...x, [c.employeeId]: e.target.checked }))}
-                            />
-                          )}
-                        </td>
-                      )}
-                      {mode === "override" && byHand && (
-                        <td className="num">
-                          {c.matchedSeconds > 0 && included[c.employeeId] && (
-                            <input
-                              type="number"
-                              step="0.001"
-                              min="0"
-                              aria-label={`Kilograms for ${c.name}`}
-                              value={kgInput[c.employeeId] ?? ""}
-                              onChange={(e) => setKgInput((x) => ({ ...x, [c.employeeId]: e.target.value }))}
-                            />
-                          )}
-                        </td>
-                      )}
+              <div className="scale-weighings-table-wrap allocation-table-wrap" ref={tableWrap}>
+                <table className="employees-table scale-weighings-table allocation-table">
+                  <thead>
+                    <tr>
+                      <th>Employee</th>
+                      <th className="num">Minutes</th>
+                      <th className="num">Share</th>
+                      <th className="num">Calculated kg</th>
+                      <th className="num">Counted kg</th>
+                      {mode === "override" && <th>Include</th>}
+                      {mode === "override" && byHand && <th className="num">Set kg</th>}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {d.contributors.map((c) => (
+                      <tr key={c.employeeId}>
+                        <td>
+                          {c.name}
+                          {c.matchedSeconds === 0 && <div className="field-hint">Scanned the bin, no picking time (gets nothing)</div>}
+                          {c.otherJobMinutes > 0 && <div className="field-hint">{c.otherJobMinutes} min with this bin under another job</div>}
+                          {c.firstAt && c.lastAt && <div className="field-hint">{span(c.firstAt, c.lastAt)}</div>}
+                        </td>
+                        <td className="num">{c.matchedMinutes.toFixed(1)}</td>
+                        <td className="num">{c.matchedSeconds > 0 ? `${c.percent.toFixed(2)}%` : "—"}</td>
+                        <td className="num">
+                          {c.matchedSeconds > 0 ? (
+                            <>
+                              {kg(c.proposedKg)}
+                              <div className="field-hint">estimated</div>
+                            </>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td className="num">
+                          {c.countedKg != null && c.counted ? (
+                            <>
+                              {kg(c.countedKg)}
+                              <div className="field-hint">{countedLabel}</div>
+                            </>
+                          ) : (
+                            <span className="field-hint">not counted</span>
+                          )}
+                        </td>
+                        {mode === "override" && (
+                          <td>
+                            {c.matchedSeconds > 0 && (
+                              <input
+                                type="checkbox"
+                                aria-label={`Include ${c.name}`}
+                                checked={!!included[c.employeeId]}
+                                onChange={(e) => setIncluded((x) => ({ ...x, [c.employeeId]: e.target.checked }))}
+                              />
+                            )}
+                          </td>
+                        )}
+                        {mode === "override" && byHand && (
+                          <td className="num">
+                            {c.matchedSeconds > 0 && included[c.employeeId] && (
+                              <input
+                                className="allocation-kg-input"
+                                type="number"
+                                step="0.001"
+                                min="0"
+                                inputMode="decimal"
+                                aria-label={`Kilograms for ${c.name}`}
+                                value={kgInput[c.employeeId] ?? ""}
+                                onChange={(e) => setKgInput((x) => ({ ...x, [c.employeeId]: e.target.value }))}
+                              />
+                            )}
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="field-hint">
+                Net weight is measured by the scale. Calculated kilograms are an estimate from picking minutes; kilograms set by an administrator are
+                labelled as such.
+              </p>
 
               {d.decision && (
                 <p className="field-hint">
@@ -235,7 +267,7 @@ export function AllocationReviewModal({ weighingId, activityId, onClose, onChang
                   )}
                 </div>
               ) : (
-                <form className="scale-weighing-void" onSubmit={submit}>
+                <form className={`scale-weighing-void allocation-form${mode === "exclude" ? "" : " is-neutral"}`} onSubmit={submit}>
                   <p>
                     {mode === "confirm" && "Share the bin's kilograms by picking minutes, as calculated above."}
                     {mode === "override" && "Untick an accidental scan or a contribution that was emptied before weighing: it gets neither kilograms nor minutes."}
@@ -243,7 +275,7 @@ export function AllocationReviewModal({ weighingId, activityId, onClose, onChang
                     {mode === "reset" && "Remove the decision: the automatic rules decide this bin again."}
                   </p>
                   {mode === "override" && (
-                    <label className="scale-field">
+                    <label className="allocation-check">
                       <input type="checkbox" checked={byHand} onChange={(e) => setByHand(e.target.checked)} /> Set kilograms by hand
                     </label>
                   )}

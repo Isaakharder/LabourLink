@@ -124,7 +124,9 @@ describe("Review allocation", () => {
     render(<ProductivityAllocationsPanel date="2026-11-24" />);
     await userEvent.click(await screen.findByText("Bin 67"));
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("100.0 (estimated)")).toBeInTheDocument();
+    const hugoRow = within(dialog).getByText("Hugo Diaz").closest("tr")!;
+    expect(hugoRow).toHaveTextContent(/60\.0\s*66\.67%\s*100\.0\s*estimated\s*not counted/);
+    expect(within(dialog).getByText(/Net weight is measured by the scale/)).toBeInTheDocument();
     expect(within(dialog).getByText("Scanned the bin, no picking time (gets nothing)")).toBeInTheDocument();
     expect(within(dialog).getByText(/Not changed by this allocation/)).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole("button", { name: "Confirm proposed allocation" }));
@@ -194,6 +196,29 @@ describe("Review allocation", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: "Save" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("Someone else changed this allocation");
     expect(within(dialog).getByRole("button", { name: "Reload" })).toBeInTheDocument();
+  });
+
+  it("labels counted kilograms as measured (whole bin), estimated, or set by an administrator", async () => {
+    const one = { ...detail, status: "reviewed" as const, contributors: [{ ...hugo, counted: false, countedKg: null }, { ...ivy, counted: true, countedKg: 150 }] };
+    route({ detail: one });
+    render(<ProductivityAllocationsPanel date="2026-11-24" />);
+    await userEvent.click(await screen.findByText("Bin 67"));
+    let dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText("whole bin (measured)")).toBeInTheDocument();
+    cleanup();
+    apiMock.mockReset();
+    route({ detail: { ...detail, status: "reviewed", contributors: [{ ...hugo, counted: true, countedKg: 100 }, { ...ivy, counted: true, countedKg: 50 }] } });
+    render(<ProductivityAllocationsPanel date="2026-11-24" />);
+    await userEvent.click(await screen.findByText("Bin 67"));
+    dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findAllByText("estimated from minutes")).toHaveLength(2);
+    cleanup();
+    apiMock.mockReset();
+    route({ detail: { ...detail, status: "manual", contributors: [{ ...hugo, counted: true, countedKg: 90 }, { ...ivy, counted: true, countedKg: 60 }] } });
+    render(<ProductivityAllocationsPanel date="2026-11-24" />);
+    await userEvent.click(await screen.findByText("Bin 67"));
+    dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findAllByText("set by an administrator")).toHaveLength(2);
   });
 
   it("shows the decision, that it no longer applies after a correction, and the history; reset is offered", async () => {
