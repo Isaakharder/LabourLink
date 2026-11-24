@@ -29,6 +29,15 @@ describe("the six Job Report choices", () => {
     for (const dropped of ["breakTime", "rowsCompleted", "quantityWorked", "nonsense", ""]) {
       expect(normalizeReportMetric(dropped, stemsJob)).toBeNull();
     }
+    // A rate saved under the other unit is shown under the Job's own unit;
+    // on a Job whose rows mix stems and plants it is not shown at all.
+    expect(normalizeReportMetric("stemsPerHour", plantsJob)).toBe("plantsPerHour");
+    expect(normalizeReportMetric("plantsPerHour", stemsJob)).toBe("stemsPerHour");
+    const mixedJob = { productivityMetric: "density" as const, quantityUnits: ["plants", "stems"] };
+    expect(normalizeReportMetric("averageSpeed", mixedJob)).toBeNull();
+    expect(normalizeReportMetric("stemsPerHour", mixedJob)).toBeNull();
+    // Kg/Hr stays (dashes, with a note saying why) so the choice isn't lost.
+    expect(normalizeReportMetric("kgPerHour", stemsJob)).toBe("kgPerHour");
     // Duplicates collapse (workTime and activityHours were the same figure).
     expect(normalizeReportMetrics(["workTime", "activityHours", "averageSpeed", "breakTime"], stemsJob)).toEqual(["totalHours", "stemsPerHour"]);
   });

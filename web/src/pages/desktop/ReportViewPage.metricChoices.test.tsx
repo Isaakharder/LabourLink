@@ -189,6 +189,16 @@ describe("ReportViewPage — Kg/Hr", () => {
   });
 });
 
+describe("ReportViewPage — Kg/Hr on a Job without LabourLink Scale", () => {
+  it("says the Job isn't measured with LabourLink Scale, not that reporting starts later", async () => {
+    configuration = { dailyMetric: "rows", weeklyTotals: ["kgPerHour"] };
+    renderPage();
+    await screen.findByText("Byron Escober");
+    expect(screen.getByText(/Kg\/Hr is not reported for this Job: it is not measured with LabourLink Scale/)).toBeInTheDocument();
+    expect(screen.queryByText(/reporting starts later/)).not.toBeInTheDocument();
+  });
+});
+
 describe("ReportViewPage — Edit Metrics", () => {
   it("chooses daily cells and summary columns independently and saves only the new keys", async () => {
     configuration = { dailyMetric: "averageSpeed", weeklyTotals: ["activityHours", "averageSpeed"] };

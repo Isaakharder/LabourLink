@@ -132,9 +132,24 @@ export function reportMetricUnavailableReason(choice: ReportMetricChoice, job: R
 //   employeePaidTime          -> paidHours (the same whole-day figure)
 //   paidTime                  -> paidHours (was this Job's time plus paid
 //                                breaks; no saved report used it)
-//   averageSpeed              -> stemsPerHour or plantsPerHour
+//   averageSpeed              -> stemsPerHour or plantsPerHour (the Job's unit;
+//                                dropped if its rows mix stems and plants)
 //   breakTime, rowsCompleted, quantityWorked -> dropped
 export function normalizeReportMetric(key: string, job: ReportJobInfo | null): ReportMetricChoice | null {
+  const choice = mapReportMetricKey(key, job);
+  // A rate saved for the other row-count unit (a Stems/Hr choice on a Job
+  // that counts plants, or the reverse) is shown under the Job's own unit, so
+  // the figure is never labelled with the wrong unit. If neither unit applies
+  // (rows mixing stems and plants), the rate is not shown.
+  if (choice === "stemsPerHour" || choice === "plantsPerHour") {
+    if (reportMetricUnavailableReason(choice, job) === null) return choice;
+    const other = choice === "stemsPerHour" ? "plantsPerHour" : "stemsPerHour";
+    return reportMetricUnavailableReason(other, job) === null ? other : null;
+  }
+  return choice;
+}
+
+function mapReportMetricKey(key: string, job: ReportJobInfo | null): ReportMetricChoice | null {
   if ((REPORT_METRIC_CHOICES as readonly string[]).includes(key)) return key as ReportMetricChoice;
   switch (key) {
     case "workTime":

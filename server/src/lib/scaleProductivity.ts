@@ -251,7 +251,9 @@ export async function getScaleProductivity(
   const byDay = new Map<string, LoadOutcome[]>();
   for (const o of outcomes) {
     const day = dayOfMs(o.load.weighedAt);
-    byDay.set(day, [...(byDay.get(day) ?? []), o]);
+    const list = byDay.get(day);
+    if (list) list.push(o);
+    else byDay.set(day, [o]);
   }
   return {
     dateStart: from,

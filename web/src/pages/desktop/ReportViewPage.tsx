@@ -269,7 +269,9 @@ export function ReportViewPage() {
   const kgFrom = activityData?.scaleProductivity?.reportingFrom ?? null;
   const speedUnitNote = !showsKg
     ? null
-    : kgFrom
+    : job && job.productivityMetric !== "scale_kg"
+      ? "Kg/Hr is not reported for this Job: it is not measured with LabourLink Scale."
+      : kgFrom
       ? `Kg/Hr counts weighed bins only, on the day each bin was weighed (from ${formatLongDate(kgFrom)}), divided by the picking time matched to those bins, as on the Dashboard and TV. A dash means waiting for weighed bins.`
       : "Kg/Hr is not reported for these dates: LabourLink Scale reporting starts later.";
 
