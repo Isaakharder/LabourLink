@@ -2,21 +2,31 @@ import { useEffect, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { api, ApiError } from "../../lib/api";
 import {
-  ACTIVITY_METRIC_LABELS,
-  ActivityMetric,
-  DAILY_METRIC_ELIGIBLE_ACTIVITY_METRICS,
   PAYROLL_METRIC_LABELS,
   PAYROLL_METRICS,
   PayrollMetric,
+  ReportJobInfo,
+  ReportMetricChoice,
   ReportType,
-  WEEKLY_TOTAL_ELIGIBLE_ACTIVITY_METRICS,
-  WEEKLY_TOTAL_METRIC_LABELS,
+  reportMetricUnavailableReason,
 } from "../../lib/reportTypes";
+import { ReportMetricPicker } from "./ReportMetricPicker";
 
 interface ActivityOption {
   id: string;
   name: string;
   isActive: boolean;
+  productivityMetric?: "density" | "scale_kg";
+  densitySource?: "stems" | "plants" | null;
+}
+
+// What the picker can know before the report exists: the Job's productivity
+// metric, and its row-count unit when the Job has a density source (a Job
+// without one has its unit judged from its time entries once the report
+// runs, so neither Stems/Hr nor Plants/Hr is ruled out here).
+function jobInfo(a: ActivityOption | undefined): ReportJobInfo | null {
+  if (!a) return null;
+  return { productivityMetric: a.productivityMetric, quantityUnits: a.densitySource ? [a.densitySource] : undefined };
 }
 
 interface CreateReportModalProps {
@@ -24,8 +34,8 @@ interface CreateReportModalProps {
   onSaved: (id: string) => void;
 }
 
-const DEFAULT_DAILY_METRIC: ActivityMetric = "workTime";
-const DEFAULT_WEEKLY_TOTALS: ActivityMetric[] = ["activityHours"];
+const DEFAULT_DAILY_METRIC: ReportMetricChoice = "totalHours";
+const DEFAULT_WEEKLY_TOTALS: ReportMetricChoice[] = ["totalHours"];
 const DEFAULT_PAYROLL_METRICS: PayrollMetric[] = [
   "employee",
   "date",
@@ -61,8 +71,8 @@ export function CreateReportModal({ onClose, onSaved }: CreateReportModalProps) 
   const [name, setName] = useState("");
   const [activities, setActivities] = useState<ActivityOption[] | null>(null);
   const [activityId, setActivityId] = useState<string | null>(null);
-  const [dailyMetric, setDailyMetric] = useState<ActivityMetric>(DEFAULT_DAILY_METRIC);
-  const [weeklyTotals, setWeeklyTotals] = useState<ActivityMetric[]>(DEFAULT_WEEKLY_TOTALS);
+  const [dailyMetric, setDailyMetric] = useState<ReportMetricChoice>(DEFAULT_DAILY_METRIC);
+  const [weeklyTotals, setWeeklyTotals] = useState<ReportMetricChoice[]>(DEFAULT_WEEKLY_TOTALS);
   const [metrics, setMetrics] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -89,8 +99,15 @@ export function CreateReportModal({ onClose, onSaved }: CreateReportModalProps) 
     setMetrics((prev) => (prev.includes(key) ? prev.filter((m) => m !== key) : [...prev, key]));
   }
 
-  function toggleWeeklyTotal(key: ActivityMetric) {
-    setWeeklyTotals((prev) => (prev.includes(key) ? prev.filter((m) => m !== key) : [...prev, key]));
+  const job = jobInfo(activities?.find((a) => a.id === activityId));
+
+  // Choosing a different Job drops choices that don't apply to it.
+  function chooseActivity(nextId: string | null) {
+    setActivityId(nextId);
+    const nextJob = jobInfo(activities?.find((a) => a.id === nextId));
+    if (reportMetricUnavailableReason(dailyMetric, nextJob)) setDailyMetric(DEFAULT_DAILY_METRIC);
+    const kept = weeklyTotals.filter((m) => !reportMetricUnavailableReason(m, nextJob));
+    setWeeklyTotals(kept.length > 0 ? kept : DEFAULT_WEEKLY_TOTALS);
   }
 
   async function handleSave() {
@@ -190,7 +207,7 @@ export function CreateReportModal({ onClose, onSaved }: CreateReportModalProps) 
                 {activities === null ? (
                   <p>Loading jobs...</p>
                 ) : (
-                  <select value={activityId ?? ""} onChange={(e) => setActivityId(e.target.value || null)}>
+                  <select value={activityId ?? ""} onChange={(e) => chooseActivity(e.target.value || null)}>
                     <option value="">Select a job...</option>
                     {activities.map((a) => (
                       <option key={a.id} value={a.id}>
@@ -201,29 +218,13 @@ export function CreateReportModal({ onClose, onSaved }: CreateReportModalProps) 
                 )}
               </label>
 
-              <label className="report-form-label">
-                Daily metric (shown under each Mon–Sun date column)
-                <select value={dailyMetric} onChange={(e) => setDailyMetric(e.target.value as ActivityMetric)}>
-                  {DAILY_METRIC_ELIGIBLE_ACTIVITY_METRICS.map((m) => (
-                    <option key={m} value={m}>
-                      {ACTIVITY_METRIC_LABELS[m]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <fieldset className="report-metrics-fieldset">
-                <legend>Weekly totals (right-hand summary columns)</legend>
-                <div className="report-metrics-grid">
-                  {WEEKLY_TOTAL_ELIGIBLE_ACTIVITY_METRICS.map((m) => (
-                    <label key={m} className="report-metric-checkbox">
-                      <input type="checkbox" checked={weeklyTotals.includes(m)} onChange={() => toggleWeeklyTotal(m)} />
-                      {WEEKLY_TOTAL_METRIC_LABELS[m]}
-                    </label>
-                  ))}
-                </div>
-                {weeklyTotals.length === 0 && <p className="error-text">At least one weekly total must be selected</p>}
-              </fieldset>
+              <ReportMetricPicker
+                dailyMetric={dailyMetric}
+                summaryMetrics={weeklyTotals}
+                job={job}
+                onDailyMetricChange={setDailyMetric}
+                onSummaryMetricsChange={setWeeklyTotals}
+              />
             </>
           )}
 

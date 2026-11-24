@@ -3,6 +3,7 @@ import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { getActivityDensityAudit, getActivityReportData, getPayrollReportData } from "../lib/reportQueries";
+import { getReportScaleProductivity } from "../lib/reportScaleProductivity";
 
 const router = Router();
 
@@ -16,6 +17,12 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // it, and it's easy to add later if that changes).
 const VIEW_ROLES = ["Administrator", "Manager"];
 const MANAGE_ROLES = ["Administrator"];
+
+// Rows, Total Hours (this Job's own work time), Paid Hours (the whole day's
+// paid time, every Job, exactly as Payroll calculates it), Stems/Hr,
+// Plants/Hr (row-count speed) and Kg/Hr (LabourLink Scale, see
+// lib/reportScaleProductivity.ts). Must match web/src/lib/reportTypes.ts.
+const REPORT_METRIC_CHOICES = ["rows", "totalHours", "paidHours", "stemsPerHour", "kgPerHour", "plantsPerHour"] as const;
 
 const ACTIVITY_METRICS = [
   "employee",
@@ -39,6 +46,10 @@ const ACTIVITY_METRICS = [
   // stay in sync with that file's ACTIVITY_METRICS.
   "employeePaidTime",
   "date",
+  // The simplified Job Report choices (web/src/lib/reportTypes.ts's
+  // REPORT_METRIC_CHOICES). The keys above stay accepted so reports saved
+  // with them keep loading; the web app maps them onto these.
+  ...REPORT_METRIC_CHOICES,
 ] as const;
 
 // Activity reports no longer use the flat ACTIVITY_METRICS checkbox list
@@ -56,6 +67,7 @@ const ACTIVITY_DAILY_METRIC_ELIGIBLE = [
   "rowsCompleted",
   "quantityWorked",
   "averageSpeed",
+  ...REPORT_METRIC_CHOICES,
 ] as const;
 
 const ACTIVITY_WEEKLY_TOTAL_ELIGIBLE = [...ACTIVITY_DAILY_METRIC_ELIGIBLE, "employeePaidTime"] as const;
@@ -486,7 +498,26 @@ router.get(
     if (report.report_type === "activity") {
       const data = await getActivityReportData(report.activity_id, start, end, { employeeIds: employeeIdsFilter });
       if (!data) return res.status(404).json({ error: "The activity this report was saved with no longer exists" });
-      return res.json({ data });
+      // Which per-hour choices apply to this Job: its productivity metric,
+      // and whether its row counts are stems or plants (its density source,
+      // else the counts recorded on its time entries).
+      const { rows: jobRows } = await pool.query(
+        `select a.productivity_metric, a.density_source,
+                array(select distinct te.density_type from time_entries te
+                      where te.activity_id = a.id and te.entry_type = 'work' and te.deleted_at is null
+                        and te.density_type is not null) as density_types
+         from activities a where a.id = $1`,
+        [report.activity_id]
+      );
+      const job = jobRows[0];
+      const quantityUnits = [...new Set<string>(job.density_source ? [job.density_source] : job.density_types ?? [])].sort();
+      const scaleProductivity =
+        job.productivity_metric === "scale_kg"
+          ? await getReportScaleProductivity(report.activity_id, start, end, employeeIdsFilter)
+          : null;
+      return res.json({
+        data: { ...data, activity: { ...data.activity, productivityMetric: job.productivity_metric, quantityUnits }, scaleProductivity },
+      });
     }
 
     const data = await getPayrollReportData(start, end, { employeeIds: employeeIdsFilter });

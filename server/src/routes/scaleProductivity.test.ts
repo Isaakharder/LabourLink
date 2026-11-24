@@ -12,10 +12,12 @@ import { randomUUID } from "crypto";
 import { pool } from "../db";
 import { signSession } from "../middleware/auth";
 import { addDaysToDateStr, calendarDateInAppTimezone, getDayBoundsUtc } from "../lib/timezone";
-import { getScaleProductivity } from "../lib/scaleProductivity";
+import { getScaleProductivity, roundKgPerHour } from "../lib/scaleProductivity";
+import { getReportScaleProductivity } from "../lib/reportScaleProductivity";
 import { buildDisplaySlides, _clearSpeedCacheForTests } from "../lib/displaySpeedSlides";
 import activitiesRouter from "./activities";
 import dashboardRouter from "./dashboard";
+import reportsRouter from "./reports";
 
 let pass = 0;
 let fail = 0;
@@ -39,6 +41,7 @@ async function main() {
   app.use(cookieParser());
   app.use("/api/activities", activitiesRouter);
   app.use("/api/dashboard", dashboardRouter);
+  app.use("/api/reports", reportsRouter);
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     res.status(500).json({ error: "Internal server error", detail: String(err) });
   });
@@ -52,6 +55,7 @@ async function main() {
   let periodId: string | undefined;
   let landId: string | undefined;
   let displayId: string | undefined;
+  let reportId: string | undefined;
 
   try {
     const teamRoleId = (await pool.query(`select id from team_roles where name = 'Team Member'`)).rows[0].id;
@@ -301,6 +305,55 @@ async function main() {
     const onlyCal = await getScaleProductivity(PICK, DAY, DAY, { now, employeeIds: [cal.id] });
     check(onlyCal.byEmployee.get(cal.id)?.netGrams === 114_286, "the employee filter keeps shares of bins credited to someone else", onlyCal.byEmployee.get(cal.id));
 
+    // ---- Job Reports' Kg/Hr: the same calculation, split by weighing day ----
+    for (const [id, e] of both.byEmployee) {
+      const days = [...both.byDateEmployee.values()].map((m) => m.get(id)).filter((x) => x !== undefined);
+      check(
+        days.reduce((t, x) => t + x!.netGrams, 0) === e.netGrams && days.reduce((t, x) => t + x!.bins, 0) === e.bins,
+        "per-day kilograms and bins add up to the range",
+        { id, days, e }
+      );
+    }
+    check(!both.byDateEmployee.get(PREV)?.get(dee.id)?.bins && both.byDateEmployee.get(DAY)?.get(dee.id)?.bins === 1, "per-day: the two-day bin is on its weighing day only");
+    const rep = await getReportScaleProductivity(PICK, PREV, DAY);
+    for (const e of rep.byEmployee) {
+      check(e.kgPerHour === roundKgPerHour(both.byEmployee.get(e.employeeId)!.kgPerHour), "report Kg/Hr = the Dashboard/TV figure", e);
+    }
+    const counted = [...both.byEmployee.values()].filter((e) => e.bins > 0);
+    const kg = counted.reduce((t, e) => t + e.netGrams, 0) / 1000;
+    const h = counted.reduce((t, e) => t + e.matchedSeconds, 0) / 3600;
+    check(rep.totals.kgPerHour === roundKgPerHour(kg / h), "report total Kg/Hr is total kg / total matched hours", { totals: rep.totals, kg, h });
+    check(rep.byDate.every((d) => d.date === DAY), "report: no Kg/Hr on a day with no weighed bin", rep.byDate);
+    const repAna = await getReportScaleProductivity(PICK, PREV, DAY, [ana.id]);
+    check(repAna.byEmployee.length === 1 && repAna.totals.netGrams === 270_000, "report employee filter", repAna.byEmployee);
+    const repBefore = await getReportScaleProductivity(PICK, "2026-11-01", "2026-11-23");
+    check(repBefore.reportingFrom === null && repBefore.byEmployee.length === 0 && repBefore.totals.kgPerHour === null, "report: nothing before 2026-11-24", repBefore);
+
+    reportId = (
+      await pool.query(
+        `insert into saved_reports (name, report_type, activity_id, configuration, created_by) values ($1, 'activity', $2, $3, $4) returning id`,
+        [`QA KGH ${RUN_ID}`, PICK, JSON.stringify({ dailyMetric: "averageSpeed", weeklyTotals: ["activityHours"] }), admin.id]
+      )
+    ).rows[0].id;
+    {
+      const auth = { cookie: `labourlink_session=${admin.token}`, "content-type": "application/json" };
+      const res = await fetch(`${BASE}/api/reports/${reportId}/data?start=${PREV}&end=${DAY}`, { headers: auth });
+      const body = (await res.json()) as any;
+      check(res.status === 200 && body.data.activity.productivityMetric === "scale_kg", "report data says the Job is a kg/hour Job", body.data?.activity);
+      check(JSON.stringify(body.data.activity.quantityUnits) === JSON.stringify(["stems"]), "report data carries the Job's row-count unit", body.data?.activity);
+      check(
+        body.data.scaleProductivity.byEmployee.find((e: any) => e.employeeId === ana.id)?.kgPerHour === roundKgPerHour(both.byEmployee.get(ana.id)!.kgPerHour),
+        "report data endpoint returns the same Kg/Hr",
+        body.data.scaleProductivity
+      );
+      let patch = await fetch(`${BASE}/api/reports/${reportId}`, { method: "PATCH", headers: auth, body: JSON.stringify({ dailyMetric: "kgPerHour", weeklyTotals: ["rows", "totalHours", "paidHours", "stemsPerHour", "kgPerHour", "plantsPerHour"] }) });
+      check(patch.status === 200, "the six choices can be saved", patch.status);
+      patch = await fetch(`${BASE}/api/reports/${reportId}`, { method: "PATCH", headers: auth, body: JSON.stringify({ weeklyTotals: ["kgPerHourX"] }) });
+      check(patch.status === 400, "an unknown choice is refused", patch.status);
+      patch = await fetch(`${BASE}/api/reports/${reportId}`, { method: "PATCH", headers: auth, body: JSON.stringify({ dailyMetric: "averageSpeed", weeklyTotals: ["activityHours"] }) });
+      check(patch.status === 200, "the older keys are still accepted", patch.status);
+    }
+
     // Settling the official supersede review changes nothing for kg/hour: B3's
     // allocation is decided in Review allocation, not by the credit review.
     await pool.query(`update bin_cycles set review_status = 'confirmed' where id = $1`, [sup]);
@@ -404,6 +457,7 @@ async function main() {
         console.error("cleanup:", sql, e instanceof Error ? e.message : e);
       }
     };
+    if (reportId) await del(`delete from saved_reports where id = $1`, [reportId]);
     if (displayId) await del(`delete from greenhouse_displays where id = $1`, [displayId]);
     if (landId) await del(`delete from greenhouse_lands where id = $1`, [landId]);
     await del(`delete from scale_productivity_allocation_history where weighing_id = any($1::uuid[])`, [ids.weighings]);

@@ -85,6 +85,9 @@ export interface ScaleProductivityResult {
   dateStart: string | null;
   dateEnd: string | null;
   byEmployee: Map<string, EmployeeScaleProductivity>;
+  // The same figures split by the local date each bin was weighed (only
+  // dates with at least one bin). Used by Reports' daily cells.
+  byDateEmployee: Map<string, Map<string, EmployeeScaleProductivity>>;
   // Bins (per employee) picked with this Job's time that are still being
   // filled or awaiting weighing: they count once weighed and credited.
   openBinsByEmployee: Map<string, number>;
@@ -205,7 +208,7 @@ export async function getScaleProductivity(
   const db = opts.db ?? pool;
   const now = opts.now ?? new Date();
   const from = dateStart < SCALE_PRODUCTIVITY_START_DATE ? SCALE_PRODUCTIVITY_START_DATE : dateStart;
-  const empty: ScaleProductivityResult = { dateStart: null, dateEnd: null, byEmployee: new Map(), openBinsByEmployee: new Map() };
+  const empty: ScaleProductivityResult = { dateStart: null, dateEnd: null, byEmployee: new Map(), byDateEmployee: new Map(), openBinsByEmployee: new Map() };
   if (dateEnd < from) return empty;
   const { start, end } = getRangeBoundsUtc(from, dateEnd);
   const employeeIds = opts.employeeIds ?? null;
@@ -241,12 +244,22 @@ export async function getScaleProductivity(
     [jobId, employeeIds, now]
   );
 
-  let byEmployee = summarizeByEmployee(outcomes);
-  if (employeeIds) byEmployee = new Map([...byEmployee].filter(([id]) => employeeIds.includes(id)));
+  const keep = (m: Map<string, EmployeeScaleProductivity>) => (employeeIds ? new Map([...m].filter(([id]) => employeeIds.includes(id))) : m);
+  // Per local day of weighing: the same outcomes, summarized one day at a
+  // time. Every bin is reported on exactly one day, so the days add up to
+  // the range (kilograms and matched time; kg/hour is their ratio).
+  const byDay = new Map<string, LoadOutcome[]>();
+  for (const o of outcomes) {
+    const day = dayOfMs(o.load.weighedAt);
+    const list = byDay.get(day);
+    if (list) list.push(o);
+    else byDay.set(day, [o]);
+  }
   return {
     dateStart: from,
     dateEnd,
-    byEmployee,
+    byEmployee: keep(summarizeByEmployee(outcomes)),
+    byDateEmployee: new Map([...byDay].map(([day, list]) => [day, keep(summarizeByEmployee(list))])),
     openBinsByEmployee: new Map(open.map((r) => [r.employee_id as string, Number(r.n)])),
   };
 }
