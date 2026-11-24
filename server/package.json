@@ -25,6 +25,8 @@
     "test:scale-weighings-rows": "ts-node src/routes/scaleWeighings.rows.test.ts",
     "test:bin-cycles": "ts-node src/routes/binCycles.test.ts",
     "test:bin-cycles-no-scale": "ts-node src/routes/binCycles.noScale.test.ts",
+    "test:scale-productivity-rules": "ts-node src/lib/scaleProductivity.test.ts",
+    "test:scale-productivity": "ts-node src/routes/scaleProductivity.test.ts",
     "test:migration-072-scale-weighing-corrections": "ts-node src/scripts/migration072ScaleWeighingCorrections.test.ts",
     "test:migration-071-carrier-registration-audit": "ts-node src/scripts/migration071CarrierRegistrationAudit.test.ts",
     "cutoff:run": "ts-node src/cli/dailyCutoffRun.ts",

@@ -15,6 +15,19 @@ export interface DashboardCardBase {
   activityId: string;
   activityName: string;
   runStartedAt: string; // ISO — start of the current run, not just the open segment
+  // kg/hour Jobs only (server/src/lib/scaleProductivity.ts), this week;
+  // null/absent for every other Job.
+  scaleProductivity?: DashboardScaleProductivity | null;
+}
+
+export interface DashboardScaleProductivity {
+  kgPerHour: number | null; // null: no weighed, credited bin with matched time yet
+  netKg: number;
+  matchedHours: number;
+  weighedBins: number;
+  excludedBins: number;
+  binsNotYetWeighed: number;
+  reportingFrom: string | null;
 }
 
 export type BlockStatus = "in_progress" | "complete" | "no_rows_linked" | "missing_density" | "not_enough_data";

@@ -294,6 +294,7 @@ async function loadSlidesConfig(displayId: string) {
   if (!d[0]) return null;
   const { rows } = await pool.query(
     `select a.id, a.name, a.speed_unit, a.density_source, a.normal_speed,
+            a.productivity_metric, a.scale_normal_kg_per_hour,
             coalesce(s.send_to_tv, false) as send_to_tv, s.target_override,
             coalesce(s.minimum_activity_hours, 0) as minimum_activity_hours,
             s.top_n, coalesce(s.slide_seconds, 15) as slide_seconds,
@@ -331,6 +332,10 @@ async function loadSlidesConfig(displayId: string) {
       speedUnit: r.speed_unit,
       densitySource: r.density_source,
       normalSpeed: r.normal_speed != null ? Number(r.normal_speed) : null,
+      // kg/hour Jobs (077): the TV shows kg/hour against the Job's own kg/hour
+      // normal speed; this display's target override isn't used for them.
+      productivityMetric: r.productivity_metric,
+      scaleNormalKgPerHour: r.scale_normal_kg_per_hour != null ? Number(r.scale_normal_kg_per_hour) : null,
       sendToTv: r.send_to_tv,
       targetOverride: r.target_override != null ? Number(r.target_override) : null,
       minimumActivityHours: Number(r.minimum_activity_hours),

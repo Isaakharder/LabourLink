@@ -10,6 +10,7 @@
 import { pool } from "../db";
 import { getActivityReportDataWithAttribution } from "./reportQueries";
 import { aggregateDensitySpeed } from "./densitySpeed";
+import { getScaleProductivity, roundKgPerHour, SCALE_KG_SPEED_UNIT, SCALE_PRODUCTIVITY_START_DATE } from "./scaleProductivity";
 import { APP_TIMEZONE, getRangeBoundsUtc } from "./timezone";
 import { ReportWeek, resolveReportingPeriod } from "./displayPeriods";
 import { DEFAULT_SCHEDULE, nextScheduleBoundary, scheduleAllowsAt, scheduleFromRow, SlideSchedule } from "./displaySchedule";
@@ -19,6 +20,37 @@ export interface SpeedRow {
   speed: number;
   quantityCounted: number;
   activityHours: number;
+  // kg/hour Jobs only: eligible weighed bins behind the figure.
+  binsCounted?: number;
+}
+
+// kg/hour Jobs (077): matched weighed-bin productivity. speed = kg/hour,
+// quantityCounted = credited net kg, activityHours = picking hours matched
+// to those same bins (lib/scaleProductivity.ts). Employees whose bins are
+// all still open or excluded are counted, never given 0.
+export async function computeScaleSpeedRows(
+  activityId: string,
+  from: string,
+  to: string
+): Promise<{ rows: SpeedRow[]; employeesWithoutSpeed: number; employeesWithWork: number; reportedFrom: string | null }> {
+  const result = await getScaleProductivity(activityId, from, to);
+  const rows: SpeedRow[] = [];
+  let employeesWithoutSpeed = 0;
+  for (const e of result.byEmployee.values()) {
+    const speed = roundKgPerHour(e.kgPerHour);
+    if (speed == null) {
+      employeesWithoutSpeed++;
+      continue;
+    }
+    rows.push({
+      employeeId: e.employeeId,
+      speed,
+      quantityCounted: e.netGrams / 1000,
+      activityHours: round2(e.matchedSeconds / 3600),
+      binsCounted: e.bins,
+    });
+  }
+  return { rows, employeesWithoutSpeed, employeesWithWork: result.byEmployee.size, reportedFrom: result.dateStart };
 }
 
 function round2(n: number): number {
@@ -63,14 +95,15 @@ export async function computeActivitySpeedRows(
 // short time instead of each running a full report. Age is reported to the
 // TV through computedAt, so a retained figure is never presented as new.
 const SPEED_CACHE_MS = 30_000;
-const speedCache = new Map<string, { at: number; promise: Promise<Awaited<ReturnType<typeof computeActivitySpeedRows>>> }>();
+type CachedRows = (NonNullable<Awaited<ReturnType<typeof computeActivitySpeedRows>>> & { reportedFrom?: string | null }) | null;
+const speedCache = new Map<string, { at: number; promise: Promise<CachedRows> }>();
 
-function cachedSpeedRows(activityId: string, from: string, to: string) {
-  const key = `${activityId}:${from}:${to}`;
+function cachedSpeedRows(activityId: string, from: string, to: string, metric: "density" | "scale_kg" = "density") {
+  const key = `${metric}:${activityId}:${from}:${to}`;
   const now = Date.now();
   const hit = speedCache.get(key);
   if (hit && now - hit.at < SPEED_CACHE_MS) return { promise: hit.promise, computedAt: hit.at };
-  const promise = computeActivitySpeedRows(activityId, from, to);
+  const promise: Promise<CachedRows> = metric === "scale_kg" ? computeScaleSpeedRows(activityId, from, to) : computeActivitySpeedRows(activityId, from, to);
   speedCache.set(key, { at: now, promise });
   promise.catch(() => speedCache.delete(key));
   for (const [k, v] of speedCache) if (now - v.at >= SPEED_CACHE_MS) speedCache.delete(k);
@@ -85,7 +118,9 @@ export type SlideStatus = "ok" | "no_speed" | "unavailable";
 // Why a slide has no ranking: the activity has no stems/plants count at all
 // (never measurable), work exists but no visit has a calculable speed yet,
 // or everyone with a speed is under the minimum hours.
-export type NoSpeedReason = "no_density" | "not_calculable" | "below_minimum" | null;
+// kg/hour Jobs: waiting_for_bins = no weighed, credited bin with matched
+// picking time yet in the period.
+export type NoSpeedReason = "no_density" | "not_calculable" | "below_minimum" | "waiting_for_bins" | null;
 
 export interface RankedEmployee {
   // Full name as shown on the ranking slide's bar ("First Last"), per the
@@ -97,12 +132,16 @@ export interface RankedEmployee {
   speed: number;
   activityHours: number;
   quantityCounted: number;
+  // kg/hour Jobs only.
+  binsCounted?: number;
 }
 
 export interface ActivitySlide {
   activityId: string;
   activityName: string;
   speedUnit: string | null;
+  // "scale_kg": kg/hour from LabourLink Scale (speedUnit "kg/hour").
+  productivityMetric?: "density" | "scale_kg";
   target: number | null;
   minimumActivityHours: number;
   topN: number | null;
@@ -167,6 +206,7 @@ export async function buildDisplaySlides(display: DisplayReportSettings, today: 
   // schedule allows them now go on to the existing activity/data rules.
   const { rows: sent } = await pool.query(
     `select a.id, a.name, a.speed_unit, a.density_source, a.normal_speed,
+            a.productivity_metric, a.scale_normal_kg_per_hour,
             s.target_override, s.minimum_activity_hours, s.top_n, s.slide_seconds,
             s.at_target_color, s.below_target_color,
             s.schedule_enabled, s.schedule_days, s.schedule_start::text, s.schedule_end::text
@@ -201,11 +241,23 @@ export async function buildDisplaySlides(display: DisplayReportSettings, today: 
   for (const a of enabled) {
     if (!withWork.has(a.id)) continue; // no work in the period: skipped entirely
     const minimumActivityHours = Number(a.minimum_activity_hours);
+    const isKg = a.productivity_metric === "scale_kg";
     const slide: ActivitySlide = {
       activityId: a.id,
       activityName: a.name,
-      speedUnit: a.speed_unit,
-      target: a.target_override != null ? Number(a.target_override) : a.normal_speed != null ? Number(a.normal_speed) : null,
+      speedUnit: isKg ? SCALE_KG_SPEED_UNIT : a.speed_unit,
+      productivityMetric: isKg ? "scale_kg" : "density",
+      // A display's target override is in the Job's row-count unit, so a
+      // kg/hour slide uses only the Job's own kg/hour normal speed.
+      target: isKg
+        ? a.scale_normal_kg_per_hour != null
+          ? Number(a.scale_normal_kg_per_hour)
+          : null
+        : a.target_override != null
+          ? Number(a.target_override)
+          : a.normal_speed != null
+            ? Number(a.normal_speed)
+            : null,
       minimumActivityHours,
       topN: a.top_n,
       slideSeconds: a.slide_seconds,
@@ -220,7 +272,7 @@ export async function buildDisplaySlides(display: DisplayReportSettings, today: 
       computedAt: new Date().toISOString(),
     };
 
-    if (!a.density_source) {
+    if (!isKg && !a.density_source) {
       slide.status = "no_speed";
       slide.reason = "no_density";
       slide.notice = `Work is recorded, but LabourLink doesn't calculate a speed for ${a.name}: it has no stems or plants count per row.`;
@@ -229,7 +281,7 @@ export async function buildDisplaySlides(display: DisplayReportSettings, today: 
     }
 
     try {
-      const { promise, computedAt } = cachedSpeedRows(a.id, period.dateStart, period.dateEnd);
+      const { promise, computedAt } = cachedSpeedRows(a.id, period.dateStart, period.dateEnd, isKg ? "scale_kg" : "density");
       const result = await promise;
       slide.computedAt = new Date(computedAt).toISOString();
       if (!result) throw new Error("activity not found");
@@ -246,8 +298,16 @@ export async function buildDisplaySlides(display: DisplayReportSettings, today: 
         speed: r.speed,
         activityHours: r.activityHours,
         quantityCounted: r.quantityCounted,
+        ...(isKg ? { binsCounted: r.binsCounted ?? 0 } : {}),
       }));
-      if (slide.employees.length === 0) {
+      if (isKg && sorted.length === 0) {
+        slide.status = "no_speed";
+        slide.reason = "waiting_for_bins";
+        slide.notice =
+          result.reportedFrom == null
+            ? `Kilograms/hour starts on ${SCALE_PRODUCTIVITY_START_DATE}.`
+            : "Waiting for weighed bins: kilograms/hour appears as bins are weighed and credited.";
+      } else if (slide.employees.length === 0) {
         slide.status = "no_speed";
         slide.reason = sorted.length > 0 ? "below_minimum" : "not_calculable";
         slide.notice =

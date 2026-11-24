@@ -9,9 +9,12 @@ import { ConfirmDialog } from "../../../components/ui/ConfirmDialog";
 type StatusFilter = "active" | "inactive" | "all";
 
 function formatSpeed(activity: Activity): string {
-  if (activity.normalSpeed == null) return "—";
-  const speed = activity.normalSpeed;
-  return activity.speedUnit ? `${speed} ${activity.speedUnit}` : String(speed);
+  const rowCount =
+    activity.normalSpeed == null ? "—" : activity.speedUnit ? `${activity.normalSpeed} ${activity.speedUnit}` : String(activity.normalSpeed);
+  if (activity.productivityMetric !== "scale_kg") return rowCount;
+  // kg/hour Jobs: the Dashboard/TV metric first; the row-count speed is kept.
+  const kg = activity.scaleNormalKgPerHour != null ? `${activity.scaleNormalKgPerHour} kg/hour` : "kg/hour";
+  return rowCount === "—" ? kg : `${kg} · ${rowCount}`;
 }
 
 // Compact, ordered summary — "Where? → Which Carrier? · Both required" for
