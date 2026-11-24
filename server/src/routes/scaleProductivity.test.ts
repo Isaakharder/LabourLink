@@ -320,6 +320,23 @@ async function main() {
     const ae = pick?.employees[0];
     check(ae?.speed === 167 && ae.quantityCounted === 270 && ae.activityHours === 1.62 && ae.binsCounted === 2, "slide carries kg/hour, kg, matched hours and bins", ae);
     check(pick?.employeesWithoutSpeed === 1, "Cal (only excluded bins) is counted without a speed", pick?.employeesWithoutSpeed);
+    // Minimum hours on a kg/hour slide = picking hours matched to eligible
+    // weighed bins only (not shift hours, not open bins: Ana also has 1 h in
+    // an unweighed bin and Cal's job time has no eligible bin).
+    await pool.query(`update greenhouse_display_activity_slides set minimum_activity_hours = 1.7 where display_id = $1 and activity_id = $2`, [displayId, PICK]);
+    _clearSpeedCacheForTests();
+    const minPayload = await buildDisplaySlides({ id: displayId!, reportWeek: "this_week", reportIncludeToday: true, mapSlideSeconds: 20 }, DAY, now);
+    const minSlide = minPayload.slides.find((s) => s.activityId === PICK);
+    check(
+      JSON.stringify(minSlide?.employees.map((e) => e.firstName)) === JSON.stringify(["Dee"]) && minSlide?.belowMinimumHours === 2,
+      "minimum 1.7 h uses matched hours: Ana 1.62 h and Ben 1.0 h are below it, Dee 2.0 h is shown",
+      minSlide
+    );
+    await pool.query(`update greenhouse_display_activity_slides set minimum_activity_hours = 1 where display_id = $1 and activity_id = $2`, [displayId, PICK]);
+    _clearSpeedCacheForTests();
+    const oneHour = (await buildDisplaySlides({ id: displayId!, reportWeek: "this_week", reportIncludeToday: true, mapSlideSeconds: 20 }, DAY, now)).slides.find((s) => s.activityId === PICK);
+    check(oneHour?.employees.length === 3 && oneHour.belowMinimumHours === 0, "minimum 1.0 matched hour: all three shown (Ben exactly 1.0 h)", oneHour);
+
     const empty = payload.slides.find((s) => s.activityId === EMPTY);
     check(empty?.status === "no_speed" && empty.reason === "waiting_for_bins" && /Waiting for weighed bins/.test(empty.notice ?? ""), "a kg/hour Job with work but no weighed bins waits", empty);
 

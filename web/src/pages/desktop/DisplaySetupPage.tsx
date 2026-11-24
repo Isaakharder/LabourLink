@@ -515,6 +515,7 @@ export function DisplaySetupPage() {
                   {a.productivityMetric === "scale_kg" && (
                     <p className="display-setup-hint">
                       Target is the job's kg/hour normal speed (Basic Data → Jobs). This TV's row-count target isn't used for kg/hour and is kept unchanged.
+                      Min. job hours counts only picking hours matched to weighed, credited bins (1.0 h is a good starting point).
                     </p>
                   )}
                   {a.productivityMetric !== "scale_kg" && a.targetText === "" && a.normalSpeed != null && (
