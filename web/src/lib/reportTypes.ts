@@ -28,6 +28,13 @@ export const ACTIVITY_METRICS = [
   // this activity) — the two can genuinely disagree on a multi-activity day.
   "employeePaidTime",
   "date",
+  // The simplified Job Report choices — see REPORT_METRIC_CHOICES below.
+  // ("rows" above is one of them.)
+  "totalHours",
+  "paidHours",
+  "stemsPerHour",
+  "kgPerHour",
+  "plantsPerHour",
 ] as const;
 export type ActivityMetric = (typeof ACTIVITY_METRICS)[number];
 
@@ -69,7 +76,88 @@ export const ACTIVITY_METRIC_LABELS: Record<ActivityMetric, string> = {
   averageSpeed: "Average speed",
   employeePaidTime: "Employee Paid Time",
   date: "Date",
+  totalHours: "Total Hours",
+  paidHours: "Paid Hours",
+  stemsPerHour: "Stems/Hr",
+  kgPerHour: "Kg/Hr",
+  plantsPerHour: "Plants/Hr",
 };
+
+// The only six choices the Job Report offers, for the daily cells and for
+// the summary columns alike (chosen independently):
+//   rows          distinct rows worked
+//   totalHours    this Job's own work time (H:MM)
+//   paidHours     the employee's whole-day paid time, every Job combined,
+//                 exactly as Payroll calculates it (H:MM)
+//   stemsPerHour  row-count speed of a stems Job: stems / this Job's hours
+//   plantsPerHour the same for a plants Job
+//   kgPerHour     LabourLink Scale kg/hour, the Dashboard/TV calculation
+// Every rate is a ratio of sums (quantity added up, hours added up), never
+// an average of daily or employee rates.
+export const REPORT_METRIC_CHOICES = ["rows", "totalHours", "paidHours", "stemsPerHour", "kgPerHour", "plantsPerHour"] as const;
+export type ReportMetricChoice = (typeof REPORT_METRIC_CHOICES)[number];
+
+export const REPORT_METRIC_HINTS: Record<ReportMetricChoice, string> = {
+  rows: "Rows worked",
+  totalHours: "This Job's work time",
+  paidHours: "Whole-day paid time, all Jobs (as Payroll)",
+  stemsPerHour: "Stems from completed rows per hour of this Job",
+  kgPerHour: "Weighed-bin kilograms per matched picking hour (same as the Dashboard and TV)",
+  plantsPerHour: "Plants from completed rows per hour of this Job",
+};
+
+export interface ReportJobInfo {
+  productivityMetric?: "density" | "scale_kg";
+  // "stems" and/or "plants": the Job's row counts.
+  quantityUnits?: string[];
+}
+
+// null when the choice applies to this Job, otherwise why it doesn't.
+export function reportMetricUnavailableReason(choice: ReportMetricChoice, job: ReportJobInfo | null): string | null {
+  if (!job) return null;
+  const units = job.quantityUnits;
+  if (choice === "kgPerHour") return job.productivityMetric === "scale_kg" ? null : "Only for Jobs measured with LabourLink Scale";
+  if (choice === "stemsPerHour" || choice === "plantsPerHour") {
+    const unit = choice === "stemsPerHour" ? "stems" : "plants";
+    if (units === undefined) return null; // not known yet
+    if (units.length > 1) return "This Job's rows mix stems and plants";
+    return units.includes(unit) ? null : `This Job has no ${unit} count per row`;
+  }
+  return null;
+}
+
+// Reports saved before the six choices used other keys. They are read, not
+// rewritten: the saved report changes only when someone saves it again.
+//   workTime / activityHours  -> totalHours (both were this Job's work time)
+//   employeePaidTime          -> paidHours (the same whole-day figure)
+//   paidTime                  -> paidHours (was this Job's time plus paid
+//                                breaks; no saved report used it)
+//   averageSpeed              -> stemsPerHour or plantsPerHour
+//   breakTime, rowsCompleted, quantityWorked -> dropped
+export function normalizeReportMetric(key: string, job: ReportJobInfo | null): ReportMetricChoice | null {
+  if ((REPORT_METRIC_CHOICES as readonly string[]).includes(key)) return key as ReportMetricChoice;
+  switch (key) {
+    case "workTime":
+    case "activityHours":
+      return "totalHours";
+    case "employeePaidTime":
+    case "paidTime":
+      return "paidHours";
+    case "averageSpeed":
+      return (job?.quantityUnits ?? []).length === 1 && job!.quantityUnits![0] === "plants" ? "plantsPerHour" : "stemsPerHour";
+    default:
+      return null;
+  }
+}
+
+export function normalizeReportMetrics(keys: string[], job: ReportJobInfo | null): ReportMetricChoice[] {
+  const out: ReportMetricChoice[] = [];
+  for (const k of keys) {
+    const c = normalizeReportMetric(k, job);
+    if (c && !out.includes(c)) out.push(c);
+  }
+  return out;
+}
 
 // The "(H:MM)" suffix on every duration metric is the "clear indication ...
 // so users know this is a duration, not a clock time" requirement — applied
@@ -179,8 +267,26 @@ export interface ActivityDateTotal {
   employeePaidSeconds: number;
 }
 
+// Kg/Hr figures from LabourLink Scale (server lib/reportScaleProductivity.ts).
+export interface ReportKgFigures {
+  netGrams: number;
+  matchedSeconds: number;
+  bins: number;
+  kgPerHour: number | null;
+}
+
+export interface ReportScaleProductivity {
+  reportingFrom: string | null;
+  byEmployeeDay: (ReportKgFigures & { employeeId: string; date: string })[];
+  byEmployee: (ReportKgFigures & { employeeId: string; employeeName: string; openBins: number })[];
+  byDate: (ReportKgFigures & { date: string })[];
+  totals: ReportKgFigures;
+}
+
 export interface ActivityReportData {
-  activity: { id: string; name: string; normalSpeedPerHour: number | null; speedUnit: string | null };
+  activity: { id: string; name: string; normalSpeedPerHour: number | null; speedUnit: string | null } & ReportJobInfo;
+  // Present only for Jobs measured with LabourLink Scale.
+  scaleProductivity?: ReportScaleProductivity | null;
   rows: ActivityReportRow[];
   // Pivot table's right-hand Grand Total column (per employee) and bottom
   // Grand Total row (per date, across employees) — see reportQueries.ts.
@@ -253,6 +359,11 @@ export const WEEKLY_TOTAL_METRIC_LABELS: Record<ActivityMetric, string> = {
   quantityWorked: "Weekly Quantity Worked",
   averageSpeed: "Weekly Average Speed",
   employeePaidTime: "Employee Paid Time",
+  totalHours: "Total Hours",
+  paidHours: "Paid Hours",
+  stemsPerHour: "Stems/Hr",
+  kgPerHour: "Kg/Hr",
+  plantsPerHour: "Plants/Hr",
 };
 
 // Common shape every pivot cell's data source (a day-row, an employee Grand
@@ -266,6 +377,8 @@ export interface PivotCellSource {
   quantityWorked: number | null;
   rowsCompleted: number;
   averageSpeed: number | null;
+  // Whole-day paid time (every Job, as Payroll) — "Paid Hours".
+  employeePaidSeconds?: number;
 }
 
 // Single source of truth for "what does this metric look like in a pivot
@@ -293,6 +406,14 @@ export function pivotCellValue(metric: ActivityMetric, source: PivotCellSource, 
       return source.quantityWorked == null ? "—" : String(source.quantityWorked);
     case "averageSpeed":
       return source.averageSpeed == null ? "—" : formatSpeedValue(source.averageSpeed, speedUnit);
+    case "totalHours":
+      return secondsToHoursMinutes(source.workSeconds);
+    case "paidHours":
+      return source.employeePaidSeconds == null ? "—" : secondsToHoursMinutes(source.employeePaidSeconds);
+    case "stemsPerHour":
+    case "plantsPerHour":
+      // The unit is in the column header (Stems/Hr, Plants/Hr).
+      return source.averageSpeed == null ? "—" : source.averageSpeed.toFixed(1);
     default:
       return "—";
   }

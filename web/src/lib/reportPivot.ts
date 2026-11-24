@@ -11,6 +11,7 @@ import {
   DateRange,
   PayrollMetric,
   PayrollReportData,
+  ReportKgFigures,
   WEEKLY_TOTAL_METRIC_LABELS,
   payrollPivotCellValue,
   pivotCellValue,
@@ -86,6 +87,11 @@ function weeklyValue(
   return pivotCellValue(key, source, speedUnit);
 }
 
+// "157.1" (one decimal, as the TV), or "—" while there's no weighed bin.
+export function formatKgPerHour(f: ReportKgFigures | undefined): string {
+  return f && f.kgPerHour != null ? f.kgPerHour.toFixed(1) : "—";
+}
+
 export function buildActivityPivotGrid(
   data: ActivityReportData,
   dateRange: DateRange,
@@ -94,6 +100,8 @@ export function buildActivityPivotGrid(
 ): PivotGrid {
   const dates = enumerateDates(dateRange.start, dateRange.end);
   const speedUnit = data.activity.speedUnit;
+  const scale = data.scaleProductivity ?? null;
+  const showsKg = dailyMetric === "kgPerHour" || weeklyTotals.includes("kgPerHour");
 
   const rowByKey = new Map(data.rows.map((r) => [`${r.employeeId}:${r.date}`, r]));
   const weeklyTotalColumns: PivotWeeklyTotalColumn[] = weeklyTotals.map((key) => ({
@@ -101,32 +109,62 @@ export function buildActivityPivotGrid(
     label: WEEKLY_TOTAL_METRIC_LABELS[key],
   }));
 
-  const employees: PivotEmployeeRow[] = [...data.employeeTotals]
+  // Kg/Hr never reads the time rows: it comes from the weighed bins, each
+  // reported on the date it was weighed (lib/reportScaleProductivity.ts).
+  const kgByEmployeeDay = new Map((scale?.byEmployeeDay ?? []).map((k) => [`${k.employeeId}:${k.date}`, k]));
+  const kgByEmployee = new Map((scale?.byEmployee ?? []).map((k) => [k.employeeId, k]));
+  const kgByDate = new Map((scale?.byDate ?? []).map((k) => [k.date, k]));
+
+  // Everyone with this Job's time in the range, plus (when Kg/Hr is shown)
+  // anyone whose weighed bins fall in the range although all their minutes
+  // were earlier, so the report lists the same people as the TV.
+  const people: { employeeId: string; employeeName: string; total: ActivityEmployeeTotal | null }[] = data.employeeTotals.map(
+    (et) => ({ employeeId: et.employeeId, employeeName: et.employeeName, total: et })
+  );
+  if (showsKg) {
+    for (const k of scale?.byEmployee ?? []) {
+      if (k.bins > 0 && !people.some((p) => p.employeeId === k.employeeId)) {
+        people.push({ employeeId: k.employeeId, employeeName: k.employeeName, total: null });
+      }
+    }
+  }
+
+  const useKgForSort = showsKg && ![dailyMetric, ...weeklyTotals].some((m) => m === "stemsPerHour" || m === "plantsPerHour" || m === "averageSpeed");
+
+  const employees: PivotEmployeeRow[] = people
     .sort((a, b) => a.employeeName.localeCompare(b.employeeName))
-    .map((et) => ({
-      employeeId: et.employeeId,
-      employeeName: et.employeeName,
+    .map(({ employeeId, employeeName, total }) => ({
+      employeeId,
+      employeeName,
       cells: dates.map((d) => {
-        const row = rowByKey.get(`${et.employeeId}:${d}`);
+        if (dailyMetric === "kgPerHour") return formatKgPerHour(kgByEmployeeDay.get(`${employeeId}:${d}`));
+        const row = rowByKey.get(`${employeeId}:${d}`);
         return row ? pivotCellValue(dailyMetric, row, speedUnit) : "—";
       }),
-      // et (ActivityEmployeeTotal) is already the server's own per-employee
+      // total (ActivityEmployeeTotal) is already the server's own per-employee
       // sum of the underlying seconds across the whole range (see
       // reportQueries.ts's employeeSeconds accumulation) — formatted once
       // here, never built from this grid's own already-rounded daily cells.
-      weeklyTotals: weeklyTotals.map((key) => weeklyValue(key, et, speedUnit)),
-      speedValue: et.averageSpeed,
+      weeklyTotals: weeklyTotals.map((key) =>
+        key === "kgPerHour" ? formatKgPerHour(kgByEmployee.get(employeeId)) : total ? weeklyValue(key, total, speedUnit) : "—"
+      ),
+      speedValue: useKgForSort ? (kgByEmployee.get(employeeId)?.kgPerHour ?? null) : (total?.averageSpeed ?? null),
     }));
 
   const dateTotalByDate = new Map(data.dateTotals.map((dt) => [dt.date, dt]));
   const columnTotals = dates.map((d) => {
+    if (dailyMetric === "kgPerHour") return formatKgPerHour(kgByDate.get(d));
     const dt = dateTotalByDate.get(d);
     return dt ? pivotCellValue(dailyMetric, dt, speedUnit) : "—";
   });
 
-  const weeklyTotalColumnTotals = weeklyTotals.map((key) => weeklyValue(key, data.totals, speedUnit));
+  const weeklyTotalColumnTotals = weeklyTotals.map((key) =>
+    key === "kgPerHour" ? formatKgPerHour(scale?.totals) : weeklyValue(key, data.totals, speedUnit)
+  );
 
-  const hasSpeedMetric = speedUnit != null || data.employeeTotals.some((et) => et.averageSpeed != null);
+  const hasSpeedMetric = useKgForSort
+    ? employees.some((e) => e.speedValue != null)
+    : speedUnit != null || data.employeeTotals.some((et) => et.averageSpeed != null);
 
   return { dates, employees, columnTotals, weeklyTotalColumns, weeklyTotalColumnTotals, hasSpeedMetric };
 }

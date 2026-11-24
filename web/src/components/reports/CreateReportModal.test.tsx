@@ -1,14 +1,13 @@
 // @vitest-environment jsdom
 //
-// Covers the Activity Report branch of the create wizard's Step 3: the
-// checkbox-plus-"Show:"-dropdown workflow is gone, replaced by a single
-// "Daily metric" <select> (DAILY_METRIC_ELIGIBLE_ACTIVITY_METRICS) plus a
-// "Weekly totals" multi-select checkbox group
-// (WEEKLY_TOTAL_ELIGIBLE_ACTIVITY_METRICS, min 1) — see reportTypes.ts.
-// POSTs {dailyMetric, weeklyTotals}, never the old flat {metrics} list.
-// Payroll's own Step 3 (its original checkbox grid, POSTing {metrics})
-// must stay completely untouched by this redesign — covered by the second
-// describe block below.
+// Covers the Activity (Job) Report branch of the create wizard's Step 3:
+// one "Daily cells" <select> and a "Summary columns" checkbox row, both
+// offering only the six REPORT_METRIC_CHOICES (Rows, Total Hours, Paid
+// Hours, Stems/Hr, Kg/Hr, Plants/Hr), chosen independently. Choices that
+// don't apply to the chosen Job are disabled. POSTs {dailyMetric,
+// weeklyTotals}, never the old flat {metrics} list. Payroll's own Step 3
+// (its original checkbox grid, POSTing {metrics}) must stay untouched —
+// covered by the second describe block below.
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -35,94 +34,98 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-async function goToActivityStep3(user: ReturnType<typeof userEvent.setup>) {
+const ACTIVITIES = [
+  { id: "act-1", name: "Winding & Pruning", isActive: true, productivityMetric: "density", densitySource: "stems" },
+  { id: "act-2", name: "Picking Peppers", isActive: true, productivityMetric: "scale_kg", densitySource: null },
+];
+
+async function goToActivityStep3(user: ReturnType<typeof userEvent.setup>, activityId = "act-1", onSaved = vi.fn()) {
   apiMock.mockImplementation((path: string) => {
-    if (path === "/api/activities?status=active") {
-      return Promise.resolve({ activities: [{ id: "act-1", name: "Winding & Pruning", isActive: true }] });
-    }
+    if (path === "/api/activities?status=active") return Promise.resolve({ activities: ACTIVITIES });
+    if (path === "/api/reports") return Promise.resolve({ id: "new-report-1" });
     return Promise.reject(new Error(`Unhandled mock api() call: ${path}`));
   });
 
-  render(<CreateReportModal onClose={vi.fn()} onSaved={vi.fn()} />);
+  render(<CreateReportModal onClose={vi.fn()} onSaved={onSaved} />);
   await user.click(screen.getByRole("button", { name: /job report/i }));
-  await user.type(screen.getByLabelText(/name/i), "Winding — Weekly");
+  await user.type(screen.getByLabelText(/name/i), "Weekly");
   await user.click(screen.getByRole("button", { name: /^next$/i }));
   await screen.findByText(/step 3 of 3/i);
   await waitFor(() => expect(screen.getByRole("combobox", { name: /job$/i })).toBeInTheDocument());
-  await user.selectOptions(screen.getByRole("combobox", { name: /job$/i }), "act-1");
+  await user.selectOptions(screen.getByRole("combobox", { name: /job$/i }), activityId);
+  return onSaved;
 }
 
-describe("CreateReportModal — Activity Report daily metric + weekly totals", () => {
-  it("shows a Daily metric select and a Weekly totals checkbox group instead of the old flat metrics checkbox grid", async () => {
+const SIX = ["Rows", "Total Hours", "Paid Hours", "Stems/Hr", "Kg/Hr", "Plants/Hr"];
+
+describe("CreateReportModal — Job Report daily cells + summary columns", () => {
+  it("offers exactly the six choices in the dropdown and as summary checkboxes", async () => {
     const user = userEvent.setup();
     await goToActivityStep3(user);
 
-    expect(screen.getByRole("combobox", { name: /daily metric/i })).toBeInTheDocument();
-    // No lone flat metrics checkbox grid — "Weekly totals" is its own
-    // labeled fieldset, distinct from the Daily metric selector.
-    expect(screen.getByText(/weekly totals/i)).toBeInTheDocument();
-    // Every daily-metric option is a real activity metric label.
-    expect(screen.getByRole("option", { name: "Job hours" })).toBeInTheDocument();
-    // Employee Paid Time is only ever a weekly total, never a daily-metric
-    // option (it's a whole-shift figure, not meaningful per activity-day).
-    expect(screen.queryByRole("option", { name: "Employee Paid Time" })).not.toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "Employee Paid Time" })).toBeInTheDocument();
+    const daily = screen.getByRole("combobox", { name: /daily cells/i });
+    const options = Array.from(daily.querySelectorAll("option")).map((o) => o.textContent!.replace(" (n/a)", ""));
+    expect(options).toEqual(SIX);
+    const group = screen.getByRole("group", { name: /summary columns/i });
+    const boxes = Array.from(group.querySelectorAll("label")).map((l) => l.textContent);
+    expect(boxes).toEqual(SIX);
+    // None of the old options remain.
+    expect(screen.queryByRole("checkbox", { name: "Employee Paid Time" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Weekly Job Hours" })).not.toBeInTheDocument();
   });
 
-  it("defaults to Activity hours checked as the only weekly total, and disables Save when none remain checked", async () => {
+  it("disables what doesn't apply: Kg/Hr and Plants/Hr on a stems Job; nothing ruled out by unit for a Scale Job without a density source", async () => {
+    const user = userEvent.setup();
+    await goToActivityStep3(user, "act-1");
+    expect(screen.getByRole("checkbox", { name: "Kg/Hr" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Plants/Hr" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Stems/Hr" })).toBeEnabled();
+
+    await user.selectOptions(screen.getByRole("combobox", { name: /job$/i }), "act-2");
+    expect(screen.getByRole("checkbox", { name: "Kg/Hr" })).toBeEnabled();
+    expect(screen.getByRole("checkbox", { name: "Stems/Hr" })).toBeEnabled();
+  });
+
+  it("defaults to Total Hours in both places, and disables Save when no summary column is left", async () => {
     const user = userEvent.setup();
     await goToActivityStep3(user);
 
-    const activityHoursCheckbox = screen.getByRole("checkbox", { name: "Weekly Job Hours" });
-    expect(activityHoursCheckbox).toBeChecked();
-
-    await user.click(activityHoursCheckbox);
-    expect(screen.getByText(/at least one weekly total must be selected/i)).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /daily cells/i })).toHaveValue("totalHours");
+    const totalHours = screen.getByRole("checkbox", { name: "Total Hours" });
+    expect(totalHours).toBeChecked();
+    await user.click(totalHours);
+    expect(screen.getByText(/choose at least one summary column/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /save report/i })).toBeDisabled();
   });
 
-  it("POSTs {dailyMetric, weeklyTotals} — never the old flat {metrics} array", async () => {
+  it("POSTs independently chosen {dailyMetric, weeklyTotals} — never the old flat {metrics} array", async () => {
     const user = userEvent.setup();
-    await goToActivityStep3(user);
+    const onSaved = await goToActivityStep3(user, "act-2");
 
-    apiMock.mockImplementation((path: string, init?: RequestInit) => {
-      if (path === "/api/reports" && init?.method === "POST") {
-        return Promise.resolve({ id: "new-report-1" });
-      }
-      return Promise.reject(new Error(`Unhandled mock api() call: ${path}`));
-    });
-
-    await user.selectOptions(screen.getByRole("combobox", { name: /daily metric/i }), "averageSpeed");
-    await user.click(screen.getByRole("checkbox", { name: "Employee Paid Time" }));
-
-    const onSaved = vi.fn();
-    cleanup();
-    render(<CreateReportModal onClose={vi.fn()} onSaved={onSaved} />);
-    apiMock.mockImplementation((path: string) => {
-      if (path === "/api/activities?status=active") {
-        return Promise.resolve({ activities: [{ id: "act-1", name: "Winding & Pruning", isActive: true }] });
-      }
-      if (path === "/api/reports") {
-        return Promise.resolve({ id: "new-report-1" });
-      }
-      return Promise.reject(new Error(`Unhandled mock api() call: ${path}`));
-    });
-    await user.click(screen.getByRole("button", { name: /job report/i }));
-    await user.type(screen.getByLabelText(/name/i), "Winding — Weekly");
-    await user.click(screen.getByRole("button", { name: /^next$/i }));
-    await waitFor(() => expect(screen.getByRole("combobox", { name: /job$/i })).toBeInTheDocument());
-    await user.selectOptions(screen.getByRole("combobox", { name: /job$/i }), "act-1");
-    await user.selectOptions(screen.getByRole("combobox", { name: /daily metric/i }), "averageSpeed");
-    await user.click(screen.getByRole("checkbox", { name: "Employee Paid Time" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: /daily cells/i }), "rows");
+    await user.click(screen.getByRole("checkbox", { name: "Kg/Hr" }));
+    await user.click(screen.getByRole("checkbox", { name: "Paid Hours" }));
     await user.click(screen.getByRole("button", { name: /save report/i }));
 
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith("new-report-1"));
     const postCall = apiMock.mock.calls.find(([path]) => path === "/api/reports");
-    expect(postCall).toBeTruthy();
     const body = JSON.parse((postCall![1] as RequestInit).body as string);
-    expect(body.dailyMetric).toBe("averageSpeed");
-    expect(body.weeklyTotals).toEqual(expect.arrayContaining(["activityHours", "employeePaidTime"]));
+    expect(body.dailyMetric).toBe("rows");
+    // Always in the fixed choice order, whatever order they were ticked in.
+    expect(body.weeklyTotals).toEqual(["totalHours", "paidHours", "kgPerHour"]);
     expect(body.metrics).toBeUndefined();
+  });
+
+  it("switching to a Job a choice doesn't apply to drops that choice", async () => {
+    const user = userEvent.setup();
+    await goToActivityStep3(user, "act-2");
+    await user.selectOptions(screen.getByRole("combobox", { name: /daily cells/i }), "kgPerHour");
+    await user.click(screen.getByRole("checkbox", { name: "Kg/Hr" }));
+
+    await user.selectOptions(screen.getByRole("combobox", { name: /job$/i }), "act-1");
+    expect(screen.getByRole("combobox", { name: /daily cells/i })).toHaveValue("totalHours");
+    expect(screen.getByRole("checkbox", { name: "Kg/Hr" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Total Hours" })).toBeChecked();
   });
 });
 
@@ -137,8 +140,8 @@ describe("CreateReportModal — Payroll Report step 3 stays the original flat me
     await screen.findByText(/step 3 of 3/i);
 
     expect(screen.getByRole("checkbox", { name: "Total hours (H:MM)" })).toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: /daily metric/i })).not.toBeInTheDocument();
-    expect(screen.queryByText(/weekly totals \(right-hand/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /daily cells/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: /summary columns/i })).not.toBeInTheDocument();
   });
 
   it("POSTs the original {metrics} array, never dailyMetric/weeklyTotals", async () => {
