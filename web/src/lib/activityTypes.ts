@@ -63,6 +63,12 @@ export const DENSITY_SOURCE_SPEED_UNIT: Record<DensitySource, string> = {
   stems: "stems/hour",
 };
 
+// What a Job's productivity is measured in on the Dashboard and TV
+// (server/migrations/077_activity_productivity_metric.sql): its row-count
+// speed (stems/hour or plants/hour, from the density source) or
+// kilograms/hour from LabourLink Scale.
+export type ProductivityMetric = "density" | "scale_kg";
+
 export interface Activity {
   id: string;
   name: string;
@@ -74,6 +80,9 @@ export interface Activity {
   // speed on Inputs is driven by — null means no calculated speed, only the
   // configured normalSpeed above.
   densitySource: DensitySource | null;
+  // Older servers don't send these: treat as "density" / null.
+  productivityMetric?: ProductivityMetric;
+  scaleNormalKgPerHour?: number | null;
   // Active employees currently assigned this Job.
   assignedEmployeeCount: number;
   updatedAt: string;

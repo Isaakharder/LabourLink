@@ -89,7 +89,9 @@ export function TvRankingSlide({ item }: TvRankingSlideProps) {
               ? "No speed ranking"
               : slide.reason === "below_minimum"
                 ? "No one listed yet"
-                : "No speeds yet"}
+                : slide.reason === "waiting_for_bins"
+                  ? "Waiting for weighed bins"
+                  : "No speeds yet"}
         </p>
         <p className="tv-ranking-notice-text">{slide.notice}</p>
       </div>

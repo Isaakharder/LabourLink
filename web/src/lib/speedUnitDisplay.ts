@@ -5,6 +5,7 @@
 // "plants/hour" and free-text units) is shown exactly as stored.
 const GRAPH_UNIT_LABELS: Record<string, string> = {
   "stems/hour": "stm/hr",
+  "kg/hour": "kg/hr",
 };
 
 export function graphSpeedUnit(unit: string | null | undefined): string {

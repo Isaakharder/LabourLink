@@ -171,7 +171,8 @@ export interface GreenhouseDisplayStateResponse {
 // --- TV slideshow (GET /api/greenhouse/display/:key/slides) -----------------
 
 export type SlideStatus = "ok" | "no_speed" | "unavailable";
-export type NoSpeedReason = "no_density" | "not_calculable" | "below_minimum" | null;
+// waiting_for_bins: a kg/hour Job with no weighed, credited bin yet.
+export type NoSpeedReason = "no_density" | "not_calculable" | "below_minimum" | "waiting_for_bins" | null;
 
 export interface RankedEmployee {
   // Full name for the ranking bar (server >= 060); older servers send only
@@ -182,6 +183,8 @@ export interface RankedEmployee {
   speed: number;
   activityHours: number;
   quantityCounted: number;
+  // kg/hour Jobs: weighed bins behind the figure.
+  binsCounted?: number;
 }
 
 export interface ActivitySlide {
@@ -225,6 +228,9 @@ export interface ActivitySlideSetting {
   speedUnit: string | null;
   densitySource: string | null;
   normalSpeed: number | null;
+  // kg/hour Jobs (077): the TV uses the Job's kg/hour normal speed as target.
+  productivityMetric?: "density" | "scale_kg";
+  scaleNormalKgPerHour?: number | null;
   sendToTv: boolean;
   targetOverride: number | null;
   minimumActivityHours: number;
