@@ -25,6 +25,9 @@ export interface DashboardScaleProductivity {
   netKg: number;
   matchedHours: number;
   weighedBins: number;
+  sharedBins?: number; // weighed bins shared with other employees
+  estimatedKg?: number; // their kilograms allocated by picking minutes (an estimate)
+  manualKg?: number; // kilograms set by an administrator
   excludedBins: number;
   binsNotYetWeighed: number;
   reportingFrom: string | null;

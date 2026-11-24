@@ -1,71 +1,82 @@
 // Kilograms/hour for Jobs whose productivity metric is "Kilograms/hour (from
-// LabourLink Scale)" (077_activity_productivity_metric.sql).
+// LabourLink Scale)" (077_activity_productivity_metric.sql), with shared bins
+// allocated between their pickers (078_scale_productivity_allocations.sql).
 //
-// Matched weighed-bin productivity. Read-only: nothing here decides a
-// weighing, a credit, a picking cycle, a time entry or pay.
+// PRODUCTIVITY REPORTING ONLY. Read-only apart from the administrator's
+// allocation decisions (scaleProductivityAllocations.ts): nothing here
+// changes a weighing, an official scale credit, a picking cycle, a time
+// entry or pay.
 //
-//   kg/hour = sum(net kg of the eligible bins)
-//           / sum(picking hours matched to those same bins)
+//   kg/hour = sum(kilograms allocated to the employee from counted bins)
+//           / sum(the employee's own picking hours matched to those bins)
 //
-// A bin enters the figure only when it has been weighed and carries a live
-// employee credit (scale_employee_credits: status credited, credits live,
-// which already excludes trial, voided, duplicate, pending, needs-review and
-// expired weighings). Its kilograms and its matched picking time enter
-// together; a bin still filling, awaiting weighing or pending contributes
-// neither.
+// A bin is a candidate when it has been weighed and carries a live employee
+// credit (scale_employee_credits: status credited, credits live, which
+// excludes trial, voided, duplicate, pending, needs-review and expired
+// weighings) and closed a picking cycle. A bin still filling or awaiting
+// weighing contributes neither kilograms nor minutes.
 //
-// A bin's matched picking time, from the existing attribution (074/075):
-// * the picking cycle this weighing closed (bin_cycles.weighing_id, which
-//   follows an administrator's "credit this cycle instead"), from the
-//   cycle's first scan (opened_at) to the weighing; when the credited
-//   employee's own entry with this bin was already running at that scan,
-//   from that entry's start (never before the bin's previous weighing);
-// * the credited employee's own work time entries with this bin in that
-//   window, as they are now (after Inputs corrections), not deleted;
-// * minus that employee's breaks; overlapping entries counted once.
+// The bin's LOAD is everything put into it since its previous boundary: the
+// bin's previous weighing (any status: the bin was on the scale), an
+// administrator's "closed without weighing" (bin emptied), or the start of
+// picking-cycle tracking. Every employee with this Job's work time with the
+// bin inside the load contributes their own matched minutes: their
+// non-deleted time entries with the bin, clipped to the load, minus their own
+// breaks, overlapping entries counted once. That covers the whole history of
+// the load (every picking cycle, superseded or not, same-employee rescans,
+// multiple handovers, and minutes recorded before the phone scan), and is
+// independent of who holds the official credit.
 //
-// A bin is EXCLUDED (counted and shown, never in the figure) when its
-// kilograms can't be fully attributed to that time:
-//   several_employees      another employee scanned this bin in the cycle, or
-//                          has time with it in the window
-//   superseded_review_open an earlier cycle of this bin by someone else was
-//                          superseded and is still awaiting review
-//   late_conflict          another employee's phone claimed the bin after the
-//                          credit (scale_weighing_flags late_conflict)
-//   credit_mismatch        the credited employee isn't the cycle's employee
-//   other_job              some of the bin's time is under another Job
-//   no_matched_time        no picking time matches the bin (never divided by
-//                          zero, never given a made-up duration)
-//   overlapping_time       the employee's time for this bin overlaps their
-//                          time for another bin (a minute is never counted
-//                          for two bins)
-//   no_cycle               credited, but no picking cycle is linked
+// The bin's net kilograms are allocated in proportion to those minutes
+// (integer grams, largest remainder: the shares always add up to the net
+// weight exactly). Each employee's share and their own minutes enter their
+// kg/hour together.
+//
+// LIMITATION: LabourLink records no event when a bin is emptied without
+// being weighed, and no weight at a handover, so the records alone can't
+// prove that two employees' picking went into one physical load. A bin is
+// allocated automatically only when that is the plain reading of the
+// records: one employee, or picking that continues from one employee to the
+// next with no pause longer than HANDOVER_MAX_GAP_MS on the same day. Every
+// other bin waits for an administrator (Scale Weighings -> Review
+// allocation) and counts for nobody until then:
+//   handover_gap        a pause of more than 15 minutes at a handover
+//   overnight_handover  another employee continued the bin on a later day
+//   other_job           some of the bin's time is under another Job
+//   overlapping_time    an employee's counted time for this bin overlaps
+//                       their counted time for another bin (a minute is
+//                       never counted twice, whatever was decided)
+//   late_conflict       another employee's phone claimed the bin after the
+//                       weighing (scale_weighing_flags late_conflict)
+//   inputs_changed      a reviewed bin whose records changed since (a time
+//                       entry corrected, a delayed upload): decisions are
+//                       never silently re-applied to different records
+// Never counted: no_cycle (no picking cycle linked), no_matched_time (no
+// picking time with the bin), excluded_by_admin.
 //
 // Reporting rule across days: a bin is reported on the local date it was
 // WEIGHED, with all of its kilograms and all of its matched picking time
-// (even minutes from an earlier day). Nothing is split or estimated, so
+// (even minutes from an earlier day). Nothing is split across days, so
 // every bin appears exactly once and totals over any set of days are exact.
 //
-// Reporting starts on SCALE_PRODUCTIVITY_START_DATE: bins weighed earlier
-// (trials, the activation day) are never included.
+// Reporting starts on SCALE_PRODUCTIVITY_START_DATE.
 import { Pool, PoolClient } from "pg";
 import { pool } from "../db";
 import { calendarDateInAppTimezone, getRangeBoundsUtc } from "./timezone";
 import {
-  BinInput,
+  AllocationDecision,
   BreakInput,
   EmployeeScaleProductivity,
   EntryInput,
-  evaluateBin,
-  excludeOverlappingBins,
+  evaluateLoad,
+  LoadInput,
+  LoadOutcome,
+  reviewOverlappingLoads,
   SCALE_PRODUCTIVITY_START_DATE,
   summarizeByEmployee,
 } from "./scaleProductivityRules";
 export * from "./scaleProductivityRules";
 
-// ---------------------------------------------------------------------------
-// Database
-// ---------------------------------------------------------------------------
 type Db = Pool | PoolClient;
 
 export interface ScaleProductivityResult {
@@ -80,6 +91,109 @@ export interface ScaleProductivityResult {
 }
 
 const ms = (t: Date | string) => new Date(t).getTime();
+export const dayOfMs = (t: number) => calendarDateInAppTimezone(new Date(t));
+
+const LOADS_SQL = (where: string) => `
+  select w.id, w.carrier_id, w.employee_id, w.net_g, w.weighed_at,
+         exists (select 1 from bin_cycles c where c.weighing_id = w.id and c.status = 'closed') as has_cycle,
+         (select count(*)::int from scale_weighing_flags f
+           where f.weighing_id = w.id and f.kind = 'late_conflict' and f.employee_id <> w.employee_id) as late_conflicts,
+         greatest(
+           (select max(pw.weighed_at) from scale_weighings pw where pw.carrier_id = w.carrier_id and pw.weighed_at < w.weighed_at),
+           (select max(c.closed_at) from bin_cycles c
+             where c.carrier_id = w.carrier_id and c.status = 'closed_unweighed' and c.closed_at < w.weighed_at),
+           (select max(t.started_at) from bin_cycle_tracking t where t.started_at <= w.weighed_at)
+         ) as load_start
+  from scale_employee_credits w
+  where not w.is_duplicate and ${where}`;
+
+function toLoad(r: any): LoadInput {
+  const weighedAt = ms(r.weighed_at);
+  return {
+    weighingId: r.id,
+    carrierId: r.carrier_id,
+    creditedEmployeeId: r.employee_id,
+    netGrams: Number(r.net_g),
+    weighedAt,
+    loadStart: r.load_start ? Math.min(ms(r.load_start), weighedAt) : weighedAt,
+    hasCycle: r.has_cycle === true,
+    lateConflicts: Number(r.late_conflicts),
+    scannerIds: [],
+  };
+}
+
+// Evaluates the credited bins weighed in [start, end) for one Job. Bins
+// whose loads can overlap them in time (weighed shortly before or after) are
+// evaluated too, only so that the overlapping-time check gives the same
+// answer whatever range is asked for.
+export async function evaluateLoads(jobId: string, range: { start: Date; end: Date } | { weighingIds: string[] }, db: Db = pool): Promise<LoadOutcome[]> {
+  const { rows: targetRows } =
+    "weighingIds" in range
+      ? await db.query(LOADS_SQL(`w.id = any($1::uuid[])`), [range.weighingIds])
+      : await db.query(LOADS_SQL(`w.weighed_at >= $1 and w.weighed_at < $2`), [range.start, range.end]);
+  const targets = targetRows.map(toLoad);
+  if (!targets.length) return [];
+  const spanFrom = Math.min(...targets.map((l) => l.loadStart));
+  const spanTo = Math.max(...targets.map((l) => l.weighedAt));
+  const targetIds = new Set(targets.map((l) => l.weighingId));
+  const { rows: nearRows } = await db.query(
+    `select * from (${LOADS_SQL(`w.weighed_at > $1::timestamptz and w.weighed_at < $3::timestamptz + interval '7 days'`)}) x
+     where x.load_start < $2::timestamptz and not (x.id = any($4::uuid[]))`,
+    [new Date(spanFrom), new Date(spanTo), new Date(spanTo), [...targetIds]]
+  );
+  const loads = [...targets, ...nearRows.map(toLoad).filter((l) => l.weighedAt > spanFrom && l.loadStart < spanTo)];
+
+  const args = [loads.map((l) => l.weighingId), loads.map((l) => l.carrierId), loads.map((l) => new Date(l.loadStart)), loads.map((l) => new Date(l.weighedAt))];
+  // One after another: `db` may be a single transaction client.
+  const scanRes = await db.query(
+    `select distinct x.weighing_id, s.employee_id
+     from unnest($1::uuid[], $2::uuid[], $3::timestamptz[], $4::timestamptz[]) as x(weighing_id, carrier_id, from_at, to_at)
+     join bin_scans s on s.carrier_id = x.carrier_id and s.occurred_at > x.from_at and s.occurred_at <= x.to_at`,
+    args
+  );
+  const entryRes = await db.query(
+    `select distinct te.id, te.employee_id, te.carrier_id, te.activity_id, te.started_at, te.ended_at
+     from unnest($1::uuid[], $2::timestamptz[], $3::timestamptz[]) as x(carrier_id, from_at, to_at)
+     join time_entries te
+       on te.carrier_id = x.carrier_id and te.entry_type = 'work' and te.deleted_at is null
+      and te.started_at < x.to_at and coalesce(te.ended_at, 'infinity'::timestamptz) > x.from_at`,
+    [args[1], args[2], args[3]]
+  );
+  const decisionRes = await db.query(
+    `select a.weighing_id, a.action, a.method, a.inputs_fingerprint,
+            coalesce(json_agg(json_build_object('employeeId', s.employee_id, 'included', s.included, 'allocatedGrams', s.allocated_g))
+                     filter (where s.employee_id is not null), '[]'::json) as shares
+     from scale_productivity_allocations a
+     left join scale_productivity_allocation_shares s on s.weighing_id = a.weighing_id
+     where a.weighing_id = any($1::uuid[]) and a.activity_id = $2
+     group by a.weighing_id, a.action, a.method, a.inputs_fingerprint`,
+    [args[0], jobId]
+  );
+  for (const r of scanRes.rows) loads.find((l) => l.weighingId === r.weighing_id)?.scannerIds.push(r.employee_id);
+  const entries: EntryInput[] = entryRes.rows.map((r) => ({
+    employeeId: r.employee_id,
+    carrierId: r.carrier_id,
+    activityId: r.activity_id,
+    startedAt: ms(r.started_at),
+    endedAt: r.ended_at ? ms(r.ended_at) : null,
+  }));
+  const people = [...new Set([...entries.map((e) => e.employeeId), ...scanRes.rows.map((r) => r.employee_id as string)])];
+  const { rows: breakRows } = people.length
+    ? await db.query(
+        `select te.employee_id, te.started_at, te.ended_at from time_entries te
+         where te.entry_type = 'break' and te.deleted_at is null and te.employee_id = any($1::uuid[])
+           and te.started_at < $3 and coalesce(te.ended_at, 'infinity'::timestamptz) > $2`,
+        [people, new Date(Math.min(...loads.map((l) => l.loadStart))), new Date(Math.max(...loads.map((l) => l.weighedAt)))]
+      )
+    : { rows: [] as any[] };
+  const breaks: BreakInput[] = breakRows.map((r) => ({ employeeId: r.employee_id, startedAt: ms(r.started_at), endedAt: r.ended_at ? ms(r.ended_at) : null }));
+  const decisions = new Map<string, AllocationDecision>(
+    decisionRes.rows.map((r) => [r.weighing_id, { action: r.action, method: r.method, fingerprint: r.inputs_fingerprint, shares: r.shares }])
+  );
+
+  const outcomes = reviewOverlappingLoads(loads.map((l) => evaluateLoad(l, jobId, entries, breaks, decisions.get(l.weighingId) ?? null, dayOfMs)));
+  return outcomes.filter((o) => targetIds.has(o.load.weighingId));
+}
 
 // Inclusive local dates. `employeeIds` limits the result (null = everyone).
 export async function getScaleProductivity(
@@ -96,80 +210,7 @@ export async function getScaleProductivity(
   const { start, end } = getRangeBoundsUtc(from, dateEnd);
   const employeeIds = opts.employeeIds ?? null;
 
-  const { rows: credits } = await db.query(
-    `select w.id, w.carrier_id, w.employee_id, w.net_g, w.weighed_at,
-            c.employee_id as cycle_employee_id, c.opened_at as cycle_opened_at,
-            (select count(distinct s.employee_id)::int from bin_scans s
-              where s.cycle_id = c.id and s.employee_id <> w.employee_id) as other_scan_employees,
-            (select count(*)::int from bin_cycles sc
-              where sc.superseded_by_cycle_id = c.id and sc.status = 'superseded' and sc.review_status = 'open') as open_superseded,
-            (select count(*)::int from scale_weighing_flags f
-              where f.weighing_id = w.id and f.kind = 'late_conflict' and f.employee_id <> w.employee_id) as late_conflicts,
-            greatest(
-              (select max(pw.weighed_at) from scale_weighings pw where pw.carrier_id = w.carrier_id and pw.weighed_at < c.opened_at),
-              (select max(pc.closed_at) from bin_cycles pc where pc.carrier_id = c.carrier_id and pc.id <> c.id and pc.closed_at <= c.opened_at)
-            ) as previous_boundary_at
-     from scale_employee_credits w
-     left join bin_cycles c on c.weighing_id = w.id and c.status = 'closed'
-     where not w.is_duplicate and w.weighed_at >= $1 and w.weighed_at < $2
-       and ($3::uuid[] is null or w.employee_id = any($3::uuid[]))`,
-    [start, end, employeeIds]
-  );
-
-  const bins: BinInput[] = credits.map((r) => ({
-    weighingId: r.id,
-    carrierId: r.carrier_id,
-    employeeId: r.employee_id,
-    netGrams: Number(r.net_g),
-    weighedAt: ms(r.weighed_at),
-    weighDate: calendarDateInAppTimezone(new Date(r.weighed_at)),
-    cycle: r.cycle_opened_at
-      ? {
-          employeeId: r.cycle_employee_id,
-          openedAt: ms(r.cycle_opened_at),
-          otherScanEmployees: Number(r.other_scan_employees),
-          openSupersededReviews: Number(r.open_superseded),
-          previousBoundaryAt: r.previous_boundary_at ? ms(r.previous_boundary_at) : null,
-        }
-      : null,
-    lateConflicts: Number(r.late_conflicts),
-  }));
-
-  const windowed = bins.filter((b) => b.cycle);
-  let entries: EntryInput[] = [];
-  let breaks: BreakInput[] = [];
-  if (windowed.length) {
-    const [entryRes, breakRes] = await Promise.all([
-      db.query(
-        `select distinct te.id, te.employee_id, te.carrier_id, te.activity_id, te.started_at, te.ended_at
-         from unnest($1::uuid[], $2::timestamptz[], $3::timestamptz[]) as x(carrier_id, from_at, to_at)
-         join time_entries te
-           on te.carrier_id = x.carrier_id and te.entry_type = 'work' and te.deleted_at is null
-          and te.started_at < x.to_at and coalesce(te.ended_at, 'infinity'::timestamptz) > x.from_at`,
-        [windowed.map((b) => b.carrierId), windowed.map((b) => new Date(b.cycle!.openedAt)), windowed.map((b) => new Date(b.weighedAt))]
-      ),
-      db.query(
-        `select te.employee_id, te.started_at, te.ended_at
-         from time_entries te
-         where te.entry_type = 'break' and te.deleted_at is null and te.employee_id = any($1::uuid[])
-           and te.started_at < $3 and coalesce(te.ended_at, 'infinity'::timestamptz) > $2`,
-        [
-          [...new Set(windowed.map((b) => b.employeeId))],
-          // 12 h earlier: breaks inside an entry that started before its scan.
-          new Date(Math.min(...windowed.map((b) => b.cycle!.openedAt)) - 12 * 3_600_000),
-          new Date(Math.max(...windowed.map((b) => b.weighedAt))),
-        ]
-      ),
-    ]);
-    entries = entryRes.rows.map((r) => ({
-      employeeId: r.employee_id,
-      carrierId: r.carrier_id,
-      activityId: r.activity_id,
-      startedAt: ms(r.started_at),
-      endedAt: r.ended_at ? ms(r.ended_at) : null,
-    }));
-    breaks = breakRes.rows.map((r) => ({ employeeId: r.employee_id, startedAt: ms(r.started_at), endedAt: r.ended_at ? ms(r.ended_at) : null }));
-  }
+  let outcomes = await evaluateLoads(jobId, { start: new Date(start), end: new Date(end) }, db);
 
   // Bins with no time at all can't be placed under a Job; they're shown for
   // this Job only to employees who worked it in the range.
@@ -179,14 +220,11 @@ export async function getScaleProductivity(
     [jobId, start, end]
   );
   const worksJob = new Set(jobWorkers.map((r) => r.employee_id as string));
-
-  let outcomes = bins.map((b) => evaluateBin(b, jobId, entries, breaks));
   outcomes = outcomes.filter((o) => {
     if (o.kind !== "excluded") return true;
-    if (o.reason === "no_cycle" || o.reason === "no_matched_time") return worksJob.has(o.bin.employeeId);
+    if (o.reason === "no_cycle" || o.reason === "no_matched_time") return worksJob.has(o.load.creditedEmployeeId);
     return true;
   });
-  outcomes = excludeOverlappingBins(outcomes);
 
   // Bins still open (filling / awaiting weighing / needs review) whose
   // employee has this Job's time with them: they count once weighed.
@@ -203,11 +241,12 @@ export async function getScaleProductivity(
     [jobId, employeeIds, now]
   );
 
+  let byEmployee = summarizeByEmployee(outcomes);
+  if (employeeIds) byEmployee = new Map([...byEmployee].filter(([id]) => employeeIds.includes(id)));
   return {
     dateStart: from,
     dateEnd,
-    byEmployee: summarizeByEmployee(outcomes),
+    byEmployee,
     openBinsByEmployee: new Map(open.map((r) => [r.employee_id as string, Number(r.n)])),
   };
 }
-
