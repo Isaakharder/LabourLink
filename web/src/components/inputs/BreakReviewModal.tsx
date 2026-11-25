@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { api, ApiError } from "../../lib/api";
 import {
@@ -98,7 +98,9 @@ export function BreakReviewModal({
   onClose,
   onSaved,
 }: {
-  review: Pick<BreakReviewCase, "breakId" | "employeeName" | "date" | "startedAt" | "endedAt" | "durationSeconds" | "isPaid">;
+  review: Pick<BreakReviewCase, "breakId" | "employeeName" | "date" | "startedAt" | "endedAt" | "durationSeconds" | "isPaid"> & {
+    overlappedWorkSeconds?: number | null;
+  };
   onClose: () => void;
   onSaved: (message: string) => void;
 }) {
@@ -114,7 +116,32 @@ export function BreakReviewModal({
   const endIso = endValue ? combineDateAndTimeToUtcIso(review.date, endValue) : null;
   const newSeconds = startIso && endIso ? Math.round((Date.parse(endIso) - Date.parse(startIso)) / 1000) : null;
   const timesValid = mode === "confirm" || (newSeconds !== null && newSeconds > 0);
-  const canSave = timesValid && reason.trim().length >= 3 && confirmed && !saving;
+
+  // Warnings for conflicting records, from the same preview the Inputs break
+  // correction uses (POST /breaks/:id/correction-preview, read-only): which
+  // work entries the correction would shorten, split or remove, or why it
+  // can't be saved (e.g. it overlaps another break).
+  const [preview, setPreview] = useState<{ key: string; messages: string[]; error: string | null } | null>(null);
+  const previewKey = mode === "correct" && timesValid && startIso && endIso ? `${startIso}|${endIso}` : null;
+  useEffect(() => {
+    if (!previewKey) return;
+    let cancelled = false;
+    const [startTime, endTime] = previewKey.split("|");
+    api<{ messages?: string[] }>(`/api/inputs/breaks/${review.breakId}/correction-preview`, {
+      method: "POST",
+      body: JSON.stringify({ startTime, endTime }),
+    })
+      .then((res) => !cancelled && setPreview({ key: previewKey, messages: res?.messages ?? [], error: null }))
+      .catch((err) => !cancelled && setPreview({ key: previewKey, messages: [], error: err instanceof ApiError ? err.message : "Could not check these times" }));
+    return () => {
+      cancelled = true;
+    };
+  }, [previewKey, review.breakId]);
+  const currentPreview = previewKey && preview?.key === previewKey ? preview : null;
+  const previewPending = previewKey !== null && currentPreview === null;
+  const conflict = currentPreview?.error ?? null;
+
+  const canSave = timesValid && !conflict && !previewPending && reason.trim().length >= 3 && confirmed && !saving;
   // Paid hours move by the change in unpaid break time (a paid break is paid
   // either way; a break with no paid flag is unpaid, as in payroll,
   // workdayTotals.ts). Shown before saving so the change is never a surprise.
@@ -176,6 +203,20 @@ export function BreakReviewModal({
         {mode === "correct" && (
           <p className="break-review-hint">
             As with any break correction in Inputs, work that overlaps the corrected break is trimmed to fit around it.
+          </p>
+        )}
+        {conflict && <p className="error-text break-review-conflict">Can't save these times: {conflict}</p>}
+        {currentPreview && currentPreview.messages.length > 0 && (
+          <ul className="break-review-warnings" aria-label="Changes to work entries">
+            {currentPreview.messages.map((m, i) => (
+              <li key={i}>{m}</li>
+            ))}
+          </ul>
+        )}
+        {mode === "confirm" && (review.overlappedWorkSeconds ?? 0) > 0 && (
+          <p className="break-review-payroll-note">
+            {formatDurationHMS(review.overlappedWorkSeconds!)} of work is recorded during this break. Confirming it as
+            recorded means that work no longer counts as productive time; check the work entries in Inputs first.
           </p>
         )}
         <label className="break-review-reason">

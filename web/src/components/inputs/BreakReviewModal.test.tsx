@@ -26,6 +26,7 @@ vi.mock("../../lib/api", () => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.mocked(api).mockImplementation(() => Promise.resolve({ ok: true }));
 });
 
 const DAY = "2026-11-10";
@@ -65,7 +66,8 @@ describe("BreakReviewModal", () => {
 
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith("Break corrected."));
     const body = patchBody();
-    expect(vi.mocked(api).mock.calls[0][0]).toBe("/api/inputs/breaks/brk-1");
+    const patchCall = vi.mocked(api).mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "PATCH")!;
+    expect(patchCall[0]).toBe("/api/inputs/breaks/brk-1");
     expect(body).toMatchObject({ confirmed: true, reason: "Confirmed with Jeffrey" });
     expect(Date.parse(body.endTime) - Date.parse(body.startTime)).toBe(30 * 60_000);
     expect(body.confirmAsRecorded).toBeUndefined();
@@ -98,6 +100,45 @@ describe("BreakReviewModal", () => {
     await user.click(screen.getByRole("checkbox"));
     expect(screen.getByRole("button", { name: "Save review" })).toBeDisabled();
     expect(screen.getByText(/end must be after the start/i)).toBeInTheDocument();
+  });
+});
+
+describe("BreakReviewModal — warnings for conflicting records", () => {
+  it("shows which work entries the correction would change, from the Inputs correction preview", async () => {
+    vi.mocked(api).mockImplementation((path: string) =>
+      path.endsWith("/correction-preview")
+        ? Promise.resolve({ messages: ["This correction will shorten Picking Peppers from 12:00 PM to 12:30 PM and remove 30 minutes from worked time."] })
+        : Promise.resolve({ ok: true })
+    );
+    const { container } = render(<BreakReviewModal review={review} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.change(container.querySelectorAll<HTMLInputElement>('input[type="time"]')[1], { target: { value: "12:30:00" } });
+    expect(await screen.findByText(/will shorten Picking Peppers/)).toBeInTheDocument();
+    const previewCall = vi.mocked(api).mock.calls.find(([p]) => String(p).endsWith("/correction-preview"))!;
+    expect(previewCall[0]).toBe("/api/inputs/breaks/brk-1/correction-preview");
+    expect((previewCall[1] as RequestInit).method).toBe("POST");
+  });
+
+  it("a clash with another break blocks Save and says why", async () => {
+    const { ApiError } = await import("../../lib/api");
+    vi.mocked(api).mockImplementation((path: string) =>
+      path.endsWith("/correction-preview")
+        ? Promise.reject(new (ApiError as any)(409, "The corrected break overlaps another break (3:00 PM - 3:15 PM)"))
+        : Promise.resolve({ ok: true })
+    );
+    const user = userEvent.setup();
+    const { container } = render(<BreakReviewModal review={review} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.change(container.querySelectorAll<HTMLInputElement>('input[type="time"]')[1], { target: { value: "15:10:00" } });
+    expect(await screen.findByText(/overlaps another break/)).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox"), "Checked with him");
+    await user.click(screen.getByRole("checkbox"));
+    expect(screen.getByRole("button", { name: "Save review" })).toBeDisabled();
+  });
+
+  it("'right as recorded' warns when work is recorded during the break", async () => {
+    const user = userEvent.setup();
+    render(<BreakReviewModal review={{ ...review, overlappedWorkSeconds: 3 * 3600 }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole("radio", { name: /right as recorded/i }));
+    expect(screen.getByText(/3:00:00 of work is recorded during this break/)).toBeInTheDocument();
   });
 });
 

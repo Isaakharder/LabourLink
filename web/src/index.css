@@ -11145,3 +11145,12 @@ button.inputs-break-review-badge:hover {
     padding: 0.2rem 0.5rem;
   }
 }
+.break-review-warnings {
+  margin: 0;
+  padding: 0.5rem 0.75rem 0.5rem 1.75rem;
+  border-radius: 6px;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  color: #78350f;
+  font-size: 0.9rem;
+}

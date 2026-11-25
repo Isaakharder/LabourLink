@@ -213,21 +213,23 @@ export function InputsPage() {
   const [addEmployeeToDayOpen, setAddEmployeeToDayOpen] = useState(false);
 
   // Breaks closed automatically at the end of a day and not reviewed yet
-  // (GET /api/inputs/break-reviews, same roles as break corrections). The
-  // "Breaks to review" button lists them; the review dialog corrects or
-  // confirms one, with a reason, through PATCH /api/inputs/breaks/:id.
-  const canReviewBreaks = canAddEmployeeToDay;
+  // (GET /api/inputs/break-reviews). Anyone who can open these break records
+  // in Inputs can review them: the server decides (the same access as the
+  // daily view and break corrections), so no role list is repeated here —
+  // the button appears only when the server returns the list, and a break's
+  // own canEdit (from the daily view) gates its review dialog.
   const [breakReviews, setBreakReviews] = useState<BreakReviewCase[] | null>(null);
   const [breakReviewListOpen, setBreakReviewListOpen] = useState(false);
   const [reviewingBreak, setReviewingBreak] = useState<React.ComponentProps<typeof BreakReviewModal>["review"] | null>(null);
   const loadBreakReviews = useCallback(() => {
-    if (!canReviewBreaks) return;
     api<{ breaks: BreakReviewCase[] }>("/api/inputs/break-reviews")
       .then((res) => setBreakReviews(res.breaks))
-      .catch(() => {
-        // Keep the last known list; the next load retries.
+      .catch((err) => {
+        // No access (403): no button. Otherwise keep the last known list;
+        // the next load retries.
+        if (err instanceof ApiError && (err.status === 403 || err.status === 401)) setBreakReviews(null);
       });
-  }, [canReviewBreaks]);
+  }, []);
   useEffect(() => {
     loadBreakReviews();
   }, [loadBreakReviews]);
@@ -1126,7 +1128,7 @@ export function InputsPage() {
         <div className="inputs-workspace-main">
           <div className="inputs-workspace-datenav">
             <DateNav date={date} onChange={(d) => updateParams({ date: d })} />
-            {canReviewBreaks && breakReviews && breakReviews.length > 0 && (
+            {breakReviews && breakReviews.length > 0 && (
               <button
                 type="button"
                 className="inputs-section-header-button inputs-review-button inputs-break-review-button"
@@ -1275,7 +1277,7 @@ export function InputsPage() {
                 onCancelEditBreak={handleCancelEditBreak}
                 onReviewBreak={
                   daily.canEdit
-                    ? (b) =>
+                    ? (b: BreakDto) =>
                         setReviewingBreak({
                           breakId: b.id,
                           employeeName: `${daily.employee.firstName} ${daily.employee.lastName}`,
@@ -1284,6 +1286,7 @@ export function InputsPage() {
                           endedAt: b.endedAt!,
                           durationSeconds: b.durationSeconds,
                           isPaid: b.isPaid,
+                          overlappedWorkSeconds: breakReviews?.find((c) => c.breakId === b.id)?.overlappedWorkSeconds ?? null,
                         })
                     : undefined
                 }

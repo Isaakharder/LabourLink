@@ -14,7 +14,11 @@
 //     records the review with its reason, and productivity then subtracts
 //     the break as recorded.
 //  5. Ordinary breaks are unaffected: corrected without a reason, as before.
-//  6. Only Inputs editors can list breaks to review.
+//  6. Permissions follow Inputs access, not a separate review role: every
+//     role that can open and correct break records in Inputs (Administrator,
+//     Manager, Supervisor) can list, preview and review them, recorded as
+//     themselves; roles without Inputs access (Employee, Crew Leader) are
+//     refused on every review route, with nothing written.
 //
 // Run with: npm run test:inputs-break-review
 import "dotenv/config";
@@ -82,6 +86,10 @@ async function main() {
     }
     const admin = await employee("Administrator", "Admin");
     const worker = await employee("Employee", "Worker");
+    const supervisor = await employee("Supervisor", "Sup");
+    const manager = await employee("Manager", "Mgr");
+    const crewLeader = await employee("Crew Leader", "Crew");
+    const dee = await employee("Employee", "Dee");
     const ana = await employee("Employee", "Ana");
     const ben = await employee("Employee", "Ben");
     const cy = await employee("Employee", "Cy");
@@ -115,6 +123,9 @@ async function main() {
     // Ben: work 07:00-15:00, an unpaid break from 14:00 closed by the end-of-day backstop at 23:59:59.
     await work(ben.id, at(7), at(15));
     const benBreak = await brk(ben.id, at(14), new Date(MIDNIGHT.getTime() - 1000), true);
+    // Dee: work 07:00-15:00, an unpaid break from 13:00 closed by the midnight cut-off.
+    await work(dee.id, at(7), at(15));
+    const deeBreak = await brk(dee.id, at(13), MIDNIGHT);
     // Cy: work 07:00-15:00, an ordinary 10:00-10:15 break.
     await work(cy.id, at(7), at(10));
     await work(cy.id, at(10, 15), at(15));
@@ -195,6 +206,39 @@ async function main() {
     check(!listed(benBreak), "Ben's break leaves the list");
     res = await call(admin.token, "PATCH", `/breaks/${cyBreak}`, { confirmAsRecorded: true, confirmed: true, reason: "Not needed" });
     check(res.status === 409, "an ordinary break can't be 'confirmed as recorded'", res);
+
+    // ---- 6. Permissions: Inputs access decides, not a review-only role ----
+    const deeEntries0 = await entries(dee.id);
+    for (const who of [worker, crewLeader]) {
+      const label = who === worker ? "Employee" : "Crew Leader";
+      check((await call(who.token, "GET", `/break-reviews`)).status === 403, `${label}: can't list breaks to review`);
+      check((await call(who.token, "GET", `/daily?employeeId=${dee.id}&date=${DAY}`)).status === 403, `${label}: can't open the break record in Inputs either`);
+      check(
+        (await call(who.token, "POST", `/breaks/${deeBreak}/correction-preview`, { startTime: at(13).toISOString(), endTime: at(13, 30).toISOString() })).status === 403,
+        `${label}: can't preview a correction`
+      );
+      check(
+        (await call(who.token, "PATCH", `/breaks/${deeBreak}`, { startTime: at(13).toISOString(), endTime: at(13, 30).toISOString(), confirmed: true, reason: "Trying anyway" })).status === 403,
+        `${label}: can't correct`
+      );
+      check(
+        (await call(who.token, "PATCH", `/breaks/${deeBreak}`, { confirmAsRecorded: true, confirmed: true, reason: "Trying anyway" })).status === 403,
+        `${label}: can't confirm as recorded`
+      );
+    }
+    check((await entries(dee.id)) === deeEntries0 && (await corrections(deeBreak)).length === 0, "refused users wrote nothing");
+    for (const who of [supervisor, manager]) {
+      const label = who === supervisor ? "Supervisor" : "Manager";
+      const l = await call(who.token, "GET", `/break-reviews`);
+      check(l.status === 200 && (l.body?.breaks ?? []).some((b: any) => b.breakId === deeBreak), `${label}: lists Dee's break`, l.status);
+      const pv = await call(who.token, "POST", `/breaks/${deeBreak}/correction-preview`, { startTime: at(13).toISOString(), endTime: at(13, 30).toISOString() });
+      check(pv.status === 200 && Array.isArray(pv.body?.messages) && pv.body.messages.some((m: string) => /shorten|resume|remove/i.test(m)), `${label}: sees the warning for the overlapping work entry`, pv.body);
+    }
+    res = await call(supervisor.token, "PATCH", `/breaks/${deeBreak}`, { startTime: at(13).toISOString(), endTime: at(13, 30).toISOString(), confirmed: true, reason: "Dee says lunch was 30 min" });
+    check(res.status === 200, "a Supervisor can review and correct", res);
+    const deeCorr = await corrections(deeBreak);
+    check(deeCorr.length === 1 && deeCorr[0].changed_by_employee_id === supervisor.id && deeCorr[0].reason === "Dee says lunch was 30 min", "the audit history names the Supervisor and their reason", deeCorr);
+    check((await activitySeconds(dee.id)) === 7.5 * 3600, "Dee's productivity uses the Supervisor's corrected break", await activitySeconds(dee.id));
 
     // ---- 5. Ordinary breaks: as before ----
     res = await call(admin.token, "PATCH", `/breaks/${cyBreak}`, { endTime: at(10, 20).toISOString() });

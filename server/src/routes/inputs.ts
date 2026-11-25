@@ -3870,6 +3870,11 @@ router.post(
 // "Breaks to review" list. Productivity keeps the work that overlaps them
 // until they are reviewed (lib/breakOverlap.ts); payroll uses them as
 // recorded until an Inputs user corrects them (PATCH /breaks/:id). Read-only.
+// Access is exactly Inputs access (EDIT_ROLES, the same as opening any
+// employee's day in /daily and correcting a break): there is no separate
+// review role, and Inputs has no per-employee scoping, so whoever can open
+// a break record here can review it. If record-level rules are ever added
+// to /daily and the break routes, apply them here too.
 router.get(
   "/break-reviews",
   requireAuth,
