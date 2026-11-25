@@ -423,7 +423,9 @@ export function DisplaySetupPage() {
                   {cardTools(a.activityId, a.name, a.schedule)}
                   {scheduleLine(a.schedule)}
                   <p className="display-setup-unit">
-                    {a.densitySource
+                    {a.productivityMetric === "scale_kg"
+                      ? "Speed: kg/hour (LabourLink Scale): weighed bins and their matched picking time"
+                      : a.densitySource
                       ? `Speed: ${a.speedUnit ?? `${a.densitySource}/hour`}`
                       : "No speed calculation for this job (no stems or plants count per row) — its slide shows a notice instead of rankings."}
                   </p>
@@ -434,8 +436,17 @@ export function DisplaySetupPage() {
                         type="number"
                         min={0}
                         step="any"
-                        placeholder={a.normalSpeed != null ? `${a.normalSpeed} (normal speed)` : "None"}
-                        value={a.targetText}
+                        placeholder={
+                          a.productivityMetric === "scale_kg"
+                            ? a.scaleNormalKgPerHour != null
+                              ? `${a.scaleNormalKgPerHour} kg/hour (job)`
+                              : "None"
+                            : a.normalSpeed != null
+                              ? `${a.normalSpeed} (normal speed)`
+                              : "None"
+                        }
+                        disabled={a.productivityMetric === "scale_kg"}
+                        value={a.productivityMetric === "scale_kg" ? "" : a.targetText}
                         onChange={(e) => updateActivity(a.activityId, { targetText: e.target.value })}
                       />
                     </label>
@@ -501,7 +512,13 @@ export function DisplaySetupPage() {
                       />
                     </label>
                   </div>
-                  {a.targetText === "" && a.normalSpeed != null && (
+                  {a.productivityMetric === "scale_kg" && (
+                    <p className="display-setup-hint">
+                      Target is the job's kg/hour normal speed (Basic Data → Jobs). This TV's row-count target isn't used for kg/hour and is kept unchanged.
+                      Min. job hours counts only picking hours matched to weighed, credited bins (1.0 h is a good starting point).
+                    </p>
+                  )}
+                  {a.productivityMetric !== "scale_kg" && a.targetText === "" && a.normalSpeed != null && (
                     <p className="display-setup-hint">Target uses the job's normal speed. Enter a number to override it on this TV only.</p>
                   )}
                 </div>

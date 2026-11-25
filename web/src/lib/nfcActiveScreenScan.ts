@@ -95,6 +95,24 @@ export function classifyHomeScan(
   return { kind: "switch", targetType: resolved.targetType, targetId: resolved.targetId, label: resolved.label };
 }
 
+// A rescan of the bin already in use (outcome "already-current" for a bin):
+// sent as a bin_rescan event so the server can start a new picking cycle if
+// the bin was weighed since. Only when the server says it accepts bin_rescan
+// (an older server can't store it), and at most once per bin per
+// BIN_RESCAN_MIN_INTERVAL_MS, so a tag held against the phone doesn't send a
+// stream of them (repeats would only join the same cycle anyway).
+export const BIN_RESCAN_MIN_INTERVAL_MS = 30_000;
+export function binRescanDecision(
+  serverAcceptsRescan: boolean,
+  last: { carrierId: string; atMs: number } | null,
+  carrierId: string,
+  nowMs: number
+): "send" | "throttled" | "unsupported" {
+  if (!serverAcceptsRescan) return "unsupported";
+  if (last && last.carrierId === carrierId && nowMs - last.atMs < BIN_RESCAN_MIN_INTERVAL_MS) return "throttled";
+  return "send";
+}
+
 // Builds the complete answer set a scan-triggered switch submits — the
 // currently-answered row/carrier questions carried over unchanged, with only
 // the scanned tag's own question replaced by the new value. A scan on a

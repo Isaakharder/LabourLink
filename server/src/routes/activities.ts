@@ -23,6 +23,26 @@ const DENSITY_SPEED_UNIT: Record<DensitySource, string> = {
   plants: "plants/hour",
   stems: "stems/hour",
 };
+// The productivity a Job shows on the Dashboard and TV
+// (077_activity_productivity_metric.sql): its row-count speed (density_source,
+// unchanged) or kilograms/hour from LabourLink Scale (lib/scaleProductivity.ts).
+// A kg/hour Job keeps density_source, speed_unit and normal_speed exactly as
+// they are (Inputs, Reports, row progress and Productive TV still use them);
+// its kg/hour target is scale_normal_kg_per_hour.
+const PRODUCTIVITY_METRICS = ["density", "scale_kg"] as const;
+type ProductivityMetric = (typeof PRODUCTIVITY_METRICS)[number];
+
+function parseProductivityMetric(v: unknown): ProductivityMetric | "invalid" {
+  if (v === undefined || v === null || v === "") return "density";
+  return PRODUCTIVITY_METRICS.includes(v as ProductivityMetric) ? (v as ProductivityMetric) : "invalid";
+}
+
+function parseKgTarget(v: unknown): number | null | "invalid" {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 && n < 100000000 ? Math.round(n * 100) / 100 : "invalid";
+}
+
 const DEFAULT_LABEL: Record<QuestionType, string> = {
   greenhouse_row: "Where?",
   carrier: "Which Carrier?",
@@ -52,6 +72,8 @@ interface ActivityFields {
   // just the configured normalSpeed above. Never linked to a specific
   // density record: resolved per-row at work-entry time (mobileTime.ts).
   densitySource: DensitySource | null;
+  productivityMetric: ProductivityMetric;
+  scaleNormalKgPerHour: number | null;
 }
 
 function validateCreate(body: Record<string, unknown>):
@@ -86,6 +108,11 @@ function validateCreate(body: Record<string, unknown>):
   // DENSITY_SPEED_UNIT above).
   const speedUnit = densitySource ? DENSITY_SPEED_UNIT[densitySource] : trimOrNull(body.speedUnit as string);
 
+  const productivityMetric = parseProductivityMetric(body.productivityMetric);
+  if (productivityMetric === "invalid") errors.productivityMetric = "Productivity must be 'density' or 'scale_kg'";
+  const scaleNormalKgPerHour = parseKgTarget(body.scaleNormalKgPerHour);
+  if (scaleNormalKgPerHour === "invalid") errors.scaleNormalKgPerHour = "Normal speed (kg/hour) must be greater than 0";
+
   let minimumDurationMinutes = 0;
   if (body.minimumDurationMinutes === undefined || body.minimumDurationMinutes === null || body.minimumDurationMinutes === "") {
     errors.minimumDurationMinutes = "Minimum duration is required";
@@ -108,6 +135,8 @@ function validateCreate(body: Record<string, unknown>):
       minimumDurationMinutes,
       isActive: body.isActive === undefined ? true : Boolean(body.isActive),
       densitySource,
+      productivityMetric: productivityMetric as ProductivityMetric,
+      scaleNormalKgPerHour: scaleNormalKgPerHour as number | null,
     },
   };
 }
@@ -177,6 +206,17 @@ function validateUpdate(body: Record<string, unknown>, currentDensitySource: Den
   }
 
   if ("isActive" in body) data.isActive = Boolean(body.isActive);
+
+  if ("productivityMetric" in body) {
+    const m = parseProductivityMetric(body.productivityMetric);
+    if (m === "invalid") errors.productivityMetric = "Productivity must be 'density' or 'scale_kg'";
+    else data.productivityMetric = m;
+  }
+  if ("scaleNormalKgPerHour" in body) {
+    const t = parseKgTarget(body.scaleNormalKgPerHour);
+    if (t === "invalid") errors.scaleNormalKgPerHour = "Normal speed (kg/hour) must be greater than 0";
+    else data.scaleNormalKgPerHour = t;
+  }
 
   if (Object.keys(errors).length) return { errors };
   return { data };
@@ -283,6 +323,7 @@ async function upsertQuestions(client: PoolClient, activityId: string, questions
 const SELECT_COLUMNS = `
   a.id, a.name, a.normal_speed, a.speed_unit, a.minimum_duration_minutes,
   a.is_active, a.sort_order, a.updated_at, a.density_source,
+  a.productivity_metric, a.scale_normal_kg_per_hour,
   coalesce(emp.assigned_employee_count, 0) as assigned_employee_count,
   coalesce(q.questions, '[]'::json) as questions
 `;
@@ -329,6 +370,8 @@ function serializeActivity(row: any) {
     minimumDurationMinutes: row.minimum_duration_minutes,
     isActive: row.is_active,
     densitySource: row.density_source,
+    productivityMetric: row.productivity_metric,
+    scaleNormalKgPerHour: row.scale_normal_kg_per_hour != null ? Number(row.scale_normal_kg_per_hour) : null,
     assignedEmployeeCount: Number(row.assigned_employee_count),
     updatedAt: row.updated_at,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -406,10 +449,11 @@ router.post(
       let activityId: string;
       try {
         const { rows } = await client.query(
-          `insert into activities (name, normal_speed, speed_unit, minimum_duration_minutes, is_active, density_source)
-           values ($1, $2, $3, $4, $5, $6)
+          `insert into activities (name, normal_speed, speed_unit, minimum_duration_minutes, is_active, density_source,
+                                   productivity_metric, scale_normal_kg_per_hour)
+           values ($1, $2, $3, $4, $5, $6, $7, $8)
            returning id`,
-          [d.name, d.normalSpeed, d.speedUnit, d.minimumDurationMinutes, d.isActive, d.densitySource]
+          [d.name, d.normalSpeed, d.speedUnit, d.minimumDurationMinutes, d.isActive, d.densitySource, d.productivityMetric, d.scaleNormalKgPerHour]
         );
         activityId = rows[0].id;
       } catch (err) {
@@ -469,6 +513,8 @@ router.patch(
       minimumDurationMinutes: "minimum_duration_minutes",
       isActive: "is_active",
       densitySource: "density_source",
+      productivityMetric: "productivity_metric",
+      scaleNormalKgPerHour: "scale_normal_kg_per_hour",
     };
 
     const keys = Object.keys(d) as (keyof ActivityFields)[];

@@ -5,9 +5,18 @@ import { InputsDateCalendar } from "./InputsDateCalendar";
 interface DateNavProps {
   date: string;
   onChange: (date: string) => void;
+  // Latest selectable date (inclusive): the Next arrow is disabled there and
+  // a later calendar pick is ignored. Unset on Inputs.
+  max?: string;
+  // Accessible name of the calendar trigger.
+  label?: string;
 }
 
-export function DateNav({ date, onChange }: DateNavProps) {
+export function DateNav({ date, onChange: onChangeProp, max, label = "Choose Inputs date" }: DateNavProps) {
+  const onChange = (next: string) => {
+    if (max && next > max) return;
+    onChangeProp(next);
+  };
   const [calendarOpen, setCalendarOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -55,7 +64,7 @@ export function DateNav({ date, onChange }: DateNavProps) {
           onClick={() => setCalendarOpen((open) => !open)}
           aria-haspopup="dialog"
           aria-expanded={calendarOpen}
-          aria-label="Choose Inputs date"
+          aria-label={label}
         >
           {formatDateLong(date)}
         </button>
@@ -74,6 +83,7 @@ export function DateNav({ date, onChange }: DateNavProps) {
         type="button"
         className="inputs-date-nav-arrow"
         onClick={() => onChange(addCalendarDays(date, 1))}
+        disabled={!!max && date >= max}
         aria-label="Next day"
       >
         →

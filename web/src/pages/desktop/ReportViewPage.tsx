@@ -3,20 +3,19 @@ import { useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../../lib/api";
 import {
   ACTIVITY_METRIC_LABELS,
-  ActivityMetric,
   ActivityReportData,
-  DAILY_METRIC_ELIGIBLE_ACTIVITY_METRICS,
   DateRange,
   PAYROLL_METRIC_LABELS,
   PayrollMetric,
   PayrollReportData,
   PIVOT_ELIGIBLE_PAYROLL_METRICS,
+  ReportMetricChoice,
   SavedReportDetail,
-  WEEKLY_TOTAL_ELIGIBLE_ACTIVITY_METRICS,
-  WEEKLY_TOTAL_METRIC_LABELS,
   formatPayrollDuration,
-  speedUnitAbbreviationNote,
+  normalizeReportMetric,
+  normalizeReportMetrics,
 } from "../../lib/reportTypes";
+import { ReportMetricPicker } from "../../components/reports/ReportMetricPicker";
 import { ReportDateFilterPanel } from "../../components/reports/ReportDateFilterPanel";
 import { ReportPivotTable } from "../../components/reports/ReportPivotTable";
 import { ReportPreviewModal } from "../../components/reports/ReportPreviewModal";
@@ -40,8 +39,14 @@ import { startOfWeekMonday, addCalendarDays, todayInAppTimezone } from "../../li
 // from before this pivot rework.
 const PAYROLL_SUBTABLE_METRICS = ["daysWorked", "activityBreakdown", "weeklyTotals"] as const;
 
-const DEFAULT_DAILY_METRIC: ActivityMetric = "workTime";
-const DEFAULT_WEEKLY_TOTALS: ActivityMetric[] = ["activityHours"];
+const DEFAULT_DAILY_METRIC: ReportMetricChoice = "totalHours";
+const DEFAULT_WEEKLY_TOTALS: ReportMetricChoice[] = ["totalHours"];
+
+// "Nov 24, 2026"
+function formatLongDate(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Intl.DateTimeFormat("en-US", { timeZone: "UTC", dateStyle: "medium" }).format(new Date(Date.UTC(y, m - 1, d)));
+}
 
 interface ReportEmployeeOption {
   id: string;
@@ -60,20 +65,21 @@ function defaultDateRange(): DateRange {
 //   - Payroll: unchanged — a flat `metrics` checkbox list plus the
 //     `pivotMetric` "Show:" dropdown selecting which checked metric
 //     currently drives the pivot cells/Employee Total column.
-//   - Activity: `dailyMetric` (single, shown under each Mon-Sun date
-//     column) + `weeklyTotals` (one or more independently-saved right-hand
-//     summary columns) — no "Show:" dropdown, no checkbox-plus-dropdown
-//     workflow; see reportPivot.ts's buildActivityPivotGrid. Both fall back
-//     to DEFAULT_DAILY_METRIC/DEFAULT_WEEKLY_TOTALS for a report saved
-//     before this redesign (configuration.dailyMetric/weeklyTotals absent).
+//   - Activity: `dailyMetric` (one of the six REPORT_METRIC_CHOICES, shown
+//     under each Mon-Sun date column) + `weeklyTotals` (the summary
+//     columns), chosen independently with ReportMetricPicker. The saved
+//     configuration is read through normalizeReportMetric, so a report saved
+//     with the older keys (workTime, activityHours, averageSpeed, ...) shows
+//     their closest choice; it is rewritten only when someone saves.
 export function ReportViewPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [report, setReport] = useState<SavedReportDetail | null>(null);
   const [dateRange, setDateRange] = useState<DateRange>(defaultDateRange());
   const [metrics, setMetrics] = useState<string[]>([]);
-  const [dailyMetric, setDailyMetric] = useState<ActivityMetric>(DEFAULT_DAILY_METRIC);
-  const [weeklyTotals, setWeeklyTotals] = useState<ActivityMetric[]>(DEFAULT_WEEKLY_TOTALS);
+  // Unsaved picker edits (null = showing the saved configuration).
+  const [draftDailyMetric, setDraftDailyMetric] = useState<ReportMetricChoice | null>(null);
+  const [draftWeeklyTotals, setDraftWeeklyTotals] = useState<ReportMetricChoice[] | null>(null);
   const [data, setData] = useState<ActivityReportData | PayrollReportData | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
@@ -90,8 +96,6 @@ export function ReportViewPage() {
       .then((res) => {
         setReport(res.report);
         setMetrics(res.report.configuration.metrics ?? []);
-        setDailyMetric((res.report.configuration.dailyMetric as ActivityMetric) ?? DEFAULT_DAILY_METRIC);
-        setWeeklyTotals((res.report.configuration.weeklyTotals as ActivityMetric[]) ?? DEFAULT_WEEKLY_TOTALS);
         if (res.report.configuration.lastDateRange) setDateRange(res.report.configuration.lastDateRange);
       })
       .catch((err) => setLoadError(err instanceof ApiError ? err.message : "Could not load report"));
@@ -149,8 +153,10 @@ export function ReportViewPage() {
     setSavingMetrics(true);
     try {
       await api(`/api/reports/${id}`, { method: "PATCH", body: JSON.stringify({ dailyMetric, weeklyTotals }) });
+      setReport((prev) => (prev ? { ...prev, configuration: { ...prev.configuration, dailyMetric, weeklyTotals } } : prev));
+      setDraftDailyMetric(null);
+      setDraftWeeklyTotals(null);
       setEditingMetrics(false);
-      loadData();
     } catch (err) {
       setDataError(err instanceof ApiError ? err.message : "Could not save metrics");
     } finally {
@@ -162,8 +168,13 @@ export function ReportViewPage() {
     setMetrics((prev) => (prev.includes(key) ? prev.filter((m) => m !== key) : [...prev, key]));
   }
 
-  function toggleWeeklyTotal(key: ActivityMetric) {
-    setWeeklyTotals((prev) => (prev.includes(key) ? prev.filter((m) => m !== key) : [...prev, key]));
+  function toggleMetricsEditor() {
+    if (editingMetrics) {
+      // Closing without saving puts the saved choices back.
+      setDraftDailyMetric(null);
+      setDraftWeeklyTotals(null);
+    }
+    setEditingMetrics((v) => !v);
   }
 
   // Persists the dropdown's staged selection to the report's own
@@ -179,6 +190,14 @@ export function ReportViewPage() {
   }
 
   const isActivity = report?.reportType === "activity";
+  const activityData = isActivity && data ? (data as ActivityReportData) : null;
+  const job = activityData ? activityData.activity : null;
+  const savedDailyMetric = normalizeReportMetric(report?.configuration.dailyMetric ?? "", job) ?? DEFAULT_DAILY_METRIC;
+  const savedWeeklyTotalsList = normalizeReportMetrics(report?.configuration.weeklyTotals ?? [], job);
+  const savedWeeklyTotals = savedWeeklyTotalsList.length > 0 ? savedWeeklyTotalsList : DEFAULT_WEEKLY_TOTALS;
+  const dailyMetric = draftDailyMetric ?? savedDailyMetric;
+  const weeklyTotals = draftWeeklyTotals ?? savedWeeklyTotals;
+  const weeklyTotalsKey = weeklyTotals.join(",");
 
   // Payroll only — which configured metrics can actually fill a pivot cell
   // (falls back to "workTime" if the report has none selected, e.g. an
@@ -207,7 +226,8 @@ export function ReportViewPage() {
     if (!pivotMetric) return null;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return buildPayrollPivotGrid(data as PayrollReportData, dateRange, pivotMetric as any);
-  }, [report, data, pivotMetric, dateRange, isActivity, dailyMetric, weeklyTotals]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [report, data, pivotMetric, dateRange, isActivity, dailyMetric, weeklyTotalsKey]);
 
   // Re-orders the already-built grid only — no refetch or recalculation —
   // and is what every output (screen, Print, preview, CSV, PDF) reads.
@@ -241,13 +261,19 @@ export function ReportViewPage() {
       ? PAYROLL_METRIC_LABELS[pivotMetric as PayrollMetric]
       : "";
 
-  // Only ever set for an Activity report currently showing the Average
-  // Speed daily metric, and only when the activity's speed_unit is one of
-  // the two units this app abbreviates — see reportTypes.ts's
-  // speedUnitAbbreviationNote. null otherwise, which is exactly when the
-  // note (and the cell abbreviation it explains) should be hidden.
-  const activitySpeedUnit = isActivity && data ? (data as ActivityReportData).activity.speedUnit : null;
-  const speedUnitNote = isActivity && dailyMetric === "averageSpeed" ? speedUnitAbbreviationNote(activitySpeedUnit) : null;
+  // Kg/Hr explanation, shown (and printed, and on the PDF) whenever a Kg/Hr
+  // column is on screen: it follows the TV's rules, so say which. The six
+  // choices never abbreviate a unit inside a cell (the unit is in the
+  // header), so the old st/hr note no longer applies.
+  const showsKg = isActivity && (dailyMetric === "kgPerHour" || weeklyTotals.includes("kgPerHour"));
+  const kgFrom = activityData?.scaleProductivity?.reportingFrom ?? null;
+  const speedUnitNote = !showsKg
+    ? null
+    : job && job.productivityMetric !== "scale_kg"
+      ? "Kg/Hr is not reported for this Job: it is not measured with LabourLink Scale."
+      : kgFrom
+      ? `Kg/Hr counts weighed bins only, on the day each bin was weighed (from ${formatLongDate(kgFrom)}), divided by the picking time matched to those bins, as on the Dashboard and TV. A dash means waiting for weighed bins.`
+      : "Kg/Hr is not reported for these dates: LabourLink Scale reporting starts later.";
 
   function handleExportCsv() {
     // CSV has no page orientation, so it stays a direct action — no preview
@@ -284,7 +310,7 @@ export function ReportViewPage() {
           </div>
         </div>
         <div className="report-view-actions">
-          <button type="button" onClick={() => setEditingMetrics((v) => !v)}>
+          <button type="button" onClick={toggleMetricsEditor}>
             {editingMetrics ? "Close Metrics" : "Edit Metrics"}
           </button>
           <button type="button" disabled={!pivotGrid} onClick={() => setPreviewMode("print")}>
@@ -323,29 +349,13 @@ export function ReportViewPage() {
       </div>
 
       {editingMetrics && isActivity && (
-        <fieldset className="report-metrics-fieldset">
-          <legend>Daily metric &amp; weekly totals</legend>
-          <label className="report-form-label">
-            Daily metric (shown under each Mon–Sun date column)
-            <select value={dailyMetric} onChange={(e) => setDailyMetric(e.target.value as ActivityMetric)}>
-              {DAILY_METRIC_ELIGIBLE_ACTIVITY_METRICS.map((m) => (
-                <option key={m} value={m}>
-                  {ACTIVITY_METRIC_LABELS[m]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <p>Weekly totals (right-hand summary columns)</p>
-          <div className="report-metrics-grid">
-            {WEEKLY_TOTAL_ELIGIBLE_ACTIVITY_METRICS.map((m) => (
-              <label key={m} className="report-metric-checkbox">
-                <input type="checkbox" checked={weeklyTotals.includes(m)} onChange={() => toggleWeeklyTotal(m)} />
-                {WEEKLY_TOTAL_METRIC_LABELS[m]}
-              </label>
-            ))}
-          </div>
-          {weeklyTotals.length === 0 && <p className="error-text">At least one weekly total must be selected</p>}
-          <div className="employee-form-actions">
+        <ReportMetricPicker
+          dailyMetric={dailyMetric}
+          summaryMetrics={weeklyTotals}
+          job={job}
+          onDailyMetricChange={setDraftDailyMetric}
+          onSummaryMetricsChange={setDraftWeeklyTotals}
+          actions={
             <button
               type="button"
               className="employee-form-save"
@@ -354,8 +364,8 @@ export function ReportViewPage() {
             >
               {savingMetrics ? "Saving..." : "Save"}
             </button>
-          </div>
-        </fieldset>
+          }
+        />
       )}
 
       {editingMetrics && !isActivity && (

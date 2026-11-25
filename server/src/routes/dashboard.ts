@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { getScaleProductivity, roundKgPerHour } from "../lib/scaleProductivity";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
@@ -10,6 +11,7 @@ import { aggregateDensitySpeed } from "../lib/densitySpeed";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { getSignedPhotoUrls } from "../lib/storage";
 import { getActiveWorkPermitAlerts } from "../lib/workPermits";
+import { getKgWeighedOnDate } from "../lib/dashboardKpis";
 import {
   getLongOpenShiftAlerts,
   getOrgSettings,
@@ -31,6 +33,20 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // thing would be on a historical Reports page. Reports/mobile Stats don't
 // need this floor; this endpoint does.
 const MIN_SPEED_DURATION_SECONDS = 15 * 60;
+
+// kg/hour Job card figures (lib/scaleProductivity.ts), this week.
+interface DashboardScaleProductivity {
+  kgPerHour: number | null; // null: no weighed, credited bin with matched time yet
+  netKg: number;
+  matchedHours: number;
+  weighedBins: number;
+  sharedBins: number; // of the weighed bins, shared with other employees (kg allocated by minutes)
+  estimatedKg: number; // kilograms from shared bins allocated by minutes (an estimate)
+  manualKg: number; // kilograms set by an administrator (Review allocation)
+  excludedBins: number; // weighed, but waiting for an administrator or never counted
+  binsNotYetWeighed: number;
+  reportingFrom: string | null; // null: the week is before kg/hour reporting starts
+}
 
 router.get("/", requireAuth, asyncHandler(async (_req, res) => {
   let rows;
@@ -109,6 +125,31 @@ router.get(
         leadMonths: a.leadMonths,
         leadDays: a.leadDays,
       })),
+    });
+  })
+);
+
+// KPI strip: small greenhouse-wide figures for today (greenhouse-local
+// date). Read-only. Each KPI is null when it doesn't apply here (no
+// LabourLink Scale -> kgWeighedToday is null), and the Dashboard hides that
+// card. Administrator/Manager only, like the Scale Weighings page and the
+// work permit alerts these summarize. workPermitAlerts counts exactly the
+// alerts GET /work-permit-alerts lists (same function, same "today").
+router.get(
+  "/kpis",
+  requireAuth,
+  requireRole("Administrator", "Manager"),
+  asyncHandler(async (_req, res) => {
+    const date = calendarDateInAppTimezone(new Date());
+    const [kgWeighedToday, alerts] = await Promise.all([getKgWeighedOnDate(pool, date), getActiveWorkPermitAlerts(pool, date)]);
+    res.json({
+      date,
+      kgWeighedToday,
+      workPermitAlerts: {
+        active: alerts.length,
+        expired: alerts.filter((a) => a.severity === "expired").length,
+        under30Days: alerts.filter((a) => a.severity === "red").length,
+      },
     });
   })
 );
@@ -353,7 +394,7 @@ router.get(
       `select te.id as time_entry_id, te.employee_id, te.activity_id, te.started_at,
               te.greenhouse_row_id, te.carrier_id,
               e.first_name, e.last_name, e.profile_photo_path,
-              a.name as activity_name, a.density_source,
+              a.name as activity_name, a.density_source, a.productivity_metric,
               gr.row_number, gp.name as phase_name,
               c.name as carrier_name
        from time_entries te
@@ -487,6 +528,31 @@ router.get(
       for (const r of rowsWorkedRows) rowsWorkedByEmployee.set(r.employee_id, Number(r.n));
     }
 
+    // --- kg/hour Jobs (077): matched weighed-bin productivity for the same
+    // week, one call per distinct kg/hour Job (never per employee). Shown in
+    // place of the row-count speed; the row-count speed above still drives
+    // block projections unchanged. ---
+    const scaleByEmployee = new Map<string, DashboardScaleProductivity>();
+    for (const activityId of [...new Set(openRows.filter((r) => r.productivity_metric === "scale_kg").map((r) => r.activity_id as string))]) {
+      const ids = openRows.filter((r) => r.activity_id === activityId).map((r) => r.employee_id as string);
+      const result = await getScaleProductivity(activityId, weekStart, weekEnd, { employeeIds: ids });
+      for (const employeeId of ids) {
+        const e = result.byEmployee.get(employeeId);
+        scaleByEmployee.set(employeeId, {
+          kgPerHour: roundKgPerHour(e?.kgPerHour ?? null),
+          netKg: (e?.netGrams ?? 0) / 1000,
+          matchedHours: (e?.matchedSeconds ?? 0) / 3600,
+          weighedBins: e?.bins ?? 0,
+          sharedBins: e?.sharedBins ?? 0,
+          estimatedKg: (e?.estimatedGrams ?? 0) / 1000,
+          manualKg: (e?.manualGrams ?? 0) / 1000,
+          excludedBins: e?.excludedBins ?? 0,
+          binsNotYetWeighed: result.openBinsByEmployee.get(employeeId) ?? 0,
+          reportingFrom: result.dateStart,
+        });
+      }
+    }
+
     // --- Photos: one batched signed-URL call for every employee, never
     // per-employee. ---
     const photoPaths = [...new Set(openRows.filter((r) => r.profile_photo_path).map((r) => r.profile_photo_path as string))];
@@ -502,6 +568,8 @@ router.get(
         activityId: r.activity_id as string,
         activityName: r.activity_name as string,
         runStartedAt: runStartByEmployee.get(employeeId) ?? new Date(r.started_at).toISOString(),
+        // Present only for kg/hour Jobs.
+        scaleProductivity: r.productivity_metric === "scale_kg" ? scaleByEmployee.get(employeeId) ?? null : null,
       };
 
       if (r.density_source != null) {

@@ -32,12 +32,15 @@ import mobileTimeRoutes from "./routes/mobileTime";
 import integrationsRoutes from "./routes/integrations";
 import scaleRoutes from "./routes/scale";
 import scaleWeighingsRoutes from "./routes/scaleWeighings";
+import binCyclesRoutes from "./routes/binCycles";
+import scaleProductivityAllocationsRoutes from "./routes/scaleProductivityAllocations";
 import { startScaleMatchingSweep } from "./lib/scaleMatching";
 import nfcTagsRoutes from "./routes/nfcTags";
 import pairingRoutes from "./routes/pairing";
 import reviewerPairingRoutes from "./routes/reviewerPairing";
 import passwordResetRoutes from "./routes/passwordReset";
 import plantDensitiesRoutes from "./routes/plantDensities";
+import varietiesRoutes from "./routes/varieties";
 import reportsRoutes from "./routes/reports";
 import rowCompletionsRoutes from "./routes/rowCompletions";
 import { installAsyncErrorForwarding, installProcessSafetyNet } from "./lib/processSafety";
@@ -66,6 +69,7 @@ app.use("/api/employment-periods", employmentPeriodsRoutes);
 app.use("/api/employee-blocks", employeeBlocksRoutes);
 app.use("/api/employee-groups", employeeGroupsRoutes);
 app.use("/api/plant-densities", plantDensitiesRoutes);
+app.use("/api/varieties", varietiesRoutes);
 app.use("/api/row-completions", rowCompletionsRoutes);
 app.use("/api/activities", activitiesRoutes);
 app.use("/api/activity-groups", activityGroupsRoutes);
@@ -92,6 +96,8 @@ app.use("/api/reports", reportsRoutes);
 app.use("/api/integrations", integrationsRoutes);
 app.use("/api/scale", scaleRoutes);
 app.use("/api/scale-weighings", scaleWeighingsRoutes);
+app.use("/api/bin-cycles", binCyclesRoutes);
+app.use("/api/scale-productivity-allocations", scaleProductivityAllocationsRoutes);
 
 // Safety net: any error forwarded via next(err) (see asyncHandler) lands
 // here instead of crashing the process. Logged server-side; the client only

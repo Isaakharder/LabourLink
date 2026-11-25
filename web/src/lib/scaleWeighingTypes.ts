@@ -2,6 +2,20 @@
 
 export type ScaleWeighingStatus = "pending" | "credited" | "needs_review" | "expired" | "voided";
 
+// Greenhouse rows the bin was picked in during the bin use this weighing
+// ended (server/src/lib/scaleWeighingRows.ts). "unknown" is shown as — with
+// the reason, never as a guess.
+export interface WeighingPickedRow {
+  id: string;
+  phaseName: string;
+  rowNumber: number;
+  label: string;
+}
+
+export type UnknownRowsCode = "noCycle" | "severalInCycle" | "competing" | "nobody" | "earlierDay" | "noRows" | "duplicate";
+
+export type WeighingRows = { status: "known"; rows: WeighingPickedRow[] } | { status: "unknown"; code: UnknownRowsCode; reason: string };
+
 export interface ScaleWeighingRow {
   id: string;
   weighedAt: string;
@@ -20,6 +34,7 @@ export interface ScaleWeighingRow {
   pendingUntil: string | null;
   stationName: string;
   flagCount: number;
+  rows?: WeighingRows;
 }
 
 export interface ScaleWeighingDay {
@@ -37,6 +52,8 @@ export interface ScaleWeighingDay {
     trial: number;
   };
   weighings: ScaleWeighingRow[];
+  // Weighings per status filter choice, over the bin and employee filters.
+  statusCounts?: Record<string, number>;
   filters: { bins: { id: string; name: string }[]; employees: { id: string; name: string }[] };
 }
 
@@ -65,6 +82,66 @@ export interface ScaleWeighingDetail extends Omit<ScaleWeighingRow, "flagCount">
     performedAt: string;
     performedBy: string;
   }[];
+  // Picking cycles (server 074): null = decided before cycle tracking
+  // started; "none" = weighed again with no phone scan since, not credited.
+  pickingCycle?: null | "none" | {
+    id: string;
+    status: BinCycleStatus;
+    employeeName: string;
+    openedAt: string;
+    lastScanAt: string;
+    reviewReason: string | null;
+    closeReason: string | null;
+    scans: { employeeId: string; employeeName: string; occurredAt: string; receivedAt: string }[];
+    resolution: { employeeName: string; resolvedBy: string; resolvedAt: string; reason: string; previousStatus: string } | null;
+    // Other employees' cycles superseded before this weighing (075).
+    supersededCycles?: SupersededCycle[];
+  };
+}
+
+export interface SupersededCycle {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  openedAt: string;
+  lastScanAt: string;
+  supersededAt: string;
+  reviewStatus: "open" | "confirmed" | "reinstated";
+  reason: string | null;
+  // The scan arrived after the weighing was credited (a late conflict).
+  lateScan?: boolean;
+  scans: { occurredAt: string; receivedAt: string }[];
+}
+
+export type BinCycleStatus = "filling" | "awaiting_weighing" | "needs_review" | "closed" | "closed_unweighed" | "superseded";
+
+export const BIN_CYCLE_STATUS_LABELS: Record<BinCycleStatus, string> = {
+  filling: "Filling",
+  awaiting_weighing: "Awaiting weighing",
+  needs_review: "Needs review",
+  closed: "Weighed / closed",
+  closed_unweighed: "Closed without weighing",
+  superseded: "Superseded: not weighed",
+};
+
+export interface BinCycle {
+  id: string;
+  bin: { id: string; name: string };
+  status: BinCycleStatus;
+  employee: { id: string; name: string };
+  openedAt: string;
+  lastScanAt: string;
+  awaitingSince: string | null;
+  reviewReason: string | null;
+  scanCount: number;
+  weighing: { id: string; weighedAt: string; netKg: number; status: ScaleWeighingStatus } | null;
+  closedAt: string | null;
+  closeReason: string | null;
+  closedBy: string | null;
+  supersededByCycleId?: string | null;
+  reviewStatus?: "open" | "confirmed" | "reinstated" | null;
+  settled?: boolean;
+  lateScan?: boolean;
 }
 
 export const STATUS_LABELS: Record<ScaleWeighingStatus, string> = {

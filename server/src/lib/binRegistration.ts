@@ -21,9 +21,10 @@ import { parseRfidTag } from "./rfidTag";
 
 export const MIN_REGISTRATION_KG = 2;
 export const MAX_TARE_KG = 999.99;
-// The station's own stability rule is stricter (scale config
-// stableToleranceKg); this only rejects a reading that clearly wasn't stable.
-export const MAX_SAMPLE_SPREAD_KG = 0.2;
+// How much the empty bin's readings may vary during the station's 10-second
+// measurement (station 0.4.1+, config captureToleranceKg, default 0.9 kg).
+// Compared in whole grams so exactly 0.9 kg isn't refused by float rounding.
+export const MAX_SAMPLE_SPREAD_KG = 0.9;
 export const MIN_STABLE_MS = 2000;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -94,8 +95,10 @@ export function parseRegistration(body: unknown): Parsed<RegistrationInput> {
     errors.measured = "The indicator must be in gross mode.";
   } else if (!samples || samples.length < 5 || samples.length > 500 || !samples.every(isKg)) {
     errors.measured = "The stable readings are missing.";
-  } else if (Math.max(...(samples as number[])) - Math.min(...(samples as number[])) > MAX_SAMPLE_SPREAD_KG) {
-    errors.measured = "The weight was not stable.";
+  } else if (
+    Math.round((Math.max(...(samples as number[])) - Math.min(...(samples as number[]))) * 1000) > Math.round(MAX_SAMPLE_SPREAD_KG * 1000)
+  ) {
+    errors.measured = `The weight varied by more than ${MAX_SAMPLE_SPREAD_KG} kg during the measurement.`;
   } else if (typeof m.stableMs !== "number" || m.stableMs < MIN_STABLE_MS) {
     errors.measured = "The weight was not stable for long enough.";
   }

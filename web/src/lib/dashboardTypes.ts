@@ -15,6 +15,22 @@ export interface DashboardCardBase {
   activityId: string;
   activityName: string;
   runStartedAt: string; // ISO — start of the current run, not just the open segment
+  // kg/hour Jobs only (server/src/lib/scaleProductivity.ts), this week;
+  // null/absent for every other Job.
+  scaleProductivity?: DashboardScaleProductivity | null;
+}
+
+export interface DashboardScaleProductivity {
+  kgPerHour: number | null; // null: no weighed, credited bin with matched time yet
+  netKg: number;
+  matchedHours: number;
+  weighedBins: number;
+  sharedBins?: number; // weighed bins shared with other employees
+  estimatedKg?: number; // their kilograms allocated by picking minutes (an estimate)
+  manualKg?: number; // kilograms set by an administrator
+  excludedBins: number;
+  binsNotYetWeighed: number;
+  reportingFrom: string | null;
 }
 
 export type BlockStatus = "in_progress" | "complete" | "no_rows_linked" | "missing_density" | "not_enough_data";
@@ -65,4 +81,25 @@ export interface DashboardSettingsActivity {
 
 export interface GetDashboardSettingsResponse {
   activities: DashboardSettingsActivity[];
+}
+
+// GET /api/dashboard/kpis — small greenhouse-wide figures for today. Each
+// KPI is null when it doesn't apply to this greenhouse (the card is hidden).
+export interface KgWeighedKpi {
+  netKg: number;
+  bins: number;
+  lastWeighedAt: string | null;
+}
+
+// Counts of the alerts listed on Employees -> Work Permits.
+export interface WorkPermitAlertsKpi {
+  active: number;
+  expired: number;
+  under30Days: number;
+}
+
+export interface GetDashboardKpisResponse {
+  date: string;
+  kgWeighedToday: KgWeighedKpi | null;
+  workPermitAlerts: WorkPermitAlertsKpi | null;
 }

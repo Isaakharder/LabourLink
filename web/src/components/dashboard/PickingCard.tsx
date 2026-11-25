@@ -1,5 +1,6 @@
 import { Avatar } from "../employees/Avatar";
 import { PickingDashboardCard } from "../../lib/dashboardTypes";
+import { ScaleProductivityStats } from "./ScaleProductivityStats";
 
 function formatSpeed(speed: number | null): string {
   // Genuinely bins/hour, not kg/hour — there is no weight-capture anywhere
@@ -24,8 +25,14 @@ export function PickingCard({ card }: { card: PickingDashboardCard }) {
       </div>
 
       <dl className="dashboard-card-stats">
-        <dt>Average picking speed</dt>
-        <dd>{formatSpeed(card.weeklySpeed)}</dd>
+        {card.scaleProductivity ? (
+          <ScaleProductivityStats scale={card.scaleProductivity} />
+        ) : (
+          <>
+            <dt>Average picking speed</dt>
+            <dd>{formatSpeed(card.weeklySpeed)}</dd>
+          </>
+        )}
 
         <dt>Rows completed this week</dt>
         <dd>{card.rowsWorkedThisWeek}</dd>

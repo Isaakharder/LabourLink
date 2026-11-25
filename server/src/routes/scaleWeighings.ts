@@ -17,6 +17,8 @@ import { Router } from "express";
 import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { recordWeighingEvent } from "../lib/scaleMatching";
+import { LATE_SUPERSEDED_REASON } from "../lib/binCycles";
+import { loadWeighingRows, WeighingRows } from "../lib/scaleWeighingRows";
 import { calendarDateInAppTimezone, getDayBoundsUtc } from "../lib/timezone";
 import { requireAuth, requireRole } from "../middleware/auth";
 
@@ -26,6 +28,29 @@ router.use(requireAuth);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const STATUSES = ["pending", "credited", "needs_review", "expired", "voided"];
+
+// The status filter choices, one definition for the filter, its counts and
+// the summary cards. "needs_review" is a weighing held for an administrator:
+// status needs_review and NOT a duplicate (a duplicate is a repeat weighing
+// within five minutes, never reviewed or counted; it has its own choice).
+// "not_credited" is everything that didn't become a credit: pending, needs
+// review (duplicates included) and expired.
+export const STATUS_FILTERS = ["all", "credited", "pending", "needs_review", "not_credited", "expired", "voided", "duplicate"] as const;
+type StatusFilter = (typeof STATUS_FILTERS)[number];
+export function matchesStatusFilter(r: { status: string; is_duplicate: boolean }, filter: StatusFilter): boolean {
+  switch (filter) {
+    case "all":
+      return true;
+    case "needs_review":
+      return r.status === "needs_review" && !r.is_duplicate;
+    case "duplicate":
+      return r.is_duplicate;
+    case "not_credited":
+      return ["pending", "needs_review", "expired"].includes(r.status);
+    default:
+      return r.status === filter;
+  }
+}
 
 const kg = (g: number | string) => Math.round(Number(g)) / 1000;
 const fullName = (alias: string) => `trim(${alias}.first_name || ' ' || coalesce(${alias}.last_name, ''))`;
@@ -38,10 +63,11 @@ router.get(
     const { start, end } = getDayBoundsUtc(date);
     const carrierId = typeof req.query.carrierId === "string" && UUID_RE.test(req.query.carrierId) ? req.query.carrierId : null;
     const employeeId = typeof req.query.employeeId === "string" && UUID_RE.test(req.query.employeeId) ? req.query.employeeId : null;
-    const status = typeof req.query.status === "string" ? req.query.status : "all";
-    if (status !== "all" && status !== "not_credited" && !STATUSES.includes(status)) {
+    const statusParam = typeof req.query.status === "string" ? req.query.status : "all";
+    if (!(STATUS_FILTERS as readonly string[]).includes(statusParam)) {
       return res.status(400).json({ error: "Unknown status filter" });
     }
+    const status = statusParam as StatusFilter;
 
     const { rows } = await pool.query(
       `select w.id, w.weighed_at, w.carrier_id, c.name as bin_name, w.rfid_tag, w.gross_g, w.tare_g, w.net_g,
@@ -68,16 +94,20 @@ router.get(
       if (r.employee_id) employees.set(r.employee_id, r.employee_name);
     }
 
-    const shown = rows.filter(
-      (r) =>
-        (!carrierId || r.carrier_id === carrierId) &&
-        (!employeeId || r.employee_id === employeeId) &&
-        (status === "all" ||
-          (status === "not_credited" ? ["pending", "needs_review", "expired"].includes(r.status) : r.status === status))
-    );
+    // The day under the bin and employee filters. The summary cards and the
+    // status counts describe this set; the status filter only chooses which
+    // of these weighings are listed, so the cards and the counts always agree.
+    const base = rows.filter((r) => (!carrierId || r.carrier_id === carrierId) && (!employeeId || r.employee_id === employeeId));
+    const shown = base.filter((r) => matchesStatusFilter(r, status));
 
-    const production = shown.filter((r) => r.counts_for_production);
-    const credits = shown.filter((r) => r.counts_as_credit);
+    // Rows each bin was picked in (display only; see scaleWeighingRows.ts).
+    const rowsById = await loadWeighingRows(pool, shown);
+    const unknownRows: WeighingRows = { status: "unknown", code: "noCycle", reason: "" };
+
+    const statusCounts = Object.fromEntries(STATUS_FILTERS.map((f) => [f, base.filter((r) => matchesStatusFilter(r, f)).length]));
+
+    const production = base.filter((r) => r.counts_for_production);
+    const credits = base.filter((r) => r.counts_as_credit);
     res.json({
       date,
       totals: {
@@ -85,12 +115,12 @@ router.get(
         binsWeighed: production.length,
         creditedNetKg: kg(credits.reduce((sum, r) => sum + r.net_g, 0)),
         credited: credits.length,
-        pending: shown.filter((r) => r.status === "pending").length,
-        needsReview: shown.filter((r) => r.status === "needs_review" && !r.is_duplicate).length,
-        neverCredited: shown.filter((r) => (r.status === "needs_review" || r.status === "expired") && !r.is_duplicate).length,
-        duplicates: shown.filter((r) => r.is_duplicate).length,
-        voided: shown.filter((r) => r.status === "voided").length,
-        trial: shown.filter((r) => !r.credits_live).length,
+        pending: statusCounts.pending,
+        needsReview: statusCounts.needs_review,
+        neverCredited: base.filter((r) => (r.status === "needs_review" || r.status === "expired") && !r.is_duplicate).length,
+        duplicates: statusCounts.duplicate,
+        voided: statusCounts.voided,
+        trial: base.filter((r) => !r.credits_live).length,
       },
       weighings: shown.map((r) => ({
         id: r.id,
@@ -109,7 +139,9 @@ router.get(
         pendingUntil: r.status === "pending" ? r.pending_until : null,
         stationName: r.station_name,
         flagCount: r.flag_count,
+        rows: rowsById.get(r.id) ?? unknownRows,
       })),
+      statusCounts,
       filters: {
         bins: [...bins].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })),
         employees: [...employees].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name)),
@@ -132,7 +164,7 @@ async function loadDetail(id: string) {
   );
   const w = rows[0];
   if (!w) return null;
-  const [history, claims, flags, corrections] = await Promise.all([
+  const [history, claims, flags, corrections, cycle, superseded] = await Promise.all([
     pool.query(
       `select ev.kind, ev.from_status, ev.to_status, ev.reason, ev.created_at,
               ${fullName("e")} as employee_name, ${fullName("a")} as actor_name
@@ -168,7 +200,44 @@ async function loadDetail(id: string) {
        where co.weighing_id = $1 order by co.performed_at`,
       [id]
     ),
+    // Picking cycle (074) this weighing closed, if any.
+    pool.query(
+      `select bc.id, bc.status, bc.opened_at, bc.last_scan_at, bc.review_reason, bc.close_reason, ${fullName("e")} as employee_name,
+              bc.resolved_at, bc.resolution_reason, bc.resolution_previous_status,
+              ${fullName("re")} as resolved_employee_name, ${fullName("rb")} as resolved_by_name,
+              exists (select 1 from bin_cycle_tracking p
+                      where $2::timestamptz > p.started_at and (p.stopped_at is null or $2::timestamptz <= p.stopped_at)) as tracked,
+              coalesce((select json_agg(json_build_object('employeeId', s.employee_id, 'employeeName', ${fullName("se")},
+                                                          'occurredAt', s.occurred_at, 'receivedAt', s.received_at) order by s.occurred_at)
+                        from bin_scans s join employees se on se.id = s.employee_id where s.cycle_id = bc.id), '[]') as scans
+       from (select $1::uuid as wid) x
+       left join bin_cycles bc on bc.weighing_id = x.wid
+       left join employees e on e.id = bc.employee_id
+       left join employees re on re.id = bc.resolved_employee_id
+       left join employees rb on rb.id = bc.resolved_by_employee_id`,
+      [id, w.weighed_at]
+    ),
+    // Earlier picking cycles (075) superseded before this weighing: every
+    // cycle whose superseded-by chain leads to the cycle this weighing closed.
+    pool.query(
+      `with recursive chain as (
+         select id from bin_cycles where weighing_id = $1
+         union
+         select c.id from bin_cycles c join chain on c.superseded_by_cycle_id = chain.id
+       )
+       select bc.id, bc.status, bc.review_status, bc.opened_at, bc.last_scan_at, bc.closed_at, bc.close_reason, bc.finalized_at,
+              bc.employee_id, ${fullName("e")} as employee_name,
+              coalesce((select json_agg(json_build_object('occurredAt', s.occurred_at, 'receivedAt', s.received_at) order by s.occurred_at)
+                        from bin_scans s where s.cycle_id = bc.id), '[]') as scans
+       from bin_cycles bc join employees e on e.id = bc.employee_id
+       where bc.id in (select id from chain) and bc.status = 'superseded'
+       order by bc.opened_at`,
+      [id]
+    ),
   ]);
+  const rowsInfo = (await loadWeighingRows(pool, [w])).get(w.id) ?? { status: "unknown", code: "noCycle", reason: "" };
+  const cy = cycle.rows[0];
+  const tracked = cy?.tracked === true;
   return {
     id: w.id,
     stationWeighingId: w.station_weighing_id,
@@ -190,6 +259,47 @@ async function loadDetail(id: string) {
     pendingUntil: w.status === "pending" ? w.pending_until : null,
     resolvedAt: w.resolved_at,
     stationName: w.station_name,
+    rows: rowsInfo,
+    // null: decided before picking cycles started. "none": no cycle (bin
+    // weighed again with no phone scan since), never credited.
+    pickingCycle: !tracked
+      ? null
+      : cy.id
+        ? {
+            id: cy.id,
+            status: cy.status,
+            employeeName: cy.employee_name,
+            openedAt: cy.opened_at,
+            lastScanAt: cy.last_scan_at,
+            reviewReason: cy.review_reason,
+            closeReason: cy.close_reason,
+            // Every phone scan in the cycle: who chose the bin, and when.
+            scans: cy.scans,
+            // Other employees' cycles this one superseded (the bin was reused
+            // before it was weighed), for administrator review.
+            supersededCycles: superseded.rows.map((r) => ({
+              id: r.id,
+              employeeId: r.employee_id,
+              employeeName: r.employee_name,
+              openedAt: r.opened_at,
+              lastScanAt: r.last_scan_at,
+              supersededAt: r.closed_at,
+              reviewStatus: r.review_status,
+              reason: r.close_reason,
+              lateScan: r.close_reason === LATE_SUPERSEDED_REASON,
+              scans: r.scans,
+            })),
+            resolution: cy.resolved_at
+              ? {
+                  employeeName: cy.resolved_employee_name,
+                  resolvedBy: cy.resolved_by_name,
+                  resolvedAt: cy.resolved_at,
+                  reason: cy.resolution_reason,
+                  previousStatus: cy.resolution_previous_status,
+                }
+              : null,
+          }
+        : "none",
     history: history.rows.map((h) => ({
       kind: h.kind,
       fromStatus: h.from_status,

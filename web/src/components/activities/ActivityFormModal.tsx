@@ -8,6 +8,7 @@ import {
   DENSITY_SOURCE_LABELS,
   DENSITY_SOURCE_SPEED_UNIT,
   DensitySource,
+  ProductivityMetric,
   SPEED_UNIT_SUGGESTIONS,
 } from "../../lib/activityTypes";
 import { QuestionsEditor, serializeQuestionDrafts, toQuestionDrafts } from "./QuestionsEditor";
@@ -25,6 +26,8 @@ interface FormState {
   minimumDurationMinutes: string;
   isActive: boolean;
   densitySource: "" | DensitySource;
+  productivityMetric: ProductivityMetric;
+  scaleNormalKgPerHour: string;
 }
 
 function toFormState(activity: Activity | null): FormState {
@@ -35,6 +38,8 @@ function toFormState(activity: Activity | null): FormState {
     minimumDurationMinutes: activity ? String(activity.minimumDurationMinutes) : "0",
     isActive: activity?.isActive ?? true,
     densitySource: activity?.densitySource ?? "",
+    productivityMetric: activity?.productivityMetric ?? "density",
+    scaleNormalKgPerHour: activity?.scaleNormalKgPerHour != null ? String(activity.scaleNormalKgPerHour) : "",
   };
 }
 
@@ -66,6 +71,10 @@ export function ActivityFormModal({ activity, onClose, onSaved }: ActivityFormMo
       const n = Number(form.normalSpeed);
       if (!Number.isFinite(n) || n <= 0) next.normalSpeed = "Normal speed must be greater than 0";
     }
+    if (form.scaleNormalKgPerHour.trim()) {
+      const n = Number(form.scaleNormalKgPerHour);
+      if (!Number.isFinite(n) || n <= 0) next.scaleNormalKgPerHour = "Normal speed must be greater than 0";
+    }
     const duration = Number(form.minimumDurationMinutes);
     if (form.minimumDurationMinutes.trim() === "" || !Number.isInteger(duration) || duration < 0) {
       next.minimumDurationMinutes = "Minimum duration must be zero or greater";
@@ -87,6 +96,8 @@ export function ActivityFormModal({ activity, onClose, onSaved }: ActivityFormMo
         normalSpeed: form.normalSpeed.trim() ? Number(form.normalSpeed) : null,
         speedUnit: effectiveSpeedUnit.trim() || null,
         densitySource: form.densitySource || null,
+        productivityMetric: form.productivityMetric,
+        scaleNormalKgPerHour: form.scaleNormalKgPerHour.trim() ? Number(form.scaleNormalKgPerHour) : null,
         minimumDurationMinutes: Number(form.minimumDurationMinutes),
         isActive: form.isActive,
         // Sent as a complete list every save (create or edit), including
@@ -175,6 +186,38 @@ export function ActivityFormModal({ activity, onClose, onSaved }: ActivityFormMo
                 ))}
               </select>
             </label>
+            <label>
+              Productivity shown
+              <select
+                value={form.productivityMetric}
+                onChange={(e) => set("productivityMetric", e.target.value as ProductivityMetric)}
+              >
+                <option value="density">
+                  {form.densitySource ? `${DENSITY_SOURCE_LABELS[form.densitySource]}/hour (row counts)` : "Normal speed (no kg)"}
+                </option>
+                <option value="scale_kg">Kilograms/hour (from LabourLink Scale)</option>
+              </select>
+              <span className="field-hint">
+                {form.productivityMetric === "scale_kg"
+                  ? "Dashboard and TV show kg/hour: weighed, credited bins divided by the picking time matched to those bins. Inputs, Reports and row progress keep using the density source."
+                  : "Dashboard and TV show the row-count speed, as before."}
+              </span>
+            </label>
+            {form.productivityMetric === "scale_kg" && (
+              <label>
+                Normal speed (kg/hour)
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={form.scaleNormalKgPerHour}
+                  onChange={(e) => set("scaleNormalKgPerHour", e.target.value)}
+                  placeholder="e.g. 150"
+                />
+                <span className="field-hint">The TV target for kg/hour. The normal speed above stays the row-count target.</span>
+                {errors.scaleNormalKgPerHour && <span className="field-error">{errors.scaleNormalKgPerHour}</span>}
+              </label>
+            )}
             <label>
               Minimum duration (minutes) *
               <input

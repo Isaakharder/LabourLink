@@ -16,7 +16,7 @@ interface WorkPermitStatusProps {
 
 // Compact permit status on the employee profile — "Valid until…" / "Alert
 // acknowledged until…" / "Expired" / a togglable "Renewed / history" list.
-// Deliberately separate from the Dashboard's Work Permit Alerts section
+// Deliberately separate from the Work Permit Alerts list (Employees -> Work Permits)
 // (which only ever lists employees currently inside their notification
 // window) — this reflects one employee's full current state regardless of
 // whether an active alert exists for them right now.

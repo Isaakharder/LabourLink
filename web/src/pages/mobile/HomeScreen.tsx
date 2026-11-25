@@ -12,7 +12,7 @@ import { SwitchWarningDialog } from "../../components/mobile/SwitchWarningDialog
 import { isNfcSupported, startScanSession, ScannedTag } from "../../lib/nfc";
 import { refreshTagMappingCache, resolveScannedTag } from "../../lib/nfcMappingCache";
 import { checkSwitchWarning, SwitchWarning } from "../../lib/nfcSwitchWarning";
-import { buildScanSwitchAnswers, classifyHomeScan, HomeScanOutcome, isHomeNfcScanActive } from "../../lib/nfcActiveScreenScan";
+import { binRescanDecision, buildScanSwitchAnswers, classifyHomeScan, HomeScanOutcome, isHomeNfcScanActive } from "../../lib/nfcActiveScreenScan";
 import { playErrorFeedback, playSuccessFeedback } from "../../lib/feedback";
 import { ActivityTimer, formatElapsed } from "../../components/mobile/ActivityTimer";
 import { RecentJobsCard } from "../../components/mobile/RecentJobsCard";
@@ -68,6 +68,7 @@ export function HomeScreen() {
     pendingActivityName,
     handleApiError,
     perform,
+    rescanBin,
   } = useWorkSession();
   const [activities, setActivities] = useState<Activity[]>([]);
   const [activitiesLoaded, setActivitiesLoaded] = useState(false);
@@ -238,10 +239,12 @@ export function HomeScreen() {
   // snapshot, and critically never calls a stale copy of submitQuestionFlow
   // itself (a plain function recreated every render, closing over that
   // render's own me/switchWarning/perform).
-  const homeScanContextRef = useRef({ me, activities, online, language, submitQuestionFlow });
+  const homeScanContextRef = useRef({ me, activities, online, language, submitQuestionFlow, rescanBin });
   useEffect(() => {
-    homeScanContextRef.current = { me, activities, online, language, submitQuestionFlow };
+    homeScanContextRef.current = { me, activities, online, language, submitQuestionFlow, rescanBin };
   });
+  // The last bin rescan sent (see binRescanDecision).
+  const lastBinRescanRef = useRef<{ carrierId: string; atMs: number } | null>(null);
 
   // Set the instant a resolved scan is classified as an actionable switch,
   // cleared once submitQuestionFlow's attempt for it has fully settled (see
@@ -296,7 +299,30 @@ export function HomeScreen() {
       // (e.g. confirming it's still the right one) that silence alone reads
       // as "did that do anything?".
       if (outcome.targetType === "carrier") {
-        setHomeNfcMessage(t(ctx.language, "nfcAlreadyUsingThisBin"));
+        // Rescanning the bin already in use: a new picking cycle on the
+        // server if the bin was weighed since (bin_rescan). The job, row,
+        // bin and time all stay exactly as they are.
+        const carrierId = ctx.me.currentActivity.carrier?.id ?? null;
+        const decision = carrierId && carrierQ
+          ? binRescanDecision(ctx.me.features?.binRescan === true, lastBinRescanRef.current, carrierId, Date.now())
+          : "unsupported";
+        if (decision === "send" && carrierId && carrierQ) {
+          lastBinRescanRef.current = { carrierId, atMs: Date.now() };
+          void ctx.rescanBin(ctx.me.currentActivity.id, carrierQ.id, carrierId).then(
+            () => {
+              playSuccessFeedback();
+              setHomeNfcMessage(t(ctx.language, "nfcBinRescanned"));
+            },
+            (err) => {
+              console.error("[nfc] bin rescan was not saved:", err);
+              lastBinRescanRef.current = null;
+              playErrorFeedback();
+              setHomeNfcMessage(t(ctx.language, "nfcBinRescanNotSaved"));
+            }
+          );
+        } else {
+          setHomeNfcMessage(t(ctx.language, decision === "throttled" ? "nfcBinRescanned" : "nfcAlreadyUsingThisBin"));
+        }
       }
       return;
     }

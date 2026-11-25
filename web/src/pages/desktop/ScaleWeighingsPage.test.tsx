@@ -39,6 +39,14 @@ const day: ScaleWeighingDay = {
       pendingUntil: null,
       stationName: "Weigh station 1",
       flagCount: 0,
+      rows: {
+        status: "known",
+        rows: [
+          { id: "r-12", phaseName: "Phase 1", rowNumber: 12, label: "Phase 1 · Row 12" },
+          { id: "r-13", phaseName: "Phase 1", rowNumber: 13, label: "Phase 1 · Row 13" },
+          { id: "r-571", phaseName: "Phase 2", rowNumber: 571, label: "Phase 2 · Row 571" },
+        ],
+      },
     },
     {
       id: "w-2",
@@ -57,8 +65,10 @@ const day: ScaleWeighingDay = {
       pendingUntil: null,
       stationName: "Weigh station 1",
       flagCount: 0,
+      rows: { status: "unknown", code: "duplicate", reason: "A repeat weighing of the same bin within five minutes; the rows are on the first weighing." },
     },
   ],
+  statusCounts: { all: 2, credited: 1, pending: 0, needs_review: 0, expired: 0, voided: 0, not_credited: 1, duplicate: 1 },
   filters: { bins: [{ id: "b-77", name: "Bin 77" }], employees: [{ id: "e-1", name: "Ruben Ortiz" }] },
 };
 
@@ -83,11 +93,82 @@ function detail(over: Partial<ScaleWeighingDetail> = {}): ScaleWeighingDetail {
 }
 
 let voidCalls: { path: string; body: Record<string, unknown> }[] = [];
+let resolveCalls: { path: string; body: Record<string, unknown> }[] = [];
+let nextDetail: ScaleWeighingDetail | null = null;
+let reviewCalls: { path: string; body: Record<string, unknown> }[] = [];
+
+// Bin 56: Patrick's cycle superseded by Ruben's; the weighing credited Ruben.
+const reused = (moved: boolean): ScaleWeighingDetail =>
+  detail({
+    employee: moved ? { id: "e-3", name: "Patrick Jones" } : { id: "e-1", name: "Ruben Ortiz" },
+    claims: [],
+    pickingCycle: {
+      id: moved ? "c-p" : "c-r",
+      status: "closed",
+      employeeName: moved ? "Patrick Jones" : "Ruben Ortiz",
+      openedAt: "2026-11-19T13:08:00Z",
+      lastScanAt: "2026-11-19T13:47:00Z",
+      reviewReason: null,
+      closeReason: null,
+      scans: [{ employeeId: "e-1", employeeName: "Ruben Ortiz", occurredAt: "2026-11-19T13:08:00Z", receivedAt: "2026-11-19T13:08:05Z" }],
+      resolution: null,
+      supersededCycles: moved
+        ? []
+        : [
+            {
+              id: "c-p",
+              employeeId: "e-3",
+              employeeName: "Patrick Jones",
+              openedAt: "2026-11-18T16:20:00Z",
+              lastScanAt: "2026-11-18T20:16:00Z",
+              supersededAt: "2026-11-19T13:08:00Z",
+              reviewStatus: "open",
+              reason: "Another employee started using this bin before it was weighed.",
+              scans: [{ occurredAt: "2026-11-18T16:20:00Z", receivedAt: "2026-11-18T16:21:00Z" }],
+            },
+          ],
+    },
+  });
+
+const disputed = (resolved: boolean): ScaleWeighingDetail =>
+  detail({
+    status: resolved ? "credited" : "needs_review",
+    employee: resolved ? { id: "e-2", name: "Maria Lopez" } : null,
+    countsAsCredit: resolved,
+    claims: [],
+    pickingCycle: {
+      id: "c-9",
+      status: "closed",
+      employeeName: "Ruben Ortiz",
+      openedAt: "2026-10-31T09:00:00Z",
+      lastScanAt: "2026-10-31T09:20:00Z",
+      reviewReason: "Chosen by more than one employee: Maria Lopez, Ruben Ortiz",
+      closeReason: null,
+      scans: [
+        { employeeId: "e-1", employeeName: "Ruben Ortiz", occurredAt: "2026-10-31T09:00:00Z", receivedAt: "2026-10-31T09:00:05Z" },
+        { employeeId: "e-2", employeeName: "Maria Lopez", occurredAt: "2026-10-31T09:20:00Z", receivedAt: "2026-10-31T09:20:05Z" },
+      ],
+      resolution: resolved
+        ? { employeeName: "Maria Lopez", resolvedBy: "Ada Admin", resolvedAt: "2026-10-31T12:00:00Z", reason: "Maria filled it", previousStatus: "needs_review" }
+        : null,
+    },
+  });
 
 vi.mock("../../lib/api", () => ({
   ApiError: class extends Error {},
   api: vi.fn((path: string, init?: { method?: string; body?: string }) => {
     if (path.startsWith("/api/scale-weighings?")) return Promise.resolve(day);
+    if (path.startsWith("/api/bin-cycles?")) return Promise.resolve({ trackingStartedAt: null, trackingEverStarted: false, cycles: [] });
+    if (path.endsWith("/reinstate") || path.endsWith("/confirm-superseded")) {
+      reviewCalls.push({ path, body: JSON.parse(init!.body!) });
+      nextDetail = reused(true);
+      return Promise.resolve({ cycle: {}, replay: false });
+    }
+    if (path.endsWith("/resolve")) {
+      resolveCalls.push({ path, body: JSON.parse(init!.body!) });
+      nextDetail = disputed(true);
+      return Promise.resolve({ cycle: {}, replay: false });
+    }
     if (path.endsWith("/void")) {
       voidCalls.push({ path, body: JSON.parse(init!.body!) });
       return Promise.resolve({
@@ -99,7 +180,7 @@ vi.mock("../../lib/api", () => ({
         }),
       });
     }
-    if (path.startsWith("/api/scale-weighings/")) return Promise.resolve({ weighing: detail() });
+    if (path.startsWith("/api/scale-weighings/")) return Promise.resolve({ weighing: nextDetail ?? detail() });
     return Promise.reject(new Error(`unexpected ${path}`));
   }),
 }));
@@ -111,6 +192,9 @@ const lastListCall = () => listCalls()[listCalls().length - 1];
 beforeEach(() => {
   role = "Administrator";
   voidCalls = [];
+  resolveCalls = [];
+  reviewCalls = [];
+  nextDetail = null;
   apiMock.mockClear();
 });
 afterEach(cleanup);
@@ -127,7 +211,7 @@ describe("ScaleWeighingsPage", () => {
     const rows = screen.getAllByRole("row");
     expect(within(rows[1]).getByText("Credited")).toBeInTheDocument();
     expect(within(rows[1]).getByText("172.5")).toBeInTheDocument();
-    expect(within(rows[2]).getByText("Duplicate")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("Duplicate", { selector: ".scale-status" })).toBeInTheDocument();
     expect(rows[2]).toHaveClass("scale-weighing-not-counted");
   });
 
@@ -137,7 +221,7 @@ describe("ScaleWeighingsPage", () => {
     await screen.findByText("Ruben Ortiz", { selector: "td" });
     await user.click(screen.getByRole("button", { name: "Previous day" }));
     await waitFor(() => expect(lastListCall()).toContain(`date=${addCalendarDays(todayInAppTimezone(), -1)}`));
-    await user.selectOptions(screen.getByRole("combobox", { name: "Status" }), "not_credited");
+    await user.click(within(screen.getByRole("group", { name: "Status" })).getByRole("button", { name: /Not credited/ }));
     await waitFor(() => expect(lastListCall()).toContain("status=not_credited"));
     await user.selectOptions(screen.getByRole("combobox", { name: "Bin" }), "b-77");
     await waitFor(() => expect(lastListCall()).toContain("carrierId=b-77"));
@@ -146,6 +230,66 @@ describe("ScaleWeighingsPage", () => {
     await user.click(screen.getByRole("button", { name: "Today" }));
     await waitFor(() => expect(lastListCall()).toContain(`date=${todayInAppTimezone()}`));
     expect(screen.getByRole("button", { name: "Next day" })).toBeDisabled();
+  });
+
+  it("shows the rows each bin was picked in, grouped by phase, and — when unknown", async () => {
+    render(<ScaleWeighingsPage />);
+    await screen.findByText("Ruben Ortiz", { selector: "td" });
+    const rows = screen.getAllByRole("row");
+    const known = within(rows[1]).getByLabelText("Rows: Phase 1 · Row 12, Phase 1 · Row 13, Phase 2 · Row 571");
+    expect(within(known).getByText("12, 13")).toBeInTheDocument();
+    expect(within(known).getByText("571")).toBeInTheDocument();
+    expect(within(known).getByText("Phase 2")).toBeInTheDocument();
+    // Unknown: a visible label, and the full reason on tap (no hover needed).
+    const why = within(rows[2]).getByRole("button", { name: /^Rows unknown: Duplicate\. Show why/ });
+    expect(why).toHaveTextContent("—");
+    expect(why).toHaveAttribute("aria-expanded", "false");
+    expect(within(rows[2]).queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  it("reveals why rows are unknown on tap or keyboard, without opening the weighing", async () => {
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await screen.findByText("Ruben Ortiz", { selector: "td" });
+    const row = screen.getAllByRole("row")[2];
+    const detailCalls = () => apiMock.mock.calls.filter((c) => /^\/api\/scale-weighings\/[^?]/.test(c[0] as string)).length;
+    const before = detailCalls();
+    await user.click(within(row).getByRole("button", { name: /Show why/ }));
+    expect(within(row).getByRole("note")).toHaveTextContent("A repeat weighing of the same bin within five minutes");
+    expect(within(row).getByRole("button", { name: /Hide why/ })).toHaveAttribute("aria-expanded", "true");
+    expect(detailCalls()).toBe(before);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    within(row).getByRole("button", { name: /Hide why/ }).focus();
+    await user.keyboard("{Enter}");
+    expect(within(row).queryByRole("note")).not.toBeInTheDocument();
+    expect(detailCalls()).toBe(before);
+  });
+
+  it("shows status counts on the filter chips and clears filters", async () => {
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await screen.findByText("Ruben Ortiz", { selector: "td" });
+    const tabs = within(screen.getByRole("group", { name: "Status" }));
+    expect(tabs.getByRole("button", { name: "All 2" })).toHaveAttribute("aria-pressed", "true");
+    // Needs review leaves out the duplicate; the duplicate has its own chip,
+    // and the Needs review card shows the same number as the chip.
+    expect(tabs.getByRole("button", { name: "Needs review 0" })).toBeInTheDocument();
+    expect(tabs.getByRole("button", { name: "Duplicate 1" })).toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "Day totals" })).getByText("Needs review").parentElement).toHaveTextContent("Needs review0");
+    expect(screen.queryByRole("button", { name: "Clear filters" })).not.toBeInTheDocument();
+    await user.click(tabs.getByRole("button", { name: "Credited 1" }));
+    await waitFor(() => expect(lastListCall()).toContain("status=credited"));
+    expect(tabs.getByRole("button", { name: "Credited 1" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getAllByRole("button", { name: "Clear filters" })[0]);
+    await waitFor(() => expect(lastListCall()).toContain("status=all"));
+  });
+
+  it("shows the rows in the weighing's detail", async () => {
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await user.click(await screen.findByText("Ruben Ortiz", { selector: "td" }));
+    expect(await screen.findByText("Rows 12, 13")).toBeInTheDocument();
+    expect(screen.getByText("Row 571")).toBeInTheDocument();
   });
 
   it("opens a weighing with its history, and an Administrator can void the credit with a reason", async () => {
@@ -165,6 +309,81 @@ describe("ScaleWeighingsPage", () => {
     expect(await screen.findByText(/Credit to Ruben Ortiz voided by Ada Admin/)).toBeInTheDocument();
     expect(screen.getByText(/Not counted in production totals/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Void this credit" })).toBeNull();
+  });
+
+  it("an Administrator resolves a disputed picking cycle: chooses one of its scanners and gives a reason", async () => {
+    nextDetail = disputed(false);
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await user.click(await screen.findByText("Ruben Ortiz", { selector: "td" }));
+    expect(await screen.findByText("Phone scans in this picking cycle")).toBeInTheDocument();
+    expect(screen.getByText(/^Maria Lopez:/)).toBeInTheDocument();
+    expect(screen.getByText(/^Ruben Ortiz:/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Resolve: choose the employee" }));
+    const submit = screen.getByRole("button", { name: "Credit this employee" });
+    expect(submit).toBeDisabled();
+    await user.click(screen.getByRole("radio", { name: "Maria Lopez" }));
+    expect(submit).toBeDisabled(); // still needs a reason
+    await user.type(screen.getByRole("textbox"), "Maria filled it");
+    await user.click(submit);
+    await waitFor(() => expect(resolveCalls).toHaveLength(1));
+    expect(resolveCalls[0].path).toBe("/api/bin-cycles/c-9/resolve");
+    expect(resolveCalls[0].body).toMatchObject({ employeeId: "e-2", reason: "Maria filled it" });
+    expect(typeof resolveCalls[0].body.requestId).toBe("string");
+    expect(await screen.findByText(/Resolved by Ada Admin/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Resolve: choose the employee" })).toBeNull();
+  });
+
+  it("shows superseded cycles and an Administrator can credit one instead, with a reason", async () => {
+    nextDetail = reused(false);
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await user.click(await screen.findByText("Ruben Ortiz", { selector: "td" }));
+    expect(await screen.findByText("Earlier picking cycles superseded before this weighing")).toBeInTheDocument();
+    expect(screen.getByText("Patrick Jones")).toBeInTheDocument();
+    expect(screen.getByText("· To review")).toBeInTheDocument();
+    expect(screen.getByText(/Bin reused before weighing/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Credit this cycle instead" }));
+    const submit = screen.getByRole("button", { name: "Credit Patrick Jones" });
+    expect(submit).toBeDisabled();
+    await user.type(screen.getByRole("textbox"), "Ruben scanned the wrong bin");
+    await user.click(submit);
+    await waitFor(() => expect(reviewCalls).toHaveLength(1));
+    expect(reviewCalls[0].path).toBe("/api/bin-cycles/c-p/reinstate");
+    expect(reviewCalls[0].body).toMatchObject({ reason: "Ruben scanned the wrong bin" });
+    expect(typeof reviewCalls[0].body.requestId).toBe("string");
+    await waitFor(() => expect(screen.queryByText("Earlier picking cycles superseded before this weighing")).toBeNull());
+  });
+
+  it("marks a late conflict as such", async () => {
+    const d = reused(false);
+    if (d.pickingCycle && d.pickingCycle !== "none") d.pickingCycle.supersededCycles![0].lateScan = true;
+    nextDetail = d;
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await user.click(await screen.findByText("Ruben Ortiz", { selector: "td" }));
+    expect(await screen.findByText(/Late conflict: this scan reached LabourLink after the weighing was credited/)).toBeInTheDocument();
+  });
+
+  it("does not offer moving a credit to a Manager", async () => {
+    role = "Manager";
+    nextDetail = reused(false);
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await user.click(await screen.findByText("Ruben Ortiz", { selector: "td" }));
+    await screen.findByText("Earlier picking cycles superseded before this weighing");
+    expect(screen.queryByRole("button", { name: "Credit this cycle instead" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Confirm superseded" })).toBeNull();
+  });
+
+  it("does not offer resolving to a Manager", async () => {
+    role = "Manager";
+    nextDetail = disputed(false);
+    const user = userEvent.setup();
+    render(<ScaleWeighingsPage />);
+    await user.click(await screen.findByText("Ruben Ortiz", { selector: "td" }));
+    await screen.findByText("Phone scans in this picking cycle");
+    expect(screen.queryByRole("button", { name: "Resolve: choose the employee" })).toBeNull();
   });
 
   it("does not offer voiding to a Manager", async () => {

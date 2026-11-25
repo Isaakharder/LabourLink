@@ -48,7 +48,7 @@ export interface Employee {
   employeeGroup: EmployeeGroupRef | null;
   // Never the employee's Employment End Date, and never a reason to
   // auto-deactivate them — purely an optional expiry to track and warn
-  // about (see workPermitTypes.ts / the Dashboard's Work Permit Alerts
+  // about (see workPermitTypes.ts / the Employees page's Work Permit Alerts
   // section). Exactly one of the two lead fields is ever non-null when an
   // expiry date is set (see 047_work_permit_tracking.sql).
   workPermitExpiryDate: string | null;

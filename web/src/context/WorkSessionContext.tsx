@@ -127,6 +127,9 @@ export interface MeResponse {
   // (persisted before this field existed) won't have it; see
   // localMidnightCutoff.ts's own fallback for that case.
   appTimezone?: string;
+  // What the server accepts. binRescan: bin_rescan events (picking cycles).
+  // Absent from older servers and older cached snapshots: not supported.
+  features?: { binRescan?: boolean };
 }
 
 // While the server hasn't yet been reached this poll cycle, retry this
@@ -213,6 +216,9 @@ interface WorkSessionContextValue {
   flush: () => Promise<void>;
   startBreak: () => void;
   endBreak: () => void;
+  // Records a rescan of the bin already in use (bin_rescan). Changes no job,
+  // row, bin or time locally or on the server.
+  rescanBin: (activityId: string, carrierQuestionId: string, carrierId: string) => Promise<void>;
   endDayConfirmOpen: boolean;
   endDaySubmitting: boolean;
   endDayError: string | null;
@@ -911,6 +917,21 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
 
   const confirmEndDay = useCallback(() => confirmEndDayInternal(uuid()), [confirmEndDayInternal]);
 
+  const rescanBin = useCallback(
+    async (activityId: string, carrierQuestionId: string, carrierId: string) => {
+      const clientEventId = uuid();
+      logCheckpoint(clientEventId, "rescanBin:tap-handler-entered");
+      await commitLocalEvent(
+        "bin_rescan",
+        new Date().toISOString(),
+        { activityId, carrierId, answers: [{ questionId: carrierQuestionId, carrierId }] },
+        {},
+        clientEventId
+      );
+    },
+    [commitLocalEvent]
+  );
+
   return (
     <WorkSessionContext.Provider
       value={{
@@ -933,6 +954,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
         flush,
         startBreak,
         endBreak,
+        rescanBin,
         endDayConfirmOpen,
         endDaySubmitting,
         endDayError,

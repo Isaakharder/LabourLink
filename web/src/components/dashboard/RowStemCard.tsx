@@ -1,5 +1,6 @@
 import { Avatar } from "../employees/Avatar";
 import { RowStemDashboardCard } from "../../lib/dashboardTypes";
+import { ScaleProductivityStats } from "./ScaleProductivityStats";
 
 function formatSpeed(speed: number | null, densityType: "plants" | "stems"): string {
   if (speed == null) return "Not enough data";
@@ -47,8 +48,14 @@ export function RowStemCard({ card }: { card: RowStemDashboardCard }) {
       </div>
 
       <dl className="dashboard-card-stats">
-        <dt>This week</dt>
-        <dd>{formatSpeed(card.weeklySpeed, card.densityType)}</dd>
+        {card.scaleProductivity ? (
+          <ScaleProductivityStats scale={card.scaleProductivity} />
+        ) : (
+          <>
+            <dt>This week</dt>
+            <dd>{formatSpeed(card.weeklySpeed, card.densityType)}</dd>
+          </>
+        )}
 
         <dt>Block</dt>
         <dd>{block ? block.name : "No block assigned"}</dd>

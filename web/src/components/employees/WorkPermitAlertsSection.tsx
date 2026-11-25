@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { Modal } from "../ui/Modal";
-import { Avatar } from "../employees/Avatar";
+import { Avatar } from "./Avatar";
 import { api, ApiError } from "../../lib/api";
 import { formatRemainingTime, formatWorkPermitDate, formatWorkPermitLead, WorkPermitAlert } from "../../lib/workPermitTypes";
 
@@ -18,6 +18,16 @@ function formatHeadlineDuration(remainingDays: number): string {
 function severityClass(severity: WorkPermitAlert["severity"]): string {
   return `work-permit-alert-card work-permit-alert-${severity}`;
 }
+
+// Short urgency label for each row; the colours match the severity bands
+// (amber > 90 days, orange 30-90 days, red < 30 days, expired).
+const SEVERITY_LABELS: Record<WorkPermitAlert["severity"], string> = {
+  expired: "Expired",
+  red: "Under 30 days",
+  orange: "30–90 days",
+  amber: "Over 90 days",
+};
+const SEVERITY_ORDER: WorkPermitAlert["severity"][] = ["expired", "red", "orange", "amber"];
 
 interface RenewModalProps {
   alert: WorkPermitAlert;
@@ -118,18 +128,25 @@ function WorkPermitAlertCard({ alert, busy, onAcknowledge, onRenew, onCancel }: 
       ? "Work permit expired"
       : `Work permit overdue by ${Math.abs(alert.remainingDays)} days`
     : `Work permit expiring in ${formatHeadlineDuration(alert.remainingDays)}`;
+  const [firstName, ...rest] = alert.employeeName.split(" ");
 
   return (
-    <div className={severityClass(alert.severity)}>
-      <Avatar photoUrl={alert.photoUrl} firstName={alert.employeeName.split(" ")[0] ?? ""} lastName={alert.employeeName.split(" ").slice(1).join(" ")} />
+    <li className={severityClass(alert.severity)}>
+      <Avatar photoUrl={alert.photoUrl} firstName={firstName ?? ""} lastName={rest.join(" ")} />
       <div className="work-permit-alert-body">
+        <p className="work-permit-alert-name">
+          {alert.employeeName}
+          <span className="work-permit-alert-badge">{SEVERITY_LABELS[alert.severity]}</span>
+        </p>
         <p className="work-permit-alert-headline">{headline}</p>
+      </div>
+      <div className="work-permit-alert-dates">
         <p className="work-permit-alert-detail">
-          {alert.employeeName}'s work permit {isExpired ? "expired" : "expires"} {formatWorkPermitDate(alert.expiryDate)}.
+          {isExpired ? "Expired" : "Expires"} {formatWorkPermitDate(alert.expiryDate)}
         </p>
         <p className="work-permit-alert-meta">
           {isExpired ? (
-            <>Expired · {formatRemainingTime(Math.abs(alert.remainingDays))} ago</>
+            <>{formatRemainingTime(Math.abs(alert.remainingDays))} ago</>
           ) : (
             <>{formatRemainingTime(alert.remainingDays)} remaining</>
           )}
@@ -137,7 +154,7 @@ function WorkPermitAlertCard({ alert, busy, onAcknowledge, onRenew, onCancel }: 
           {formatWorkPermitLead(alert.leadMonths, alert.leadDays)}
         </p>
       </div>
-      <div className="work-permit-alert-actions">
+      <div className="work-permit-alert-actions" aria-label={`Actions for ${alert.employeeName}`} role="group">
         <button type="button" onClick={onAcknowledge} disabled={busy}>
           {busy ? "..." : "Acknowledge"}
         </button>
@@ -148,15 +165,15 @@ function WorkPermitAlertCard({ alert, busy, onAcknowledge, onRenew, onCancel }: 
           Cancel alert
         </button>
       </div>
-    </div>
+    </li>
   );
 }
 
-// Near the top of the Dashboard, per the brief — but entirely absent (not
-// an empty shell) whenever there are zero active alerts, and restricted
-// server-side (not only by this component simply not rendering) to
-// Administrator/Manager, since GET /api/dashboard/work-permit-alerts
-// itself 403s for any other role.
+// The Employees page's Work Permits tab. Restricted server-side (not only
+// by the tab being hidden) to Administrator/Manager, since
+// GET /api/dashboard/work-permit-alerts itself 403s for any other role.
+// Alerts are computed by the server; this component only lists them and
+// calls the existing Acknowledge / Renewed / Cancel alert endpoints.
 export function WorkPermitAlertsSection() {
   const [alerts, setAlerts] = useState<WorkPermitAlert[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -231,24 +248,47 @@ export function WorkPermitAlertsSection() {
   }
 
   if (loadError) return <p className="error-text">{loadError}</p>;
-  if (!alerts || alerts.length === 0) return null;
+
+  const counts = SEVERITY_ORDER.map((severity) => ({ severity, count: alerts?.filter((a) => a.severity === severity).length ?? 0 })).filter(
+    (c) => c.count > 0
+  );
 
   return (
-    <section className="work-permit-alerts-section">
-      <h2>Work Permit Alerts</h2>
-      {actionError && <p className="error-text">{actionError}</p>}
-      <div className="work-permit-alerts-list">
-        {alerts.map((alert) => (
-          <WorkPermitAlertCard
-            key={alert.employeeId}
-            alert={alert}
-            busy={processingId === alert.employeeId}
-            onAcknowledge={() => handleAcknowledge(alert)}
-            onRenew={() => setRenewTarget(alert)}
-            onCancel={() => setCancelTarget(alert)}
-          />
-        ))}
+    <section className="work-permit-alerts-section" aria-busy={alerts === null}>
+      <div className="work-permit-alerts-header">
+        <h2>Work permit alerts</h2>
+        {alerts && alerts.length > 0 && (
+          <p className="work-permit-alerts-counts">
+            {counts.map((c) => (
+              <span key={c.severity} className={`work-permit-alerts-count work-permit-alert-${c.severity}`}>
+                {c.count} {SEVERITY_LABELS[c.severity].toLowerCase()}
+              </span>
+            ))}
+          </p>
+        )}
       </div>
+      <p className="work-permit-alerts-hint">
+        Permits within their notify lead time, soonest first. Acknowledge hides an alert for a week; Renewed records the new expiry date.
+      </p>
+      {actionError && <p className="error-text">{actionError}</p>}
+      {alerts === null ? (
+        <p className="work-permit-alerts-empty">Loading…</p>
+      ) : alerts.length === 0 ? (
+        <p className="work-permit-alerts-empty">No work permit alerts right now.</p>
+      ) : (
+        <ul className="work-permit-alerts-list">
+          {alerts.map((alert) => (
+            <WorkPermitAlertCard
+              key={alert.employeeId}
+              alert={alert}
+              busy={processingId === alert.employeeId}
+              onAcknowledge={() => handleAcknowledge(alert)}
+              onRenew={() => setRenewTarget(alert)}
+              onCancel={() => setCancelTarget(alert)}
+            />
+          ))}
+        </ul>
+      )}
 
       {renewTarget && (
         <RenewModal

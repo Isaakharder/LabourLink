@@ -1,0 +1,442 @@
+// Basic Data -> Varieties API (routes/varieties.ts, 076_varieties.sql)
+// through the real router: the variety catalogue, growing seasons (no
+// overlaps, copy to a new season), plants planted per variety per season,
+// bulk row assignment, calculated density from each season's saved row
+// lengths (unchanged by a real greenhouse resize through the layout API),
+// the entered Plant Density figure kept separate, history by season,
+// delete rules and permissions, database-level non-overlapping seasons
+// (adjacent seasons allowed), and the confirmed "use current layout
+// lengths" action. Seasons use far-future dates and RUN_ID-suffixed
+// names; everything created is removed at the end.
+//
+// Run with: npm run test:varieties
+import "dotenv/config";
+import express, { NextFunction, Request, Response } from "express";
+import cookieParser from "cookie-parser";
+import { AddressInfo } from "net";
+import { pool } from "../db";
+import { signSession } from "../middleware/auth";
+import { METRES_PER_FOOT, varietyForRowOnDate } from "../lib/varietyPlanting";
+import varietiesRouter from "./varieties";
+import greenhouseLayoutRouter from "./greenhouseLayout";
+
+let pass = 0;
+let fail = 0;
+function check(condition: boolean, label: string, extra?: unknown) {
+  if (condition) pass++;
+  else {
+    fail++;
+    console.error(`FAIL: ${label}`, extra !== undefined ? JSON.stringify(extra) : "");
+  }
+}
+
+const RUN_ID = Date.now();
+// Far-future, run-specific years so seasons never collide with other data.
+const Y = 2200 + (RUN_ID % 500) * 3;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Json = any;
+
+async function main() {
+  const app = express();
+  app.use(express.json());
+  app.use(cookieParser());
+  app.use("/api/varieties", varietiesRouter);
+  app.use("/api/greenhouse-layout", greenhouseLayoutRouter);
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    res.status(500).json({ error: "Internal server error", detail: String(err) });
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  const BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const ids = { employees: [] as string[], phases: [] as string[], rows: [] as string[], seasons: [] as string[], varieties: [] as string[], densities: [] as string[] };
+  let landId: string | undefined;
+
+  try {
+    const teamRoleId = (await pool.query(`select id from team_roles where name = 'Team Member'`)).rows[0].id;
+    async function employee(role: string, first: string) {
+      const roleId = (await pool.query(`select id from security_roles where name = $1`, [role])).rows[0].id;
+      const id = (
+        await pool.query(`insert into employees (first_name, last_name, security_role_id, team_role_id) values ($1, $2, $3, $4) returning id`, [
+          first,
+          `VAR ${RUN_ID}`,
+          roleId,
+          teamRoleId,
+        ])
+      ).rows[0].id as string;
+      ids.employees.push(id);
+      return signSession({ id, firstName: first, lastName: `VAR ${RUN_ID}`, securityRole: role, teamRole: "Team Member" });
+    }
+    const admin = await employee("Administrator", "Ada");
+    const manager = await employee("Manager", "Max");
+    const worker = await employee("Employee", "Eve");
+
+    async function call(method: string, path: string, token: string | null, body?: unknown): Promise<{ status: number; body: Json }> {
+      const r = await fetch(`${BASE}/api/varieties${path}`, {
+        method,
+        headers: { "content-type": "application/json", ...(token ? { cookie: `labourlink_session=${token}` } : {}) },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const text = await r.text();
+      return { status: r.status, body: text ? JSON.parse(text) : null };
+    }
+
+    // ---- Fixtures: one land, two phases, rows of two lengths ----
+    landId = (await pool.query(`insert into greenhouse_lands (name, north_south_feet, east_west_feet) values ($1, 2000, 2000) returning id`, [`QA VAR ${RUN_ID}`])).rows[0]
+      .id as string;
+    async function phase(name: string) {
+      const id = (
+        await pool.query(`insert into greenhouse_phases (land_id, name, north_south_feet, east_west_feet) values ($1, $2, 1000, 1000) returning id`, [landId, name])
+      ).rows[0].id as string;
+      ids.phases.push(id);
+      return id;
+    }
+    const p1 = await phase(`QA VAR ${RUN_ID} Phase 1`);
+    const p2 = await phase(`QA VAR ${RUN_ID} Phase 2`);
+    async function row(phaseId: string, n: number, lengthFt: number) {
+      const id = (
+        await pool.query(
+          `insert into greenhouse_rows (phase_id, row_number, x_ft, y_ft, width_ft, length_ft, orientation) values ($1, $2, 0, $3, 2, $4, 'horizontal') returning id`,
+          [phaseId, n, n * 3, lengthFt]
+        )
+      ).rows[0].id as string;
+      ids.rows.push(id);
+      return id;
+    }
+    const p1Rows: string[] = [];
+    for (let n = 1; n <= 10; n++) p1Rows.push(await row(p1, n, 192));
+    const shortRow = await row(p2, 501, 300);
+    const longRow = await row(p2, 502, 330);
+
+    // Existing Plant Density "Plants per row" on two Phase 1 rows (entered value).
+    const densityId = (
+      await pool.query(`insert into plant_densities (name, type, count_per_row) values ($1, 'plants', 318) returning id`, [`QA VAR ${RUN_ID} density`])
+    ).rows[0].id as string;
+    ids.densities.push(densityId);
+    await pool.query(`insert into plant_density_rows (density_id, greenhouse_row_id, density_type) values ($1, $2, 'plants'), ($1, $3, 'plants')`, [
+      densityId,
+      p1Rows[0],
+      p1Rows[1],
+    ]);
+
+    const timeEntriesBefore = Number((await pool.query(`select count(*) from time_entries`)).rows[0].count);
+    const densityLinksBefore = Number((await pool.query(`select count(*) from plant_density_rows`)).rows[0].count);
+
+    // ---- Permissions ----
+    check((await call("GET", "/seasons", null)).status === 401, "signed out -> 401");
+    check((await call("GET", "/seasons", worker)).status === 403, "Employee can't read -> 403");
+    check((await call("GET", "/seasons", manager)).status === 200, "Manager can read");
+    check((await call("POST", "/", manager, { name: "Nope" })).status === 403, "Manager can't add varieties -> 403");
+
+    // ---- Seasons ----
+    const s1 = await call("POST", "/seasons", admin, { name: `QA ${RUN_ID} ${Y}`, startsOn: `${Y}-01-05`, endsOn: `${Y}-11-30` });
+    check(s1.status === 201 && s1.body.season?.startsOn === `${Y}-01-05`, "create a season", s1.body);
+    const season1 = s1.body.season.id as string;
+    ids.seasons.push(season1);
+    const overlap = await call("POST", "/seasons", admin, { name: `QA ${RUN_ID} overlap`, startsOn: `${Y}-11-01`, endsOn: `${Y + 1}-03-01` });
+    check(overlap.status === 409 && /overlap/.test(overlap.body.errors?.startsOn ?? ""), "overlapping season rejected", overlap.body);
+    const openEnded = await call("POST", "/seasons", admin, { name: `QA ${RUN_ID} open`, startsOn: `${Y - 1}-01-01` });
+    check(openEnded.status === 409, "an open-ended season that would run into a later one is rejected", openEnded.body);
+    const badDates = await call("POST", "/seasons", admin, { name: `QA ${RUN_ID} bad`, startsOn: `${Y + 2}-05-01`, endsOn: `${Y + 2}-04-01` });
+    check(badDates.status === 400 && !!badDates.body.errors?.endsOn, "end before start rejected", badDates.body);
+    const dupName = await call("POST", "/seasons", admin, { name: ` qa ${RUN_ID} ${Y} `, startsOn: `${Y + 5}-01-01` });
+    check(dupName.status === 409 && !!dupName.body.errors?.name, "duplicate season name (case/space-insensitive) rejected", dupName.body);
+
+    // ---- Varieties ----
+    const v1 = await call("POST", "/", admin, { name: `  Red Bell ${RUN_ID}  `, notes: "Blocky red", seasonId: season1, totalPlants: 3180 });
+    check(v1.status === 201, "add a variety with plants planted for the season", v1.body);
+    const red = v1.body.id as string;
+    ids.varieties.push(red);
+    const v2 = await call("POST", "/", admin, { name: `Yellow ${RUN_ID}` });
+    const yellow = v2.body.id as string;
+    ids.varieties.push(yellow);
+    check((await call("POST", "/", admin, { name: `red bell ${RUN_ID}` })).status === 409, "duplicate variety name (case-insensitive) rejected");
+    check((await call("POST", "/", admin, { name: "   " })).status === 400, "blank name rejected");
+    check((await call("POST", "/", admin, { name: `X ${RUN_ID}`, seasonId: season1, totalPlants: 2.5 })).status === 400, "fractional plants rejected");
+    check(
+      (await pool.query(`select count(*) from varieties where name = $1`, [`X ${RUN_ID}`])).rows[0].count === "0",
+      "a rejected plants value doesn't leave a half-created variety"
+    );
+    const renamed = await call("PATCH", `/${yellow}`, admin, { name: `Yellow Sun ${RUN_ID}`, notes: "  " });
+    check(renamed.status === 200, "edit a variety", renamed.body);
+
+    let list = await call("GET", `/?seasonId=${season1}`, manager);
+    const redRow = list.body.varieties.find((v: Json) => v.id === red);
+    check(redRow?.name === `Red Bell ${RUN_ID}` && redRow.totalPlants === 3180 && redRow.notes === "Blocky red", "name trimmed, plants planted recorded", redRow);
+    check(list.body.varieties.find((v: Json) => v.id === yellow)?.notes === null, "blank notes stored as empty", list.body.varieties.find((v: Json) => v.id === yellow));
+
+    // ---- Bulk row assignment ----
+    const assign = await call("PUT", `/seasons/${season1}/rows`, admin, { rowIds: p1Rows, varietyId: red });
+    check(assign.status === 200 && assign.body.rows.filter((r: Json) => r.varietyId === red).length === 10, "assign 10 consecutive rows at once", assign.status);
+    check((await call("PUT", `/seasons/${season1}/rows`, manager, { rowIds: [p1Rows[0]], varietyId: yellow })).status === 403, "Manager can't assign rows");
+
+    list = await call("GET", `/?seasonId=${season1}`, admin);
+    let s = list.body.varieties.find((v: Json) => v.id === red).summary;
+    const metres = 10 * 192 * METRES_PER_FOOT;
+    check(s.rows === 10 && s.totalLengthM === Math.round(metres * 10) / 10, "summary: rows and total length in metres", s);
+    check(s.plantsPerMetre === Math.round((3180 / metres) * 100) / 100, "summary: plants per metre calculated from plants planted and length", s);
+    check(s.averageEstimatedPlantsPerRow === 318, "summary: estimated plants per row", s);
+    check(s.rowsWithEnteredCount === 2 && s.enteredPlantsTotal === 636, "summary: the entered Plant Density figure is reported separately", s);
+
+    // Reassign two of those rows to Yellow (a variety change within the season).
+    await call("PUT", `/seasons/${season1}/rows`, admin, { rowIds: [p1Rows[8], p1Rows[9]], varietyId: yellow });
+    list = await call("GET", `/?seasonId=${season1}`, admin);
+    check(list.body.varieties.find((v: Json) => v.id === red).summary.rows === 8, "reassigning moves rows (one variety per row per season)");
+    check(list.body.varieties.find((v: Json) => v.id === yellow).plantedThisSeason === true, "assigning rows records the variety as planted this season");
+
+    // Per-row estimates: proportional to length, equal rows equal, adding up to the total.
+    await call("PUT", `/seasons/${season1}/rows`, admin, { rowIds: [shortRow, longRow], varietyId: yellow });
+    await call("PATCH", `/${yellow}`, admin, { seasonId: season1, totalPlants: 2000 });
+    const yRows = await call("GET", `/${yellow}/rows?seasonId=${season1}`, admin);
+    const est = yRows.body.rows.map((r: Json) => r.estimatedPlants);
+    check(Math.abs(est.reduce((a: number, b: number) => a + b, 0) - 2000) <= 0.2, "per-row estimates add up to the plants planted (to rounding)", yRows.body.rows);
+    const p1Est = yRows.body.rows.filter((r: Json) => r.rowNumber === 9 || r.rowNumber === 10).map((r: Json) => r.estimatedPlants);
+    check(p1Est.length === 2 && p1Est[0] === p1Est[1], "rows of equal length get equal estimates", p1Est);
+    const lengths = 2 * 192 + 300 + 330;
+    check(yRows.body.rows.find((r: Json) => r.id === longRow).estimatedPlants === Math.round(((2000 * 330) / lengths) * 10) / 10, "estimate = plants x row length / total length", yRows.body.rows);
+    const longEst = yRows.body.rows.find((r: Json) => r.id === longRow).estimatedPlants;
+    const shortEst = yRows.body.rows.find((r: Json) => r.id === shortRow).estimatedPlants;
+    check(longEst > shortEst && longEst > yRows.body.rows.find((r: Json) => r.id === p1Rows[8]).estimatedPlants, "longer rows get more plants", { longEst, shortEst });
+    check(yRows.body.rows.find((r: Json) => r.id === p1Rows[0]) === undefined, "only this variety's rows are listed");
+    const redRows = await call("GET", `/${red}/rows?seasonId=${season1}`, admin);
+    const r0 = redRows.body.rows.find((r: Json) => r.id === p1Rows[0]);
+    check(r0.enteredPlantsPerRow === 318 && r0.estimatedPlants === 397.5, "a row shows both its calculated estimate and its entered Plant Density value", r0);
+
+    // Clearing plants planted keeps rows; density becomes unknown.
+    await call("PATCH", `/${yellow}`, admin, { seasonId: season1, totalPlants: null });
+    list = await call("GET", `/?seasonId=${season1}`, admin);
+    s = list.body.varieties.find((v: Json) => v.id === yellow).summary;
+    check(s.rows === 4 && s.plantsPerMetre === null && s.averageEstimatedPlantsPerRow === null, "no plants planted: rows and length shown, no calculated density", s);
+
+    // Unassign.
+    await call("PUT", `/seasons/${season1}/rows`, admin, { rowIds: [shortRow], varietyId: null });
+    check((await call("GET", `/rows?seasonId=${season1}`, admin)).body.rows.find((r: Json) => r.id === shortRow).varietyId === null, "unassign a row");
+
+    // Validation.
+    check((await call("PUT", `/seasons/${season1}/rows`, admin, { rowIds: [], varietyId: red })).status === 400, "empty row list rejected");
+    check(
+      (await call("PUT", `/seasons/${season1}/rows`, admin, { rowIds: ["00000000-0000-0000-0000-000000000000"], varietyId: red })).status === 400,
+      "unknown row rejected"
+    );
+
+    // ---- Next season: copy, then change a row, history stays ----
+    const s2 = await call("POST", "/seasons", admin, {
+      name: `QA ${RUN_ID} ${Y + 1}`,
+      startsOn: `${Y + 1}-01-04`,
+      endsOn: `${Y + 1}-11-30`,
+      copyFromSeasonId: season1,
+    });
+    check(s2.status === 201, "create the next season copying the previous one", s2.body);
+    const season2 = s2.body.season.id as string;
+    ids.seasons.push(season2);
+    const s2Red = (await call("GET", `/?seasonId=${season2}`, admin)).body.varieties.find((v: Json) => v.id === red);
+    check(s2Red.totalPlants === 3180 && s2Red.summary.rows === 8, "copied season starts with the same plantings and rows", s2Red);
+
+    await call("PUT", `/seasons/${season2}/rows`, admin, { rowIds: [p1Rows[0]], varietyId: yellow });
+    check((await varietyForRowOnDate(pool, p1Rows[0], `${Y}-06-15`))?.varietyId === red, "a harvest in last season's row stays with last season's variety");
+    check((await varietyForRowOnDate(pool, p1Rows[0], `${Y + 1}-06-15`))?.varietyId === yellow, "the same row this season gives this season's variety");
+    check((await varietyForRowOnDate(pool, p1Rows[0], `${Y}-12-25`)) === null, "a date between seasons has no variety");
+    check((await call("GET", `/?seasonId=${season1}`, admin)).body.varieties.find((v: Json) => v.id === red).summary.rows === 8, "changing next season never changes last season");
+
+    // ---- Season row-length snapshot vs a real greenhouse resize ----
+    const lengthOf = async (rowId: string) => Number((await pool.query(`select length_ft from greenhouse_rows where id = $1`, [rowId])).rows[0].length_ft);
+    const season1Before = (await call("GET", `/?seasonId=${season1}`, admin)).body.varieties.find((v: Json) => v.id === red);
+    const season1RowsBefore = (await call("GET", `/${red}/rows?seasonId=${season1}`, admin)).body.rows;
+    const season2Before = (await call("GET", `/?seasonId=${season2}`, admin)).body.varieties.find((v: Json) => v.id === red);
+    check(season1RowsBefore.every((r: Json) => r.lengthM === Math.round(192 * METRES_PER_FOOT * 10) / 10 && r.lengthChanged === false), "before the resize: season lengths match the layout", season1RowsBefore);
+
+    // Widen the land 2000 ft -> 2400 ft East-West through the layout API:
+    // every horizontal row's length is rescaled x1.2 (192 ft -> 230.4 ft).
+    const resize = await fetch(`${BASE}/api/greenhouse-layout/lands/${landId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie: `labourlink_session=${admin}` },
+      body: JSON.stringify({ eastWestFeet: 2400 }),
+    });
+    check(resize.status === 200, "greenhouse resize through the layout API", resize.status);
+    check(Math.abs((await lengthOf(p1Rows[2])) - 230.4) < 1e-9, "the resize really changed the layout row length (192 -> 230.4 ft)", await lengthOf(p1Rows[2]));
+
+    const season1After = (await call("GET", `/?seasonId=${season1}`, admin)).body.varieties.find((v: Json) => v.id === red);
+    const season1RowsAfter = (await call("GET", `/${red}/rows?seasonId=${season1}`, admin)).body.rows;
+    for (const k of ["rows", "totalLengthM", "plantsPerMetre", "averageEstimatedPlantsPerRow"]) {
+      check(season1After.summary[k] === season1Before.summary[k], `after the resize: last season's ${k} is unchanged`, { before: season1Before.summary[k], after: season1After.summary[k] });
+    }
+    check(
+      JSON.stringify(season1RowsAfter.map((r: Json) => [r.id, r.lengthM, r.estimatedPlants])) === JSON.stringify(season1RowsBefore.map((r: Json) => [r.id, r.lengthM, r.estimatedPlants])),
+      "after the resize: last season's per-row lengths and plant estimates are unchanged"
+    );
+    check(season1After.summary.lengthChangedRows === season1After.summary.rows, "the rows whose layout length now differs are flagged", season1After.summary);
+    check(season1RowsAfter.every((r: Json) => r.lengthChanged && r.layoutLengthM === Math.round(230.4 * METRES_PER_FOOT * 10) / 10), "each row shows the new layout length beside its saved one", season1RowsAfter[0]);
+    check(
+      JSON.stringify((await call("GET", `/?seasonId=${season2}`, admin)).body.varieties.find((v: Json) => v.id === red).summary) ===
+        JSON.stringify({ ...season2Before.summary, lengthChangedRows: season2Before.summary.rows }),
+      "the next season's saved figures don't move either (only flagged)"
+    );
+
+    // History lookups: the right season, the saved assignment and length.
+    const past = await varietyForRowOnDate(pool, p1Rows[2], `${Y}-06-15`);
+    check(past?.seasonId === season1 && past.varietyId === red && past.rowLengthFt === 192, "a past harvest date resolves to last season, its variety and its saved 192 ft length", past);
+    const later = await varietyForRowOnDate(pool, p1Rows[0], `${Y + 1}-06-15`);
+    check(later?.seasonId === season2 && later.varietyId === yellow, "a date in the next season resolves to the next season's assignment", later);
+    check((await varietyForRowOnDate(pool, p1Rows[2], `${Y}-01-05`))?.seasonId === season1, "a season's first day belongs to it");
+    check((await varietyForRowOnDate(pool, p1Rows[2], `${Y}-11-30`))?.seasonId === season1, "a season's last day belongs to it");
+    check((await varietyForRowOnDate(pool, p1Rows[2], `${Y + 1}-01-03`)) === null, "the day before the next season starts has no variety");
+
+    // Moving a row to another variety in the same season keeps its saved length.
+    await call("PUT", `/seasons/${season1}/rows`, admin, { rowIds: [p1Rows[3]], varietyId: yellow });
+    check((await varietyForRowOnDate(pool, p1Rows[3], `${Y}-06-15`))?.rowLengthFt === 192, "reassigning a row within the season keeps its saved length");
+    await call("PUT", `/seasons/${season1}/rows`, admin, { rowIds: [p1Rows[3]], varietyId: red });
+
+    // A season created now saves the current layout.
+    const s4 = await call("POST", "/seasons", admin, { name: `QA ${RUN_ID} ${Y + 2}`, startsOn: `${Y + 2}-01-01`, endsOn: `${Y + 2}-11-30`, copyFromSeasonId: season1 });
+    ids.seasons.push(s4.body.season.id);
+    check((await varietyForRowOnDate(pool, p1Rows[2], `${Y + 2}-06-15`))?.rowLengthFt === 230.4, "a season copied after the resize saves the new layout length", await varietyForRowOnDate(pool, p1Rows[2], `${Y + 2}-06-15`));
+    check((await varietyForRowOnDate(pool, p1Rows[2], `${Y}-06-15`))?.rowLengthFt === 192, "...while last season keeps 192 ft");
+
+    // Only an explicit, confirmed Administrator action takes the layout lengths.
+    const season1Name = `QA ${RUN_ID} ${Y}`;
+    check((await call("GET", `/seasons/${season1}/layout-length-changes`, manager)).status === 403, "Manager can't preview the length update");
+    check(
+      (await call("POST", `/seasons/${season1}/use-layout-lengths`, manager, { confirmSeasonName: season1Name, confirmAffectedRows: 1 })).status === 403,
+      "Manager can't update a season's saved lengths"
+    );
+    const noChanges = await call("GET", `/seasons/${s4.body.season.id}/layout-length-changes`, admin);
+    check(noChanges.status === 200 && noChanges.body.affectedRows === 0, "a season already matching the layout has nothing to update", noChanges.body);
+
+    // ---- A row removed from the layout keeps its season history ----
+    const beforeRemove = (await call("GET", `/?seasonId=${season1}`, admin)).body.varieties.find((v: Json) => v.id === red).summary;
+    await pool.query(`update greenhouse_rows set deleted_at = now() where id = $1`, [p1Rows[1]]);
+    const afterRemove = (await call("GET", `/?seasonId=${season1}`, admin)).body.varieties.find((v: Json) => v.id === red).summary;
+    check(
+      afterRemove.rows === beforeRemove.rows && afterRemove.totalLengthM === beforeRemove.totalLengthM && afterRemove.plantsPerMetre === beforeRemove.plantsPerMetre && afterRemove.deletedRows === 1,
+      "removing a row from the layout doesn't change last season's figures (row kept, flagged)",
+      { beforeRemove, afterRemove }
+    );
+    check((await varietyForRowOnDate(pool, p1Rows[1], `${Y}-06-15`))?.varietyId === red, "history for a removed row is still answerable");
+
+    // The explicit action updates rows still in the layout, never removed ones,
+    // and only after a confirmation naming the season and the row count.
+    const season1Assigned = Number((await pool.query(`select count(*) from variety_row_assignments where season_id = $1`, [season1])).rows[0].count);
+    const preview = await call("GET", `/seasons/${season1}/layout-length-changes`, admin);
+    check(
+      preview.status === 200 && preview.body.season.name === season1Name && preview.body.affectedRows === season1Assigned - 1,
+      "the preview names the season and counts the rows that would change (removed rows excluded)",
+      preview.body
+    );
+    const ex = preview.body.examples.find((e: Json) => e.rowNumber === 3);
+    check(
+      ex && ex.savedLengthM === Math.round(192 * METRES_PER_FOOT * 10) / 10 && ex.layoutLengthM === Math.round(230.4 * METRES_PER_FOOT * 10) / 10,
+      "the preview shows saved vs layout lengths",
+      preview.body.examples
+    );
+    const lengthsNow = async () => (await pool.query(`select greenhouse_row_id, row_length_ft from variety_row_assignments where season_id = $1 order by 1`, [season1])).rows;
+    const untouched = JSON.stringify(await lengthsNow());
+    const noConfirm = await call("POST", `/seasons/${season1}/use-layout-lengths`, admin, {});
+    check(noConfirm.status === 400 && JSON.stringify(await lengthsNow()) === untouched, "no confirmation: refused, nothing changed", noConfirm.body);
+    const wrongCount = await call("POST", `/seasons/${season1}/use-layout-lengths`, admin, { confirmSeasonName: season1Name, confirmAffectedRows: preview.body.affectedRows + 1 });
+    check(
+      wrongCount.status === 409 && wrongCount.body.affectedRows === preview.body.affectedRows && JSON.stringify(await lengthsNow()) === untouched,
+      "a stale or wrong row count: refused with the current count, nothing changed",
+      wrongCount.body
+    );
+    const wrongSeason = await call("POST", `/seasons/${season1}/use-layout-lengths`, admin, { confirmSeasonName: `QA ${RUN_ID} ${Y + 1}`, confirmAffectedRows: preview.body.affectedRows });
+    check(wrongSeason.status === 409 && JSON.stringify(await lengthsNow()) === untouched, "another season's name: refused, nothing changed", wrongSeason.body);
+    const refreshed = await call("POST", `/seasons/${season1}/use-layout-lengths`, admin, { confirmSeasonName: season1Name, confirmAffectedRows: preview.body.affectedRows });
+    check(refreshed.status === 200 && refreshed.body.updated === season1Assigned - 1, "confirmed: updates exactly the previewed rows still in the layout", refreshed.body.updated);
+    const again = await call("POST", `/seasons/${season1}/use-layout-lengths`, admin, { confirmSeasonName: season1Name, confirmAffectedRows: preview.body.affectedRows });
+    check(again.status === 409 && again.body.affectedRows === 0, "repeating a used confirmation is refused (nothing left to update)", again.body);
+    check((await varietyForRowOnDate(pool, p1Rows[2], `${Y}-06-15`))?.rowLengthFt === 230.4, "...to the current layout length");
+    check((await varietyForRowOnDate(pool, p1Rows[1], `${Y}-06-15`))?.rowLengthFt === 192, "...and a removed row keeps its saved length");
+    await pool.query(`update greenhouse_rows set deleted_at = null where id = $1`, [p1Rows[1]]);
+
+    // ---- Deactivate / delete rules ----
+    check((await call("DELETE", `/${red}`, admin)).status === 409, "a planted variety can't be deleted");
+    await call("PATCH", `/${red}`, admin, { isActive: false });
+    check((await call("PUT", `/seasons/${season2}/rows`, admin, { rowIds: [p1Rows[2]], varietyId: red })).status === 409, "an inactive variety can't get new rows");
+    check((await call("GET", `/?seasonId=${season1}`, admin)).body.varieties.find((v: Json) => v.id === red).summary.rows === 8, "deactivating keeps its rows and history");
+    const v3 = await call("POST", "/", admin, { name: `Unused ${RUN_ID}` });
+    check((await call("DELETE", `/${v3.body.id}`, admin)).status === 200, "a never-planted variety can be deleted");
+    check((await call("DELETE", `/seasons/${season2}`, admin)).status === 409, "a season with assigned rows can't be deleted");
+    const s3 = await call("POST", "/seasons", admin, { name: `QA ${RUN_ID} empty`, startsOn: `${Y + 3}-01-01`, endsOn: `${Y + 3}-02-01` });
+    check((await call("DELETE", `/seasons/${s3.body.season.id}`, admin)).status === 200, "an empty season can be deleted");
+
+    // Season edit can't create an overlap.
+    const stretch = await call("PATCH", `/seasons/${season1}`, admin, { endsOn: `${Y + 1}-02-01` });
+    check(stretch.status === 409, "editing a season into the next one is rejected", stretch.body);
+    check((await call("PATCH", `/seasons/${season1}`, admin, { name: `QA ${RUN_ID} ${Y} renamed` })).status === 200, "rename a season");
+
+    // ---- Non-overlapping seasons enforced by the database itself ----
+    const Z = Y + 10;
+    const insertSeason = async (name: string, startsOn: string, endsOn: string | null) => {
+      try {
+        const r = await pool.query(`insert into growing_seasons (name, starts_on, ends_on) values ($1, $2, $3) returning id`, [`QA ${RUN_ID} ${name}`, startsOn, endsOn]);
+        ids.seasons.push(r.rows[0].id);
+        return { ok: true as const, id: r.rows[0].id as string };
+      } catch (err) {
+        return { ok: false as const, code: (err as { code?: string }).code, constraint: (err as { constraint?: string }).constraint };
+      }
+    };
+    const isOverlapError = (r: Awaited<ReturnType<typeof insertSeason>>) => !r.ok && r.code === "23P01" && r.constraint === "excl_growing_seasons_no_overlap";
+    const a = await insertSeason("db A", `${Z}-01-01`, `${Z}-06-30`);
+    check(a.ok, "db: a season can be inserted directly", a);
+    check((await insertSeason("db B", `${Z}-07-01`, `${Z}-12-31`)).ok, "db: an adjacent season (starts the day after) is allowed");
+    check(isOverlapError(await insertSeason("db overlap", `${Z}-06-15`, `${Z}-08-01`)), "db: an overlapping season is rejected by the constraint (direct SQL, no API)");
+    check(isOverlapError(await insertSeason("db same day", `${Z}-12-31`, `${Z + 1}-02-01`)), "db: starting on another season's last day is rejected (both ends inclusive)");
+    check(isOverlapError(await insertSeason("db inside", `${Z}-03-01`, `${Z}-03-02`)), "db: a season inside another is rejected");
+    check((await insertSeason("db open", `${Z + 1}-01-01`, null)).ok, "db: an open-ended season after the last one is allowed");
+    check(isOverlapError(await insertSeason("db after open", `${Z + 5}-01-01`, `${Z + 5}-12-31`)), "db: nothing can start inside an open-ended season");
+    let updateErr: { code?: string; constraint?: string } = {};
+    try {
+      await pool.query(`update growing_seasons set ends_on = $2 where id = $1`, [a.ok ? a.id : null, `${Z}-07-15`]);
+    } catch (err) {
+      updateErr = err as { code?: string; constraint?: string };
+    }
+    check(updateErr.code === "23P01" && updateErr.constraint === "excl_growing_seasons_no_overlap", "db: extending a season into the next one is rejected", updateErr);
+
+    // Two requests at the same moment for overlapping seasons: exactly one wins.
+    const W = Y + 6; // free years before the database tests above (Z = Y + 10 onward)
+    const racers = await Promise.all(
+      [1, 2, 3].map((i) => call("POST", "/seasons", admin, { name: `QA ${RUN_ID} race ${i}`, startsOn: `${W}-01-0${i}`, endsOn: `${W}-12-31` }))
+    );
+    for (const r of racers) if (r.status === 201) ids.seasons.push(r.body.season.id);
+    check(racers.filter((r) => r.status === 201).length === 1, "simultaneous overlapping requests: exactly one season is created", racers.map((r) => r.status));
+    check(
+      racers.filter((r) => r.status !== 201).every((r) => r.status === 409 && /overlap/.test(r.body.errors?.startsOn ?? "")),
+      "...the others get a clear overlap error, never a server error",
+      racers.map((r) => r.body)
+    );
+    const adjacentApi = await call("POST", "/seasons", admin, { name: `QA ${RUN_ID} after race`, startsOn: `${W + 1}-01-01`, endsOn: `${W + 1}-12-31` });
+    if (adjacentApi.status === 201) ids.seasons.push(adjacentApi.body.season.id);
+    check(adjacentApi.status === 201, "API: an adjacent season is allowed", adjacentApi.body);
+
+    // ---- Nothing else touched ----
+    check(Number((await pool.query(`select count(*) from time_entries`)).rows[0].count) === timeEntriesBefore, "time entries untouched");
+    check(Number((await pool.query(`select count(*) from plant_density_rows`)).rows[0].count) === densityLinksBefore, "Plant Density links untouched");
+  } finally {
+    const tryDelete = async (q: string, p: unknown[]) => {
+      try {
+        await pool.query(q, p);
+      } catch (err) {
+        console.error("cleanup step failed:", q, err);
+      }
+    };
+    await tryDelete(`delete from variety_row_assignments where season_id = any($1::uuid[]) or greenhouse_row_id = any($2::uuid[])`, [ids.seasons, ids.rows]);
+    await tryDelete(`delete from variety_plantings where season_id = any($1::uuid[]) or variety_id = any($2::uuid[])`, [ids.seasons, ids.varieties]);
+    await tryDelete(`delete from growing_seasons where id = any($1::uuid[]) or name like $2`, [ids.seasons, `QA ${RUN_ID}%`]);
+    await tryDelete(`delete from varieties where id = any($1::uuid[]) or name like $2`, [ids.varieties, `% ${RUN_ID}`]);
+    await tryDelete(`delete from plant_density_rows where density_id = any($1::uuid[])`, [ids.densities]);
+    await tryDelete(`delete from plant_densities where id = any($1::uuid[])`, [ids.densities]);
+    await tryDelete(`delete from greenhouse_rows where id = any($1::uuid[])`, [ids.rows]);
+    await tryDelete(`delete from greenhouse_phases where id = any($1::uuid[])`, [ids.phases]);
+    if (landId) await tryDelete(`delete from greenhouse_lands where id = $1`, [landId]);
+    await tryDelete(`delete from employees where id = any($1::uuid[])`, [ids.employees]);
+    server.close();
+  }
+  console.log(`\n${pass} passed, ${fail} failed`);
+  process.exit(fail > 0 ? 1 : 0);
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
