@@ -15,6 +15,7 @@ import { AddBreakModal } from "../../components/inputs/AddBreakModal";
 import { AddActivityModal } from "../../components/inputs/AddActivityModal";
 import { AddEmployeeToDayModal } from "../../components/inputs/AddEmployeeToDayModal";
 import { SpeedReviewModal } from "../../components/inputs/SpeedReviewModal";
+import { BreakReviewCase, BreakReviewListModal, BreakReviewModal } from "../../components/inputs/BreakReviewModal";
 import { SpeedReviewGroupsResponse } from "../../lib/speedReviewTypes";
 import { api, ApiError } from "../../lib/api";
 import { useAuth } from "../../context/AuthContext";
@@ -210,6 +211,28 @@ export function InputsPage() {
     currentEmployee?.securityRole === "Manager" ||
     currentEmployee?.securityRole === "Supervisor";
   const [addEmployeeToDayOpen, setAddEmployeeToDayOpen] = useState(false);
+
+  // Breaks closed automatically at the end of a day and not reviewed yet
+  // (GET /api/inputs/break-reviews). Anyone who can open these break records
+  // in Inputs can review them: the server decides (the same access as the
+  // daily view and break corrections), so no role list is repeated here —
+  // the button appears only when the server returns the list, and a break's
+  // own canEdit (from the daily view) gates its review dialog.
+  const [breakReviews, setBreakReviews] = useState<BreakReviewCase[] | null>(null);
+  const [breakReviewListOpen, setBreakReviewListOpen] = useState(false);
+  const [reviewingBreak, setReviewingBreak] = useState<React.ComponentProps<typeof BreakReviewModal>["review"] | null>(null);
+  const loadBreakReviews = useCallback(() => {
+    api<{ breaks: BreakReviewCase[] }>("/api/inputs/break-reviews")
+      .then((res) => setBreakReviews(res.breaks))
+      .catch((err) => {
+        // No access (403): no button. Otherwise keep the last known list;
+        // the next load retries.
+        if (err instanceof ApiError && (err.status === 403 || err.status === 401)) setBreakReviews(null);
+      });
+  }, []);
+  useEffect(() => {
+    loadBreakReviews();
+  }, [loadBreakReviews]);
   // Success message to show once the employee switch that follows a save has
   // happened — that switch's reset effect clears successMessage itself.
   const pendingSuccessMessageRef = useRef<string | null>(null);
@@ -1105,6 +1128,16 @@ export function InputsPage() {
         <div className="inputs-workspace-main">
           <div className="inputs-workspace-datenav">
             <DateNav date={date} onChange={(d) => updateParams({ date: d })} />
+            {breakReviews && breakReviews.length > 0 && (
+              <button
+                type="button"
+                className="inputs-section-header-button inputs-review-button inputs-break-review-button"
+                onClick={() => setBreakReviewListOpen(true)}
+              >
+                Breaks to review
+                <ReviewCountBadge count={breakReviews.length} label="breaks closed automatically that need review" />
+              </button>
+            )}
             {selectedEmployeeId && (
               <span className={`inputs-live-status${stale ? " inputs-live-status-stale" : ""}`}>
                 {stale
@@ -1242,6 +1275,21 @@ export function InputsPage() {
                 onEditBreakTimeChange={setEditBreakTimeValue}
                 onSaveEditBreak={handleSaveEditBreak}
                 onCancelEditBreak={handleCancelEditBreak}
+                onReviewBreak={
+                  daily.canEdit
+                    ? (b: BreakDto) =>
+                        setReviewingBreak({
+                          breakId: b.id,
+                          employeeName: `${daily.employee.firstName} ${daily.employee.lastName}`,
+                          date,
+                          startedAt: b.startedAt,
+                          endedAt: b.endedAt!,
+                          durationSeconds: b.durationSeconds,
+                          isPaid: b.isPaid,
+                          overlappedWorkSeconds: breakReviews?.find((c) => c.breakId === b.id)?.overlappedWorkSeconds ?? null,
+                        })
+                    : undefined
+                }
                 editingWorkStart={editingWorkStart}
                 editWorkStartTimeValue={editWorkStartTimeValue}
                 onStartEditWorkStart={handleStartEditWorkStart}
@@ -1296,6 +1344,30 @@ export function InputsPage() {
           date={date}
           onClose={() => setAddEmployeeToDayOpen(false)}
           onCreated={handleEmployeeAddedToDay}
+        />
+      )}
+      {breakReviewListOpen && (
+        <BreakReviewListModal
+          cases={breakReviews}
+          onClose={() => setBreakReviewListOpen(false)}
+          onOpen={(c) => {
+            setBreakReviewListOpen(false);
+            updateParams({ date: c.date, employee: c.employeeId });
+            setReviewingBreak(c);
+          }}
+        />
+      )}
+      {reviewingBreak && (
+        <BreakReviewModal
+          review={reviewingBreak}
+          onClose={() => setReviewingBreak(null)}
+          onSaved={(message) => {
+            setReviewingBreak(null);
+            loadDaily();
+            loadEmployees();
+            loadBreakReviews();
+            setSuccessMessage(message);
+          }}
         />
       )}
       {reviewModal && (

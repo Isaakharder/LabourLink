@@ -35,6 +35,7 @@
     "midnight-cutoff:run": "ts-node src/cli/midnightCutoffRun.ts",
     "test:midnight-cutoff": "ts-node src/lib/midnightCutoff.test.ts",
     "test:long-shift-admin-end": "ts-node src/lib/longShiftAdminEnd.test.ts",
+    "test:inputs-break-review": "ts-node src/routes/inputs.breakReview.test.ts",
     "test:inputs-rollover-corrected-from-display": "ts-node src/routes/inputs.rolloverCorrectedFromDisplay.test.ts",
     "test:inputs-activity-run-correction": "ts-node src/routes/inputs.activityRunCorrection.test.ts",
     "test:inputs-below-minimum-duration": "ts-node src/routes/inputs.belowMinimumDuration.test.ts",

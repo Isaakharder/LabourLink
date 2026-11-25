@@ -59,6 +59,9 @@ interface WorkdayDetailsCardProps {
   onEditBreakTimeChange: (value: string) => void;
   onSaveEditBreak: () => void;
   onCancelEditBreak: () => void;
+  // Opens the review dialog for a break that needs review (needsReview).
+  // Omitted when the signed-in employee can't edit this day.
+  onReviewBreak?: (brk: BreakDto) => void;
   // Work start time editing is a single click-to-edit cell (no separate
   // "select, then click again to edit" step like the break rows below) —
   // there's no delete action or other row state that a select step would
@@ -96,6 +99,7 @@ export function WorkdayDetailsCard({
   onEditBreakTimeChange,
   onSaveEditBreak,
   onCancelEditBreak,
+  onReviewBreak,
   editingWorkStart,
   editWorkStartTimeValue,
   onStartEditWorkStart,
@@ -118,6 +122,12 @@ export function WorkdayDetailsCard({
     if (workStartTime && !editingWorkStart) onStartEditWorkStart();
   }
   function handleTimeCellClick(brk: BreakDto, field: "start" | "end", isSelected: boolean) {
+    // A break closed automatically is never edited inline: its correction
+    // needs a reason and a confirmation, so it opens the review dialog.
+    if (brk.needsReview && onReviewBreak && brk.canEdit) {
+      onReviewBreak(brk);
+      return;
+    }
     const alreadyEditingThisCell = editingBreak?.id === brk.id && editingBreak.field === field;
     if (isSelected && selected.size <= 1 && brk.canEdit && !alreadyEditingThisCell && (field === "start" || brk.endedAt)) {
       onStartEditBreak(brk, field);
@@ -349,7 +359,23 @@ export function WorkdayDetailsCard({
                     ) : b.endedAt ? (
                       <span className="inputs-cell-stack">
                         <span className="inputs-cell-time">{formatTimeInAppTimezone(b.endedAt)}</span>
-                        {b.autoClosed && <span className="inputs-autoclosed-badge">Auto-closed</span>}
+                        {b.autoClosed && !b.needsReview && <span className="inputs-autoclosed-badge">Auto-closed</span>}
+                        {b.needsReview &&
+                          (onReviewBreak && b.canEdit ? (
+                            <button
+                              type="button"
+                              className="inputs-break-review-badge"
+                              title="Closed automatically at the end of the day. Review it to correct or confirm the break."
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onReviewBreak(b);
+                              }}
+                            >
+                              Needs review
+                            </button>
+                          ) : (
+                            <span className="inputs-break-review-badge">Needs review</span>
+                          ))}
                       </span>
                     ) : (
                       "In progress"

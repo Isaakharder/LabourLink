@@ -9,7 +9,8 @@
 import { pool } from "../db";
 import {
   fetchMergedBreaksByEmployee,
-  isSystemClosedBreak,
+  BREAK_REVIEWED_SQL,
+  breakNeedsReview,
   mergeBreakIntervals,
   MergedBreaks,
   secondsOutsideBreaks,
@@ -960,11 +961,13 @@ async function fetchWholeShiftEntries(workEmployeeIds: string[], start: Date, en
         ended_at: Date;
         is_paid: boolean | null;
         auto_closed_at: Date | null;
+        reviewed: boolean;
       }[],
     };
   }
   return pool.query(
-    `select te.employee_id, te.entry_type, te.activity_id, te.started_at, te.ended_at, te.is_paid, te.auto_closed_at
+    `select te.employee_id, te.entry_type, te.activity_id, te.started_at, te.ended_at, te.is_paid, te.auto_closed_at,
+            case when te.entry_type = 'break' then ${BREAK_REVIEWED_SQL("te")} else false end as reviewed
      from time_entries te
      where te.deleted_at is null and te.ended_at is not null
        and te.employee_id = any($1::uuid[]) and te.started_at >= $2 and te.started_at < $3
@@ -1100,7 +1103,7 @@ export async function getActivityReportDataWithAttribution(
   // Paid Time above is unchanged.
   const breakIntervalsByEmployee = new Map<string, { startedAt: Date; endedAt: Date }[]>();
   for (const r of wholeShiftRes.rows) {
-    if (r.entry_type !== "break" || isSystemClosedBreak(r.started_at, r.ended_at, r.auto_closed_at)) continue;
+    if (r.entry_type !== "break" || breakNeedsReview(r.started_at, r.ended_at, r.auto_closed_at, r.reviewed)) continue;
     const list = breakIntervalsByEmployee.get(r.employee_id) ?? [];
     list.push({ startedAt: r.started_at, endedAt: r.ended_at });
     breakIntervalsByEmployee.set(r.employee_id, list);
