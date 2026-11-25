@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { pool } from "../db";
+import { BREAK_REVIEWED_SQL, breakNeedsReview } from "../lib/breakOverlap";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { getSignedPhotoUrl, getSignedPhotoUrls } from "../lib/storage";
@@ -551,6 +552,7 @@ router.get(
               te.break_profile_item_id, te.source, te.is_paid, te.greenhouse_row_id, te.carrier_id,
               te.auto_closed_at, te.density_type, te.density_count_per_row, te.actual_started_at,
               te.actual_ended_at, te.created_by_employee_id, te.creation_reason, te.rollover_of_entry_id,
+              case when te.entry_type = 'break' and te.ended_at is not null then ${BREAK_REVIEWED_SQL("te")} else false end as break_reviewed,
               cb.first_name as created_by_first_name, cb.last_name as created_by_last_name,
               a.name as activity_name, a.normal_speed, a.speed_unit, a.density_source, a.minimum_duration_minutes,
               bpi.name as break_item_name,
@@ -651,6 +653,9 @@ router.get(
     // activityRuns.ts), which is exactly what's looked up below, so this
     // needs no involvement from the grouping logic itself.
     const autoClosedMeta = new Map<string, boolean>();
+    // Breaks a cut-off closed (at midnight, or the end-of-day backstop) that
+    // no one has reviewed yet — see breakNeedsReview.
+    const breakNeedsReviewIds = new Set<string>();
     // Same per-segment-id keying and the same accepted limitation as
     // autoClosedMeta above: a multi-segment run only ever surfaces this for
     // its *last* segment (the one run.id resolves to) — the only segment a
@@ -695,6 +700,9 @@ router.get(
     >();
     for (const r of entryRows) {
       autoClosedMeta.set(r.id, r.auto_closed_at !== null);
+      if (r.entry_type === "break" && breakNeedsReview(new Date(r.started_at), r.ended_at ? new Date(r.ended_at) : null, r.auto_closed_at, r.break_reviewed)) {
+        breakNeedsReviewIds.add(r.id);
+      }
       if (r.actual_ended_at) {
         endedAtOriginalMeta.set(r.id, r.actual_ended_at);
       }
@@ -1253,6 +1261,10 @@ router.get(
           source: meta?.source ?? "manual",
           breakProfileItemId: meta?.breakProfileItemId ?? null,
           autoClosed: autoClosedMeta.get(b.id) ?? false,
+          // Closed by a cut-off and not reviewed yet: productivity keeps the
+          // overlapping work until an Inputs user corrects or confirms it
+          // (PATCH /breaks/:id with a reason).
+          needsReview: breakNeedsReviewIds.has(b.id),
           // A break is always a single segment, so unlike a run's
           // manualEntry above, this is never ambiguous.
           manualEntry: manualEntryMeta.get(b.id) ?? null,
@@ -3212,7 +3224,13 @@ router.patch(
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid break id" });
-    const { startTime, endTime } = req.body as { startTime?: string; endTime?: string };
+    const { startTime, endTime, reason, confirmed, confirmAsRecorded } = req.body as {
+      startTime?: string;
+      endTime?: string;
+      reason?: unknown;
+      confirmed?: unknown;
+      confirmAsRecorded?: unknown;
+    };
 
     const client = await pool.connect();
     try {
@@ -3234,6 +3252,56 @@ router.patch(
       }
       await lockEmployeeForManualEntry(client, ownerPeek.rows[0].employee_id);
 
+      // A break a cut-off closed (at midnight, or the end-of-day backstop)
+      // and nobody has reviewed: its end time was set by the system, not by
+      // the employee. Correcting it changes paid hours, so it needs an
+      // explicit confirmation and a typed reason, both recorded in
+      // time_entry_corrections. "Confirm as recorded" keeps the times and
+      // only records the review. Nothing is ever changed automatically.
+      const reviewRes = await client.query(
+        `select te.id, te.employee_id, te.entry_type, te.started_at, te.ended_at, te.auto_closed_at, te.deleted_at,
+                case when te.ended_at is not null then ${BREAK_REVIEWED_SQL("te")} else false end as reviewed
+         from time_entries te where te.id = $1 for update`,
+        [id]
+      );
+      const reviewTarget = reviewRes.rows[0];
+      const needsReview =
+        !!reviewTarget &&
+        !reviewTarget.deleted_at &&
+        reviewTarget.entry_type === "break" &&
+        breakNeedsReview(
+          new Date(reviewTarget.started_at),
+          reviewTarget.ended_at ? new Date(reviewTarget.ended_at) : null,
+          reviewTarget.auto_closed_at,
+          reviewTarget.reviewed
+        );
+      if (needsReview && (confirmed !== true || !isValidReason(reason))) {
+        await client.query("rollback");
+        return res.status(422).json({
+          error: `This break was closed automatically and needs review: confirm the break times and give a reason (at least ${MIN_REASON_LENGTH} characters)`,
+        });
+      }
+      if (reason !== undefined && !isValidReason(reason)) {
+        await client.query("rollback");
+        return res.status(400).json({ error: `A reason must be at least ${MIN_REASON_LENGTH} characters` });
+      }
+      const correctionReason = isValidReason(reason) ? reason.trim() : AUTO_CORRECTION_REASON;
+      if (confirmAsRecorded === true) {
+        if (!needsReview) {
+          await client.query("rollback");
+          return res.status(409).json({ error: "Only a break that needs review can be confirmed as recorded" });
+        }
+        const recordedEnd = new Date(reviewTarget.ended_at).toISOString();
+        await client.query(
+          `insert into time_entry_corrections
+             (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
+           values ($1, $2, $3, 'ended_at', $4, $4, $5)`,
+          [id, reviewTarget.employee_id, req.employee!.id, recordedEnd, correctionReason]
+        );
+        await client.query("commit");
+        return res.json({ ok: true, confirmedAsRecorded: true });
+      }
+
       const planResult = await computeBreakCorrectionPlan(client, id, startTime, endTime);
       if (!planResult.ok) {
         await client.query("rollback");
@@ -3247,7 +3315,7 @@ router.patch(
           `insert into time_entry_corrections
              (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason)
            values ($1, $2, $3, $4, $5, $6, $7)`,
-          [entryId, employeeId, req.employee!.id, field, oldVal.toISOString(), newVal.toISOString(), AUTO_CORRECTION_REASON]
+          [entryId, employeeId, req.employee!.id, field, oldVal.toISOString(), newVal.toISOString(), correctionReason]
         );
 
       // Trims — each clears its OWN changed boundary's actual_* value too
@@ -3794,6 +3862,53 @@ router.post(
     }
 
     res.json({ ok: true, deleted });
+  })
+);
+
+// Breaks closed by a cut-off (the midnight cut-off, or the end-of-day
+// backstop) that nobody has reviewed yet, newest first: the Inputs page's
+// "Breaks to review" list. Productivity keeps the work that overlaps them
+// until they are reviewed (lib/breakOverlap.ts); payroll uses them as
+// recorded until an Inputs user corrects them (PATCH /breaks/:id). Read-only.
+router.get(
+  "/break-reviews",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (_req, res) => {
+    const { rows } = await pool.query(
+      `select te.id, te.employee_id, te.started_at, te.ended_at, te.auto_closed_at, te.is_paid,
+              e.first_name, e.last_name, bpi.name as break_item_name,
+              ${BREAK_REVIEWED_SQL("te")} as reviewed,
+              coalesce((
+                select sum(extract(epoch from least(coalesce(w.ended_at, now()), te.ended_at) - greatest(w.started_at, te.started_at)))
+                from time_entries w
+                where w.employee_id = te.employee_id and w.entry_type = 'work' and w.deleted_at is null
+                  and w.started_at < te.ended_at and coalesce(w.ended_at, now()) > te.started_at
+              ), 0)::float as overlapped_work_seconds
+       from time_entries te
+       join employees e on e.id = te.employee_id
+       left join break_profile_items bpi on bpi.id = te.break_profile_item_id
+       where te.entry_type = 'break' and te.deleted_at is null and te.ended_at is not null
+         and (te.auto_closed_at is not null
+              or to_char(te.ended_at at time zone $1, 'HH24:MI:SS.US') in ('00:00:00.000000', '23:59:59.000000'))
+       order by te.started_at desc`,
+      [APP_TIMEZONE]
+    );
+    const breaks = rows
+      .filter((r) => breakNeedsReview(new Date(r.started_at), new Date(r.ended_at), r.auto_closed_at, r.reviewed))
+      .map((r) => ({
+        breakId: r.id,
+        employeeId: r.employee_id,
+        employeeName: `${r.first_name} ${r.last_name}`.trim(),
+        date: calendarDateInAppTimezone(new Date(r.started_at)),
+        startedAt: new Date(r.started_at).toISOString(),
+        endedAt: new Date(r.ended_at).toISOString(),
+        durationSeconds: Math.round((new Date(r.ended_at).getTime() - new Date(r.started_at).getTime()) / 1000),
+        name: r.break_item_name ?? null,
+        isPaid: r.is_paid ?? null,
+        overlappedWorkSeconds: Math.max(0, Math.round(r.overlapped_work_seconds)),
+      }));
+    res.json({ breaks });
   })
 );
 

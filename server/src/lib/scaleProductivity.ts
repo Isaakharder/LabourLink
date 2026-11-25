@@ -63,6 +63,7 @@
 import { Pool, PoolClient } from "pg";
 import { pool } from "../db";
 import { calendarDateInAppTimezone, getRangeBoundsUtc } from "./timezone";
+import { BREAK_REVIEWED_SQL, breakNeedsReview } from "./breakOverlap";
 import {
   AllocationDecision,
   BreakInput,
@@ -183,13 +184,20 @@ export async function evaluateLoads(jobId: string, range: { start: Date; end: Da
   const people = [...new Set([...entries.map((e) => e.employeeId), ...scanRes.rows.map((r) => r.employee_id as string)])];
   const { rows: breakRows } = people.length
     ? await db.query(
-        `select te.employee_id, te.started_at, te.ended_at from time_entries te
+        `select te.employee_id, te.started_at, te.ended_at, te.auto_closed_at, ${BREAK_REVIEWED_SQL("te")} as reviewed from time_entries te
          where te.entry_type = 'break' and te.deleted_at is null and te.employee_id = any($1::uuid[])
            and te.started_at < $3 and coalesce(te.ended_at, 'infinity'::timestamptz) > $2`,
         [people, new Date(Math.min(...loads.map((l) => l.loadStart))), new Date(Math.max(...loads.map((l) => l.weighedAt)))]
       )
     : { rows: [] as any[] };
-  const breaks: BreakInput[] = breakRows.map((r) => ({ employeeId: r.employee_id, startedAt: ms(r.started_at), endedAt: r.ended_at ? ms(r.ended_at) : null }));
+  // A break closed by a cut-off and not yet reviewed in Inputs is no
+  // evidence the picker stopped (same rule as Reports and the TV's stems
+  // slides, lib/breakOverlap.ts): it is not removed from matched minutes.
+  // Reviewing it changes those minutes, and so the bin's fingerprint: a
+  // saved allocation decision for that bin then returns to review.
+  const breaks: BreakInput[] = breakRows
+    .filter((r) => !breakNeedsReview(r.started_at, r.ended_at, r.auto_closed_at, r.reviewed))
+    .map((r) => ({ employeeId: r.employee_id, startedAt: ms(r.started_at), endedAt: r.ended_at ? ms(r.ended_at) : null }));
   const decisions = new Map<string, AllocationDecision>(
     decisionRes.rows.map((r) => [r.weighing_id, { action: r.action, method: r.method, fingerprint: r.inputs_fingerprint, shares: r.shares }])
   );

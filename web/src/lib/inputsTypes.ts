@@ -191,6 +191,10 @@ export interface BreakDto {
   canEdit: boolean;
   // Same daily-cutoff meaning as ActivityRunDto.autoClosed above.
   autoClosed: boolean;
+  // Closed by a cut-off (midnight or the end-of-day backstop) and not
+  // reviewed yet: shown as "Needs review", corrected or confirmed only
+  // through the review dialog (a reason and a confirmation are required).
+  needsReview?: boolean;
   // Always unambiguous for a break — unlike a run, a break is never made
   // of more than one segment.
   manualEntry: ManualEntryMeta | null;

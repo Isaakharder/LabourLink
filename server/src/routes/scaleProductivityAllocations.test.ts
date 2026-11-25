@@ -247,6 +247,46 @@ async function main() {
     p = await prod();
     check(p.get(ivy.id)?.matchedSeconds === 35 * 60 && p.get(hugo.id)!.netGrams + p.get(ivy.id)!.netGrams === 150_000, "now with Ivy's corrected 35 minutes, still exactly 150 kg", [p.get(hugo.id), p.get(ivy.id)]);
 
+    // ---- A break closed at midnight, before and after its review in Inputs ----
+    // Ivy's unpaid break from 07:45, closed by the midnight cut-off: until it
+    // is reviewed it says nothing about when she stopped, so her matched
+    // minutes, the bin's fingerprint and the saved decision are untouched.
+    const midnight = getDayBoundsUtc(DAY).end;
+    const ivyBreak = (
+      await pool.query(
+        `insert into time_entries (employee_id, entry_type, idempotency_key, started_at, ended_at, source, is_paid)
+         values ($1, 'break', gen_random_uuid(), $2, $3, 'manual', false) returning id`,
+        [ivy.id, at(7, 45), midnight]
+      )
+    ).rows[0].id as string;
+    await pool.query(
+      `insert into time_entry_corrections (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason, changed_at)
+       values ($1, $2, null, 'ended_at', 'null', $3, 'midnight_cutoff', $4)`,
+      [ivyBreak, ivy.id, midnight.toISOString(), midnight]
+    );
+    const hugoReviewed = p.get(hugo.id)!.netGrams;
+    const fp2Reviewed = (await call(admin, "GET", `/${w2}?activityId=${PICK}`)).body.fingerprint;
+    p = await prod();
+    check(p.get(ivy.id)?.matchedSeconds === 35 * 60 && p.get(hugo.id)?.netGrams === hugoReviewed, "an unreviewed midnight-closed break: matched minutes and the reviewed H2 unchanged", [p.get(hugo.id), p.get(ivy.id)]);
+    // Reviewed in Inputs ("confirm as recorded"; an Inputs user's audited
+    // correction, recorded after the break ended): it now counts, Ivy's
+    // matched minutes drop to 07:30-07:45, and H2's saved decision no longer
+    // applies: back to review. Official credits are untouched (checked below).
+    await pool.query(
+      `insert into time_entry_corrections (time_entry_id, employee_id, changed_by_employee_id, field_name, old_value, new_value, reason, changed_at)
+       values ($1, $2, $3, 'ended_at', $4, $4, 'Confirmed as recorded', $5)`,
+      [ivyBreak, ivy.id, admin.id, midnight.toISOString(), new Date(midnight.getTime() + 60_000)]
+    );
+    p = await prod();
+    check(!p.get(hugo.id)?.bins && p.get(hugo.id)?.excludedByReason.inputs_changed === 1, "after the break review, H2's previous decision is invalidated: back to review", p.get(hugo.id));
+    d = (await call(admin, "GET", `/${w2}?activityId=${PICK}`)).body;
+    check(d.status === "review" && d.reasons[0].code === "inputs_changed" && d.fingerprint !== fp2Reviewed, "detail: inputs changed, new fingerprint", d.reasons);
+    // Undo the scenario so the rest of this test runs on the original records.
+    await pool.query(`delete from time_entry_corrections where time_entry_id = $1`, [ivyBreak]);
+    await pool.query(`delete from time_entries where id = $1`, [ivyBreak]);
+    p = await prod();
+    check(p.get(ivy.id)?.matchedSeconds === 35 * 60 && p.get(hugo.id)?.netGrams === hugoReviewed, "break removed again: the reviewed H2 applies again", [p.get(hugo.id), p.get(ivy.id)]);
+
     // ---- Concurrent administrators on H3 ----
     d = (await call(admin, "GET", `/${w3}?activityId=${PICK}`)).body;
     const fp3 = d.fingerprint;

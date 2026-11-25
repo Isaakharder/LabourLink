@@ -37,6 +37,27 @@ export function isSystemClosedBreak(startedAt: Date, endedAt: Date, autoClosedAt
   return end === dayEnd || end === dayEnd - 1000;
 }
 
+// SQL: true when an Inputs user (Administrator, Manager or Supervisor)
+// corrected or confirmed this break after it was closed. That correction
+// is audited in time_entry_corrections with changed_by_employee_id set;
+// the cut-offs' own audit rows have changed_by_employee_id null. A
+// correction made before the break ended (only its start can be changed
+// then) doesn't count: it says nothing about the system-set end.
+export const BREAK_REVIEWED_SQL = (alias: string) =>
+  `exists (select 1 from time_entry_corrections tec
+           where tec.time_entry_id = ${alias}.id and tec.changed_by_employee_id is not null
+             and tec.changed_at >= ${alias}.ended_at)`;
+
+// A break the system closed (isSystemClosedBreak) and no one has reviewed
+// yet. Its end is no evidence of how long the break was, so productivity
+// never subtracts it from overlapping work, and Inputs flags it for review.
+// Once reviewed, it is an ordinary break with its verified times, in every
+// calculation (Reports, Dashboard, TV, kg/hour and shared bins alike).
+export function breakNeedsReview(startedAt: Date, endedAt: Date | null, autoClosedAt: Date | null, reviewed: boolean): boolean {
+  if (!endedAt || reviewed) return false;
+  return isSystemClosedBreak(startedAt, endedAt, autoClosedAt);
+}
+
 export interface TimeInterval {
   startedAt: Date;
   endedAt: Date;
@@ -90,20 +111,20 @@ export function secondsOutsideBreaks(segment: TimeInterval, breaks: MergedBreaks
 
 // One query: every finished, non-deleted break of these employees that
 // overlaps [from, to), merged per employee. System-closed breaks are left
-// out (see isSystemClosedBreak).
+// out until an Inputs user has reviewed them (see breakNeedsReview).
 export async function fetchMergedBreaksByEmployee(employeeIds: string[], from: Date, to: Date): Promise<Map<string, MergedBreaks>> {
   const out = new Map<string, MergedBreaks>();
   if (!employeeIds.length || to <= from) return out;
-  const { rows } = await pool.query<{ employee_id: string; started_at: Date; ended_at: Date; auto_closed_at: Date | null }>(
-    `select employee_id, started_at, ended_at, auto_closed_at
-     from time_entries
-     where entry_type = 'break' and deleted_at is null and ended_at is not null
-       and employee_id = any($1::uuid[]) and started_at < $3 and ended_at > $2`,
+  const { rows } = await pool.query<{ employee_id: string; started_at: Date; ended_at: Date; auto_closed_at: Date | null; reviewed: boolean }>(
+    `select te.employee_id, te.started_at, te.ended_at, te.auto_closed_at, ${BREAK_REVIEWED_SQL("te")} as reviewed
+     from time_entries te
+     where te.entry_type = 'break' and te.deleted_at is null and te.ended_at is not null
+       and te.employee_id = any($1::uuid[]) and te.started_at < $3 and te.ended_at > $2`,
     [[...new Set(employeeIds)], from, to]
   );
   const raw = new Map<string, TimeInterval[]>();
   for (const r of rows) {
-    if (isSystemClosedBreak(r.started_at, r.ended_at, r.auto_closed_at)) continue;
+    if (breakNeedsReview(r.started_at, r.ended_at, r.auto_closed_at, r.reviewed)) continue;
     const list = raw.get(r.employee_id) ?? [];
     list.push({ startedAt: r.started_at, endedAt: r.ended_at });
     raw.set(r.employee_id, list);
