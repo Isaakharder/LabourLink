@@ -19,6 +19,7 @@ import { RecentJobsCard } from "../../components/mobile/RecentJobsCard";
 import { fetchActivitiesWithCache, fetchRowsWithCache, fetchCarriersWithCache } from "../../lib/referenceDataCache";
 import { computeSyncIndicatorState } from "../../lib/syncIndicator";
 import { logCheckpoint } from "../../lib/localEventStore";
+import { formatBreakTime } from "../../lib/scheduledBreakDisplay";
 
 type Activity = PickerActivity;
 
@@ -796,7 +797,27 @@ export function HomeScreen() {
       <div className="work-status">
         {me!.status === "idle" && <p>{t(language, "statusIdle")}</p>}
         {me!.status === "work" && <p>{t(language, "statusWorking")}</p>}
-        {me!.status === "break" && <p>{t(language, "statusOnBreak")}</p>}
+        {me!.status === "break" && !me!.scheduledBreak && <p>{t(language, "statusOnBreak")}</p>}
+        {/* A scheduled break: the employee stays on it until its scheduled
+            end, when the job resumes (server/src/lib/scheduledBreaks.ts). */}
+        {me!.status === "break" && me!.scheduledBreak && (
+          <>
+            <p>
+              {t(language, "scheduledBreakUntil", {
+                name: me!.scheduledBreak.name ?? t(language, "scheduledBreakDefaultName"),
+                time: formatBreakTime(me!.scheduledBreak.endsAt, me!.appTimezone),
+              })}
+            </p>
+            {me!.scheduledBreak.resumeRequested && me!.scheduledBreak.resume && (
+              <p className="mobile-scheduled-break-resume">
+                {t(language, "scheduledBreakResumes", {
+                  activity: me!.scheduledBreak.resume.activityName,
+                  time: formatBreakTime(me!.scheduledBreak.endsAt, me!.appTimezone),
+                })}
+              </p>
+            )}
+          </>
+        )}
       </div>
 
       {error && !pickerOpen && !questionFlow && !singleQuestionEdit && <p className="error-text">{error}</p>}

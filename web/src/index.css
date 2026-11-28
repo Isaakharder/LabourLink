@@ -1877,6 +1877,19 @@ input {
   color: var(--color-text);
 }
 
+.employee-form-auto-breaks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding-top: 1.4rem;
+}
+
+.employee-form-auto-breaks .employee-form-checkbox-inline {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.5rem !important;
+}
+
 .employee-form-checkbox {
   flex-direction: row !important;
   align-items: center;
@@ -11078,6 +11091,18 @@ button.inputs-break-review-badge:hover {
 .break-review-hint {
   color: var(--color-muted);
   font-size: 0.9rem;
+}
+.break-review-section + .break-review-section {
+  margin-top: 1.25rem;
+}
+.break-review-section h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+}
+.break-review-message {
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid #f59e0b;
+  background: #fffbeb;
 }
 .break-review-table {
   width: 100%;

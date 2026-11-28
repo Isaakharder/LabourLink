@@ -13,10 +13,10 @@ import {
   zonedWallTimeToUtc,
 } from "../lib/timezone";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
-import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
-import { reconcileMidnightCutoff } from "../lib/midnightCutoff";
 import { aggregateDensitySpeed } from "../lib/densitySpeed";
-import { computeWorkdayTotals, groupByEmployeeDay, WorkdayBoundaryEntry } from "../lib/workdayTotals";
+import { computeWorkdayTotals, groupByEmployeeDay, WorkdayBoundaryEntry, WorkdayTotalsOptions } from "../lib/workdayTotals";
+import { loadWorkdayTotalsOptions } from "../lib/payrollSettings";
+import { describeOccurrenceReview } from "../lib/breakOccurrenceReviews";
 import { CandidateRun, getRolloverPriorDurationSeconds, getUnresolvedRunsForRows } from "../lib/rowCompletionCandidates";
 import {
   loadCarrierOptions,
@@ -305,6 +305,7 @@ async function loadPaidSecondsByEmployee(
   interface RawEntry extends WorkdayBoundaryEntry {
     employeeId: string;
   }
+  const workdayTotalsOptions = await loadWorkdayTotalsOptions();
   const rawEntries: RawEntry[] = entryRows.map((r) => ({
     employeeId: r.employee_id,
     entryType: r.entry_type,
@@ -320,7 +321,7 @@ async function loadPaidSecondsByEmployee(
     // so the date half always resolves back to `date` itself.
     const employeeId = key.slice(0, key.indexOf(":"));
     try {
-      const totals = computeWorkdayTotals(entries);
+      const totals = computeWorkdayTotals(entries, new Date(), workdayTotalsOptions);
       // Paid breaks are already folded into workedSeconds (see
       // workdayTotals.ts) — "paid hours" is workedSeconds directly, the
       // same convention Payroll's own paidSeconds field uses.
@@ -504,40 +505,13 @@ router.get(
     // performance investigation.
     const photoUrlPromise = employee.profile_photo_path ? getSignedPhotoUrl(employee.profile_photo_path) : null;
 
-    // Close a still-open entry at local midnight if it's behind, before
-    // break reconciliation (which reasons about "today") or the main
-    // time_entries query below runs — see midnightCutoff.ts. Deliberately
-    // scoped to viewing TODAY specifically, not "any date <= today" (unlike
-    // reconcileEmployeeBreaks below, which legitimately reconciles whichever
-    // day is being viewed): reconcileMidnightCutoff operates on whatever is
-    // GLOBALLY currently open for this employee, not on the viewed date, so
-    // running it while an admin reviews an unrelated old date would
-    // silently mutate the employee's live status as a side effect of
-    // looking at old history — a surprising effect with no real benefit,
-    // since the mobile app's own GET /me already reconciles current status
-    // on every request regardless. Only viewing today gets the extra
-    // request-time nudge here, matching what an admin watching a live/
-    // current day would actually expect.
-    const todayLocalForCutoff = calendarDateInAppTimezone(new Date());
-    if (date === todayLocalForCutoff) {
-      await reconcileMidnightCutoff(employeeId);
-    }
+    // Reading a day never writes: no midnight cut-off and no automatic
+    // breaks happen here (2026-11-28). The midnight cut-off runs from its
+    // scheduled job and every phone request (midnightCutoff.ts); automatic
+    // breaks and scheduled-break resumes run from the auto-breaks worker
+    // (autoBreakWorker.ts). So opening Inputs, for any date, can never create
+    // or change a break.
 
-    // Reconcile scheduled breaks the employee worked straight through before
-    // reading the day back — never for a future date (nothing to reconcile
-    // yet, and reconcileEmployeeBreaks would just no-op on future-dated
-    // items anyway, but skipping avoids the wasted round trip). Must
-    // complete (and its own commit land) strictly BEFORE the main
-    // time_entries query below runs — reconciliation can itself insert/split
-    // time_entries rows, and this response has to reflect whatever it just
-    // created, so this is deliberately awaited here rather than run
-    // concurrently with the query that follows it.
-    if (date <= calendarDateInAppTimezone(new Date())) {
-      await reconcileEmployeeBreaks(employeeId, date, {
-        isActive: employee.is_active,
-        breakProfileId: employee.break_profile_id,
-      });
-    }
     console.log(`[timing] daily reconcile+empRes done: ${Date.now() - __t0}ms`);
 
     const { start, end } = getDayBoundsUtc(date);
@@ -1045,7 +1019,7 @@ router.get(
       endedAt: r.ended_at,
       isPaid: r.is_paid,
     }));
-    const workdayTotals = computeWorkdayTotals(workdayEntries);
+    const workdayTotals = computeWorkdayTotals(workdayEntries, new Date(), await loadWorkdayTotalsOptions());
     const totalWorkedSeconds = Math.round(workdayTotals.workedSeconds);
     const totalBreakSeconds = Math.round(workdayTotals.breakSeconds);
     const totalPaidBreakSeconds = Math.round(workdayTotals.paidBreakSeconds);
@@ -1919,7 +1893,8 @@ function fingerprintActivityCorrectionPlan(plan: ActivityCorrectionPlanOk): stri
 // changes it is to recompute the whole day's totals before and after.
 function simulateWorkdayTotalsDelta(
   dayRows: { entry_type: string; started_at: Date; ended_at: Date | null; is_paid: boolean | null }[],
-  plan: Pick<ActivityCorrectionPlanOk, "trims" | "deletions" | "continuations">
+  plan: Pick<ActivityCorrectionPlanOk, "trims" | "deletions" | "continuations">,
+  workdayTotalsOptions: WorkdayTotalsOptions
 ): { workedSecondsDelta: number; breakSecondsDelta: number } {
   const toBoundary = (r: { entry_type: string; started_at: Date; ended_at: Date | null; is_paid: boolean | null }): WorkdayBoundaryEntry => ({
     entryType: r.entry_type as "work" | "break",
@@ -1927,7 +1902,7 @@ function simulateWorkdayTotalsDelta(
     endedAt: r.ended_at,
     isPaid: r.is_paid,
   });
-  const before = computeWorkdayTotals(dayRows.map(toBoundary));
+  const before = computeWorkdayTotals(dayRows.map(toBoundary), new Date(), workdayTotalsOptions);
 
   const deletedIds = new Set(plan.deletions.map((d) => d.id));
   const afterRows = dayRows
@@ -1945,7 +1920,7 @@ function simulateWorkdayTotalsDelta(
   for (const c of plan.continuations) {
     afterRows.push({ entry_type: "work", started_at: c.startedAt, ended_at: c.endedAt, is_paid: null });
   }
-  const after = computeWorkdayTotals(afterRows.map(toBoundary));
+  const after = computeWorkdayTotals(afterRows.map(toBoundary), new Date(), workdayTotalsOptions);
 
   return {
     workedSecondsDelta: Math.round(after.workedSeconds - before.workedSeconds),
@@ -2107,7 +2082,7 @@ router.post(
          where employee_id = $1 and started_at >= $2 and started_at < $3 and deleted_at is null`,
         [plan.employeeId, start, end]
       );
-      const { workedSecondsDelta, breakSecondsDelta } = simulateWorkdayTotalsDelta(dayRowsRes.rows, plan);
+      const { workedSecondsDelta, breakSecondsDelta } = simulateWorkdayTotalsDelta(dayRowsRes.rows, plan, await loadWorkdayTotalsOptions());
 
       const activityIds = [...new Set([plan.activityId, ...plan.deletions.map((d) => d.activityId), ...plan.continuations.map((c) => c.activityId)])];
       const nameByActivityId = new Map<string, string>();
@@ -3913,7 +3888,95 @@ router.get(
         isPaid: r.is_paid ?? null,
         overlappedWorkSeconds: Math.max(0, Math.round(r.overlapped_work_seconds)),
       }));
-    res.json({ breaks });
+
+    // Scheduled breaks flagged by scheduledBreaks.ts and not yet confirmed:
+    // Auto breaks didn't add one although the employee worked during it, the
+    // employee's own tap was shortened or recorded as an ordinary break, or
+    // a delayed phone event contradicts an automatic break. Many have no
+    // break record at all.
+    const { rows: occ } = await pool.query(
+      `select bo.id, bo.employee_id, to_char(bo.scheduled_date, 'YYYY-MM-DD') as date, bo.name, bo.scheduled_start,
+              bo.scheduled_end, bo.is_paid, bo.review_reason, bo.review_detail, bo.review_flagged_at,
+              e.first_name, e.last_name, b.started_at as break_started_at, b.ended_at as break_ended_at
+       from break_occurrences bo
+       join employees e on e.id = bo.employee_id
+       left join time_entries b on b.id = bo.break_entry_id and b.deleted_at is null
+       where bo.review_reason is not null and bo.review_confirmed_at is null
+       order by bo.scheduled_start desc`
+    );
+    const occurrences = occ.map((r) => ({
+      occurrenceId: r.id,
+      employeeId: r.employee_id,
+      employeeName: `${r.first_name} ${r.last_name}`.trim(),
+      date: r.date,
+      name: r.name ?? null,
+      scheduledStart: new Date(r.scheduled_start).toISOString(),
+      scheduledEnd: new Date(r.scheduled_end).toISOString(),
+      isPaid: r.is_paid,
+      reason: r.review_reason,
+      message: describeOccurrenceReview({
+        name: r.name,
+        scheduledStart: r.scheduled_start,
+        scheduledEnd: r.scheduled_end,
+        reason: r.review_reason,
+        detail: r.review_detail,
+      }),
+      flaggedAt: new Date(r.review_flagged_at).toISOString(),
+      recordedBreak: r.break_started_at
+        ? { startedAt: new Date(r.break_started_at).toISOString(), endedAt: r.break_ended_at ? new Date(r.break_ended_at).toISOString() : null }
+        : null,
+    }));
+    res.json({ breaks, occurrences });
+  })
+);
+
+// Confirms one flagged scheduled-break occurrence (GET /break-reviews,
+// "occurrences"): records who checked it, when, and why. It changes no
+// time entry: it never adds a break, moves a time or changes pay. An
+// occurrence Auto breaks was still checking stops being checked, so a
+// supervisor's "this is right" is never overridden by an automatic break.
+// Same access as the rest of Breaks to review.
+router.post(
+  "/break-occurrences/:id/review",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid id" });
+    const { confirmed, reason } = req.body as { confirmed?: unknown; reason?: unknown };
+    if (confirmed !== true || !isValidReason(reason)) {
+      return res.status(422).json({ error: `Confirm that you have checked this day and give a reason (at least ${MIN_REASON_LENGTH} characters)` });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const peek = await client.query(`select employee_id from break_occurrences where id = $1`, [id]);
+      if (!peek.rows[0]) {
+        await client.query("rollback");
+        return res.status(404).json({ error: "Not found" });
+      }
+      await lockEmployeeForManualEntry(client, peek.rows[0].employee_id);
+      const { rowCount } = await client.query(
+        `update break_occurrences
+         set review_confirmed_at = now(), review_confirmed_by_employee_id = $2, review_confirm_note = $3,
+             last_check_reason = case when status in ('pending', 'reversed') then coalesce(last_check_reason, '') || ' (review confirmed)' else last_check_reason end,
+             resolved_at = coalesce(resolved_at, now()),
+             status = case when status in ('pending', 'reversed') then 'expired' else status end
+         where id = $1 and review_reason is not null and review_confirmed_at is null`,
+        [id, req.employee!.id, reason.trim()]
+      );
+      if (!rowCount) {
+        await client.query("rollback");
+        return res.status(409).json({ error: "This break has no open review (it may have just been reviewed)" });
+      }
+      await client.query("commit");
+      res.json({ ok: true });
+    } catch (err) {
+      await client.query("rollback").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
   })
 );
 

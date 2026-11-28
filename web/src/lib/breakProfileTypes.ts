@@ -5,7 +5,6 @@ export interface BreakProfileItem {
   endTime: string; // "HH:MM:SS"
   isPaid: boolean;
   fixedBreak: boolean;
-  autoAdd: boolean;
   sortOrder: number;
   durationSeconds: number;
 }
@@ -58,5 +57,4 @@ export interface BreakProfileItemDraft {
   endTime: string;
   isPaid: boolean;
   fixedBreak: boolean;
-  autoAdd: boolean;
 }

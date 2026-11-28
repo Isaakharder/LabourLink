@@ -49,6 +49,7 @@ import cookieParser from "cookie-parser";
 import { AddressInfo } from "net";
 import { randomUUID } from "crypto";
 import { pool } from "../db";
+import { materializeDueResumeForEmployee } from "../lib/scheduledBreaks";
 import { zonedWallTimeParts } from "../lib/timezone";
 import mobileTimeRouter from "./mobileTime";
 
@@ -186,8 +187,8 @@ async function main() {
       await openWorkEntry(new Date(now0.getTime() - 60 * 60000), deviceIds[deviceIds.length - 1]);
 
       const itemRes = await pool.query(
-        `insert into break_profile_items (break_profile_id, name, start_time, end_time, is_paid, fixed_break, sort_order, is_active)
-         values ($1, $2, $3, $4, false, true, 0, true) returning id`,
+        `insert into break_profile_items (break_profile_id, name, start_time, end_time, is_paid, fixed_break, sort_order, is_active, created_at, updated_at)
+         values ($1, $2, $3, $4, false, true, 0, true, '2000-01-01', '2000-01-01') returning id`,
         [
           profile!.id,
           `QA Safety Item ${RUN_ID}`,
@@ -225,6 +226,9 @@ async function main() {
 
       const endRes = await callDevice("/api/mobile/time-entries/break/end", deviceIdentifier, { idempotencyKey: randomUUID() });
       check(endRes.status === 200, "1) break/end still succeeds normally afterward (the rejected edit never applied)", endRes.body);
+      // Ended before its scheduled end: the employee stays on the break
+      // until then (scheduledBreaks.ts), when work resumes.
+      await materializeDueResumeForEmployee(target!.id, new Date(now0.getTime() + 61 * 60000));
 
       const closed = await fetchEntry(openBreak.id);
       check(

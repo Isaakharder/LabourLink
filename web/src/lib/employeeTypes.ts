@@ -43,6 +43,9 @@ export interface Employee {
   assignedActivities: EmployeeAssignedActivity[];
   breakProfileId: string | null;
   breakProfile: EmployeeBreakProfile | null;
+  // Auto breaks: add missing scheduled breaks when the employee works
+  // through the full break period (server/src/lib/scheduledBreaks.ts).
+  autoBreaksEnabled?: boolean;
   // Employee Group (Employees > Employee Groups); null = Ungrouped. Purely
   // organizational — independent of jobGroup and the employee's Jobs.
   employeeGroup: EmployeeGroupRef | null;

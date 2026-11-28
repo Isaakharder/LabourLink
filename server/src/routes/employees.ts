@@ -82,6 +82,9 @@ interface EmployeeFields {
   securityRoleId: number | null;
   teamRoleId: number | null;
   breakProfileId: string | null;
+  // Auto breaks (079_employee_auto_breaks.sql): add missing scheduled breaks
+  // when this employee works through the full break period. Off by default.
+  autoBreaksEnabled: boolean;
   // Employee Group (056_employee_groups.sql); null = Ungrouped.
   employeeGroupId: string | null;
   // End Different Date (068_employee_employment_end_date.sql): the day the
@@ -268,6 +271,7 @@ function validateCreate(body: Record<string, unknown>):
       securityRoleId,
       teamRoleId,
       breakProfileId,
+      autoBreaksEnabled: body.autoBreaksEnabled === true,
       employeeGroupId,
       employmentEndDate: "value" in endParse ? endParse.value : null,
       vacationStartDate: vacation.vacationStartDate ?? null,
@@ -388,6 +392,11 @@ function validateUpdate(body: Record<string, unknown>):
     } else {
       data.breakProfileId = String(raw);
     }
+  }
+
+  if ("autoBreaksEnabled" in body) {
+    if (typeof body.autoBreaksEnabled !== "boolean") errors.autoBreaksEnabled = "Auto breaks must be on or off";
+    else data.autoBreaksEnabled = body.autoBreaksEnabled;
   }
 
   if ("employeeGroupId" in body) {
@@ -563,7 +572,7 @@ const SELECT_COLUMNS = `
   to_char(e.vacation_end_date, 'YYYY-MM-DD') as vacation_end_date,
   e.is_active, e.employee_number, e.nationality,
   e.preferred_language, e.notes, e.profile_photo_path, e.security_role_id, e.team_role_id,
-  e.break_profile_id, bp.name as break_profile_name, bp.is_active as break_profile_is_active,
+  e.break_profile_id, bp.name as break_profile_name, bp.is_active as break_profile_is_active, e.auto_breaks_enabled,
   to_char(e.work_permit_expiry_date, 'YYYY-MM-DD') as work_permit_expiry_date,
   e.work_permit_notify_lead_months, e.work_permit_notify_lead_days,
   e.created_at, e.updated_at,
@@ -624,6 +633,7 @@ function serializeEmployee(row: any, photoUrl: string | null, includeNotes: bool
     teamRoleId: row.team_role_id,
     teamRole: row.team_role,
     breakProfileId: row.break_profile_id,
+    autoBreaksEnabled: row.auto_breaks_enabled === true,
     breakProfile: row.break_profile_id
       ? { id: row.break_profile_id, name: row.break_profile_name, isActive: row.break_profile_is_active }
       : null,
@@ -793,12 +803,14 @@ router.post(
             start_date, is_active, employee_number, nationality, preferred_language, notes,
             security_role_id, team_role_id, settings_pin_hash, break_profile_id,
             work_permit_expiry_date, work_permit_notify_lead_months, work_permit_notify_lead_days,
-            employee_group_id, employment_end_date, vacation_start_date, vacation_end_date)
+            employee_group_id, employment_end_date, vacation_start_date, vacation_end_date,
+            auto_breaks_enabled, auto_breaks_effective_from, break_profile_assigned_at)
          values
            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
             coalesce($14, (select id from security_roles where name = 'Employee')),
             coalesce($15, (select id from team_roles where name = 'Team Member')),
-            null, $16, $17, $18, $19, $20, $21, $22, $23)
+            null, $16, $17, $18, $19, $20, $21, $22, $23,
+            $24, case when $24 then now() end, case when $16::uuid is not null then now() end)
          returning id`,
         [
           d.firstName,
@@ -824,6 +836,7 @@ router.post(
           d.employmentEndDate,
           d.vacationStartDate,
           d.vacationEndDate,
+          d.autoBreaksEnabled,
         ]
       );
 
@@ -983,6 +996,7 @@ router.patch(
       securityRoleId: "security_role_id",
       teamRoleId: "team_role_id",
       breakProfileId: "break_profile_id",
+      autoBreaksEnabled: "auto_breaks_enabled",
       employeeGroupId: "employee_group_id",
       employmentEndDate: "employment_end_date",
       vacationStartDate: "vacation_start_date",
@@ -1000,6 +1014,17 @@ router.patch(
       ...keys.map((k, i) => `${columnMap[k]} = $${i + 1}`),
       ...permitColumnNames.map((c, i) => `${c} = $${keys.length + i + 1}`),
     ];
+    // Prospective effect (scheduledBreaks.ts): turning Auto breaks on applies
+    // only to break windows that start from now on, and a new break profile
+    // only to windows that start after it was assigned.
+    const autoIdx = keys.indexOf("autoBreaksEnabled");
+    if (autoIdx >= 0) {
+      setClauses.push(`auto_breaks_effective_from = case when $${autoIdx + 1}::boolean and not auto_breaks_enabled then now() else auto_breaks_effective_from end`);
+    }
+    const profileIdx = keys.indexOf("breakProfileId");
+    if (profileIdx >= 0) {
+      setClauses.push(`break_profile_assigned_at = case when break_profile_id is distinct from $${profileIdx + 1}::uuid then now() else break_profile_assigned_at end`);
+    }
     setClauses.push("updated_at = now()");
 
     const client = await pool.connect();

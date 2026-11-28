@@ -28,6 +28,7 @@ interface FormState {
   securityRoleId: string;
   teamRoleId: string;
   breakProfileId: string;
+  autoBreaksEnabled: boolean;
   // "" = Ungrouped.
   employeeGroupId: string;
   email: string;
@@ -78,6 +79,7 @@ function toFormState(employee: Employee | null): FormState {
     securityRoleId: String(employee?.securityRoleId ?? 1),
     teamRoleId: String(employee?.teamRoleId ?? 1),
     breakProfileId: employee?.breakProfileId ?? "",
+    autoBreaksEnabled: employee?.autoBreaksEnabled ?? false,
     employeeGroupId: employee?.employeeGroup?.id ?? "",
     email: employee?.email ?? "",
     phoneNumber: employee?.phoneNumber ?? "",
@@ -257,6 +259,7 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
         securityRoleId: Number(form.securityRoleId),
         teamRoleId: Number(form.teamRoleId),
         breakProfileId: form.breakProfileId || null,
+        autoBreaksEnabled: form.autoBreaksEnabled,
         employeeGroupId: form.employeeGroupId || null,
         email: form.email.trim() || null,
         phoneNumber: form.phoneNumber.trim() || null,
@@ -544,6 +547,18 @@ export function EmployeeFormModal({ employee, onClose, onSaved }: EmployeeFormMo
               </select>
               {errors.breakProfileId && <span className="field-error">{errors.breakProfileId}</span>}
             </label>
+            <div className="employee-form-auto-breaks">
+              <label className="employee-form-checkbox-inline">
+                <input
+                  type="checkbox"
+                  checked={form.autoBreaksEnabled}
+                  onChange={(e) => set("autoBreaksEnabled", e.target.checked)}
+                />
+                Auto breaks
+              </label>
+              <p className="field-hint">Add missing scheduled breaks when this employee works through the full break period.</p>
+              {errors.autoBreaksEnabled && <span className="field-error">{errors.autoBreaksEnabled}</span>}
+            </div>
             <label>
               Employee Group
               <select value={form.employeeGroupId} onChange={(e) => set("employeeGroupId", e.target.value)}>

@@ -47,7 +47,6 @@ interface ItemInput {
   endTime: string;
   isPaid: boolean;
   fixedBreak: boolean;
-  autoAdd: boolean;
 }
 
 // Validates a full scheduled-break list: at least one row, each with a
@@ -89,7 +88,6 @@ function validateItems(raw: unknown): { error: string } | { items: ItemInput[] }
       endTime,
       isPaid: Boolean(it.isPaid),
       fixedBreak: Boolean(it.fixedBreak),
-      autoAdd: Boolean(it.autoAdd),
     });
   }
 
@@ -124,19 +122,26 @@ async function upsertItems(client: PoolClient, breakProfileId: string, items: It
     if (it.id && currentIds.has(it.id)) {
       keptIds.add(it.id);
       await client.query(
+        // updated_at moves only when the schedule itself changes: an
+        // occurrence whose window already started is never re-read from an
+        // item edited after it began (scheduledBreaks.ts), so re-saving an
+        // unchanged profile must not look like an edit. auto_add is no
+        // longer written here — Auto breaks is set per employee.
         `update break_profile_items
-         set name = $1, start_time = $2, end_time = $3, is_paid = $4, fixed_break = $5, auto_add = $6,
-             sort_order = $7, updated_at = now()
-         where id = $8`,
-        [it.name, it.startTime, it.endTime, it.isPaid, it.fixedBreak, it.autoAdd, i, it.id]
+         set updated_at = case when (name, start_time, end_time, is_paid, fixed_break)
+                                    is distinct from ($1::text, $2::time, $3::time, $4::boolean, $5::boolean)
+                               then now() else updated_at end,
+             name = $1, start_time = $2, end_time = $3, is_paid = $4, fixed_break = $5, sort_order = $6
+         where id = $7`,
+        [it.name, it.startTime, it.endTime, it.isPaid, it.fixedBreak, i, it.id]
       );
     } else {
       const { rows } = await client.query(
         `insert into break_profile_items
-           (id, break_profile_id, name, start_time, end_time, is_paid, fixed_break, auto_add, sort_order)
-         values (coalesce($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9)
+           (id, break_profile_id, name, start_time, end_time, is_paid, fixed_break, sort_order)
+         values (coalesce($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8)
          returning id`,
-        [it.id, breakProfileId, it.name, it.startTime, it.endTime, it.isPaid, it.fixedBreak, it.autoAdd, i]
+        [it.id, breakProfileId, it.name, it.startTime, it.endTime, it.isPaid, it.fixedBreak, i]
       );
       keptIds.add(rows[0].id as string);
     }
@@ -171,7 +176,6 @@ const LIST_SELECT = `
              'endTime', to_char(bpi.end_time, 'HH24:MI:SS'),
              'isPaid', bpi.is_paid,
              'fixedBreak', bpi.fixed_break,
-             'autoAdd', bpi.auto_add,
              'sortOrder', bpi.sort_order,
              'durationSeconds', extract(epoch from (bpi.end_time - bpi.start_time))::int
            ) order by bpi.sort_order) as items,

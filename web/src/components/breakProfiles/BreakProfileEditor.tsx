@@ -28,7 +28,6 @@ function toDraftItem(item: BreakProfileItem): BreakProfileItemDraft {
     endTime: item.endTime.slice(0, 5),
     isPaid: item.isPaid,
     fixedBreak: item.fixedBreak,
-    autoAdd: item.autoAdd,
   };
 }
 
@@ -40,7 +39,6 @@ function blankItem(): BreakProfileItemDraft {
     endTime: "",
     isPaid: false,
     fixedBreak: false,
-    autoAdd: false,
   };
 }
 
@@ -224,7 +222,6 @@ export function BreakProfileEditor({ profileId, onSaved, onCancel }: BreakProfil
         endTime: it.endTime,
         isPaid: it.isPaid,
         fixedBreak: it.fixedBreak,
-        autoAdd: it.autoAdd,
       })),
     };
 

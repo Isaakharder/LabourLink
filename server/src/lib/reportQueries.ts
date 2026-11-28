@@ -19,6 +19,7 @@ import {
 import { addDaysToDateStr, APP_TIMEZONE, calendarDateInAppTimezone, getDayBoundsUtc, getRangeBoundsUtc } from "./timezone";
 import { aggregateDensitySpeed } from "./densitySpeed";
 import { computeWorkdayTotals, groupByEmployeeDay, WorkdayBoundaryEntry } from "./workdayTotals";
+import { loadWorkdayTotalsOptions } from "./payrollSettings";
 import { CandidateRun, getUnresolvedRunsForRows } from "./rowCompletionCandidates";
 import { getRowReviewWindowDays } from "./rowReviewWindow";
 
@@ -1092,8 +1093,9 @@ export async function getActivityReportDataWithAttribution(
     isPaid: r.is_paid,
   }));
   const employeePaidByKey = new Map<string, number>();
+  const workdayTotalsOptions = await loadWorkdayTotalsOptions();
   for (const [key, entries] of groupByEmployeeDay(wholeShiftEntries)) {
-    employeePaidByKey.set(key, toSeconds(computeWorkdayTotals(entries).workedSeconds));
+    employeePaidByKey.set(key, toSeconds(computeWorkdayTotals(entries, new Date(), workdayTotalsOptions).workedSeconds));
   }
 
   // Activity Hours leave out any part of this activity's work that overlaps
@@ -1429,10 +1431,11 @@ export async function getPayrollReportData(
     isPaid: r.is_paid,
   }));
 
+  const workdayTotalsOptions = await loadWorkdayTotalsOptions();
   const rows: PayrollReportRow[] = [...groupByEmployeeDay(rawEntries).entries()]
     .map(([key, entries]) => {
       const [employeeId, date] = [entries[0].employeeId, key.slice(key.indexOf(":") + 1)];
-      const totals = computeWorkdayTotals(entries);
+      const totals = computeWorkdayTotals(entries, new Date(), workdayTotalsOptions);
       const workSeconds = toSeconds(totals.workedSeconds);
       const breakSeconds = toSeconds(totals.breakSeconds);
       const paidBreakSeconds = toSeconds(totals.paidBreakSeconds);

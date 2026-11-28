@@ -27,6 +27,7 @@ import { PoolClient } from "pg";
 import { pool } from "../db";
 import { lockEmployeeForManualEntry } from "./manualTimeEntries";
 import { calendarDateInAppTimezone, getDayBoundsUtc } from "./timezone";
+import { materializeDueResumeForEmployee } from "./scheduledBreaks";
 
 export const MIDNIGHT_CUTOFF_REASON = "midnight_cutoff";
 
@@ -40,12 +41,13 @@ export function computeMidnightCutoffBoundary(startedAtLocalDate: string): Date 
 
 interface OpenEntryRow {
   id: string;
+  entry_type: "work" | "break";
   started_at: string;
 }
 
 async function getOpenEntryForUpdate(client: PoolClient, employeeId: string): Promise<OpenEntryRow | null> {
   const { rows } = await client.query(
-    `select id, started_at from time_entries
+    `select id, entry_type, started_at from time_entries
      where employee_id = $1 and ended_at is null and deleted_at is null
      for update`,
     [employeeId]
@@ -59,7 +61,7 @@ async function getOpenEntryForUpdate(client: PoolClient, employeeId: string): Pr
 // on its own — the real write re-fetches FOR UPDATE and re-validates first.
 async function getOpenEntryUnlocked(employeeId: string): Promise<OpenEntryRow | null> {
   const { rows } = await pool.query(
-    `select id, started_at from time_entries
+    `select id, entry_type, started_at from time_entries
      where employee_id = $1 and ended_at is null and deleted_at is null`,
     [employeeId]
   );
@@ -78,8 +80,15 @@ export type ReconcileOutcome = "no_action" | "cut_off";
 // overwhelming majority of calls: this runs on every mobile request and
 // Inputs load, exactly like breakReconciliation.reconcileEmployeeBreaks.
 export async function reconcileMidnightCutoff(employeeId: string): Promise<ReconcileOutcome> {
-  const peeked = await getOpenEntryUnlocked(employeeId);
+  let peeked = await getOpenEntryUnlocked(employeeId);
   if (!peeked) return "no_action";
+  // A scheduled break whose end passed after the employee asked to go back
+  // resumes work at that end first (scheduledBreaks.ts) — otherwise this
+  // would cut the break off at midnight as if they never came back.
+  if (peeked.entry_type === "break" && (await materializeDueResumeForEmployee(employeeId))) {
+    peeked = await getOpenEntryUnlocked(employeeId);
+    if (!peeked) return "no_action";
+  }
   const todayLocal = calendarDateInAppTimezone(new Date());
   if (calendarDateInAppTimezone(new Date(peeked.started_at)) >= todayLocal) return "no_action";
 
