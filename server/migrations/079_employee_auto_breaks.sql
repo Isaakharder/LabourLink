@@ -18,7 +18,10 @@
 --    schedule (start, end, paid) and whether Auto breaks applied, so editing
 --    the profile or the employee afterwards can't change an occurrence that
 --    has already started. A tapped or automatic break links to its
---    occurrence (time_entries.break_occurrence_id).
+--    occurrence (time_entries.break_occurrence_id). It also records how an
+--    automatic break split the employee's work (so a delayed phone event
+--    can undo it exactly) and any review for Inputs "Breaks to review";
+--    confirming a review changes no time entry.
 --
 -- 3. time_entries.resume_*: on a scheduled break, the job (row, bin and
 --    density snapshot) the employee goes back to, and when they asked to go
@@ -61,11 +64,32 @@ create table break_occurrences (
   -- tapped: the employee's own Start Break matched it.
   -- auto_added: added automatically.
   -- expired: Auto breaks stopped checking it (see last_check_reason).
+  -- reversed: an automatic break was just undone because the phone's
+  --   delayed events showed it no longer qualified; it is decided again
+  --   once that sync finishes.
   status text not null default 'pending'
-    check (status in ('pending', 'tapped', 'auto_added', 'expired')),
+    check (status in ('pending', 'tapped', 'auto_added', 'expired', 'reversed')),
   break_entry_id uuid references time_entries(id) on delete set null,
   last_check_reason text,
   last_checked_at timestamptz,
+  -- How an automatic break split the employee's single work entry, so a
+  -- delayed phone event can undo it exactly: the part before the window
+  -- (null when the work started exactly at the window start) and the part
+  -- after it. Only set when nothing was deleted.
+  auto_before_entry_id uuid references time_entries(id) on delete set null,
+  auto_after_entry_id uuid references time_entries(id) on delete set null,
+  -- The delayed phone event that undid the automatic break, if any.
+  reversal jsonb,
+  -- Breaks to review (Inputs): why this occurrence needs a supervisor's
+  -- look (not added, shortened, recorded as an ordinary break, or a
+  -- conflict), and the supervisor's confirmation. Confirming only records
+  -- the review: it never adds a break or changes any time.
+  review_reason text,
+  review_detail jsonb,
+  review_flagged_at timestamptz,
+  review_confirmed_at timestamptz,
+  review_confirmed_by_employee_id uuid references employees(id) on delete set null,
+  review_confirm_note text,
   created_at timestamptz not null default now(),
   resolved_at timestamptz,
   constraint chk_break_occurrences_window check (scheduled_end > scheduled_start),
@@ -73,6 +97,8 @@ create table break_occurrences (
 );
 create index idx_break_occurrences_pending on break_occurrences (scheduled_end) where status = 'pending' and auto_enabled;
 create index idx_break_occurrences_employee_date on break_occurrences (employee_id, scheduled_date);
+create index idx_break_occurrences_review on break_occurrences (review_flagged_at)
+  where review_reason is not null and review_confirmed_at is null;
 
 alter table time_entries
   add column break_occurrence_id uuid references break_occurrences(id) on delete set null,

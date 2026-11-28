@@ -16,11 +16,15 @@
 //      whichever comes first. Another Start Break before the end just
 //      cancels that request. Finish Work ends the break at the tap.
 //   3. Auto breaks (employees.auto_breaks_enabled): once a window has ended
-//      and the employee worked continuously through all of it, the worker
-//      adds the break. Never on a day or window that started before Auto
-//      breaks was turned on, never across a gap, never over a supervisor's
-//      record, never when the employee's own tap already recorded it, and
-//      never again after a supervisor deleted it.
+//      and the employee's recorded work covers all of it (still-open work
+//      counts), the worker adds the break. Never on a day or window that
+//      started before Auto breaks was turned on, never across a gap, never
+//      over a supervisor's record, never when the employee's own tap already
+//      recorded it, and never again after a supervisor deleted it. A delayed
+//      phone event from before its end undoes it first when that can be done
+//      exactly, and it is decided again (reconcileWithAutoBreaks).
+//   5. Exceptions (not added, shortened, recorded as an ordinary break, or
+//      contradicted by a delayed event) are flagged for Breaks to review.
 //   4. break_occurrences freezes each day's schedule once its window starts,
 //      so later profile or employee edits can't change it.
 //
@@ -57,12 +61,21 @@ export interface Occurrence {
   is_paid: boolean;
   fixed_break: boolean;
   auto_enabled: boolean;
-  status: "pending" | "tapped" | "auto_added" | "expired";
+  status: "pending" | "tapped" | "auto_added" | "expired" | "reversed";
   break_entry_id: string | null;
+  auto_before_entry_id: string | null;
+  auto_after_entry_id: string | null;
+  reversal: { event: TapKind; eventAt: string } | null;
 }
 
 const OCCURRENCE_COLUMNS = `id, employee_id, break_profile_item_id, to_char(scheduled_date, 'YYYY-MM-DD') as scheduled_date,
-  name, scheduled_start, scheduled_end, is_paid, fixed_break, auto_enabled, status, break_entry_id`;
+  name, scheduled_start, scheduled_end, is_paid, fixed_break, auto_enabled, status, break_entry_id,
+  auto_before_entry_id, auto_after_entry_id, reversal`;
+
+function normalizeOccurrence(r: Record<string, unknown>): Occurrence {
+  const o = r as unknown as Occurrence;
+  return { ...o, scheduled_start: new Date(o.scheduled_start), scheduled_end: new Date(o.scheduled_end) };
+}
 
 type Db = Pick<PoolClient, "query">;
 
@@ -113,7 +126,7 @@ export async function ensureOccurrences(db: Db, employeeId: string, dateStr: str
 
 export async function loadOccurrence(db: Db, id: string): Promise<Occurrence | null> {
   const { rows } = await db.query(`select ${OCCURRENCE_COLUMNS} from break_occurrences where id = $1`, [id]);
-  return rows[0] ?? null;
+  return rows[0] ? normalizeOccurrence(rows[0]) : null;
 }
 
 // The not-yet-recorded fixed-break occurrence whose window contains `tap`
@@ -124,13 +137,13 @@ async function occurrenceContaining(db: Db, employeeId: string, tap: Date, now: 
   await ensureOccurrences(db, employeeId, dateStr, now);
   const { rows } = await db.query(
     `select ${OCCURRENCE_COLUMNS} from break_occurrences
-     where employee_id = $1 and scheduled_date = $2::date and fixed_break and status in ('pending', 'expired')
+     where employee_id = $1 and scheduled_date = $2::date and fixed_break and status in ('pending', 'expired', 'reversed')
        and scheduled_start <= $3 and scheduled_end > $3
      order by (scheduled_end - scheduled_start) asc, scheduled_start asc
      limit 1`,
     [employeeId, dateStr, tap]
   );
-  return rows[0] ?? null;
+  return rows[0] ? normalizeOccurrence(rows[0]) : null;
 }
 
 async function supervisorRemoved(db: Db, o: Occurrence): Promise<boolean> {
@@ -139,6 +152,66 @@ async function supervisorRemoved(db: Db, o: Occurrence): Promise<boolean> {
     [o.employee_id, o.break_profile_item_id, o.scheduled_date]
   );
   return rows.length > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Breaks to review (Inputs)
+// ---------------------------------------------------------------------------
+//
+// An occurrence a supervisor should look at carries a review reason and its
+// details (times as ISO strings, so repeated checks write nothing new); the
+// Inputs "Breaks to review" list shows them in plain English
+// (breakOccurrenceReviews.ts). Confirming one only records the review.
+
+// Auto breaks didn't add it, though the employee worked during the window.
+export const AUTO_REVIEW_REASONS = [
+  "started_after_window_start",
+  "ended_before_window_end",
+  "gap_in_work",
+  "existing_break",
+  "protected_record",
+  "waiting_for_shift_end",
+  "recovery_window_passed",
+] as const;
+// The employee's own tap couldn't be recorded as the full scheduled break,
+// or a delayed phone event contradicts an automatic break. An Auto breaks
+// check never replaces one of these while it is unconfirmed.
+export const TAP_REVIEW_REASONS = ["tap_shortened", "tap_ordinary", "tap_after_supervisor_removed", "late_event_conflict"] as const;
+export type ReviewReason = (typeof AUTO_REVIEW_REASONS)[number] | (typeof TAP_REVIEW_REASONS)[number];
+
+export interface BlockingEntry {
+  entryType: "work" | "break";
+  start: string;
+  end: string | null;
+  kinds: ProtectedKind[];
+}
+
+function blocking(e: Entry): BlockingEntry {
+  return { entryType: e.entry_type, start: e.started_at.toISOString(), end: e.ended_at?.toISOString() ?? null, kinds: e.protected_kinds };
+}
+
+// Flags (or re-flags) an occurrence for review. The same reason again leaves
+// a confirmed review confirmed; a different reason needs a new review.
+async function flagReview(db: Db, occurrenceId: string, reason: ReviewReason, detail: Record<string, unknown>, fromAutoCheck = false): Promise<void> {
+  await db.query(
+    `update break_occurrences
+     set review_reason = $2, review_detail = $3::jsonb, review_flagged_at = now(),
+         review_confirmed_at = null, review_confirmed_by_employee_id = null, review_confirm_note = null
+     where id = $1
+       and (review_reason is distinct from $2 or (review_confirmed_at is null and review_detail is distinct from $3::jsonb))
+       and not ($4::boolean and review_confirmed_at is null and coalesce(review_reason = any($5::text[]), false))`,
+    [occurrenceId, reason, JSON.stringify(detail), fromAutoCheck, TAP_REVIEW_REASONS]
+  );
+}
+
+// Clears an unconfirmed Auto breaks review (the break was added after all,
+// or the employee's tap recorded it).
+async function clearAutoReview(db: Db, occurrenceId: string): Promise<void> {
+  await db.query(
+    `update break_occurrences set review_reason = null, review_detail = null, review_flagged_at = null
+     where id = $1 and review_confirmed_at is null and review_reason = any($2::text[])`,
+    [occurrenceId, AUTO_REVIEW_REASONS]
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -158,22 +231,38 @@ interface Entry {
   density_count_per_row: number | null;
   break_occurrence_id: string | null;
   auto_closed_at: Date | null;
+  source: string;
   // Supervisor-entered, corrected by a person, or linked to a row/bin
   // completion or a midnight rollover: never moved or removed here.
   protected: boolean;
+  protected_kinds: ProtectedKind[];
 }
 
-const ENTRY_COLUMNS = `te.id, te.entry_type, te.device_id, te.activity_id, te.started_at, te.ended_at, te.greenhouse_row_id,
+// Why an entry can't be moved or removed here (empty = it can): entered by
+// a supervisor, corrected by a person, linked to a row or bin completion, or
+// part of a midnight rollover.
+export type ProtectedKind = "supervisor_entry" | "correction" | "row_completion" | "bin_completion" | "rollover";
+const PROTECTED_KINDS_SQL = `array_remove(array[
+    case when te.created_by_employee_id is not null then 'supervisor_entry' end,
+    case when exists (select 1 from time_entry_corrections c where c.time_entry_id = te.id and c.changed_by_employee_id is not null) then 'correction' end,
+    case when exists (select 1 from row_completion_segments s where s.time_entry_id = te.id) then 'row_completion' end,
+    case when exists (select 1 from carrier_completion_segments s where s.time_entry_id = te.id) then 'bin_completion' end,
+    case when te.rollover_of_entry_id is not null or exists (select 1 from time_entries r where r.rollover_of_entry_id = te.id) then 'rollover' end
+  ], null)`;
+
+const ENTRY_COLUMNS = `te.id, te.entry_type, te.source, te.device_id, te.activity_id, te.started_at, te.ended_at, te.greenhouse_row_id,
   te.carrier_id, te.density_type, te.density_count_per_row, te.break_occurrence_id, te.auto_closed_at,
-  (te.created_by_employee_id is not null
-   or exists (select 1 from time_entry_corrections c where c.time_entry_id = te.id and c.changed_by_employee_id is not null)
-   or exists (select 1 from row_completion_segments s where s.time_entry_id = te.id)
-   or exists (select 1 from carrier_completion_segments s where s.time_entry_id = te.id)
-   or exists (select 1 from time_entries r where r.rollover_of_entry_id = te.id)
-   or te.rollover_of_entry_id is not null) as protected`;
+  ${PROTECTED_KINDS_SQL} as protected_kinds`;
 
 function toEntry(r: Record<string, unknown>): Entry {
-  return { ...(r as unknown as Entry), started_at: new Date(r.started_at as string), ended_at: r.ended_at ? new Date(r.ended_at as string) : null };
+  const kinds = (r.protected_kinds as ProtectedKind[] | null) ?? [];
+  return {
+    ...(r as unknown as Entry),
+    started_at: new Date(r.started_at as string),
+    ended_at: r.ended_at ? new Date(r.ended_at as string) : null,
+    protected_kinds: kinds,
+    protected: kinds.length > 0,
+  };
 }
 
 // Every non-deleted entry of the employee overlapping [from, to).
@@ -247,7 +336,10 @@ export interface Tap {
 
 export type TapOutcome =
   | { handled: true; entryId: string | null; note?: string }
-  | { handled: false };
+  // conflict: the event contradicts an automatic break that couldn't be
+  // undone, and applying it would change records from after that break; the
+  // caller rejects it (permanent conflict) and it is flagged for review.
+  | { handled: false; conflict?: string };
 
 // Applies the scheduled-break rules to one tap, inside the caller's
 // transaction (employee lock held). Returns handled: false when the tap is
@@ -257,6 +349,22 @@ export async function applyScheduledBreakTap(db: Db, tap: Tap, now: Date = new D
   if (tap.kind === "break_start") {
     const { rows } = await db.query(`select id from time_entries where idempotency_key = $1`, [tap.idempotencyKey]);
     if (rows[0]) return { handled: true, entryId: rows[0].id };
+  }
+
+  // A delayed phone event from before an automatic break's end: undo that
+  // break first (when it can be undone exactly), so the event applies to
+  // the day as it really was; it is decided again after the sync.
+  const conflicted = await reconcileWithAutoBreaks(db, tap);
+  if (conflicted && (tap.kind === "work" || tap.kind === "end_day")) {
+    const openNow = await lockedOpenEntry(db, tap.employeeId);
+    if (openNow && openNow.started_at.getTime() > tap.at.getTime()) {
+      // Leave the day as recorded: closing or switching that later entry
+      // would rewrite work after the break (possibly a supervisor's).
+      return {
+        handled: false,
+        conflict: "contradicts an automatic break that could not be undone; left as recorded and listed in Breaks to review",
+      };
+    }
   }
 
   // Work already due back (the scheduled end passed before this tap).
@@ -359,12 +467,24 @@ export async function applyScheduledBreakTap(db: Db, tap: Tap, now: Date = new D
     return { handled: true, entryId: c.id };
   }
 
-  if (!open || open.entry_type !== "work") return { handled: false };
   const o = await occurrenceContaining(db, tap.employeeId, tap.at, now);
-  if (!o || o.status === "tapped" || o.status === "auto_added") return { handled: false };
-  if (await supervisorRemoved(db, o)) {
+  // A supervisor deleted this scheduled break (whether it had been tapped or
+  // added automatically): the deletion stands, the tap is an ordinary
+  // break, and the supervisor sees it.
+  const removed = await db.query(
+    `select bo.id from break_occurrences bo
+     join break_schedule_exceptions x
+       on x.employee_id = bo.employee_id and x.break_profile_item_id = bo.break_profile_item_id and x.scheduled_date = bo.scheduled_date
+     where bo.employee_id = $1 and bo.fixed_break and bo.scheduled_start <= $2 and bo.scheduled_end > $2
+     order by (bo.scheduled_end - bo.scheduled_start) asc limit 1`,
+    [tap.employeeId, tap.at]
+  );
+  if (removed.rows[0]) {
+    await flagReview(db, removed.rows[0].id, "tap_after_supervisor_removed", { tapAt: tap.at.toISOString() });
     return { handled: false };
   }
+  if (!open || open.entry_type !== "work") return { handled: false };
+  if (!o) return { handled: false };
   return startScheduledBreak(db, tap, o, open);
 }
 
@@ -376,12 +496,23 @@ async function startScheduledBreak(db: Db, tap: Tap, o: Occurrence, open: Entry)
   // item already recorded today: the full window can't be recorded without
   // overwriting it, so this is an ordinary break at the tap.
   const later = await entriesBetween(db, tap.employeeId, tap.at, o.scheduled_end);
-  if (later.some((e) => e.id !== open.id && (e.entry_type === "break" || e.protected))) return { handled: false };
+  const blocker = later.find((e) => e.id !== open.id && (e.entry_type === "break" || e.protected));
+  if (blocker) {
+    await flagReview(db, o.id, "tap_ordinary", {
+      tapAt: tap.at.toISOString(),
+      cause: blocker.entry_type === "break" ? "break" : "protected_record",
+      blocker: blocking(blocker),
+    });
+    return { handled: false };
+  }
   const sameItem = await db.query(
     `select 1 from time_entries where employee_id = $1 and break_profile_item_id = $2 and scheduled_break_date = $3::date and deleted_at is null`,
     [tap.employeeId, o.break_profile_item_id, o.scheduled_date]
   );
-  if (sameItem.rows.length > 0) return { handled: false };
+  if (sameItem.rows.length > 0) {
+    await flagReview(db, o.id, "tap_ordinary", { tapAt: tap.at.toISOString(), cause: "already_recorded" });
+    return { handled: false };
+  }
 
   // The current shift: walk back from the open entry through contiguous
   // entries. A placeholder that starts after the tap (work-start rounding
@@ -403,6 +534,7 @@ async function startScheduledBreak(db: Db, tap: Tap, o: Occurrence, open: Entry)
 
   // Never before the shift began, nor over a protected record or a break.
   let start = Math.max(S, shiftStart);
+  let shortenedBy: Entry | null = null;
   for (let changed = true; changed; ) {
     changed = false;
     for (const e of history) {
@@ -410,12 +542,16 @@ async function startScheduledBreak(db: Db, tap: Tap, o: Occurrence, open: Entry)
       if (e.entry_type === "break" || e.protected) {
         if (e.ended_at.getTime() > start) {
           start = Math.min(T, e.ended_at.getTime());
+          shortenedBy = e;
           changed = true;
         }
       }
     }
   }
-  if (open.protected && open.started_at.getTime() >= start && !placeholder) start = T;
+  if (open.protected && open.started_at.getTime() >= start && !placeholder) {
+    start = T;
+    shortenedBy = open;
+  }
 
   // Trim the segment running into the window, remove the ones inside it.
   const toDiscard: string[] = [];
@@ -457,7 +593,21 @@ async function startScheduledBreak(db: Db, tap: Tap, o: Occurrence, open: Entry)
       resume?.densityCountPerRow ?? null,
     ]
   );
-  await db.query(`update break_occurrences set status = 'tapped', break_entry_id = $2, resolved_at = now() where id = $1`, [o.id, rows[0].id]);
+  await db.query(
+    `update break_occurrences set status = 'tapped', break_entry_id = $2, resolved_at = now(), reversal = null, last_check_reason = null where id = $1`,
+    [o.id, rows[0].id]
+  );
+  await clearAutoReview(db, o.id);
+  if (start > S) {
+    // Shorter than the schedule: say why (a late start is the agreed rule,
+    // a protected record or another break is an exception).
+    await flagReview(db, o.id, "tap_shortened", {
+      tapAt: tap.at.toISOString(),
+      recordedStart: new Date(start).toISOString(),
+      cause: shortenedBy ? (shortenedBy.protected ? "protected_record" : "break") : "shift_start",
+      blocker: shortenedBy ? blocking(shortenedBy) : null,
+    });
+  }
   return { handled: true, entryId: rows[0].id };
 }
 
@@ -567,70 +717,119 @@ export async function scheduledBreakStatus(db: Db, breakEntryId: string): Promis
 // Auto breaks
 // ---------------------------------------------------------------------------
 
-export type AutoCheck =
-  | { added: true; breakEntryId: string }
-  | { added: false; reason: string; final: boolean };
+type AutoEvaluation =
+  | { eligible: true; work: Entry[] }
+  | { eligible: false; reason: string; final: boolean; detail: Record<string, unknown> };
 
-// Decides one pending Auto breaks occurrence (window ended), inside the
-// caller's transaction with the employee lock held. Adds the break only
-// when the employee's work covers the WHOLE window continuously:
-//   - work must start at or before the window start and continue, with no
-//     gap, until at or after its end (job switches inside are fine);
-//   - the end must be known: the covering work ended at or after the window
-//     end (not by a system cut-off), or a later phone event already synced
-//     (so no queued offline event can still say they left);
+// Shift closures that make the sync path reject a delayed phone event from
+// before them (applySyncedEvent's admin-end guard). Spelled out here, not
+// imported: midnightCutoff.ts imports this module.
+const SHIFT_CLOSURE_REASONS = ["midnight_cutoff", "long_shift_admin_end"];
+
+const FAR_FUTURE = new Date("9999-01-01T00:00:00Z");
+
+async function acceptedEventSince(db: Db, employeeId: string, at: Date): Promise<boolean> {
+  const { rows } = await db.query(
+    `select 1 from mobile_time_events where employee_id = $1 and processing_status = 'accepted' and occurred_at_utc >= $2 limit 1`,
+    [employeeId, at]
+  );
+  return rows.length > 0;
+}
+
+// Whether Auto breaks may add this occurrence (its window has ended),
+// without writing anything. Caller holds the employee lock. It may when the
+// employee's recorded work covers the WHOLE window:
+//   - work starts at or before the window start and continues, with no gap,
+//     until at or after its end (job switches inside are fine). Work still
+//     open counts: Auto breaks doesn't wait for Finish Work or any later
+//     phone event;
 //   - no break of any kind overlaps the window, nothing in it was entered,
 //     corrected, completed or rolled over by anyone, and no supervisor
 //     deleted this break before.
-export async function checkAutoOccurrence(db: Db, o: Occurrence): Promise<AutoCheck> {
+// One wait (waiting_for_shift_end): when the employee changed jobs inside
+// the window and the shift is still open with nothing synced from after the
+// window. Adding the break then deletes or moves those in-window segments,
+// and an offline phone may still hold an earlier Finish Work; undoing the
+// break would need exactly the deleted segments. It is added as soon as the
+// phone syncs anything from after the window, or the shift closes.
+async function evaluateAutoOccurrence(db: Db, o: Occurrence): Promise<AutoEvaluation> {
   const S = o.scheduled_start.getTime();
   const E = o.scheduled_end.getTime();
-  if (await supervisorRemoved(db, o)) return { added: false, reason: "supervisor_removed", final: true };
+  const no = (reason: string, detail: Record<string, unknown> = {}, final = false): AutoEvaluation => ({ eligible: false, reason, final, detail });
+  if (await supervisorRemoved(db, o)) return no("supervisor_removed", {}, true);
 
   const inWindow = await entriesBetween(db, o.employee_id, o.scheduled_start, o.scheduled_end);
-  if (inWindow.some((e) => e.entry_type === "break")) return { added: false, reason: "existing_break", final: false };
+  const brk = inWindow.find((e) => e.entry_type === "break");
+  if (brk) return no("existing_break", { blocker: blocking(brk) });
   const work = inWindow.filter((e) => e.entry_type === "work");
-  if (work.length === 0) return { added: false, reason: "no_work", final: false };
-  if (work[0].started_at.getTime() > S) return { added: false, reason: "started_after_window_start", final: false };
+  if (work.length === 0) return no("no_work");
+  if (work[0].started_at.getTime() > S) return no("started_after_window_start", { workStart: work[0].started_at.toISOString() });
   for (let i = 1; i < work.length; i++) {
     const prevEnd = work[i - 1].ended_at;
     if (!prevEnd || Math.abs(work[i].started_at.getTime() - prevEnd.getTime()) > CONTIGUOUS_MS) {
-      return { added: false, reason: "gap_in_work", final: false };
+      return no("gap_in_work", { gapFrom: prevEnd?.toISOString() ?? null, gapTo: work[i].started_at.toISOString() });
     }
   }
   const last = work[work.length - 1];
-  if (last.ended_at && last.ended_at.getTime() < E) return { added: false, reason: "ended_before_window_end", final: false };
-  if (work.some((e) => e.protected)) return { added: false, reason: "supervisor_or_linked_record", final: false };
+  if (last.ended_at && last.ended_at.getTime() < E) return no("ended_before_window_end", { workEnd: last.ended_at.toISOString() });
+  const prot = work.find((e) => e.protected);
+  if (prot) return no("protected_record", { blocker: blocking(prot) });
+  if (work.length > 1 && last.ended_at === null && !(await acceptedEventSince(db, o.employee_id, o.scheduled_end))) {
+    return no("waiting_for_shift_end");
+  }
+  return { eligible: true, work };
+}
 
-  const endKnown =
-    (last.ended_at !== null && last.auto_closed_at === null && !(await closedByMidnightCutoff(db, last.id))) ||
-    (
-      await db.query(
-        `select 1 from mobile_time_events where employee_id = $1 and processing_status = 'accepted' and occurred_at_utc >= $2 limit 1`,
-        [o.employee_id, o.scheduled_end]
-      )
-    ).rows.length > 0;
-  if (!endKnown) return { added: false, reason: "awaiting_later_activity", final: false };
-
-  // Trim / move / remove the work around the window.
+// Adds the break: trims, moves or removes the work around the window.
+// When the window held one work entry, the break only splits it, and the
+// two parts are recorded on the occurrence so a delayed phone event can
+// undo the break exactly (reconcileWithAutoBreaks).
+async function applyAutoOccurrence(db: Db, o: Occurrence, work: Entry[]): Promise<{ breakEntryId: string; beforeId: string | null; afterId: string | null }> {
+  const S = o.scheduled_start.getTime();
+  const E = o.scheduled_end.getTime();
   const toDiscard: string[] = [];
   const first = work[0];
+  const last = work[work.length - 1];
+  let beforeId: string | null = null;
+  let afterId: string | null = null;
   if (work.length === 1) {
     const w = first;
     const continues = w.ended_at === null || w.ended_at.getTime() > E;
     if (w.started_at.getTime() < S) {
-      await db.query(`update time_entries set ended_at = $2 where id = $1`, [w.id, o.scheduled_start]);
       if (continues) {
-        await db.query(
+        // Trim first (one open entry per employee), then the part after the
+        // window takes the original end.
+        const orig = (await db.query(`select ended_at, actual_ended_at, auto_closed_at from time_entries where id = $1`, [w.id])).rows[0];
+        await db.query(`update time_entries set ended_at = $2, actual_ended_at = null, auto_closed_at = null where id = $1`, [w.id, o.scheduled_start]);
+        const ins = await db.query(
           `insert into time_entries
-             (employee_id, device_id, entry_type, activity_id, started_at, ended_at, idempotency_key,
+             (employee_id, device_id, entry_type, activity_id, started_at, ended_at, actual_ended_at, auto_closed_at, idempotency_key,
               greenhouse_row_id, carrier_id, density_type, density_count_per_row, source)
-           values ($1, $2, 'work', $3, $4, $5, $6, $7, $8, $9, $10, 'break_reconciliation')`,
-          [o.employee_id, w.device_id, w.activity_id, o.scheduled_end, w.ended_at, randomUUID(), w.greenhouse_row_id, w.carrier_id, w.density_type, w.density_count_per_row]
+           values ($1, $2, 'work', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'break_reconciliation')
+           returning id`,
+          [
+            o.employee_id,
+            w.device_id,
+            w.activity_id,
+            o.scheduled_end,
+            orig.ended_at,
+            orig.actual_ended_at,
+            orig.auto_closed_at,
+            randomUUID(),
+            w.greenhouse_row_id,
+            w.carrier_id,
+            w.density_type,
+            w.density_count_per_row,
+          ]
         );
+        beforeId = w.id;
+        afterId = ins.rows[0].id;
+      } else {
+        await db.query(`update time_entries set ended_at = $2 where id = $1`, [w.id, o.scheduled_start]);
       }
     } else if (continues) {
       await db.query(`update time_entries set started_at = $2 where id = $1`, [w.id, o.scheduled_end]);
+      afterId = w.id;
     } else {
       toDiscard.push(w.id);
     }
@@ -651,15 +850,268 @@ export async function checkAutoOccurrence(db: Db, o: Occurrence): Promise<AutoCh
      returning id`,
     [o.employee_id, first.device_id, o.scheduled_start, o.scheduled_end, randomUUID(), o.break_profile_item_id, o.scheduled_date, o.is_paid, o.id]
   );
-  return { added: true, breakEntryId: rows[0].id };
+  return { breakEntryId: rows[0].id, beforeId, afterId };
 }
 
-async function closedByMidnightCutoff(db: Db, entryId: string): Promise<boolean> {
-  const { rows } = await db.query(
-    `select 1 from time_entry_corrections where time_entry_id = $1 and reason = 'midnight_cutoff' limit 1`,
-    [entryId]
+type Decision = "added" | "waiting" | "expired";
+
+// Decides one Auto breaks occurrence whose window has ended, inside the
+// caller's transaction with the employee lock held: adds the break, or
+// records why not (and flags it for review when the employee worked during
+// the window). `expire`: stop checking it when it isn't added now.
+async function decideOccurrence(db: Db, o: Occurrence, expire: boolean): Promise<Decision> {
+  const ev = await evaluateAutoOccurrence(db, o);
+  if (ev.eligible) {
+    const added = await applyAutoOccurrence(db, o, ev.work);
+    await db.query(
+      `update break_occurrences
+       set status = 'auto_added', break_entry_id = $2, auto_before_entry_id = $3, auto_after_entry_id = $4,
+           resolved_at = now(), last_check_reason = null, last_checked_at = now()
+       where id = $1`,
+      [o.id, added.breakEntryId, added.beforeId, added.afterId]
+    );
+    await clearAutoReview(db, o.id);
+    return "added";
+  }
+  const final = ev.final || expire;
+  await db.query(
+    `update break_occurrences
+     set last_check_reason = $2, last_checked_at = now(),
+         status = case when $3 then 'expired' else 'pending' end,
+         resolved_at = case when $3 then now() else null end
+     where id = $1`,
+    [o.id, ev.reason, final]
   );
+  if ((AUTO_REVIEW_REASONS as readonly string[]).includes(ev.reason)) {
+    await flagReview(db, o.id, ev.reason as ReviewReason, { ...ev.detail, reversal: o.reversal ?? null }, true);
+  } else {
+    await clearAutoReview(db, o.id);
+  }
+  return final ? "expired" : "waiting";
+}
+
+// Kept for callers that decide one occurrence directly (tests).
+export async function checkAutoOccurrence(db: Db, o: Occurrence): Promise<Decision> {
+  return decideOccurrence(db, o, false);
+}
+
+// ---------------------------------------------------------------------------
+// Delayed phone events after an automatic break
+// ---------------------------------------------------------------------------
+
+interface EntryState extends Entry {
+  deleted: boolean;
+}
+
+async function entryState(db: Db, id: string | null): Promise<EntryState | null> {
+  if (!id) return null;
+  const { rows } = await db.query(`select ${ENTRY_COLUMNS}, te.deleted_at is not null as deleted from time_entries te where te.id = $1`, [id]);
+  return rows[0] ? { ...toEntry(rows[0]), deleted: rows[0].deleted } : null;
+}
+
+async function hasCorrections(db: Db, entryId: string): Promise<boolean> {
+  const { rows } = await db.query(`select 1 from time_entry_corrections where time_entry_id = $1 limit 1`, [entryId]);
   return rows.length > 0;
+}
+
+export type ReversalBlocker = "edited" | "linked_record" | "shift_closed" | "later_activity";
+
+function blockerForProtected(e: Entry): ReversalBlocker {
+  if (e.protected_kinds.some((k) => k === "row_completion" || k === "bin_completion")) return "linked_record";
+  if (e.protected_kinds.includes("rollover")) return "shift_closed";
+  return "edited";
+}
+
+// Why an automatic break can't be undone exactly, or null when it can: the
+// break only split one work entry that is still open (nothing after the
+// window has been recorded or synced since), and nobody has edited, linked
+// or closed any of the three parts.
+async function reversalBlocker(db: Db, o: Occurrence): Promise<ReversalBlocker | null> {
+  const S = o.scheduled_start.getTime();
+  const E = o.scheduled_end.getTime();
+  const later = await acceptedEventSince(db, o.employee_id, o.scheduled_end);
+  if (!o.auto_after_entry_id) return later ? "later_activity" : "shift_closed";
+  const brk = await entryState(db, o.break_entry_id);
+  if (!brk || brk.deleted || brk.source !== "auto" || (await hasCorrections(db, brk.id)) || (await supervisorRemoved(db, o))) return "edited";
+  const after = await entryState(db, o.auto_after_entry_id);
+  if (!after || after.deleted) return "edited";
+  if (after.protected) return blockerForProtected(after);
+  const before = await entryState(db, o.auto_before_entry_id);
+  if (o.auto_before_entry_id) {
+    if (!before || before.deleted || before.ended_at?.getTime() !== S) return "edited";
+    if (before.protected) return blockerForProtected(before);
+  }
+  if (after.ended_at !== null) {
+    const { rows } = await db.query(
+      `select 1 from time_entry_corrections
+       where employee_id = $1 and reason = any($2::text[])
+         and (case when new_value ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' then new_value::timestamptz end) = $3 limit 1`,
+      [o.employee_id, SHIFT_CLOSURE_REASONS, after.ended_at]
+    );
+    return rows.length > 0 || after.auto_closed_at !== null ? "shift_closed" : "later_activity";
+  }
+  if (after.started_at.getTime() !== E) return "edited";
+  if (later) return "later_activity";
+  const others = (await entriesBetween(db, o.employee_id, o.scheduled_start, FAR_FUTURE)).filter((e) => e.id !== brk.id && e.id !== after.id);
+  if (others.length > 0) return "edited";
+  return null;
+}
+
+// Undoes an automatic break exactly: the work entry it split is whole again,
+// the break is deleted, and the occurrence waits to be decided again
+// ('reversed') once the sync carrying the delayed event has finished.
+async function reverseAutoBreak(db: Db, o: Occurrence, tap: Tap): Promise<void> {
+  const after = o.auto_after_entry_id!;
+  const before = o.auto_before_entry_id;
+  await db.query(
+    `update break_occurrences
+     set status = 'reversed', break_entry_id = null, auto_before_entry_id = null, auto_after_entry_id = null,
+         resolved_at = null, reversal = $2::jsonb, last_check_reason = 'reversed_by_late_event', last_checked_at = now()
+     where id = $1`,
+    [o.id, JSON.stringify({ event: tap.kind, eventAt: tap.at.toISOString() })]
+  );
+  if (before) {
+    // Remove the part after the break first (one open entry per employee),
+    // then the entry it was split from takes its end back.
+    const a = (await db.query(`select ended_at, actual_ended_at, auto_closed_at from time_entries where id = $1`, [after])).rows[0];
+    await db.query(`update mobile_time_events set time_entry_id = $1 where time_entry_id = $2`, [before, after]);
+    await db.query(`update time_entry_corrections set time_entry_id = $1 where time_entry_id = $2`, [before, after]);
+    await db.query(`update break_occurrences set auto_before_entry_id = $1 where auto_before_entry_id = $2`, [before, after]);
+    await db.query(`delete from time_entries where id = $1 and entry_type = 'work'`, [after]);
+    await db.query(`update time_entries set ended_at = $2, actual_ended_at = $3, auto_closed_at = $4 where id = $1`, [
+      before,
+      a.ended_at,
+      a.actual_ended_at,
+      a.auto_closed_at,
+    ]);
+  } else {
+    await db.query(`update time_entries set started_at = $2 where id = $1`, [after, o.scheduled_start]);
+  }
+  await db.query(`delete from time_entries where id = $1 and entry_type = 'break' and source = 'auto'`, [o.break_entry_id]);
+}
+
+// Before a phone event at `tap.at` applies: every automatic break of this
+// shift that ends after it is undone when it can be undone exactly (latest
+// first, so a chain of breaks splitting one entry unwinds in order). One
+// that can't be undone stays, and an event that contradicts it (a job
+// change or Finish Work inside its window, or Finish Work before it) is
+// flagged for review. A Start or End Break inside its window needs neither:
+// the tap takes the break over (applyScheduledBreakTap).
+// The start of the shift an entry belongs to: back through contiguous
+// entries (work or breaks).
+async function shiftStartOf(db: Db, employeeId: string, entryId: string): Promise<Date | null> {
+  const { rows } = await db.query(
+    `with recursive chain as (
+       select id, started_at, 0 as depth from time_entries where id = $2 and deleted_at is null
+       union all
+       select p.id, p.started_at, c.depth + 1 from chain c
+       join time_entries p on p.employee_id = $1 and p.deleted_at is null and p.ended_at is not null
+         and abs(extract(epoch from (p.ended_at - c.started_at))) <= 1
+         and p.id <> c.id
+       where c.depth < 200
+     )
+     select min(started_at) as start from chain`,
+    [employeeId, entryId]
+  );
+  return rows[0]?.start ? new Date(rows[0].start) : null;
+}
+
+async function reconcileWithAutoBreaks(db: Db, tap: Tap): Promise<boolean> {
+  const { rows } = await db.query(
+    `select ${OCCURRENCE_COLUMNS} from break_occurrences
+     where employee_id = $1 and status = 'auto_added' and scheduled_end > $2 and scheduled_start < $2::timestamptz + interval '18 hours'
+     order by scheduled_end desc`,
+    [tap.employeeId, tap.at]
+  );
+  // A later break that couldn't be undone also holds the earlier one in
+  // place when both split the same entry: same cause.
+  const heldBy = new Map<string, ReversalBlocker>();
+  let conflicted = false;
+  for (const raw of rows) {
+    const o = normalizeOccurrence(raw);
+    // Only breaks in the event's own shift: a stale event from an earlier
+    // day (say, another phone syncing yesterday's Finish Work) never undoes
+    // or flags today's breaks.
+    const anchor = o.auto_before_entry_id ?? o.auto_after_entry_id ?? o.break_entry_id;
+    const shiftStart = anchor ? await shiftStartOf(db, o.employee_id, anchor) : null;
+    if (!shiftStart || shiftStart.getTime() > tap.at.getTime()) continue;
+    const blocker = (o.auto_after_entry_id && heldBy.get(o.auto_after_entry_id)) || (await reversalBlocker(db, o));
+    if (!blocker) {
+      await reverseAutoBreak(db, o, tap);
+      continue;
+    }
+    if (o.auto_before_entry_id) heldBy.set(o.auto_before_entry_id, blocker);
+    const inside = tap.at.getTime() >= o.scheduled_start.getTime();
+    const contradicts = (inside && (tap.kind === "work" || tap.kind === "end_day")) || (!inside && tap.kind === "end_day");
+    if (contradicts) {
+      await flagReview(db, o.id, "late_event_conflict", { event: tap.kind, eventAt: tap.at.toISOString(), cause: blocker });
+      conflicted = true;
+    }
+  }
+  return conflicted;
+}
+
+// The same, for a caller applying a phone event in its own transaction with
+// the employee lock held (mobileTime.ts openEntry / Finish Work).
+export async function reconcileLateEvent(db: Db, employeeId: string, kind: TapKind, at: Date): Promise<void> {
+  await reconcileWithAutoBreaks(db, { employeeId, deviceId: "", kind, idempotencyKey: "", at });
+}
+
+// After a phone sync: decides again every occurrence a delayed event in it
+// undid, whatever its date (the worker's today/yesterday recovery limit
+// doesn't apply to these). One on an older day that couldn't be added then
+// (say, waiting for the shift to end) is decided again whenever a later
+// sync carries events from that shift (`eventSpan`), until it is added or
+// a supervisor confirms it. Own transaction + lock per occurrence.
+export async function recheckReversedOccurrences(
+  employeeId: string,
+  eventSpan: { from: Date; to: Date } | null = null,
+  now: Date = new Date()
+): Promise<number> {
+  const { rows } = await pool.query(
+    `select id, status from break_occurrences
+     where employee_id = $1
+       and (status = 'reversed'
+            or (status = 'expired' and reversal is not null and review_confirmed_at is null and auto_enabled
+                and $2::timestamptz is not null
+                and scheduled_start < $3::timestamptz + interval '18 hours' and scheduled_end > $2::timestamptz - interval '18 hours'))
+     order by scheduled_end`,
+    [employeeId, eventSpan?.from ?? null, eventSpan?.to ?? null]
+  );
+  let decided = 0;
+  for (const r of rows) if (await decideLocked(r.id, now, r.status)) decided++;
+  return decided;
+}
+
+// Decides one occurrence in its own transaction with the employee lock, if
+// it is still in `expectStatus`. Returns false when there was nothing to do.
+async function decideLocked(occurrenceId: string, now: Date, expectStatus: "pending" | "reversed" | "expired"): Promise<Decision | false> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const peek = await client.query(`select employee_id from break_occurrences where id = $1`, [occurrenceId]);
+    if (!peek.rows[0]) {
+      await client.query("rollback");
+      return false;
+    }
+    await lockEmployeeForManualEntry(client, peek.rows[0].employee_id);
+    const { rows } = await client.query(`select ${OCCURRENCE_COLUMNS} from break_occurrences where id = $1 for update`, [occurrenceId]);
+    if (rows[0]?.status !== expectStatus) {
+      await client.query("commit");
+      return false;
+    }
+    const o = normalizeOccurrence(rows[0]);
+    await materializeDueResume(client, o.employee_id, now);
+    const yesterday = addDaysToDateStr(calendarDateInAppTimezone(now), -1);
+    const decision = await decideOccurrence(client, o, expectStatus === "expired" || o.scheduled_date < yesterday);
+    await client.query("commit");
+    return decision;
+  } catch (err) {
+    await client.query("rollback").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export interface AutoBreakTickResult {
@@ -677,8 +1129,11 @@ export interface AutoBreakTickResult {
 //   - snapshots occurrences for today and yesterday (local), so a short
 //     outage recovers yesterday's late windows too;
 //   - resumes work for employees whose scheduled break ended;
-//   - checks pending Auto breaks occurrences whose window ended at least
-//     `graceMs` ago; ones from before yesterday are expired, never added.
+//   - decides pending Auto breaks occurrences whose window ended at least
+//     `graceMs` ago. Ones from before yesterday are never added: they
+//     expire, flagged for review when the employee worked through them;
+//   - decides any occurrence a delayed phone event undid whose sync didn't
+//     finish deciding it (after 5 minutes), whatever its date.
 export async function runAutoBreakTick(now: Date = new Date(), graceMs = 60 * 1000): Promise<AutoBreakTickResult> {
   const result: AutoBreakTickResult = { snapshotted: 0, resumed: 0, added: 0, waiting: 0, expired: 0, failures: 0 };
   const today = calendarDateInAppTimezone(now);
@@ -714,57 +1169,85 @@ export async function runAutoBreakTick(now: Date = new Date(), graceMs = 60 * 10
     }
   }
 
+  // Past the recovery window. Without Auto breaks nothing is left to decide;
+  // with it, the occurrence is decided once more without adding anything.
   const expiredRes = await pool.query(
     `update break_occurrences set status = 'expired', resolved_at = now(),
             last_check_reason = coalesce(last_check_reason, 'not_checked') || ' (recovery window passed)'
-     where status = 'pending' and scheduled_date < $1::date`,
+     where status = 'pending' and not auto_enabled and scheduled_date < $1::date`,
     [yesterday]
   );
   result.expired += expiredRes.rowCount ?? 0;
+  const { rows: stale } = await pool.query(
+    `select id from break_occurrences where status = 'pending' and auto_enabled and scheduled_date < $1::date order by scheduled_end`,
+    [yesterday]
+  );
+  for (const r of stale) {
+    try {
+      if (await expireLocked(r.id)) result.expired++;
+    } catch (err) {
+      result.failures++;
+      console.error(`[auto-breaks] expiry failed occurrence=${r.id}:`, err);
+    }
+  }
 
   const { rows: pending } = await pool.query(
-    `select ${OCCURRENCE_COLUMNS} from break_occurrences
-     where status = 'pending' and auto_enabled and scheduled_end <= $1 and scheduled_date >= $2::date
+    `select id, status from break_occurrences
+     where (status = 'pending' and auto_enabled and scheduled_end <= $1 and scheduled_date >= $2::date)
+        or (status = 'reversed' and last_checked_at < $3)
      order by scheduled_end asc`,
-    [new Date(now.getTime() - graceMs), yesterday]
+    [new Date(now.getTime() - graceMs), yesterday, new Date(now.getTime() - 5 * 60 * 1000)]
   );
-  for (const o of pending as Occurrence[]) {
-    const client = await pool.connect();
+  for (const r of pending) {
     try {
-      await client.query("begin");
-      await lockEmployeeForManualEntry(client, o.employee_id);
-      const fresh = await client.query(`select status from break_occurrences where id = $1 for update`, [o.id]);
-      if (fresh.rows[0]?.status !== "pending") {
-        await client.query("commit");
-        continue;
-      }
-      await materializeDueResume(client, o.employee_id, now);
-      const outcome = await checkAutoOccurrence(client, { ...o, scheduled_start: new Date(o.scheduled_start), scheduled_end: new Date(o.scheduled_end) });
-      if (outcome.added) {
-        await client.query(
-          `update break_occurrences set status = 'auto_added', break_entry_id = $2, resolved_at = now(), last_check_reason = null, last_checked_at = now() where id = $1`,
-          [o.id, outcome.breakEntryId]
-        );
-        result.added++;
-      } else {
-        await client.query(
-          `update break_occurrences set last_check_reason = $2, last_checked_at = now(),
-                  status = case when $3 then 'expired' else status end,
-                  resolved_at = case when $3 then now() else resolved_at end
-           where id = $1`,
-          [o.id, outcome.reason, outcome.final]
-        );
-        if (outcome.final) result.expired++;
-        else result.waiting++;
-      }
-      await client.query("commit");
+      const decision = await decideLocked(r.id, now, r.status);
+      if (decision === "added") result.added++;
+      else if (decision === "waiting") result.waiting++;
+      else if (decision === "expired") result.expired++;
     } catch (err) {
-      await client.query("rollback").catch(() => {});
       result.failures++;
-      console.error(`[auto-breaks] check failed occurrence=${o.id}:`, err);
-    } finally {
-      client.release();
+      console.error(`[auto-breaks] check failed occurrence=${r.id}:`, err);
     }
   }
   return result;
+}
+
+// Expires one pending Auto breaks occurrence past the recovery window,
+// adding nothing. If the employee worked through it, or worked during it
+// for a reason that needs review, it is flagged.
+async function expireLocked(occurrenceId: string): Promise<boolean> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const peek = await client.query(`select employee_id from break_occurrences where id = $1`, [occurrenceId]);
+    if (!peek.rows[0]) {
+      await client.query("rollback");
+      return false;
+    }
+    await lockEmployeeForManualEntry(client, peek.rows[0].employee_id);
+    const { rows } = await client.query(`select ${OCCURRENCE_COLUMNS} from break_occurrences where id = $1 for update`, [occurrenceId]);
+    if (rows[0]?.status !== "pending") {
+      await client.query("commit");
+      return false;
+    }
+    const o = normalizeOccurrence(rows[0]);
+    const ev = await evaluateAutoOccurrence(client, o);
+    const reason = ev.eligible ? "recovery_window_passed" : ev.reason;
+    await client.query(
+      `update break_occurrences set status = 'expired', resolved_at = now(), last_checked_at = now(),
+              last_check_reason = $2 || ' (recovery window passed)'
+       where id = $1`,
+      [o.id, reason]
+    );
+    if ((AUTO_REVIEW_REASONS as readonly string[]).includes(reason)) {
+      await flagReview(client, o.id, reason as ReviewReason, ev.eligible ? {} : { ...ev.detail, reversal: o.reversal ?? null }, true);
+    }
+    await client.query("commit");
+    return true;
+  } catch (err) {
+    await client.query("rollback").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }

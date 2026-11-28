@@ -24,6 +24,30 @@ export interface BreakReviewCase {
   overlappedWorkSeconds: number;
 }
 
+// A scheduled break flagged for review (GET /api/inputs/break-reviews,
+// "occurrences"): not added automatically although the employee worked
+// during it, shortened, recorded as an ordinary break, or contradicted by a
+// delayed phone sync. Often there is no break record at all.
+export interface OccurrenceReviewCase {
+  occurrenceId: string;
+  employeeId: string;
+  employeeName: string;
+  date: string;
+  name: string | null;
+  scheduledStart: string;
+  scheduledEnd: string;
+  isPaid: boolean;
+  reason: string;
+  message: string;
+  flaggedAt: string;
+  recordedBreak: { startedAt: string; endedAt: string | null } | null;
+}
+
+function recordedBreakText(c: OccurrenceReviewCase): string {
+  if (!c.recordedBreak) return "No scheduled break recorded";
+  return `${formatTimeInAppTimezone(c.recordedBreak.startedAt)} – ${c.recordedBreak.endedAt ? formatTimeInAppTimezone(c.recordedBreak.endedAt) : "open"}`;
+}
+
 export function breakReviewSummary(c: Pick<BreakReviewCase, "startedAt" | "endedAt" | "durationSeconds">): string {
   return `${formatTimeInAppTimezone(c.startedAt)} – ${formatTimeInAppTimezone(c.endedAt)} (${formatDurationHMS(c.durationSeconds)})`;
 }
@@ -32,25 +56,71 @@ export function breakReviewSummary(c: Pick<BreakReviewCase, "startedAt" | "ended
 // day in Inputs, with the review dialog.
 export function BreakReviewListModal({
   cases,
+  occurrences,
   onOpen,
+  onOpenOccurrence,
   onClose,
 }: {
   cases: BreakReviewCase[] | null;
+  occurrences?: OccurrenceReviewCase[] | null;
   onOpen: (c: BreakReviewCase) => void;
+  onOpenOccurrence?: (c: OccurrenceReviewCase) => void;
   onClose: () => void;
 }) {
+  const loading = cases === null && (occurrences ?? null) === null;
+  const none = !loading && (cases?.length ?? 0) === 0 && (occurrences?.length ?? 0) === 0;
   return (
     <Modal title="Breaks to review" onClose={onClose} wide>
-      <p className="break-review-intro">
-        These breaks were closed automatically at the end of the day, not by the employee, so their end time is not
-        reliable. Until a break is reviewed, productivity keeps the work recorded during it. Payroll uses the break as
-        recorded until it is corrected.
-      </p>
-      {cases === null ? (
+      {loading ? (
         <p>Loading…</p>
-      ) : cases.length === 0 ? (
+      ) : none ? (
         <p>No breaks need review.</p>
-      ) : (
+      ) : null}
+      {occurrences && occurrences.length > 0 && (
+        <section className="break-review-section" aria-label="Scheduled breaks">
+          <h3>Scheduled breaks</h3>
+          <p className="break-review-intro">
+            These scheduled breaks weren't recorded as scheduled: not added automatically although the employee worked
+            during them, shortened, recorded as an ordinary break, or contradicted by a phone that synced late. Nothing
+            has been changed because of this list. Confirming records that you checked the day; it doesn't add a break
+            or change pay. If the day is wrong, correct it in Inputs.
+          </p>
+          <table className="break-review-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Employee</th>
+                <th>What happened</th>
+                <th>Recorded</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {occurrences.map((c) => (
+                <tr key={c.occurrenceId}>
+                  <td>{formatDateLong(c.date)}</td>
+                  <td>{c.employeeName}</td>
+                  <td>{c.message}</td>
+                  <td>{recordedBreakText(c)}</td>
+                  <td>
+                    <button type="button" onClick={() => onOpenOccurrence?.(c)}>
+                      Review
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+      {cases && cases.length > 0 && (
+        <section className="break-review-section" aria-label="Breaks closed automatically">
+        {occurrences && occurrences.length > 0 && <h3>Closed automatically</h3>}
+        <p className="break-review-intro">
+          These breaks were closed automatically at the end of the day, not by the employee, so their end time is not
+          reliable. Until a break is reviewed, productivity keeps the work recorded during it. Payroll uses the break as
+          recorded until it is corrected.
+        </p>
         <table className="break-review-table">
           <thead>
             <tr>
@@ -79,12 +149,91 @@ export function BreakReviewListModal({
             ))}
           </tbody>
         </table>
+        </section>
       )}
       <div className="employee-form-actions">
         <button type="button" onClick={onClose}>
           Close
         </button>
       </div>
+    </Modal>
+  );
+}
+
+// Review one flagged scheduled break: confirm that the day has been checked.
+// POST /api/inputs/break-occurrences/:id/review records who, when and why;
+// it never adds a break, moves a time or changes pay. Corrections are made
+// in Inputs, as for any other day.
+export function OccurrenceReviewModal({
+  review,
+  onClose,
+  onSaved,
+}: {
+  review: OccurrenceReviewCase;
+  onClose: () => void;
+  onSaved: (message: string) => void;
+}) {
+  const [reason, setReason] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const canSave = reason.trim().length >= 3 && confirmed && !saving;
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!canSave) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api(`/api/inputs/break-occurrences/${review.occurrenceId}/review`, {
+        method: "POST",
+        body: JSON.stringify({ confirmed: true, reason: reason.trim() }),
+      });
+      onSaved("Review recorded. No times were changed.");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not save the review");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal title="Review scheduled break" onClose={saving ? () => {} : onClose}>
+      <form onSubmit={handleSubmit} className="employee-form break-review-form" noValidate>
+        <p>
+          <strong>{review.employeeName}</strong>, {formatDateLong(review.date)}.
+        </p>
+        <p className="break-review-message">{review.message}</p>
+        <p>
+          Recorded: {recordedBreakText(review)} · {review.isPaid ? "paid" : "unpaid"} break
+        </p>
+        <p className="break-review-hint">
+          The employee's day is open behind this dialog. If it is wrong, cancel and correct it in Inputs. Confirming
+          only records that you checked it: it doesn't add a break or change any time or pay, and Auto breaks stops
+          checking this break.
+        </p>
+        <label className="break-review-reason">
+          Reason
+          <textarea
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            rows={2}
+            placeholder="e.g. Checked with the employee: worked through lunch to finish the row"
+          />
+        </label>
+        <label className="break-review-confirm">
+          <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
+          I have checked this day.
+        </label>
+        {error && <p className="error-text">{error}</p>}
+        <div className="employee-form-actions">
+          <button type="button" onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button type="submit" disabled={!canSave}>
+            {saving ? "Saving…" : "Confirm review"}
+          </button>
+        </div>
+      </form>
     </Modal>
   );
 }

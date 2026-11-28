@@ -3,7 +3,16 @@ import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireDevice } from "../middleware/device";
 import { isDemoInstanceEnabled } from "../lib/demoInstance";
-import { applyScheduledBreakTap, materializeDueResumeForEmployee, scheduledBreakStatus, Tap, TapOutcome } from "../lib/scheduledBreaks";
+import {
+  applyScheduledBreakTap,
+  materializeDueResumeForEmployee,
+  recheckReversedOccurrences,
+  reconcileLateEvent,
+  scheduledBreakStatus,
+  Tap,
+  TapKind,
+  TapOutcome,
+} from "../lib/scheduledBreaks";
 import { reconcileMidnightCutoff, MIDNIGHT_CUTOFF_REASON } from "../lib/midnightCutoff";
 import { findMostRecentShiftClosureBoundary } from "../lib/longShiftAdminEnd";
 import { lockEmployeeForManualEntry } from "../lib/manualTimeEntries";
@@ -110,6 +119,12 @@ interface OpenEntryOverrides {
   // resolveManualEntryGuard. The direct online routes leave it unset and
   // behave exactly as before.
   protectManualEntries?: boolean;
+  // A phone event being applied (sync path): any automatic break it
+  // contradicts is undone inside this same transaction, under the employee
+  // lock, before anything is opened or closed (scheduledBreaks.ts). The
+  // scheduled-break step already did this in its own transaction; doing it
+  // again here covers a worker tick that added a break in between.
+  lateEvent?: { kind: TapKind; at: Date };
 }
 
 // What openEntry() returns: the entry now open, or — only when
@@ -290,6 +305,7 @@ async function openEntry(
     // Serializes with the manual Inputs routes (same advisory lock), so a
     // manual entry can't appear between the guard below and this insert.
     if (overrides.protectManualEntries) await lockEmployeeForManualEntry(client, employeeId);
+    if (overrides.lateEvent) await reconcileLateEvent(client, employeeId, overrides.lateEvent.kind, overrides.lateEvent.at);
     // Locked peek at whatever's currently open (if anything) — needed up
     // front, not just implicitly during a blind close UPDATE, because the
     // boundary comparison below needs its started_at before deciding how
@@ -1608,6 +1624,7 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
         work: { activityId: event.activityId, greenhouseRowId: validation.validatedRowId, carrierId: validation.validatedCarrierId },
       });
       if (scheduled.handled) return { status: "accepted", timeEntryId: scheduled.entryId };
+      if (scheduled.conflict) return { status: "permanent_conflict", conflictReason: scheduled.conflict };
 
       const currentlyOpen = await getOpenEntryExcluding(employeeId, event.clientEventId);
       const wasIdle = currentlyOpen === null;
@@ -1646,6 +1663,7 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
       const entry = await openEntry(employeeId, deviceId, "work", event.activityId, event.clientEventId, {
         ...overrides,
         protectManualEntries: true,
+        lateEvent: { kind: "work", at: original },
       });
       return syncOutcomeFromEntry(entry);
     }
@@ -1685,6 +1703,7 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
       const entry = await openEntry(employeeId, deviceId, "break", null, event.clientEventId, {
         ...overrides,
         protectManualEntries: true,
+        lateEvent: { kind: "break_start", at: originalTap },
       });
       return syncOutcomeFromEntry(entry);
     }
@@ -1752,24 +1771,29 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
       const entry = await openEntry(employeeId, deviceId, "work", resumeActivityId, event.clientEventId, {
         ...overrides,
         protectManualEntries: true,
+        lateEvent: { kind: "break_end", at: originalTap },
       });
       return syncOutcomeFromEntry(entry);
     }
     case "end_day": {
       // Resumes work first if a scheduled break already ended before this tap.
-      await runScheduledBreakTap({
+      const scheduledEnd = await runScheduledBreakTap({
         employeeId,
         deviceId,
         kind: "end_day",
         idempotencyKey: event.clientEventId,
         at: resolveOriginalEndedAt(event.occurredAtUtc, now),
       });
+      if (!scheduledEnd.handled && scheduledEnd.conflict) return { status: "permanent_conflict", conflictReason: scheduledEnd.conflict };
       const client = await pool.connect();
       let closedId: string | null = null;
       let reviewNote: string | null = null;
       try {
         await client.query("begin");
         await lockEmployeeForManualEntry(client, employeeId);
+        // Same as openEntry's lateEvent: an automatic break a worker tick
+        // added since the scheduled-break step above is undone here too.
+        await reconcileLateEvent(client, employeeId, "end_day", resolveOriginalEndedAt(event.occurredAtUtc, now));
         const openRes = await client.query(
           `select id, started_at, created_by_employee_id from time_entries
            where employee_id = $1 and ended_at is null and deleted_at is null
@@ -2021,6 +2045,7 @@ router.post(
     // the response is sent (see the end of this handler).
     const acceptedBinChoices: string[] = [];
     let acceptedAny = false; // any accepted event may move this employee's bin to awaiting weighing
+    let acceptedSpan: { from: Date; to: Date } | null = null; // occurrence times of the accepted events
 
     for (const event of valid) {
       const existing = await pool.query(
@@ -2113,6 +2138,14 @@ router.post(
         if (carrierIdsInAnswers(event.answers).length > 0 || event.eventType === "bin_rescan") acceptedBinChoices.push(event.clientEventId);
         acceptedAny = true;
         lastAcceptedOccurredAtUtc = new Date(event.occurredAtUtc);
+        {
+          const occurred = new Date(event.occurredAtUtc);
+          const span = acceptedSpan as { from: Date; to: Date } | null;
+          acceptedSpan = {
+            from: span && span.from < occurred ? span.from : occurred,
+            to: span && span.to > occurred ? span.to : occurred,
+          };
+        }
         lastProcessedSeq = event.deviceSeq;
         await pool.query(
           `update device_sync_state set last_processed_seq = $2, last_synced_at = now() where device_id = $1`,
@@ -2162,6 +2195,14 @@ router.post(
     // event: a later event in the same batch can still be from before the
     // end. A later batch's earlier Finish Work undoes it (scheduledBreaks.ts).
     if (acceptedAny) await materializeDueResumeForEmployee(d.employeeId);
+    // An automatic break a delayed event in this batch undid is decided
+    // again now, against the whole batch (scheduledBreaks.ts), whatever its
+    // date. Unconditional: the event that undid it may itself have failed.
+    // Never fails the response: the events are already committed, and the
+    // worker decides anything left 'reversed' within minutes.
+    await recheckReversedOccurrences(d.employeeId, acceptedSpan).catch((err) =>
+      console.error(`[auto-breaks] recheck after sync failed employee=${d.employeeId}:`, err)
+    );
 
     // deviceLastProcessedSeq: this device's own device_sync_state row after
     // this batch — the client persists it locally (syncEngine.ts) as a

@@ -15,7 +15,13 @@ import { AddBreakModal } from "../../components/inputs/AddBreakModal";
 import { AddActivityModal } from "../../components/inputs/AddActivityModal";
 import { AddEmployeeToDayModal } from "../../components/inputs/AddEmployeeToDayModal";
 import { SpeedReviewModal } from "../../components/inputs/SpeedReviewModal";
-import { BreakReviewCase, BreakReviewListModal, BreakReviewModal } from "../../components/inputs/BreakReviewModal";
+import {
+  BreakReviewCase,
+  BreakReviewListModal,
+  BreakReviewModal,
+  OccurrenceReviewCase,
+  OccurrenceReviewModal,
+} from "../../components/inputs/BreakReviewModal";
 import { SpeedReviewGroupsResponse } from "../../lib/speedReviewTypes";
 import { api, ApiError } from "../../lib/api";
 import { useAuth } from "../../context/AuthContext";
@@ -219,15 +225,24 @@ export function InputsPage() {
   // the button appears only when the server returns the list, and a break's
   // own canEdit (from the daily view) gates its review dialog.
   const [breakReviews, setBreakReviews] = useState<BreakReviewCase[] | null>(null);
+  const [occurrenceReviews, setOccurrenceReviews] = useState<OccurrenceReviewCase[] | null>(null);
+  const [reviewingOccurrence, setReviewingOccurrence] = useState<OccurrenceReviewCase | null>(null);
   const [breakReviewListOpen, setBreakReviewListOpen] = useState(false);
   const [reviewingBreak, setReviewingBreak] = useState<React.ComponentProps<typeof BreakReviewModal>["review"] | null>(null);
   const loadBreakReviews = useCallback(() => {
-    api<{ breaks: BreakReviewCase[] }>("/api/inputs/break-reviews")
-      .then((res) => setBreakReviews(res.breaks))
+    api<{ breaks: BreakReviewCase[]; occurrences?: OccurrenceReviewCase[] }>("/api/inputs/break-reviews")
+      .then((res) => {
+        setBreakReviews(res.breaks);
+        // Absent from an older server: nothing to show.
+        setOccurrenceReviews(res.occurrences ?? []);
+      })
       .catch((err) => {
         // No access (403): no button. Otherwise keep the last known list;
         // the next load retries.
-        if (err instanceof ApiError && (err.status === 403 || err.status === 401)) setBreakReviews(null);
+        if (err instanceof ApiError && (err.status === 403 || err.status === 401)) {
+          setBreakReviews(null);
+          setOccurrenceReviews(null);
+        }
       });
   }, []);
   useEffect(() => {
@@ -1128,14 +1143,17 @@ export function InputsPage() {
         <div className="inputs-workspace-main">
           <div className="inputs-workspace-datenav">
             <DateNav date={date} onChange={(d) => updateParams({ date: d })} />
-            {breakReviews && breakReviews.length > 0 && (
+            {(breakReviews?.length ?? 0) + (occurrenceReviews?.length ?? 0) > 0 && (
               <button
                 type="button"
                 className="inputs-section-header-button inputs-review-button inputs-break-review-button"
                 onClick={() => setBreakReviewListOpen(true)}
               >
                 Breaks to review
-                <ReviewCountBadge count={breakReviews.length} label="breaks closed automatically that need review" />
+                <ReviewCountBadge
+                  count={(breakReviews?.length ?? 0) + (occurrenceReviews?.length ?? 0)}
+                  label="breaks that need review"
+                />
               </button>
             )}
             {selectedEmployeeId && (
@@ -1349,11 +1367,28 @@ export function InputsPage() {
       {breakReviewListOpen && (
         <BreakReviewListModal
           cases={breakReviews}
+          occurrences={occurrenceReviews}
           onClose={() => setBreakReviewListOpen(false)}
           onOpen={(c) => {
             setBreakReviewListOpen(false);
             updateParams({ date: c.date, employee: c.employeeId });
             setReviewingBreak(c);
+          }}
+          onOpenOccurrence={(c) => {
+            setBreakReviewListOpen(false);
+            updateParams({ date: c.date, employee: c.employeeId });
+            setReviewingOccurrence(c);
+          }}
+        />
+      )}
+      {reviewingOccurrence && (
+        <OccurrenceReviewModal
+          review={reviewingOccurrence}
+          onClose={() => setReviewingOccurrence(null)}
+          onSaved={(message) => {
+            setReviewingOccurrence(null);
+            loadBreakReviews();
+            setSuccessMessage(message);
           }}
         />
       )}

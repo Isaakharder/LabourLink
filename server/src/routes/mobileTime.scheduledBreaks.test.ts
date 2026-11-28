@@ -16,6 +16,7 @@
 //
 // Run with: npm run test:scheduled-breaks
 import "dotenv/config";
+import { describeOccurrenceReview } from "../lib/breakOccurrenceReviews";
 import { pool } from "../db";
 import { addDaysToDateStr, calendarDateInAppTimezone, zonedWallTimeToUtc } from "../lib/timezone";
 import {
@@ -38,6 +39,18 @@ import {
   summary,
   sync,
 } from "../lib/testSupport/scheduledBreakFixtures";
+
+async function occurrenceReviews(employeeId: string): Promise<any[]> {
+  const { rows } = await pool.query(
+    `select status, name, scheduled_start, scheduled_end, review_reason, review_detail from break_occurrences
+     where employee_id = $1 and review_reason is not null and review_confirmed_at is null order by scheduled_start`,
+    [employeeId]
+  );
+  return rows;
+}
+function reviewInput(r: any) {
+  return { name: r.name, scheduledStart: r.scheduled_start, scheduledEnd: r.scheduled_end, reason: r.review_reason, detail: r.review_detail };
+}
 
 async function main() {
   const server = await startServer();
@@ -202,6 +215,15 @@ async function main() {
       const brk = live(rs).filter((r) => r.entry_type === "break");
       check(brk.length === 1 && sameInstant(brk[0].started_at, t("12:06")) && sameInstant(brk[0].ended_at, t("13:00")), "12: the break starts after it, ends on schedule", describe(rs));
       check(overlaps(rs).length === 0, "12: no overlap", overlaps(rs));
+      // The shortened break is flagged for supervisor review, with why.
+      const rv = await occurrenceReviews(e.id);
+      check(
+        rv.length === 1 && rv[0].review_reason === "tap_shortened" && rv[0].review_detail.cause === "protected_record" &&
+          rv[0].review_detail.blocker.kinds.includes("bin_completion") && rv[0].status === "tapped",
+        "12: flagged for review: shortened by a completion-linked segment",
+        rv
+      );
+      check(/recorded from 12:06 PM, not 12:00 PM .*linked to a bin completion/.test(describeOccurrenceReview(reviewInput(rv[0]))), "12: review text explains it", describeOccurrenceReview(reviewInput(rv[0])));
     }
 
     // 13) A finished supervisor entry later in the window: the scheduled
@@ -222,6 +244,28 @@ async function main() {
       const brk = live(rs).filter((r) => r.entry_type === "break");
       check(brk.length === 1 && sameInstant(brk[0].started_at, t("12:10")) && brk[0].break_occurrence_id === null, "13: ordinary break at the tap", describe(rs));
       check(live(rs).some((r) => r.created_by_employee_id && sameInstant(r.started_at, t("12:30")) && sameInstant(r.ended_at, t("12:40"))), "13: the supervisor's entry is untouched", describe(rs));
+      const rv = await occurrenceReviews(e.id);
+      check(
+        rv.length === 1 && rv[0].review_reason === "tap_ordinary" && rv[0].review_detail.cause === "protected_record" &&
+          rv[0].review_detail.blocker.kinds.includes("supervisor_entry"),
+        "13: flagged for review: recorded as an ordinary break because of a supervisor entry",
+        rv
+      );
+      check(/ordinary break.*entered by a supervisor/.test(describeOccurrenceReview(reviewInput(rv[0]))), "13: review text explains it", describeOccurrenceReview(reviewInput(rv[0])));
+    }
+
+    // 14) Late arrival: the tapped break is shortened to the shift start,
+    //     flagged (the agreed rule, shown so the supervisor sees it); a
+    //     normal full-window tap is not flagged.
+    {
+      const p = await createProfile();
+      const e = await createEmployee(p.id);
+      await sync(server, e, [["work_start", t("12:20"), A], ["break_start", t("12:35")], ["break_end", t("12:55")], ["end_day", t("16:33")]]);
+      const rv = await occurrenceReviews(e.id);
+      check(rv.length === 1 && rv[0].review_reason === "tap_shortened" && rv[0].review_detail.cause === "shift_start", "14: late start flagged as shortened", rv);
+      const e2 = await createEmployee(p.id);
+      await sync(server, e2, [["work_start", t("06:58"), A], ["break_start", t("12:10")], ["break_end", t("12:50")], ["end_day", t("16:33")]]);
+      check((await occurrenceReviews(e2.id)).length === 0, "14: a normal full-window tap needs no review", await occurrenceReviews(e2.id));
     }
 
     // 11) Live: on lunch now, End Break early — the server keeps them on

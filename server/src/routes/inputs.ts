@@ -16,6 +16,7 @@ import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
 import { aggregateDensitySpeed } from "../lib/densitySpeed";
 import { computeWorkdayTotals, groupByEmployeeDay, WorkdayBoundaryEntry, WorkdayTotalsOptions } from "../lib/workdayTotals";
 import { loadWorkdayTotalsOptions } from "../lib/payrollSettings";
+import { describeOccurrenceReview } from "../lib/breakOccurrenceReviews";
 import { CandidateRun, getRolloverPriorDurationSeconds, getUnresolvedRunsForRows } from "../lib/rowCompletionCandidates";
 import {
   loadCarrierOptions,
@@ -3887,7 +3888,95 @@ router.get(
         isPaid: r.is_paid ?? null,
         overlappedWorkSeconds: Math.max(0, Math.round(r.overlapped_work_seconds)),
       }));
-    res.json({ breaks });
+
+    // Scheduled breaks flagged by scheduledBreaks.ts and not yet confirmed:
+    // Auto breaks didn't add one although the employee worked during it, the
+    // employee's own tap was shortened or recorded as an ordinary break, or
+    // a delayed phone event contradicts an automatic break. Many have no
+    // break record at all.
+    const { rows: occ } = await pool.query(
+      `select bo.id, bo.employee_id, to_char(bo.scheduled_date, 'YYYY-MM-DD') as date, bo.name, bo.scheduled_start,
+              bo.scheduled_end, bo.is_paid, bo.review_reason, bo.review_detail, bo.review_flagged_at,
+              e.first_name, e.last_name, b.started_at as break_started_at, b.ended_at as break_ended_at
+       from break_occurrences bo
+       join employees e on e.id = bo.employee_id
+       left join time_entries b on b.id = bo.break_entry_id and b.deleted_at is null
+       where bo.review_reason is not null and bo.review_confirmed_at is null
+       order by bo.scheduled_start desc`
+    );
+    const occurrences = occ.map((r) => ({
+      occurrenceId: r.id,
+      employeeId: r.employee_id,
+      employeeName: `${r.first_name} ${r.last_name}`.trim(),
+      date: r.date,
+      name: r.name ?? null,
+      scheduledStart: new Date(r.scheduled_start).toISOString(),
+      scheduledEnd: new Date(r.scheduled_end).toISOString(),
+      isPaid: r.is_paid,
+      reason: r.review_reason,
+      message: describeOccurrenceReview({
+        name: r.name,
+        scheduledStart: r.scheduled_start,
+        scheduledEnd: r.scheduled_end,
+        reason: r.review_reason,
+        detail: r.review_detail,
+      }),
+      flaggedAt: new Date(r.review_flagged_at).toISOString(),
+      recordedBreak: r.break_started_at
+        ? { startedAt: new Date(r.break_started_at).toISOString(), endedAt: r.break_ended_at ? new Date(r.break_ended_at).toISOString() : null }
+        : null,
+    }));
+    res.json({ breaks, occurrences });
+  })
+);
+
+// Confirms one flagged scheduled-break occurrence (GET /break-reviews,
+// "occurrences"): records who checked it, when, and why. It changes no
+// time entry: it never adds a break, moves a time or changes pay. An
+// occurrence Auto breaks was still checking stops being checked, so a
+// supervisor's "this is right" is never overridden by an automatic break.
+// Same access as the rest of Breaks to review.
+router.post(
+  "/break-occurrences/:id/review",
+  requireAuth,
+  requireRole(...EDIT_ROLES),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: "Invalid id" });
+    const { confirmed, reason } = req.body as { confirmed?: unknown; reason?: unknown };
+    if (confirmed !== true || !isValidReason(reason)) {
+      return res.status(422).json({ error: `Confirm that you have checked this day and give a reason (at least ${MIN_REASON_LENGTH} characters)` });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const peek = await client.query(`select employee_id from break_occurrences where id = $1`, [id]);
+      if (!peek.rows[0]) {
+        await client.query("rollback");
+        return res.status(404).json({ error: "Not found" });
+      }
+      await lockEmployeeForManualEntry(client, peek.rows[0].employee_id);
+      const { rowCount } = await client.query(
+        `update break_occurrences
+         set review_confirmed_at = now(), review_confirmed_by_employee_id = $2, review_confirm_note = $3,
+             last_check_reason = case when status in ('pending', 'reversed') then coalesce(last_check_reason, '') || ' (review confirmed)' else last_check_reason end,
+             resolved_at = coalesce(resolved_at, now()),
+             status = case when status in ('pending', 'reversed') then 'expired' else status end
+         where id = $1 and review_reason is not null and review_confirmed_at is null`,
+        [id, req.employee!.id, reason.trim()]
+      );
+      if (!rowCount) {
+        await client.query("rollback");
+        return res.status(409).json({ error: "This break has no open review (it may have just been reviewed)" });
+      }
+      await client.query("commit");
+      res.json({ ok: true });
+    } catch (err) {
+      await client.query("rollback").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
   })
 );
 

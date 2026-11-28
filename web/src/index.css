@@ -11092,6 +11092,18 @@ button.inputs-break-review-badge:hover {
   color: var(--color-muted);
   font-size: 0.9rem;
 }
+.break-review-section + .break-review-section {
+  margin-top: 1.25rem;
+}
+.break-review-section h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+}
+.break-review-message {
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid #f59e0b;
+  background: #fffbeb;
+}
 .break-review-table {
   width: 100%;
   border-collapse: collapse;

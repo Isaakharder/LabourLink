@@ -8,7 +8,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BreakReviewListModal, BreakReviewModal } from "./BreakReviewModal";
+import { BreakReviewListModal, BreakReviewModal, OccurrenceReviewModal } from "./BreakReviewModal";
 import { api } from "../../lib/api";
 import { combineDateAndTimeToUtcIso } from "../../lib/timezone";
 
@@ -157,5 +157,53 @@ describe("BreakReviewListModal", () => {
   it("says so when nothing needs review", () => {
     render(<BreakReviewListModal cases={[]} onOpen={vi.fn()} onClose={vi.fn()} />);
     expect(screen.getByText("No breaks need review.")).toBeInTheDocument();
+  });
+});
+
+describe("Scheduled-break occurrences to review", () => {
+  const occ = {
+    occurrenceId: "occ-1",
+    employeeId: "e2",
+    employeeName: "Maria P",
+    date: DAY,
+    name: "Lunch",
+    scheduledStart: combineDateAndTimeToUtcIso(DAY, "12:00:00"),
+    scheduledEnd: combineDateAndTimeToUtcIso(DAY, "13:00:00"),
+    isPaid: false,
+    reason: "protected_record",
+    message: "Lunch (12:00 PM–1:00 PM) not added: the work 12:20 PM–12:40 PM is linked to a bin completion, so it can't be removed.",
+    flaggedAt: combineDateAndTimeToUtcIso(DAY, "13:01:00"),
+    recordedBreak: null,
+  };
+
+  it("lists occurrences with no break record, with the reason, and opens one", async () => {
+    const user = userEvent.setup();
+    const onOpenOccurrence = vi.fn();
+    render(<BreakReviewListModal cases={[]} occurrences={[occ]} onOpen={vi.fn()} onOpenOccurrence={onOpenOccurrence} onClose={vi.fn()} />);
+    expect(screen.getByText(/linked to a bin completion/)).toBeInTheDocument();
+    expect(screen.getByText("No scheduled break recorded")).toBeInTheDocument();
+    expect(screen.queryByText("No breaks need review.")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Review" }));
+    expect(onOpenOccurrence).toHaveBeenCalledWith(occ);
+  });
+
+  it("confirming needs a reason and the checkbox, and sends only the review", async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    render(<OccurrenceReviewModal review={occ} onClose={vi.fn()} onSaved={onSaved} />);
+    const save = screen.getByRole("button", { name: "Confirm review" });
+    expect(save).toBeDisabled();
+    await user.type(screen.getByRole("textbox"), "Checked with the employee");
+    expect(save).toBeDisabled();
+    await user.click(screen.getByRole("checkbox"));
+    expect(save).toBeEnabled();
+    expect(screen.getByText(/doesn't add a break or change any time or pay/)).toBeInTheDocument();
+    await user.click(save);
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(api).toHaveBeenCalledTimes(1);
+    const [url, init] = vi.mocked(api).mock.calls[0] as unknown as [string, { method: string; body: string }];
+    expect(url).toBe("/api/inputs/break-occurrences/occ-1/review");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ confirmed: true, reason: "Checked with the employee" });
   });
 });
