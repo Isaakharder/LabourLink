@@ -1877,6 +1877,19 @@ input {
   color: var(--color-text);
 }
 
+.employee-form-auto-breaks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding-top: 1.4rem;
+}
+
+.employee-form-auto-breaks .employee-form-checkbox-inline {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.5rem !important;
+}
+
 .employee-form-checkbox {
   flex-direction: row !important;
   align-items: center;

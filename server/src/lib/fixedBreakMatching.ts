@@ -177,14 +177,19 @@ export async function resolveFixedBreakCloseBoundary(
 ): Promise<Date | null> {
   if (openEntryType !== "break") return null;
   const { rows } = await db.query(
-    `select bpi.end_time, to_char(te.scheduled_break_date, 'YYYY-MM-DD') as scheduled_break_date
+    `select bpi.end_time, to_char(te.scheduled_break_date, 'YYYY-MM-DD') as scheduled_break_date, bo.scheduled_end
      from time_entries te
      join break_profile_items bpi on bpi.id = te.break_profile_item_id
+     left join break_occurrences bo on bo.id = te.break_occurrence_id
      where te.id = $1`,
     [openEntryId]
   );
   const row = rows[0];
   if (!row) return null;
+  // The occurrence's frozen end (scheduledBreaks.ts) — a profile edited
+  // since the break started can't move it. Breaks recorded before
+  // occurrences existed fall back to the item's current end time.
+  if (row.scheduled_end) return new Date(row.scheduled_end);
   const [y, mo, da] = (row.scheduled_break_date as string).split("-").map(Number);
   const [eh, em, es] = parseTimeParts(row.end_time);
   return zonedWallTimeToUtc(y, mo, da, eh, em, es);

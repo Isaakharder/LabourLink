@@ -152,8 +152,8 @@ async function main() {
       isPaid: boolean
     ): Promise<string> {
       const { rows } = await pool.query(
-        `insert into break_profile_items (break_profile_id, name, start_time, end_time, is_paid, fixed_break, sort_order, is_active)
-         values ($1, $2, $3, $4, $5, true, 0, true) returning id`,
+        `insert into break_profile_items (break_profile_id, name, start_time, end_time, is_paid, fixed_break, sort_order, is_active, created_at, updated_at)
+         values ($1, $2, $3, $4, $5, true, 0, true, '2000-01-01', '2000-01-01') returning id`,
         [profileId, name, startTime, endTime, isPaid]
       );
       return rows[0].id;
@@ -439,12 +439,12 @@ async function main() {
     // -----------------------------------------------------------------
     // 7) Only one instance of a scheduled break per employee/date: a
     //    second Start Break tap arriving shortly after the first (e.g. an
-    //    accidental double-tap queued as two distinct events, or a second
-    //    device) while still inside the SAME item's window must NOT
-    //    re-match it — it's recorded as an ordinary, unscheduled break
-    //    instead, and correctly closes the first (already-matched) break
-    //    at its own tap time, with no overlap or negative duration either
-    //    way.
+    //    accidental double-tap queued as two distinct events) while still
+    //    inside the SAME window is the same scheduled break — it never
+    //    creates a second break, never cuts the first short, and the
+    //    break still records its full scheduled window (agreed
+    //    2026-11-28, scheduledBreaks.ts; this replaced the earlier rule
+    //    where the second tap became an ordinary break).
     // -----------------------------------------------------------------
     {
       const { employeeId, deviceIdentifier, profileId } = await freshFixture("OnlyOnce");
@@ -462,20 +462,20 @@ async function main() {
       check(res.status === 200, "7) the sync batch succeeds", res.body);
       check(
         res.body?.results?.every((r: { status: string }) => r.status === "accepted"),
-        "7) every event is accepted (the second tap is a valid, if unscheduled, break)",
+        "7) every event is accepted",
         res.body
       );
 
       const entries = await fetchEntriesForEmployee(employeeId);
-      const breaks = entries.filter((e) => e.entry_type === "break");
-      check(breaks.length === 2, "7) two break entries exist", breaks.length);
-      const matchedBreaks = breaks.filter((b) => b.break_profile_item_id === itemId);
-      check(matchedBreaks.length === 1, "7) exactly ONE of them is bound to the fixed item — the second never re-matches it", breaks);
-      const firstBreak = breaks.find((b) => b.break_profile_item_id === itemId);
+      const breaks = entries.filter((e) => e.entry_type === "break" && !e.deleted_at);
+      check(breaks.length === 1, "7) one break only — the second tap is the same scheduled break", breaks.length);
       check(
-        !!firstBreak && new Date(firstBreak.ended_at).getTime() === secondTapAt.getTime(),
-        "7) the first (matched) break is closed cleanly by the second tap, no gap or overlap",
-        firstBreak
+        breaks.length === 1 &&
+          breaks[0].break_profile_item_id === itemId &&
+          new Date(breaks[0].started_at).getTime() === lunchStart.getTime() &&
+          new Date(breaks[0].ended_at).getTime() === lunchEnd.getTime(),
+        "7) it records the full scheduled window",
+        breaks
       );
     }
 

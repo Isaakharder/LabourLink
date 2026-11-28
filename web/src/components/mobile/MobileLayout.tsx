@@ -3,6 +3,7 @@ import { BarChart3, Coffee, House, Settings } from "lucide-react";
 import { WorkSessionProvider, useWorkSession } from "../../context/WorkSessionContext";
 import { MessagesProvider } from "../../context/MessagesContext";
 import { t } from "../../lib/i18n";
+import { formatBreakTime } from "../../lib/scheduledBreakDisplay";
 import { ConfirmEndDayModal } from "./ConfirmEndDayModal";
 import { PendingMessageOverlay } from "./PendingMessageOverlay";
 import { ReassignmentOverlay } from "./ReassignmentOverlay";
@@ -53,7 +54,13 @@ function MobileNav() {
           </NavLink>
         )}
 
-        {status === "break" ? (
+        {status === "break" && me?.scheduledBreak?.resumeRequested ? (
+          // Already asked to go back: the job resumes at the scheduled end.
+          <button type="button" className="mobile-nav-item" disabled>
+            <Coffee size={22} />
+            <span>{t(language, "navBackAt", { time: formatBreakTime(me.scheduledBreak.endsAt, me.appTimezone) })}</span>
+          </button>
+        ) : status === "break" ? (
           <button type="button" className="mobile-nav-item" disabled={busy} onClick={endBreak}>
             <Coffee size={22} />
             <span>{t(language, "navEndBreak")}</span>

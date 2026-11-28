@@ -37,6 +37,7 @@ import cookieParser from "cookie-parser";
 import { AddressInfo } from "net";
 import { randomUUID } from "crypto";
 import { pool } from "../db";
+import { materializeDueResumeForEmployee } from "../lib/scheduledBreaks";
 import { signSession } from "../middleware/auth";
 import { roundBreak } from "../lib/workStartRounding";
 import { zonedWallTimeParts } from "../lib/timezone";
@@ -440,6 +441,7 @@ async function main() {
     {
       // Interval deliberately large and directionally certain to move the
       // value if (incorrectly) applied on top of the fixed-item match.
+      await pool.query(`delete from time_entries where employee_id = $1`, [target!.id]);
       await setBreakRounding(true, "clockwise", 30);
       const scheduledStartInstant = new Date(Date.now() - 2 * 60000); // "12:00 PM" — tap arrives 2 minutes in
       const scheduledEndInstant = new Date(scheduledStartInstant.getTime() + 60 * 60000); // "1:00 PM"
@@ -448,8 +450,8 @@ async function main() {
       const fixedItem = (
         await pool.query(
           `insert into break_profile_items
-             (break_profile_id, name, start_time, end_time, is_paid, fixed_break, auto_add, sort_order, is_active)
-           values ($1, $2, $3, $4, false, true, false, 0, true)
+             (break_profile_id, name, start_time, end_time, is_paid, fixed_break, auto_add, sort_order, is_active, created_at, updated_at)
+           values ($1, $2, $3, $4, false, true, false, 0, true, '2000-01-01', '2000-01-01')
            returning id`,
           [profile!.id, `QA BR Fixed Item ${RUN_ID}`, scheduledStart, scheduledEnd]
         )
@@ -492,6 +494,12 @@ async function main() {
           idempotencyKey: randomUUID(),
         });
         check(endRes.status === 200, "F) break/end succeeds", endRes.body);
+        // Before the scheduled end: still on the break, resume requested.
+        const stillOpen = await fetchEntry(openBreak.id);
+        check(stillOpen.ended_at === null, "F) an early End Break keeps the employee on the scheduled break", stillOpen);
+        check(endRes.body?.status === "break" && endRes.body?.scheduledBreak?.resumeRequested === true, "F) /me shows the break and the pending resume", endRes.body?.scheduledBreak);
+        // At the scheduled end, work resumes (the worker or the next request).
+        await materializeDueResumeForEmployee(target!.id, scheduledEndInstant);
         const closedBreak = await fetchEntry(openBreak.id);
         const endedParts = zonedWallTimeParts(new Date(closedBreak.ended_at));
         const endedTimeOfDay = `${pad(endedParts.hour)}:${pad(endedParts.minute)}:${pad(endedParts.second)}`;
@@ -518,14 +526,15 @@ async function main() {
     //     half-open-interval comment).
     // -----------------------------------------------------------------
     {
+      await pool.query(`delete from time_entries where employee_id = $1`, [target!.id]);
       await setBreakRounding(true, "clockwise", 30);
       const scheduledStartInstant = new Date(Date.now() + 500); // fires almost immediately
       const scheduledEndInstant = new Date(scheduledStartInstant.getTime() + 45 * 60000);
       const fixedItem = (
         await pool.query(
           `insert into break_profile_items
-             (break_profile_id, name, start_time, end_time, is_paid, fixed_break, auto_add, sort_order, is_active)
-           values ($1, $2, $3, $4, true, true, false, 0, true)
+             (break_profile_id, name, start_time, end_time, is_paid, fixed_break, auto_add, sort_order, is_active, created_at, updated_at)
+           values ($1, $2, $3, $4, true, true, false, 0, true, '2000-01-01', '2000-01-01')
            returning id`,
           [profile!.id, `QA BR Exact Boundary Item ${RUN_ID}`, timeOfDayStr(scheduledStartInstant), timeOfDayStr(scheduledEndInstant)]
         )
@@ -552,6 +561,8 @@ async function main() {
           idempotencyKey: randomUUID(),
         });
         check(endRes.status === 200, "F2) break/end (well before the scheduled end) succeeds", endRes.body);
+        check((await fetchEntry(openBreak.id)).ended_at === null, "F2) still on the break until its scheduled end", await fetchEntry(openBreak.id));
+        await materializeDueResumeForEmployee(target!.id, scheduledEndInstant);
         const closedBreak = await fetchEntry(openBreak.id);
         const endedParts = zonedWallTimeParts(new Date(closedBreak.ended_at));
         const pad = (n: number) => String(n).padStart(2, "0");
@@ -568,21 +579,22 @@ async function main() {
 
     // -----------------------------------------------------------------
     // F3) "Only one instance of each scheduled break may be added per
-    //     employee/date": a second Start Break tap that falls inside the
-    //     SAME already-used fixed item's window on the SAME date must not
-    //     create a second scheduled-matched instance — it falls through to
-    //     ordinary (non-scheduled) break handling instead, exactly as if
-    //     nothing had matched.
+    //     employee/date": after an early End Break the employee is still on
+    //     the scheduled break, so a second Start Break inside the SAME
+    //     window is that same break (it only cancels the resume) — never a
+    //     second break and never an overlap (agreed 2026-11-28; this
+    //     replaced the earlier "ordinary break" fallthrough).
     // -----------------------------------------------------------------
     {
+      await pool.query(`delete from time_entries where employee_id = $1`, [target!.id]);
       await setBreakRounding(false, "clockwise", 15);
       const scheduledStartInstant = new Date(Date.now() - 5 * 60000);
       const scheduledEndInstant = new Date(scheduledStartInstant.getTime() + 60 * 60000);
       const fixedItem = (
         await pool.query(
           `insert into break_profile_items
-             (break_profile_id, name, start_time, end_time, is_paid, fixed_break, auto_add, sort_order, is_active)
-           values ($1, $2, $3, $4, true, true, false, 0, true)
+             (break_profile_id, name, start_time, end_time, is_paid, fixed_break, auto_add, sort_order, is_active, created_at, updated_at)
+           values ($1, $2, $3, $4, true, true, false, 0, true, '2000-01-01', '2000-01-01')
            returning id`,
           [profile!.id, `QA BR Duplicate Item ${RUN_ID}`, timeOfDayStr(scheduledStartInstant), timeOfDayStr(scheduledEndInstant)]
         )
@@ -603,14 +615,20 @@ async function main() {
         const secondRes = await callDevice("POST", "/api/mobile/time-entries/break/start", deviceIdentifier, {
           idempotencyKey: randomUUID(),
         });
-        check(secondRes.status === 200, "F3) a duplicate tap inside the same window still succeeds (as an ordinary break)", secondRes.body);
+        check(secondRes.status === 200, "F3) a duplicate tap inside the same window succeeds", secondRes.body);
         const secondBreak = await fetchOpenEntry();
         check(
-          secondBreak.break_profile_item_id === null,
-          "F3) the duplicate tap does NOT re-match the already-used fixed item — it's recorded as an ordinary, unscheduled break",
-          secondBreak
+          secondBreak.id === firstBreak.id && secondRes.body?.scheduledBreak?.resumeRequested === false,
+          "F3) the duplicate tap is the same scheduled break (resume cancelled), not a new one",
+          { secondBreak, scheduledBreak: secondRes.body?.scheduledBreak }
         );
         await callDevice("POST", "/api/mobile/time-entries/break/end", deviceIdentifier, { idempotencyKey: randomUUID() });
+        const { rows: allBreaks } = await pool.query(
+          `select count(*)::int as n from time_entries where employee_id = $1 and entry_type = 'break' and deleted_at is null`,
+          [target!.id]
+        );
+        check(allBreaks[0].n === 1, "F3) still one break in total", allBreaks[0]);
+        await materializeDueResumeForEmployee(target!.id, scheduledEndInstant);
 
         const { rows: matchedCount } = await pool.query(
           `select count(*)::int as n from time_entries where employee_id = $1 and break_profile_item_id = $2 and deleted_at is null`,

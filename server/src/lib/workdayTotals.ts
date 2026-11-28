@@ -107,7 +107,20 @@ function unionSeconds(intervals: { start: number; end: number }[]): number {
 // `now` is injectable (defaults to the real current time) purely for
 // deterministic tests of the still-open-day path — every real caller
 // leaves it as the default.
-export function computeWorkdayTotals(entries: WorkdayBoundaryEntry[], now: Date = new Date()): WorkdayTotals {
+export interface WorkdayTotalsOptions {
+  // payroll_settings.unpaid_break_span_clip_from (lib/payrollSettings.ts):
+  // for a workday on or after this local date, only the part of an unpaid
+  // break inside the work span (first work start to the day's end) is
+  // deducted. Earlier workdays, or null, keep the previous rule (the whole
+  // unpaid break is deducted), so past payroll never changes on deploy.
+  unpaidBreakSpanClipFrom?: string | null;
+}
+
+export function computeWorkdayTotals(
+  entries: WorkdayBoundaryEntry[],
+  now: Date = new Date(),
+  options: WorkdayTotalsOptions = {}
+): WorkdayTotals {
   if (entries.length === 0) return ZERO;
 
   const workEntries = entries.filter((e) => e.entryType === "work");
@@ -158,7 +171,21 @@ export function computeWorkdayTotals(entries: WorkdayBoundaryEntry[], now: Date 
       unpaidIntervals.push({ start: startMs, end: endMs });
     }
   }
-  const unpaidBreakSeconds = unionSeconds(unpaidIntervals);
+  // Prospective span clip (see WorkdayTotalsOptions): an unpaid break, or
+  // the part of one, lying before the first work start or after the day's
+  // end can't take time out of a span it isn't in.
+  const workdayDate = workStartTime ? calendarDateInAppTimezone(workStartTime) : null;
+  const clipToSpan =
+    options.unpaidBreakSpanClipFrom != null && workStartMs !== null && workdayDate !== null && workdayDate >= options.unpaidBreakSpanClipFrom;
+  // While the day is still open its end isn't known yet (a rounded break
+  // can sit a few minutes ahead of "now"), so only the start is clipped.
+  const clipEndMs = workEndTime ? workEndTime.getTime() : Number.POSITIVE_INFINITY;
+  const deductedIntervals = clipToSpan
+    ? unpaidIntervals
+        .map((iv) => ({ start: Math.max(iv.start, workStartMs!), end: Math.min(iv.end, clipEndMs) }))
+        .filter((iv) => iv.end > iv.start)
+    : unpaidIntervals;
+  const unpaidBreakSeconds = unionSeconds(deductedIntervals);
   const breakSeconds = paidBreakSeconds + unpaidBreakSeconds;
 
   // Worked can never go negative even if recorded unpaid-break time

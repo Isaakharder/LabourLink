@@ -8,7 +8,7 @@
 // means everything downstream keeps working unmodified, while still getting
 // a genuinely immediate, no-network-wait UI update.
 import { getLocalEventStore, LocalEvent } from "./localEventStore";
-import { applyLocalMidnightCutoff } from "./localMidnightCutoff";
+import { activeScheduledBreak, applyLocalClockRules, applyScheduledBreakResume } from "./scheduledBreakDisplay";
 import {
   ActivitiesResponse,
   CarriersResponse,
@@ -44,14 +44,48 @@ export function applyLocalEventToMe(
   event: LocalEvent,
   display: LocalDisplayInfo
 ): MeResponse {
-  const base: MeResponse = prev ?? {
-    employee: { id: event.employeeId, firstName: "", lastName: "", preferredLanguage: null, securityRole: "Employee" },
-    status: "idle",
-    currentActivity: null,
-    since: null,
-    previousActivity: null,
-    recentJobs: [],
-  };
+  const eventAt = new Date(event.occurredAtUtc);
+  // A scheduled break that ended before this tap resumed work at its end.
+  const base: MeResponse = applyScheduledBreakResume(
+    prev ?? {
+      employee: { id: event.employeeId, firstName: "", lastName: "", preferredLanguage: null, securityRole: "Employee" },
+      status: "idle",
+      currentActivity: null,
+      since: null,
+      previousActivity: null,
+      recentJobs: [],
+    },
+    eventAt
+  );
+
+  // On a scheduled break, before its end: the employee stays on it
+  // (scheduledBreakDisplay.ts). End Break or a job choice only sets what
+  // resumes at the end; another Start Break cancels that. Finish Work ends
+  // the day as usual (below).
+  const scheduled = activeScheduledBreak(base, eventAt);
+  if (scheduled && scheduled.resume) {
+    if (event.eventType === "break_end") {
+      return { ...base, scheduledBreak: { ...scheduled, resumeRequested: true } };
+    }
+    if (event.eventType === "break_start") {
+      return { ...base, scheduledBreak: { ...scheduled, resumeRequested: false } };
+    }
+  }
+  if (scheduled && (event.eventType === "work_start" || event.eventType === "activity_switch") && event.activityId) {
+    return {
+      ...base,
+      scheduledBreak: {
+        ...scheduled,
+        resumeRequested: true,
+        resume: {
+          activityId: event.activityId,
+          activityName: display.activityName ?? "",
+          row: event.greenhouseRowId ? { id: event.greenhouseRowId, label: display.rowLabel ?? "" } : null,
+          carrier: event.carrierId ? { id: event.carrierId, name: display.carrierName ?? "" } : null,
+        },
+      },
+    };
+  }
 
   switch (event.eventType) {
     case "work_start":
@@ -223,7 +257,7 @@ export async function foldPendingEventsOntoMe(deviceId: string, base: MeResponse
   // snapshot) can still be anchored to a prior calendar day — apply the
   // cutoff before returning either way, not just when there's something to
   // replay.
-  if (pending.length === 0) return applyLocalMidnightCutoff(base, new Date(), base.appTimezone);
+  if (pending.length === 0) return applyLocalClockRules(base, new Date(), base.appTimezone);
 
   const lookup = await buildDisplayLookup();
   const tz = base.appTimezone;
@@ -242,7 +276,7 @@ export async function foldPendingEventsOntoMe(deviceId: string, base: MeResponse
   // boundary was genuinely crossed.
   let result = base;
   for (const event of pending) {
-    result = applyLocalMidnightCutoff(result, new Date(event.occurredAtUtc), tz);
+    result = applyLocalClockRules(result, new Date(event.occurredAtUtc), tz);
     const display: LocalDisplayInfo = {
       activityName: event.activityId ? (lookup.activityName.get(event.activityId) ?? null) : null,
       rowLabel: event.greenhouseRowId ? (lookup.rowLabel.get(event.greenhouseRowId) ?? null) : null,
@@ -254,7 +288,7 @@ export async function foldPendingEventsOntoMe(deviceId: string, base: MeResponse
   // Covers a last pending event that's itself from a prior day relative to
   // right now (device reconnects the next morning) — the loop above only
   // ever checks each event against the state carried in from BEFORE it.
-  return applyLocalMidnightCutoff(result, new Date(), tz);
+  return applyLocalClockRules(result, new Date(), tz);
 }
 
 // The durable "last known base" a cold start folds pending events onto —

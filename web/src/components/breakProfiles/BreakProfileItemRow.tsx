@@ -99,24 +99,15 @@ export function BreakProfileItemRow({
             PM–1:00 PM records exactly 12:00 PM–1:00 PM no matter when the employee taps, as long as each tap falls
             somewhere inside that window — Start Break anytime between 12:00 PM and 1:00 PM records 12:00 PM, and End
             Break anytime after that records 1:00 PM. A tap at 12:02 PM and another at 12:58 PM still produce
-            12:00 PM–1:00 PM.
+            12:00 PM–1:00 PM. An employee who comes back early stays on the break until 1:00 PM, when their job
+            resumes automatically.
           </p>
         </div>
 
-        <div className="break-item-toggle-group">
-          <label className="break-item-toggle">
-            <input
-              type="checkbox"
-              checked={item.autoAdd}
-              onChange={(e) => onChange({ autoAdd: e.target.checked })}
-            />
-            Auto Add
-          </label>
-          <p className="field-hint">
-            If the employee works through this scheduled break without pressing Break, LabourLink automatically adds
-            the break to their day.
-          </p>
-        </div>
+        <p className="field-hint break-item-auto-note">
+          Breaks are added automatically only for employees with <strong>Auto breaks</strong> turned on (Add/Edit
+          Employee), when they work through the whole scheduled period.
+        </p>
       </div>
 
       <button type="button" className="break-item-row-remove" onClick={onRemove} aria-label="Remove scheduled break">

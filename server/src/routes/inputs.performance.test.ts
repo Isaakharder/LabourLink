@@ -1,9 +1,10 @@
-// Tests the Inputs employee-switch performance fix's one hard correctness
-// requirement: reconciliation must complete BEFORE the main time_entries
-// query runs, so a single GET /api/inputs/daily response already reflects
-// any entries reconciliation just created — never requiring a second
-// request/poll to see them. Runs the real router over real HTTP against
-// the real database, same convention as inputs.manualEntries.test.ts.
+// GET /api/inputs/daily never writes (2026-11-28): opening Inputs for a day
+// creates and changes nothing — automatic breaks are added only by the
+// auto-breaks worker (server/src/lib/autoBreakWorker.ts), and only for
+// employees with Auto breaks on. This replaced the earlier behaviour, where
+// loading a day ran break reconciliation and split work around profile items
+// marked auto_add. Runs the real router over real HTTP against the real
+// database, same convention as inputs.manualEntries.test.ts.
 //
 // Run with: npm run test:inputs-performance
 import "dotenv/config";
@@ -106,8 +107,9 @@ async function main() {
 
     target = (
       await pool.query(
-        `insert into employees (first_name, last_name, email, security_role_id, team_role_id, settings_pin_hash, is_active, break_profile_id)
-         values ($1, $2, $3, $4, $5, $6, true, $7) returning id`,
+        `insert into employees (first_name, last_name, email, security_role_id, team_role_id, settings_pin_hash, is_active, break_profile_id,
+                                auto_breaks_enabled, auto_breaks_effective_from)
+         values ($1, $2, $3, $4, $5, $6, true, $7, true, '2000-01-01') returning id`,
         [
           "QA",
           `Inputs Perf Target ${RUN_ID}`,
@@ -120,9 +122,9 @@ async function main() {
       )
     ).rows[0];
 
-    // A work entry fully covering the 10:00-10:15 auto-add window — nothing
-    // has reconciled it yet; the only way this employee's day could show a
-    // break at all is if GET /daily's own reconcile call creates it.
+    // A work entry fully covering the 10:00-10:15 window of an item still
+    // marked auto_add, for an employee with Auto breaks on — the old
+    // Inputs-load reconciliation would have split it.
     await pool.query(
       `insert into time_entries (employee_id, device_id, entry_type, activity_id, idempotency_key, started_at, ended_at, source)
        values ($1, null, 'work', $2, gen_random_uuid(), $3, $4, 'manual')`,
@@ -141,30 +143,16 @@ async function main() {
     );
     check(res.status === 200, "GET /daily succeeds", res.body);
 
-    const reconciledBreak = (res.body?.breaks ?? []).find((b: any) => b.source === "auto");
+    const before = (await pool.query(`select count(*)::int as n from time_entries where employee_id = $1`, [target!.id])).rows[0].n;
+    check((res.body?.breaks ?? []).length === 0, "opening Inputs adds no break", res.body?.breaks);
     check(
-      reconciledBreak !== undefined,
-      "the auto-reconciled break appears in the SAME response that triggered reconciliation — no second request needed",
-      res.body?.breaks
+      (res.body?.runs ?? []).length === 1 && (res.body?.runs?.[0]?.segmentIds ?? []).length === 1,
+      "the day still shows the one unsplit work entry",
+      res.body?.runs
     );
-    check(
-      reconciledBreak?.isPaid === false,
-      "the reconciled break carries the scheduled item's own paid/unpaid status"
-    );
-
-    // The main query result must also reflect the split: groupIntoActivityRuns
-    // merges the before/after work segments back into one displayed run
-    // (same activity, contiguous at the exact break boundary — this is its
-    // existing, intended behavior for a reconciled break), but that run
-    // must be made of the two split segments, not the original single
-    // 09:00-11:00 row — proving the query genuinely ran against
-    // post-reconciliation data, not a stale pre-reconciliation read.
-    check((res.body?.runs ?? []).length === 1, "the split work segments still group into a single displayed run", res.body?.runs);
-    check(
-      (res.body?.runs?.[0]?.segmentIds ?? []).length === 2,
-      "that run is made of the two segments reconciliation just split off, not the original one-piece entry",
-      res.body?.runs?.[0]?.segmentIds
-    );
+    check(before === 1, "nothing was written to the database", before);
+    const { rows: occ } = await pool.query(`select count(*)::int as n from break_occurrences where employee_id = $1`, [target!.id]);
+    check(occ[0].n === 0, "no break occurrence was recorded by reading", occ[0]);
 
     // A second call must be idempotent — reconciliation runs again (it's
     // not conditioned on the first call), but must not double the break or

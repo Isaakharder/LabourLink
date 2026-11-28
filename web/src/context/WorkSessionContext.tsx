@@ -14,7 +14,8 @@ import {
 } from "../lib/localSessionState";
 import { resolveDisplayLabels } from "../lib/referenceDataCache";
 import { hasSyncProblem, onSyncSettled, trySyncSoon } from "../lib/syncEngine";
-import { FALLBACK_APP_TIMEZONE, applyLocalMidnightCutoff, msUntilNextLocalMidnight } from "../lib/localMidnightCutoff";
+import { FALLBACK_APP_TIMEZONE, msUntilNextLocalMidnight } from "../lib/localMidnightCutoff";
+import { applyLocalClockRules } from "../lib/scheduledBreakDisplay";
 import { RecentJob } from "../components/mobile/RecentJobsCard";
 import { uuid } from "../lib/uuid";
 
@@ -107,6 +108,23 @@ export interface PreviousActivity {
   accumulatedWorkedSeconds: number;
 }
 
+// The scheduled break the employee is on (server/src/lib/scheduledBreaks.ts):
+// its frozen window, whether End Break was already tapped before the end
+// (resumeRequested), and the job that resumes at the end.
+export interface ScheduledBreakInfo {
+  name: string | null;
+  startsAt: string;
+  endsAt: string;
+  isPaid: boolean;
+  resumeRequested: boolean;
+  resume: {
+    activityId: string;
+    activityName: string;
+    row: { id: string; label: string } | null;
+    carrier: { id: string; name: string } | null;
+  } | null;
+}
+
 export interface MeResponse {
   employee: {
     id: string;
@@ -120,6 +138,8 @@ export interface MeResponse {
   status: "idle" | "work" | "break";
   currentActivity: CurrentActivity | null;
   since: string | null;
+  // Absent from older servers and older cached snapshots.
+  scheduledBreak?: ScheduledBreakInfo | null;
   previousActivity: PreviousActivity | null;
   recentJobs: RecentJob[];
   // The org's real configured timezone (server/src/lib/timezone.ts's
@@ -343,7 +363,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
   const MIDNIGHT_FOLD_CHECK_INTERVAL_MS = 30000;
   useEffect(() => {
     const interval = window.setInterval(() => {
-      setMe((prev) => (prev ? applyLocalMidnightCutoff(prev, new Date(), prev.appTimezone) : prev));
+      setMe((prev) => (prev ? applyLocalClockRules(prev, new Date(), prev.appTimezone) : prev));
     }, MIDNIGHT_FOLD_CHECK_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, []);
@@ -368,7 +388,7 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let timeoutId: number | null = null;
     function fireAndReschedule() {
-      setMe((prev) => (prev ? applyLocalMidnightCutoff(prev, new Date(), prev.appTimezone) : prev));
+      setMe((prev) => (prev ? applyLocalClockRules(prev, new Date(), prev.appTimezone) : prev));
       schedule();
     }
     function schedule() {
@@ -521,6 +541,21 @@ export function WorkSessionProvider({ children }: { children: ReactNode }) {
     const interval = window.setInterval(loadMe, RECONNECT_POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [serverReachable, loadMe]);
+
+  // At a scheduled break's end (server/src/lib/scheduledBreaks.ts): show the
+  // resumed job straight away (applyLocalClockRules), then ask the server.
+  // The 30-second clock check above is the backstop if this timer is
+  // delayed by a suspended WebView.
+  const scheduledBreakEndsAt = me?.status === "break" ? me.scheduledBreak?.endsAt : undefined;
+  useEffect(() => {
+    if (!scheduledBreakEndsAt) return;
+    const delay = Math.max(0, new Date(scheduledBreakEndsAt).getTime() - Date.now() + 1000);
+    const id = window.setTimeout(() => {
+      setMe((prev) => (prev ? applyLocalClockRules(prev, new Date(), prev.appTimezone) : prev));
+      loadMe();
+    }, delay);
+    return () => window.clearTimeout(id);
+  }, [scheduledBreakEndsAt, loadMe]);
 
   // Manual sync trigger — Settings' "Sync now" button and the network-
   // restoration listener below both call this. Reconciles via loadMe()

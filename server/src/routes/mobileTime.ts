@@ -3,13 +3,13 @@ import { pool } from "../db";
 import { asyncHandler } from "../lib/asyncHandler";
 import { requireDevice } from "../middleware/device";
 import { isDemoInstanceEnabled } from "../lib/demoInstance";
-import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
+import { applyScheduledBreakTap, materializeDueResumeForEmployee, scheduledBreakStatus, Tap, TapOutcome } from "../lib/scheduledBreaks";
 import { reconcileMidnightCutoff, MIDNIGHT_CUTOFF_REASON } from "../lib/midnightCutoff";
 import { findMostRecentShiftClosureBoundary } from "../lib/longShiftAdminEnd";
 import { lockEmployeeForManualEntry } from "../lib/manualTimeEntries";
 import { PoolClient } from "pg";
 import { APP_TIMEZONE, calendarDateInAppTimezone } from "../lib/timezone";
-import { applyBreakBoundaryFloor, resolveFixedBreakCloseBoundary, resolveStartBreakMatch } from "../lib/fixedBreakMatching";
+import { applyBreakBoundaryFloor, resolveFixedBreakCloseBoundary } from "../lib/fixedBreakMatching";
 import {
   MAX_CLIENT_CLOCK_SKEW_FUTURE_MS,
   resolveOriginalEndedAt,
@@ -37,6 +37,26 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 function isValidIdempotencyKey(key: unknown): key is string {
   return typeof key === "string" && UUID_RE.test(key);
+}
+
+// Scheduled-break rules for one tap (lib/scheduledBreaks.ts), in its own
+// transaction under the per-employee lock shared with every other
+// time-entry writer. handled: false means "an ordinary tap — record it the
+// usual way below".
+async function runScheduledBreakTap(tap: Tap): Promise<TapOutcome> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await lockEmployeeForManualEntry(client, tap.employeeId);
+    const outcome = await applyScheduledBreakTap(client, tap);
+    await client.query("commit");
+    return outcome;
+  } catch (err) {
+    await client.query("rollback").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 interface OpenEntry {
@@ -720,15 +740,21 @@ async function serializeStatus(
   // as today's covering work entry. See midnightCutoff.ts; runs on every
   // status fetch and every mutating action for the same "never depends on a
   // background worker" reason reconcileEmployeeBreaks below already does.
+  //
+  // reconcileMidnightCutoff first resumes work at a scheduled break's end
+  // if that is due (scheduledBreaks.ts) — so a break whose end passed is
+  // never shown, or cut off at midnight, as still running.
   await reconcileMidnightCutoff(employeeId);
 
-  // Server-side reconciliation for scheduled breaks the employee worked
-  // straight through — runs on every status fetch and every mutating
-  // action (they all call this function), so it never depends on a
-  // background worker. Idempotent: see breakReconciliation.ts.
-  await reconcileEmployeeBreaks(employeeId, calendarDateInAppTimezone(new Date()));
+  // Automatic breaks are no longer added here: the auto-breaks worker
+  // (autoBreakWorker.ts) adds them, independently of anyone's phone or
+  // Inputs page.
 
   const open = await getOpenEntry(employeeId);
+  // On a scheduled break: its frozen window, whether the employee already
+  // asked to go back (End Break before the end), and the job they go back
+  // to at the scheduled end.
+  const scheduledBreak = open?.entry_type === "break" ? await scheduledBreakStatus(pool, open.id) : null;
 
   // Bounded window used to walk the current job chain backward — work/break
   // segments are short-lived, so a day's worth of history is always enough;
@@ -902,6 +928,8 @@ async function serializeStatus(
     status: open ? open.entry_type : "idle",
     currentActivity,
     since: open?.started_at ?? null,
+    // Added for phones from this release on; older phones ignore it.
+    scheduledBreak,
     previousActivity,
     recentJobs,
     // Lets the client enforce the same local-midnight cutoff while offline
@@ -978,6 +1006,20 @@ router.post(
       return res.status(400).json({ error: validation.error });
     }
     const { validatedRowId, validatedCarrierId } = validation;
+
+    // On a scheduled break: choosing a job before its end only sets the job
+    // to resume at the end (scheduledBreaks.ts).
+    const scheduled = await runScheduledBreakTap({
+      employeeId: d.employeeId,
+      deviceId: d.id,
+      kind: "work",
+      idempotencyKey,
+      at: resolveOriginalStartedAt(clientStartedAt, new Date()),
+      work: { activityId, greenhouseRowId: validatedRowId, carrierId: validatedCarrierId },
+    });
+    if (scheduled.handled) {
+      return res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage, d.employeeSecurityRole));
+    }
 
     // Work-start rounding applies ONLY on a genuine idle -> work
     // transition — never to an activity change (something is already
@@ -1114,18 +1156,19 @@ router.post(
     // exactly as it would have live, not against replay time.
     const now = new Date();
     const originalTap = resolveOriginalStartedAt(clientStartedAt, now);
-    const match = await resolveStartBreakMatch(pool, d.employeeId, originalTap);
+    // A tap inside a scheduled fixed break records its full window
+    // (scheduledBreaks.ts); anything else is an ordinary break below.
+    const scheduled = await runScheduledBreakTap({
+      employeeId: d.employeeId,
+      deviceId: d.id,
+      kind: "break_start",
+      idempotencyKey,
+      at: originalTap,
+    });
 
     let overrides: OpenEntryOverrides;
-    if (match) {
-      overrides = {
-        startedAt: match.scheduledStart,
-        actualStartedAt: originalTap,
-        breakProfileItemId: match.item.id,
-        scheduledBreakDate: match.scheduledDateLocal,
-        source: "manual",
-        isPaid: match.item.isPaid,
-      };
+    if (scheduled.handled) {
+      return res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage, d.employeeSecurityRole));
     } else {
       // No scheduled fixed-break item contains this tap (or the only one
       // that would have has already been used today — see
@@ -1166,6 +1209,19 @@ router.post(
     const { idempotencyKey, clientEndedAt } = req.body as { idempotencyKey?: string; clientEndedAt?: string };
     if (!isValidIdempotencyKey(idempotencyKey)) {
       return res.status(400).json({ error: "a valid idempotencyKey is required" });
+    }
+
+    // On a scheduled break, work resumes at its scheduled end, never
+    // earlier (scheduledBreaks.ts).
+    const scheduled = await runScheduledBreakTap({
+      employeeId: d.employeeId,
+      deviceId: d.id,
+      kind: "break_end",
+      idempotencyKey,
+      at: resolveOriginalEndedAt(clientEndedAt, new Date()),
+    });
+    if (scheduled.handled) {
+      return res.json(await serializeStatus(d.employeeId, d.employeeFirstName, d.employeeLastName, d.employeePreferredLanguage, d.employeeSecurityRole));
     }
 
     // Resume whatever activity — and greenhouse row/carrier, if any — was
@@ -1301,6 +1357,15 @@ router.post(
     if (!isValidIdempotencyKey(idempotencyKey)) {
       return res.status(400).json({ error: "a valid idempotencyKey is required" });
     }
+
+    // Resumes work first if a scheduled break already ended before this tap.
+    await runScheduledBreakTap({
+      employeeId: d.employeeId,
+      deviceId: d.id,
+      kind: "end_day",
+      idempotencyKey,
+      at: resolveOriginalEndedAt(clientEndedAt, new Date()),
+    });
 
     const client = await pool.connect();
     try {
@@ -1532,6 +1597,18 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
         return { status: "permanent_conflict", conflictReason: validation.error };
       }
 
+      // On a scheduled break: choosing a job before its end only sets the job
+      // to resume at the end (scheduledBreaks.ts).
+      const scheduled = await runScheduledBreakTap({
+        employeeId,
+        deviceId,
+        kind: "work",
+        idempotencyKey: event.clientEventId,
+        at: resolveOriginalStartedAt(event.occurredAtUtc, now),
+        work: { activityId: event.activityId, greenhouseRowId: validation.validatedRowId, carrierId: validation.validatedCarrierId },
+      });
+      if (scheduled.handled) return { status: "accepted", timeEntryId: scheduled.entryId };
+
       const currentlyOpen = await getOpenEntryExcluding(employeeId, event.clientEventId);
       const wasIdle = currentlyOpen === null;
       // Unlike the direct POST /time-entries/work route (where a client
@@ -1579,33 +1656,30 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
       // resolveStartBreakMatch's own header for why (this is precisely the
       // path a delayed/out-of-order offline sync replays through).
       const originalTap = resolveOriginalStartedAt(event.occurredAtUtc, now);
-      const match = await resolveStartBreakMatch(pool, employeeId, originalTap);
+      // A tap inside a scheduled fixed break records its full window, or
+      // reconciles with a break already recorded there (scheduledBreaks.ts).
+      const scheduled = await runScheduledBreakTap({
+        employeeId,
+        deviceId,
+        kind: "break_start",
+        idempotencyKey: event.clientEventId,
+        at: originalTap,
+      });
+      if (scheduled.handled) return { status: "accepted", timeEntryId: scheduled.entryId };
 
-      let overrides: OpenEntryOverrides;
-      if (match) {
-        overrides = {
-          startedAt: match.scheduledStart,
-          actualStartedAt: originalTap,
-          breakProfileItemId: match.item.id,
-          scheduledBreakDate: match.scheduledDateLocal,
-          source: "manual",
-          isPaid: match.item.isPaid,
-        };
-      } else {
-        // Same anchoring fix as work_start/activity_switch above: always
-        // an explicit real occurrence time, never left unset to fall
-        // through to openEntry()'s server-now() default — a synced
-        // break_start can be replayed long after it actually happened.
-        overrides = { startedAt: originalTap };
-        const settings = await loadBreakRoundingSettings(employeeId);
-        if (settings?.enabled) {
-          let rounded = roundBreak(originalTap, settings.intervalMinutes, settings.direction);
-          const currentlyOpen = await getOpenEntry(employeeId);
-          if (currentlyOpen) {
-            rounded = applyBreakBoundaryFloor(rounded, new Date(currentlyOpen.started_at), originalTap);
-          }
-          overrides = { startedAt: rounded, actualStartedAt: originalTap };
+      // An ordinary break. Same anchoring fix as work_start/activity_switch
+      // above: always an explicit real occurrence time, never left unset to
+      // fall through to openEntry()'s server-now() default — a synced
+      // break_start can be replayed long after it actually happened.
+      let overrides: OpenEntryOverrides = { startedAt: originalTap };
+      const settings = await loadBreakRoundingSettings(employeeId);
+      if (settings?.enabled) {
+        let rounded = roundBreak(originalTap, settings.intervalMinutes, settings.direction);
+        const currentlyOpen = await getOpenEntry(employeeId);
+        if (currentlyOpen) {
+          rounded = applyBreakBoundaryFloor(rounded, new Date(currentlyOpen.started_at), originalTap);
         }
+        overrides = { startedAt: rounded, actualStartedAt: originalTap };
       }
 
       const entry = await openEntry(employeeId, deviceId, "break", null, event.clientEventId, {
@@ -1623,6 +1697,18 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
       // `, created_at desc` tiebreaker is the same fix too: started_at
       // alone can tie across several distinct voided placeholders that all
       // rounded to the same wall-clock boundary.
+      //
+      // On a scheduled break, End Break resumes the job at the break's
+      // scheduled end, never earlier (scheduledBreaks.ts).
+      const scheduled = await runScheduledBreakTap({
+        employeeId,
+        deviceId,
+        kind: "break_end",
+        idempotencyKey: event.clientEventId,
+        at: resolveOriginalEndedAt(event.occurredAtUtc, now),
+      });
+      if (scheduled.handled) return { status: "accepted", timeEntryId: scheduled.entryId };
+
       const { rows } = await pool.query(
         `select activity_id, greenhouse_row_id, carrier_id, density_type, density_count_per_row from time_entries
          where employee_id = $1 and entry_type = 'work' and (deleted_at is null or deletion_reason = $2)
@@ -1670,6 +1756,14 @@ async function applySyncedEvent(employeeId: string, deviceId: string, event: Syn
       return syncOutcomeFromEntry(entry);
     }
     case "end_day": {
+      // Resumes work first if a scheduled break already ended before this tap.
+      await runScheduledBreakTap({
+        employeeId,
+        deviceId,
+        kind: "end_day",
+        idempotencyKey: event.clientEventId,
+        at: resolveOriginalEndedAt(event.occurredAtUtc, now),
+      });
       const client = await pool.connect();
       let closedId: string | null = null;
       let reviewNote: string | null = null;
@@ -2061,6 +2155,13 @@ router.post(
         });
       }
     }
+
+    // Once the whole batch is applied (in device order), a scheduled break
+    // whose end has already passed resumes work at that end now, rather than
+    // waiting for the next /me or worker tick. Deliberately not done per
+    // event: a later event in the same batch can still be from before the
+    // end. A later batch's earlier Finish Work undoes it (scheduledBreaks.ts).
+    if (acceptedAny) await materializeDueResumeForEmployee(d.employeeId);
 
     // deviceLastProcessedSeq: this device's own device_sync_state row after
     // this batch — the client persists it locally (syncEngine.ts) as a

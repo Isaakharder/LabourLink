@@ -35,6 +35,7 @@ import scaleWeighingsRoutes from "./routes/scaleWeighings";
 import binCyclesRoutes from "./routes/binCycles";
 import scaleProductivityAllocationsRoutes from "./routes/scaleProductivityAllocations";
 import { startScaleMatchingSweep } from "./lib/scaleMatching";
+import { startAutoBreakWorker } from "./lib/autoBreakWorker";
 import nfcTagsRoutes from "./routes/nfcTags";
 import pairingRoutes from "./routes/pairing";
 import reviewerPairingRoutes from "./routes/reviewerPairing";
@@ -117,6 +118,10 @@ const server = app.listen(PORT, "0.0.0.0", () => {
 // Re-evaluates pending scale weighings every few minutes (expiry, and any
 // phone sync whose follow-up matching was cut short). See lib/scaleMatching.ts.
 startScaleMatchingSweep();
+
+// Automatic breaks, and work resuming at a scheduled break's end, every
+// minute (lib/autoBreakWorker.ts).
+startAutoBreakWorker();
 
 // Graceful shutdown (lib/gracefulShutdown.ts): on SIGTERM from a Railway
 // deploy, finish in-flight requests before exiting (2026-10-10: a deploy

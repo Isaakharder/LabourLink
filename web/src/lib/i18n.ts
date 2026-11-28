@@ -43,6 +43,10 @@ const TRANSLATIONS_EN = {
   statusIdle: "Not working",
   statusWorking: "Working",
   statusOnBreak: "On break",
+  // Scheduled break (the employee stays on it until its scheduled end).
+  scheduledBreakUntil: (p: Params) => `${p.name} until ${p.time}`,
+  scheduledBreakResumes: (p: Params) => `Back to ${p.activity} at ${p.time}`,
+  scheduledBreakDefaultName: "Break",
   online: "Online",
   offline: "Offline",
   pendingSync: (p: Params) => `${p.count} pending sync`,
@@ -132,6 +136,7 @@ const TRANSLATIONS_EN = {
   navEndWork: "End Work",
   navStartBreak: "Start Break",
   navEndBreak: "End Break",
+  navBackAt: (p: Params) => `Back at ${p.time}`,
   navStats: "Stats",
 
   // --- Stats screen ---
@@ -184,6 +189,9 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   statusIdle: "No está trabajando",
   statusWorking: "Trabajando",
   statusOnBreak: "En descanso",
+  scheduledBreakUntil: (p) => `${p.name} hasta las ${p.time}`,
+  scheduledBreakResumes: (p) => `Vuelve a ${p.activity} a las ${p.time}`,
+  scheduledBreakDefaultName: "Descanso",
   online: "En línea",
   offline: "Sin conexión",
   pendingSync: (p) => `${p.count} pendiente(s) de sincronizar`,
@@ -261,6 +269,7 @@ const TRANSLATIONS_ES: Record<TranslationKey, Entry> = {
   navEndWork: "Finalizar trabajo",
   navStartBreak: "Iniciar descanso",
   navEndBreak: "Finalizar descanso",
+  navBackAt: (p) => `Vuelve ${p.time}`,
   navStats: "Estadísticas",
 
   statsTitle: "Estadísticas",

@@ -13,10 +13,9 @@ import {
   zonedWallTimeToUtc,
 } from "../lib/timezone";
 import { groupIntoActivityRuns, RunSegment } from "../lib/activityRuns";
-import { reconcileEmployeeBreaks } from "../lib/breakReconciliation";
-import { reconcileMidnightCutoff } from "../lib/midnightCutoff";
 import { aggregateDensitySpeed } from "../lib/densitySpeed";
-import { computeWorkdayTotals, groupByEmployeeDay, WorkdayBoundaryEntry } from "../lib/workdayTotals";
+import { computeWorkdayTotals, groupByEmployeeDay, WorkdayBoundaryEntry, WorkdayTotalsOptions } from "../lib/workdayTotals";
+import { loadWorkdayTotalsOptions } from "../lib/payrollSettings";
 import { CandidateRun, getRolloverPriorDurationSeconds, getUnresolvedRunsForRows } from "../lib/rowCompletionCandidates";
 import {
   loadCarrierOptions,
@@ -305,6 +304,7 @@ async function loadPaidSecondsByEmployee(
   interface RawEntry extends WorkdayBoundaryEntry {
     employeeId: string;
   }
+  const workdayTotalsOptions = await loadWorkdayTotalsOptions();
   const rawEntries: RawEntry[] = entryRows.map((r) => ({
     employeeId: r.employee_id,
     entryType: r.entry_type,
@@ -320,7 +320,7 @@ async function loadPaidSecondsByEmployee(
     // so the date half always resolves back to `date` itself.
     const employeeId = key.slice(0, key.indexOf(":"));
     try {
-      const totals = computeWorkdayTotals(entries);
+      const totals = computeWorkdayTotals(entries, new Date(), workdayTotalsOptions);
       // Paid breaks are already folded into workedSeconds (see
       // workdayTotals.ts) — "paid hours" is workedSeconds directly, the
       // same convention Payroll's own paidSeconds field uses.
@@ -504,40 +504,13 @@ router.get(
     // performance investigation.
     const photoUrlPromise = employee.profile_photo_path ? getSignedPhotoUrl(employee.profile_photo_path) : null;
 
-    // Close a still-open entry at local midnight if it's behind, before
-    // break reconciliation (which reasons about "today") or the main
-    // time_entries query below runs — see midnightCutoff.ts. Deliberately
-    // scoped to viewing TODAY specifically, not "any date <= today" (unlike
-    // reconcileEmployeeBreaks below, which legitimately reconciles whichever
-    // day is being viewed): reconcileMidnightCutoff operates on whatever is
-    // GLOBALLY currently open for this employee, not on the viewed date, so
-    // running it while an admin reviews an unrelated old date would
-    // silently mutate the employee's live status as a side effect of
-    // looking at old history — a surprising effect with no real benefit,
-    // since the mobile app's own GET /me already reconciles current status
-    // on every request regardless. Only viewing today gets the extra
-    // request-time nudge here, matching what an admin watching a live/
-    // current day would actually expect.
-    const todayLocalForCutoff = calendarDateInAppTimezone(new Date());
-    if (date === todayLocalForCutoff) {
-      await reconcileMidnightCutoff(employeeId);
-    }
+    // Reading a day never writes: no midnight cut-off and no automatic
+    // breaks happen here (2026-11-28). The midnight cut-off runs from its
+    // scheduled job and every phone request (midnightCutoff.ts); automatic
+    // breaks and scheduled-break resumes run from the auto-breaks worker
+    // (autoBreakWorker.ts). So opening Inputs, for any date, can never create
+    // or change a break.
 
-    // Reconcile scheduled breaks the employee worked straight through before
-    // reading the day back — never for a future date (nothing to reconcile
-    // yet, and reconcileEmployeeBreaks would just no-op on future-dated
-    // items anyway, but skipping avoids the wasted round trip). Must
-    // complete (and its own commit land) strictly BEFORE the main
-    // time_entries query below runs — reconciliation can itself insert/split
-    // time_entries rows, and this response has to reflect whatever it just
-    // created, so this is deliberately awaited here rather than run
-    // concurrently with the query that follows it.
-    if (date <= calendarDateInAppTimezone(new Date())) {
-      await reconcileEmployeeBreaks(employeeId, date, {
-        isActive: employee.is_active,
-        breakProfileId: employee.break_profile_id,
-      });
-    }
     console.log(`[timing] daily reconcile+empRes done: ${Date.now() - __t0}ms`);
 
     const { start, end } = getDayBoundsUtc(date);
@@ -1045,7 +1018,7 @@ router.get(
       endedAt: r.ended_at,
       isPaid: r.is_paid,
     }));
-    const workdayTotals = computeWorkdayTotals(workdayEntries);
+    const workdayTotals = computeWorkdayTotals(workdayEntries, new Date(), await loadWorkdayTotalsOptions());
     const totalWorkedSeconds = Math.round(workdayTotals.workedSeconds);
     const totalBreakSeconds = Math.round(workdayTotals.breakSeconds);
     const totalPaidBreakSeconds = Math.round(workdayTotals.paidBreakSeconds);
@@ -1919,7 +1892,8 @@ function fingerprintActivityCorrectionPlan(plan: ActivityCorrectionPlanOk): stri
 // changes it is to recompute the whole day's totals before and after.
 function simulateWorkdayTotalsDelta(
   dayRows: { entry_type: string; started_at: Date; ended_at: Date | null; is_paid: boolean | null }[],
-  plan: Pick<ActivityCorrectionPlanOk, "trims" | "deletions" | "continuations">
+  plan: Pick<ActivityCorrectionPlanOk, "trims" | "deletions" | "continuations">,
+  workdayTotalsOptions: WorkdayTotalsOptions
 ): { workedSecondsDelta: number; breakSecondsDelta: number } {
   const toBoundary = (r: { entry_type: string; started_at: Date; ended_at: Date | null; is_paid: boolean | null }): WorkdayBoundaryEntry => ({
     entryType: r.entry_type as "work" | "break",
@@ -1927,7 +1901,7 @@ function simulateWorkdayTotalsDelta(
     endedAt: r.ended_at,
     isPaid: r.is_paid,
   });
-  const before = computeWorkdayTotals(dayRows.map(toBoundary));
+  const before = computeWorkdayTotals(dayRows.map(toBoundary), new Date(), workdayTotalsOptions);
 
   const deletedIds = new Set(plan.deletions.map((d) => d.id));
   const afterRows = dayRows
@@ -1945,7 +1919,7 @@ function simulateWorkdayTotalsDelta(
   for (const c of plan.continuations) {
     afterRows.push({ entry_type: "work", started_at: c.startedAt, ended_at: c.endedAt, is_paid: null });
   }
-  const after = computeWorkdayTotals(afterRows.map(toBoundary));
+  const after = computeWorkdayTotals(afterRows.map(toBoundary), new Date(), workdayTotalsOptions);
 
   return {
     workedSecondsDelta: Math.round(after.workedSeconds - before.workedSeconds),
@@ -2107,7 +2081,7 @@ router.post(
          where employee_id = $1 and started_at >= $2 and started_at < $3 and deleted_at is null`,
         [plan.employeeId, start, end]
       );
-      const { workedSecondsDelta, breakSecondsDelta } = simulateWorkdayTotalsDelta(dayRowsRes.rows, plan);
+      const { workedSecondsDelta, breakSecondsDelta } = simulateWorkdayTotalsDelta(dayRowsRes.rows, plan, await loadWorkdayTotalsOptions());
 
       const activityIds = [...new Set([plan.activityId, ...plan.deletions.map((d) => d.activityId), ...plan.continuations.map((c) => c.activityId)])];
       const nameByActivityId = new Map<string, string>();
